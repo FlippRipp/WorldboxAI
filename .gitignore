@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environment
+venv/
+
+# Backend secrets and runtime
+backend/.env
+backend_output.log
+.backend_pid.tmp
+server.log
+server_err.log
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Save data (user-specific)
+data/saves/

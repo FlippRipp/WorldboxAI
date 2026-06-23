@@ -1,0 +1,95 @@
+{
+  "id": "wb_core_rpg",
+  "name": "Core RPG System",
+  "version": "1.2.0",
+  "dependencies": [],
+  "consumes": {
+    "state": ["input_text", "turn", "history"],
+    "module_data": [],
+    "module_configs": [],
+    "world_data": true
+  },
+  "produces": {
+    "module_data": true,
+    "context_string": true,
+    "messages": true
+  },
+  "ui_slots": ["slot_sidebar"],
+  "settings_schema": {
+    "progression_system": {
+      "type": "select",
+      "options": [
+        {"value": "xp", "label": "XP-Based"},
+        {"value": "practice", "label": "Practice-Based"},
+        {"value": "milestone", "label": "Milestone-Based"}
+      ],
+      "default": "xp"
+    },
+    "practice_ai_model": {
+      "type": "select",
+      "options": [
+        {"value": "fastest", "label": "Fastest (cheapest)"},
+        {"value": "balanced", "label": "Balanced (default)"},
+        {"value": "smartest", "label": "Smartest (most accurate)"}
+      ],
+      "default": "fastest"
+    },
+    "xp_curve_steepness": {"type": "slider", "min": 1, "max": 5, "default": 2},
+    "hp_per_vitality": {"type": "slider", "min": 3, "max": 15, "default": 7},
+    "action_rating_strictness": {"type": "slider", "min": 1, "max": 10, "default": 5},
+    "skill_improvement_rate": {"type": "slider", "min": 1, "max": 10, "default": 5},
+    "max_stat_value": {"type": "slider", "min": 15, "max": 30, "default": 20},
+    "skill_pool_start": {"type": "slider", "min": 3, "max": 20, "default": 8}
+  },
+  "commands": {
+    "/stats": "on_command_stats",
+    "/skills": "on_command_skills",
+    "/level": "on_command_level"
+  },
+  "mutation_schema": {
+    "hp_change": "integer, HP gained or lost by the player in the story. Use 0 if no player HP changed.",
+    "stat_changes": "object mapping stat name (power/agility/vitality/intelligence/spirit/charm) to integer change. Empty object if none.",
+    "skill_changes": "object mapping skill name to {rating: int, description: str, trigger_words: [str], type: 'active'|'passive'|'curse'}. For new skills, provide rating/description/trigger_words/type. For existing, just rating. Empty object if none.",
+    "xp_gained": "integer, experience points the character earned from this action. Use 0 if none."
+  },
+  "character_creation": {
+    "default_state": {
+      "stats": {"power": 10, "agility": 10, "vitality": 10, "intelligence": 10, "spirit": 10, "charm": 10},
+      "skills": {},
+      "stat_tiers": [
+        {"min": 1, "max": 4, "label": "Severely Impaired"},
+        {"min": 5, "max": 8, "label": "Below Average"},
+        {"min": 9, "max": 12, "label": "Average Human"},
+        {"min": 13, "max": 16, "label": "Above Average / Trained"},
+        {"min": 17, "max": 20, "label": "Expert / Peak Human"},
+        {"min": 21, "max": 25, "label": "Superhuman"},
+        {"min": 26, "max": 30, "label": "Legendary / Demigod"}
+      ],
+      "backstory": "",
+      "level": 1,
+      "xp": 0,
+      "hp": 85,
+      "max_hp": 85
+    }
+  },
+  "prompt_blocks": [
+    {
+      "id": "character_sheet",
+      "type": "module_prompt",
+      "enabled": true,
+      "role_type": "system",
+      "placement": "system_relative",
+      "depth": null,
+      "config": {}
+    },
+    {
+      "id": "action_feasibility",
+      "type": "module_prompt",
+      "enabled": true,
+      "role_type": "system",
+      "placement": "chat_injection",
+      "depth": 0,
+      "config": {}
+    }
+  ]
+}

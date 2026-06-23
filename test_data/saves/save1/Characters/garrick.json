@@ -1,0 +1,18 @@
+{
+  "name": "Garrick",
+  "module_data": {
+    "wb_core_rpg": {
+      "stats": {
+        "strength": 16,
+        "dexterity": 10,
+        "constitution": 12,
+        "intelligence": 10,
+        "wisdom": 10,
+        "charisma": 10
+      },
+      "level": 1,
+      "hp": 15,
+      "max_hp": 20
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "stats": {
+    "constitution": 12,
+    "strength": 16,
+    "dexterity": 10,
+    "intelligence": 10,
+    "wisdom": 10,
+    "charisma": 10
+  },
+  "level": 1,
+  "hp": 15,
+  "max_hp": 85
+}

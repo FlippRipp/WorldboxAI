@@ -1,0 +1,17 @@
+{
+  "id": "wb_test_sidebar",
+  "name": "Test Sidebar Module",
+  "version": "1.0.0",
+  "consumes": {
+    "state": ["input_text", "turn"],
+    "module_data": ["*"],
+    "module_configs": [],
+    "world_data": false
+  },
+  "produces": {
+    "module_data": false,
+    "context_string": false,
+    "messages": false
+  },
+  "ui_slots": ["slot_sidebar"]
+}

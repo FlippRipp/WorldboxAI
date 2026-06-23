@@ -1,0 +1,62 @@
+{
+  "id": "wb_npc_system",
+  "name": "NPC System",
+  "version": "1.0.0",
+  "dependencies": [],
+  "consumes": {
+    "state": ["input_text", "turn", "history", "player_location_node_id", "player_location_region"],
+    "module_data": [],
+    "module_configs": [],
+    "world_data": true
+  },
+  "produces": {
+    "module_data": true,
+    "context_string": false,
+    "messages": false
+  },
+  "settings_schema": {
+    "generator_frequency": {
+      "type": "slider",
+      "min": 3,
+      "max": 20,
+      "default": 5,
+      "label": "NPC Generation Frequency",
+      "category": "NPC System",
+      "description": "Generate new NPC concepts every N turns"
+    },
+    "introduction_enabled": {
+      "type": "toggle",
+      "default": true,
+      "label": "Auto-Introduce NPCs",
+      "category": "NPC System",
+      "description": "Let the Introduction Agent decide when to introduce new characters"
+    },
+    "max_unintroduced_pool": {
+      "type": "slider",
+      "min": 3,
+      "max": 15,
+      "default": 6,
+      "label": "Max Unintroduced Pool",
+      "category": "NPC System",
+      "description": "Maximum NPCs kept in the unintroduced pool before generation stops"
+    }
+  },
+  "mutation_schema": {
+    "npc_introductions": "array of objects: {npc_id: string, name: string (the character's name as mentioned in the story), first_impression: string (one sentence describing how they met the player), notes: string (optional evolving observations about the character)}"
+  },
+  "prompt_blocks": [
+    {
+      "id": "npc_introduction",
+      "type": "module_prompt",
+      "enabled": true,
+      "role_type": "system",
+      "placement": "system_relative",
+      "depth": null,
+      "config": {}
+    }
+  ],
+  "commands": {
+    "/npcs": "on_command_npcs",
+    "/npclist": "on_command_npclist"
+  }
+}

@@ -1,0 +1,60 @@
+[
+  {
+    "id": "core_narrator_rules",
+    "type": "static_text",
+    "source": "engine",
+    "enabled": true,
+    "role_type": "system",
+    "placement": "system_relative",
+    "depth": null,
+    "display_name": "Core Narrator Rules",
+    "category": "system_prompt",
+    "generation_types": null,
+    "config": {
+      "text": "You are a creative storyteller in a text-based RPG. Never mention stat names, numeric values, game mechanics, or meta-game terms in your narration. Describe character capabilities through narrative prose only."
+    }
+  },
+  {
+    "id": "world_rules_context",
+    "type": "world_context",
+    "source": "engine",
+    "enabled": true,
+    "role_type": "system",
+    "placement": "system_relative",
+    "depth": null,
+    "display_name": "World Rules & Lore",
+    "category": "world_context",
+    "generation_types": null,
+    "config": {}
+  },
+  {
+    "id": "engine_context",
+    "type": "engine_context",
+    "source": "engine",
+    "enabled": true,
+    "role_type": "system",
+    "placement": "system_relative",
+    "depth": null,
+    "display_name": "Engine Context",
+    "category": "utility",
+    "generation_types": null,
+    "config": {
+      "empty_text": "No additional engine context."
+    }
+  },
+  {
+    "id": "storyteller_task",
+    "type": "static_text",
+    "source": "engine",
+    "enabled": true,
+    "role_type": "system",
+    "placement": "system_relative",
+    "depth": null,
+    "display_name": "Storyteller Task",
+    "category": "post_history",
+    "generation_types": null,
+    "config": {
+      "text": "Describe the outcome of the player's action and the current environment."
+    }
+  }
+]
