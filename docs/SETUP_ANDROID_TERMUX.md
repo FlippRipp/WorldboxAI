@@ -11,10 +11,10 @@ There are two ways to run it, and both work:
   Linux box, including `numba` and `sqlite-vec`, at the cost of a container
   layer and some disk space. Zero surprises.
 - **Route B (bare Termux, no Linux container):** lighter and faster, using
-  prebuilt Android wheels from the TUR index for the hard packages. The only
-  manual step is compiling the small `sqlite-vec` SQLite extension (one
-  `make` command plus a 10-line shim), and worldgen falls back from `numba`
-  to plain numpy.
+  prebuilt Android wheels from the TUR index for the hard packages. The
+  `sqlite-vec` SQLite extension ships prebuilt in the repo (`vendor/sqlite-vec/`)
+  and loads automatically, and worldgen falls back from `numba` to plain
+  numpy.
 
 Pick A if you want the lowest-friction install, B if you want the leanest
 setup.
@@ -194,40 +194,14 @@ phantom process killer) — it applies here too.
    falls back to a pure-numpy implementation (slower worldgen, otherwise
    identical). `sqlite-vec` is also excluded; it gets special treatment next.
 
-4. **Build `sqlite-vec` — the one genuinely manual step.** There is no Bionic
-   wheel, so `pip install sqlite-vec` fails. First verify your Termux Python
-   supports loadable extensions:
-
-   ```bash
-   python -c "import sqlite3; c=sqlite3.connect(':memory:'); c.enable_load_extension(True); print('ok')"
-   ```
-
-   Then compile the extension (a single C file):
-
-   ```bash
-   cd ~
-   git clone https://github.com/asg017/sqlite-vec
-   cd sqlite-vec && make loadable
-   # produces dist/vec0.so
-   cp dist/vec0.so $PREFIX/lib/
-   ```
-
-   Then provide a shim so `import sqlite_vec` works: create a file named
-   `sqlite_vec.py` in the WorldBox repo root (`~/WorldboxAI/sqlite_vec.py`)
-   with this content:
-
-   ```python
-   import os
-   import struct
-
-   _EXT = os.path.join(os.environ["PREFIX"], "lib", "vec0")
-
-   def load(conn):
-       conn.load_extension(_EXT)
-
-   def serialize_float32(vector):
-       return struct.pack("%sf" % len(vector), *vector)
-   ```
+4. **`sqlite-vec` — nothing to do.** There is no Bionic wheel, so
+   `pip install sqlite-vec` fails — but the repo bundles the official
+   prebuilt Android extensions (`vendor/sqlite-vec/`, all four ABIs) and
+   the backend loads them automatically whenever `import sqlite_vec`
+   fails. If you previously created the manual `sqlite_vec.py` shim in
+   the repo root from an older version of this guide, delete it — the
+   bundled fallback replaces it. To use a different build, set
+   `SQLITE_VEC_PATH=/path/to/vec0.so`.
 
 5. **Install the frontend dependencies:**
 
@@ -242,7 +216,12 @@ phantom process killer) — it applies here too.
    `cp data/providers/openrouter/config.example.json data/providers/openrouter/config.json`
    and set `api_key`.
 
-7. **Run it.** Backend in one Termux session:
+7. **Run it.** `./start.sh` works on bare Termux: it uses the system
+   python when `./venv` is absent, and when a `git pull` brings updates it
+   refreshes dependencies with the TUR wheel index, skipping the packages
+   that have no Android builds (`sqlite-vec`, `numba`).
+
+   Or run the two servers manually — backend in one Termux session:
 
    ```bash
    cd ~/WorldboxAI

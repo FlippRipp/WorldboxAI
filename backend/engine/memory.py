@@ -4,7 +4,11 @@ import sqlite3
 import uuid
 from typing import List, Optional
 
-import sqlite_vec
+try:
+    import sqlite_vec
+except ImportError:
+    # No wheel on this platform (Termux/Android) — use the bundled build.
+    from backend.engine import sqlite_vec_fallback as sqlite_vec
 
 
 _MEMORY_COLUMNS = {

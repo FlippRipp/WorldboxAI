@@ -29,18 +29,39 @@ else
 fi
 
 # ── Preflight: Python virtual environment ──
+IS_ANDROID=0
+[ "$(uname -o 2>/dev/null)" = "Android" ] && IS_ANDROID=1
+
 PY=./venv/bin/python
 if [ ! -x "$PY" ]; then
-    echo "[ERROR] Python virtual environment not found at ./venv"
-    echo "Run:  python3 -m venv venv"
-    echo "Then: ./venv/bin/pip install -r requirements.txt"
-    exit 1
+    if [ "$IS_ANDROID" = "1" ] && command -v python >/dev/null 2>&1; then
+        # Bare Termux: system python is the supported setup (see
+        # docs/SETUP_ANDROID_TERMUX.md, Route B).
+        PY=python
+    else
+        echo "[ERROR] Python virtual environment not found at ./venv"
+        echo "Run:  python3 -m venv venv"
+        echo "Then: ./venv/bin/pip install -r requirements.txt"
+        exit 1
+    fi
 fi
 
 # ── Refresh Python dependencies after update ──
 if [ "$UPDATED" = "1" ]; then
     echo "Refreshing Python dependencies..."
-    "$PY" -m pip install -r requirements.txt
+    if [ "$IS_ANDROID" = "1" ]; then
+        # No Android builds exist for sqlite-vec (bundled in vendor/) or
+        # numba (worldgen falls back to numpy). TUR provides prebuilt
+        # wheels for the heavy packages.
+        REQ_TMP=$(mktemp)
+        grep -vE '^(sqlite-vec|numba)' requirements.txt > "$REQ_TMP"
+        "$PY" -m pip install \
+            --extra-index-url https://termux-user-repository.github.io/pypi/ \
+            -r "$REQ_TMP"
+        rm -f "$REQ_TMP"
+    else
+        "$PY" -m pip install -r requirements.txt
+    fi
     echo
 fi
 
