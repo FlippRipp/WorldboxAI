@@ -172,9 +172,17 @@
 .md-content a:hover { color: var(--color-purple-300); }
 
 /* Message action bar: hover-revealed on desktop; touch devices have no hover,
-   so keep it always visible there. */
+   so keep it always visible there — and in-flow as a right-aligned row above
+   the text instead of overlaying it (position: static beats the layered
+   `absolute` utility because this rule is unlayered). */
 @media (hover: none) {
-  .msg-actions { opacity: 1; }
+  .msg-actions {
+    opacity: 1;
+    position: static;
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.5rem;
+  }
 }
 
 /* Crossfade when switching swipe variants of the last AI message. */

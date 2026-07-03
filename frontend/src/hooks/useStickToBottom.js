@@ -15,7 +15,12 @@ import { useRef, useState, useCallback, useLayoutEffect, useEffect } from 'react
 //
 // `deps` is the array of values whose changes should trigger a stick check
 // (must have a stable length across renders, like any hook deps array).
-export function useStickToBottom(deps, { enabled = true, threshold = 48 } = {}) {
+//
+// `onUserScroll(delta, el)` fires only for scrolls the hook did not cause
+// itself (finger drags, wheel) — programmatic glide/snap writes are filtered
+// out via lastWriteRef, so e.g. a scroll-direction header can't react to the
+// streaming auto-scroll.
+export function useStickToBottom(deps, { enabled = true, threshold = 48, onUserScroll } = {}) {
   const ref = useRef(null);
   const pinnedRef = useRef(true);
   const [pinned, setPinned] = useState(true);
@@ -25,6 +30,11 @@ export function useStickToBottom(deps, { enabled = true, threshold = 48 } = {}) 
   const rafRef = useRef(0);
   const lastWriteRef = useRef(-1);
   const lastFrameTimeRef = useRef(0);
+  const prevScrollTopRef = useRef(0);
+
+  // Through a ref so onScroll keeps a stable identity across renders.
+  const onUserScrollRef = useRef(onUserScroll);
+  onUserScrollRef.current = onUserScroll;
 
   const isAtBottom = useCallback(() => {
     const el = ref.current;
@@ -70,6 +80,10 @@ export function useStickToBottom(deps, { enabled = true, threshold = 48 } = {}) 
   const onScroll = useCallback(() => {
     const el = ref.current;
     if (!el) return;
+    const isProgrammatic = Math.abs(el.scrollTop - lastWriteRef.current) < 1;
+    const delta = el.scrollTop - prevScrollTopRef.current;
+    prevScrollTopRef.current = el.scrollTop;
+    if (!isProgrammatic && onUserScrollRef.current) onUserScrollRef.current(delta, el);
     const p = isAtBottom();
     // Mid-glide the viewport can lag more than `threshold` behind the bottom;
     // ignore scroll events we caused ourselves so the catch-up animation
@@ -84,11 +98,12 @@ export function useStickToBottom(deps, { enabled = true, threshold = 48 } = {}) 
     setPinned(true);
   }, []);
 
+  // Use our own glide (not el.scrollTo smooth) so every frame is recorded in
+  // lastWriteRef and the ride down never counts as a user scroll.
   const scrollToBottom = useCallback(() => {
-    const el = ref.current;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
     pin();
-  }, [pin]);
+    startFollow();
+  }, [pin, startFollow]);
 
   // Run synchronously after DOM mutations: snap instantly across big gaps,
   // otherwise let the follow animation glide over the newly added lines.

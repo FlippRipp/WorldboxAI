@@ -315,10 +315,16 @@ function StreamingBlock({ content, reasoning }) {
   );
 }
 
-export function ChatFeed({ messages, currentStream, currentReasoning, swipes, busy, editRequest, currentTurn, density = 'comfortable', onBranchMessage, onRegenerate, onSwipe, onEditMessage, onDeleteMessage }) {
+export function ChatFeed({ messages, currentStream, currentReasoning, swipes, busy, editRequest, currentTurn, density = 'comfortable', scrollControlRef, onUserScroll, onBranchMessage, onRegenerate, onSwipe, onEditMessage, onDeleteMessage }) {
   // Auto-scroll the feed as messages/tokens grow, but only while the user is at
   // the bottom; scrolling up cancels it until they return to the bottom.
-  const feed = useStickToBottom([messages, currentStream, currentReasoning]);
+  const feed = useStickToBottom([messages, currentStream, currentReasoning], { onUserScroll });
+
+  // Expose scroll controls to the parent (e.g. focusing the composer on mobile
+  // scrolls the feed to the bottom).
+  useEffect(() => {
+    if (scrollControlRef) scrollControlRef.current = { pin: feed.pin, scrollToBottom: feed.scrollToBottom };
+  });
 
   // Re-pin to the bottom whenever a fresh stream starts, so each new turn
   // follows along even if the user had scrolled up during the previous one.

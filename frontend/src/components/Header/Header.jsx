@@ -4,14 +4,30 @@ import SlotRenderer from '../Slots/SlotRenderer';
 export default function Header({
   modules, gameState, ws, session,
   onOpenSettings, onOpenHealth, onOpenMemories, onOpenCharacter,
-  onBack
+  onBack, onOpenDrawer, hidden = false,
 }) {
   return (
     <>
       <ConnectionStatus isConnected={ws.isConnected} isReconnecting={ws.isReconnecting} />
 
-      <header className="h-14 border-b border-gray-700 flex items-center px-4 justify-between bg-gray-800 shrink-0">
-        <div className="flex items-center gap-3">
+      {/* On phones the bar hides on scroll-down (Chrome-style); the negative
+          margin lets the feed reflow into the freed space. lg:mt-0 hard-stops
+          the behavior on desktop regardless of JS state. */}
+      <header
+        className={`h-14 border-b border-gray-700 flex items-center px-4 justify-between bg-gray-800 shrink-0 transition-[margin-top] duration-200 ease-out ${hidden ? '-mt-14 lg:mt-0' : 'mt-0'}`}
+      >
+        <div className="flex items-center gap-3 min-w-0">
+          {onOpenDrawer && (
+            <button
+              className="lg:hidden p-2 -ml-2 text-gray-400 hover:text-white transition-colors rounded hover:bg-gray-700"
+              onClick={onOpenDrawer}
+              aria-label="Open sidebar"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
+          )}
           {onBack && (
             <button
               onClick={onBack}
@@ -55,32 +71,35 @@ export default function Header({
             config={gameState?.module_configs}
           />
 
-          <button
-            className="text-gray-400 hover:text-white px-3 py-2 text-sm border border-gray-700 rounded hover:border-purple-500 transition-colors"
-            onClick={onOpenCharacter}
-            aria-label="Open character view"
-          >
-            Character
-          </button>
+          {/* On mobile these live in the sidebar drawer instead. */}
+          <div className="hidden lg:flex items-center gap-2">
+            <button
+              className="text-gray-400 hover:text-white px-3 py-2 text-sm border border-gray-700 rounded hover:border-purple-500 transition-colors"
+              onClick={onOpenCharacter}
+              aria-label="Open character view"
+            >
+              Character
+            </button>
+
+            <button
+              className="text-gray-400 hover:text-white px-3 py-2 text-sm border border-gray-700 rounded hover:border-purple-500 transition-colors"
+              onClick={onOpenMemories}
+              aria-label="Open memory browser"
+            >
+              Memories
+            </button>
+
+            <button
+              className="text-gray-400 hover:text-white px-3 py-2 text-sm border border-gray-700 rounded hover:border-purple-500 transition-colors"
+              onClick={onOpenHealth}
+              aria-label="View system health"
+            >
+              Health
+            </button>
+          </div>
 
           <button
-            className="text-gray-400 hover:text-white px-3 py-2 text-sm border border-gray-700 rounded hover:border-purple-500 transition-colors"
-            onClick={onOpenMemories}
-            aria-label="Open memory browser"
-          >
-            Memories
-          </button>
-
-          <button
-            className="text-gray-400 hover:text-white px-3 py-2 text-sm border border-gray-700 rounded hover:border-purple-500 transition-colors"
-            onClick={onOpenHealth}
-            aria-label="View system health"
-          >
-            Health
-          </button>
-
-          <button
-            className="text-gray-400 hover:text-white p-2"
+            className="hidden lg:block text-gray-400 hover:text-white p-2"
             onClick={onOpenSettings}
             aria-label="Open settings"
           >

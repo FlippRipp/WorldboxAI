@@ -25,6 +25,7 @@ import ScenarioManager from './components/Scenario/ScenarioManager';
 import { useToasts, ToastStack } from './components/shared/Toasts';
 import { LLMInspectorProvider, useLLMInspector } from './hooks/useLLMInspector';
 import { ThemeProvider, useTheme } from './hooks/useTheme';
+import { useMediaQuery } from './hooks/useMediaQuery';
 import LLMInspectorButton from './components/LLMInspector/LLMInspectorButton';
 import LLMInspectorPanel from './components/LLMInspector/LLMInspectorPanel';
 import { api } from './lib/api';
@@ -84,6 +85,39 @@ function AppContent() {
   const [isMemoryOpen, setIsMemoryOpen] = useState(false);
   const [isCharacterOpen, setIsCharacterOpen] = useState(false);
   const sentIntroRef = useRef(false);
+
+  // Mobile-only chrome behavior: the sidebar drawer trigger lives in the
+  // header, and the header hides on scroll-down / reveals on scroll-up.
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [headerHidden, setHeaderHidden] = useState(false);
+  const isMobile = useMediaQuery('(max-width: 1023px)'); // matches Tailwind lg
+  const isMobileRef = useRef(isMobile);
+  isMobileRef.current = isMobile;
+  const feedScrollRef = useRef(null);
+
+  // Chrome-style header: user scrolls (programmatic streaming scrolls are
+  // filtered out upstream in useStickToBottom) hide it going down and reveal
+  // it going up; near the top it's always shown. Small dead zone kills jitter.
+  const handleFeedUserScroll = useCallback((delta, el) => {
+    if (!isMobileRef.current) return;
+    if (el.scrollTop < 64) { setHeaderHidden(false); return; }
+    if (delta > 6) setHeaderHidden(true);
+    else if (delta < -6) setHeaderHidden(false);
+  }, []);
+
+  // Focusing the composer on a phone brings the story back into view. The
+  // second scroll compensates for the on-screen keyboard resizing the
+  // viewport shortly after focus.
+  const handleComposerFocus = useCallback(() => {
+    if (!isMobileRef.current) return;
+    feedScrollRef.current?.scrollToBottom();
+    setTimeout(() => feedScrollRef.current?.scrollToBottom(), 300);
+  }, []);
+
+  const handleOpenDrawer = useCallback(() => {
+    setHeaderHidden(false);
+    setDrawerOpen(true);
+  }, []);
 
   const handleSend = useCallback((text) => {
     ws.sendMessage(text);
@@ -172,6 +206,7 @@ function AppContent() {
 
   const handleEnterGame = useCallback(async (saveId) => {
     await session.refreshSession();
+    setHeaderHidden(false);
     setCurrentMode('storyteller-game');
   }, [session]);
 
@@ -317,11 +352,17 @@ function AppContent() {
       : modules;
     return (
     <ModuleEventProvider>
-      <div className="flex h-screen bg-gray-900 text-gray-100 font-sans overflow-hidden">
+      <div className="flex h-dvh bg-gray-900 text-gray-100 font-sans overflow-hidden">
         <Sidebar
           session={session}
           modules={gameModules}
           gameState={gameState}
+          drawerOpen={drawerOpen}
+          onCloseDrawer={() => setDrawerOpen(false)}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+          onOpenHealth={() => setIsHealthOpen(true)}
+          onOpenMemories={() => setIsMemoryOpen(true)}
+          onOpenCharacter={() => setIsCharacterOpen(true)}
         />
 
         <div className="flex-1 flex flex-col min-w-0">
@@ -335,6 +376,8 @@ function AppContent() {
             onOpenMemories={() => setIsMemoryOpen(true)}
             onOpenCharacter={() => setIsCharacterOpen(true)}
             onBack={handleExitMode}
+            onOpenDrawer={handleOpenDrawer}
+            hidden={headerHidden}
           />
 
           <ChatFeed
@@ -346,6 +389,8 @@ function AppContent() {
             editRequest={editRequest}
             currentTurn={gameState.turn ?? null}
             density={density}
+            scrollControlRef={feedScrollRef}
+            onUserScroll={handleFeedUserScroll}
             onBranchMessage={handleBranchMessage}
             onRegenerate={handleRegenerate}
             onSwipe={handleSwipe}
@@ -367,6 +412,7 @@ function AppContent() {
             onEditLast={handleEditLast}
             onSwipePrev={handleSwipePrev}
             onSwipeNext={handleSwipeNext}
+            onComposerFocus={handleComposerFocus}
             restoredInput={ws.restoredInput}
             busy={ws.currentStream != null || ws.postProcessing}
             disabled={!ws.isConnected || ws.isReconnecting}

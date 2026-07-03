@@ -1,7 +1,11 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef, useLayoutEffect } from 'react';
 
-export default function ChatInput({ onSend, onContinue, onStop, onEditLast, onSwipePrev, onSwipeNext, restoredInput, busy, disabled }) {
+// Grow with content up to this cap, then scroll internally. Matches max-h-32.
+const MAX_HEIGHT = 128;
+
+export default function ChatInput({ onSend, onContinue, onStop, onEditLast, onSwipePrev, onSwipeNext, onComposerFocus, restoredInput, busy, disabled }) {
   const [inputValue, setInputValue] = useState('');
+  const taRef = useRef(null);
   const isEmpty = !inputValue.trim();
   const blocked = disabled || busy;
 
@@ -10,6 +14,15 @@ export default function ChatInput({ onSend, onContinue, onStop, onEditLast, onSw
   useEffect(() => {
     if (restoredInput?.text) setInputValue(restoredInput.text);
   }, [restoredInput]);
+
+  // Auto-grow: follow the content height. Keyed on the value so it covers
+  // typing, restored input, and the reset to one row after send.
+  useLayoutEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, MAX_HEIGHT)}px`;
+  }, [inputValue]);
 
   const handleSend = useCallback(() => {
     if (blocked) return;
@@ -42,12 +55,14 @@ export default function ChatInput({ onSend, onContinue, onStop, onEditLast, onSw
     <div className="p-4 border-t border-gray-700 bg-gray-800">
       <div className="max-w-[720px] mx-auto relative flex items-end bg-gray-900 rounded-xl border border-gray-600 focus-within:border-purple-500 overflow-hidden">
         <textarea
-          className="w-full bg-transparent text-white p-4 max-h-32 focus:outline-none resize-none"
+          ref={taRef}
+          className="w-full bg-transparent text-white p-4 max-h-32 focus:outline-none resize-none overflow-y-auto"
           rows={1}
           placeholder="What do you do?"
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
           onKeyDown={handleKeyDown}
+          onFocus={() => onComposerFocus?.()}
           disabled={disabled}
           aria-label="Type your action"
         />
