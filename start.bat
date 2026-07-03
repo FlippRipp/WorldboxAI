@@ -1,6 +1,18 @@
 @echo off
 setlocal enabledelayedexpansion
-cd /d "%~dp0"
+
+:: ── Re-launch from a temp copy so git pull can safely rewrite this file ──
+:: cmd.exe re-reads a running batch file from disk by byte offset after each
+:: command, so executing the original while the pull updates it can run
+:: garbled commands. The temp copy is never touched by the pull.
+if /i not "%~f0"=="%TEMP%\worldbox_start.bat" (
+    set "WORLDBOX_DIR=%~dp0"
+    copy /y "%~f0" "%TEMP%\worldbox_start.bat" >nul
+    "%TEMP%\worldbox_start.bat"
+    exit /b
+)
+
+cd /d "%WORLDBOX_DIR%"
 title WorldBox
 
 echo ==============================================
