@@ -134,6 +134,16 @@ class LLMService:
                     val = int(val)
                 setattr(self, attr, val)
 
+        # Slots the provider config left empty must never keep another
+        # provider's leftover/default model — degrade to this provider's
+        # reader model instead so every call stays on the configured provider.
+        if not config.get("module_fast_model"):
+            self.module_fast_model = self.reader_model
+        if not config.get("reader_model"):
+            self.reader_model = self.storyteller_model
+            if not config.get("module_fast_model"):
+                self.module_fast_model = self.storyteller_model
+
         # Build per-slot OpenRouter provider routing. A per-slot provider wins;
         # otherwise the singular "Default Provider" applies. Keyed by the same
         # effective model string later passed to acompletion/aembedding.

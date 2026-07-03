@@ -6,23 +6,48 @@ logger = logging.getLogger(__name__)
 
 
 class LLMBridge:
+    """Modules never name models — they ask for a preference slot
+    ("fastest"/"balanced"/"smartest") which is resolved against the live
+    LLMService at call time, so provider reconfiguration mid-session is
+    always respected. Env vars are a last resort for service-less use
+    (tests); there are no hardcoded model fallbacks."""
+
     def __init__(self):
         self._service = None
         self._inspector = None
         self._current_module = ""
-        self._storyteller_model = os.getenv("STORYTELLER_MODEL", "gemini/gemini-2.5-flash")
-        self._reader_model = os.getenv("READER_MODEL", "gemini/gemini-2.5-flash")
-        self._fast_model = os.getenv("MODULE_FAST_MODEL", self._reader_model)
-        self._mode = os.getenv("LLM_MODE", "live").strip().lower()
 
     def _set_service(self, service):
         self._service = service
-        self._storyteller_model = service.storyteller_model
-        self._reader_model = service.reader_model
-        self._fast_model = os.getenv("MODULE_FAST_MODEL", getattr(service, "module_fast_model", self._reader_model))
-        self._mode = service.mode
         if hasattr(service, 'inspector') and service.inspector:
             self._inspector = service.inspector
+
+    @property
+    def _mode(self) -> str:
+        if self._service is not None:
+            return self._service.mode
+        return os.getenv("LLM_MODE", "live").strip().lower()
+
+    @property
+    def _storyteller_model(self) -> str:
+        if self._service is not None:
+            return self._service.storyteller_model
+        return os.getenv("STORYTELLER_MODEL", "")
+
+    @property
+    def _reader_model(self) -> str:
+        if self._service is not None:
+            return self._service.reader_model
+        return os.getenv("READER_MODEL", "")
+
+    @property
+    def _fast_model(self) -> str:
+        env = os.getenv("MODULE_FAST_MODEL", "")
+        if env:
+            return env
+        if self._service is not None:
+            return getattr(self._service, "module_fast_model", "") or self._service.reader_model
+        return self._reader_model
 
     async def generate(self, prompt: str, model_preference: str = "balanced", max_tokens: int = None) -> str:
         # NOTE: `max_tokens` should NOT be used for content generation. It cuts off LLM output
@@ -38,6 +63,10 @@ class LLMBridge:
                 cid = await self._inspector.start_call(call_type="module_fast", model="mock", step="module:generate", module_source=mod_src, input_data=prompt)
                 await self._inspector.end_call(cid, prompt, result, 0, 0)
             return result
+
+        if not model:
+            logger.error("Module LLM call skipped: no LLM service configured and no model env override set.")
+            return ""
 
         messages = [{"role": "user", "content": prompt}]
 

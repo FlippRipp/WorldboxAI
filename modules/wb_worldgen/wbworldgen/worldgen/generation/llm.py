@@ -9,8 +9,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "gemini/gemini-2.5-flash"
-
 
 async def json_retry_completion(
     llm_service,
@@ -75,7 +73,7 @@ class LLMStepGenerator:
         return self._llm
 
     async def generate(self, step, context: dict, user_prompt: str, user_note: str = "") -> dict:
-        model = self._model or (self._llm.reader_model if self._llm else _DEFAULT_MODEL)
+        model = self._model or self._llm.reader_model
         temperature = self._temperature or 1.0
 
         narrative = ""
@@ -131,7 +129,7 @@ and values appropriate to the world seed prompt above. Never output the schema's
         index: int, context: dict, user_prompt: str, user_note: str = "",
     ) -> str:
         """Regenerate a single entry of a list field, distinct from the others."""
-        model = self._model or (self._llm.reader_model if self._llm else _DEFAULT_MODEL)
+        model = self._model or self._llm.reader_model
         # Slightly above the step temperature for more variety on a single item.
         temperature = min((self._temperature or 1.0) + 0.1, 1.0)
 
@@ -197,7 +195,7 @@ Respond with a single new '{field_label}' entry as JSON: {{"item": "..."}}"""
         Returns a dict (whole entry) when ``subfield`` is None, otherwise the new
         value for that sub-field only.
         """
-        model = self._model or (self._llm.reader_model if self._llm else _DEFAULT_MODEL)
+        model = self._model or self._llm.reader_model
         # Slightly above the step temperature for more variety on a single item.
         temperature = min((self._temperature or 1.0) + 0.1, 1.0)
 

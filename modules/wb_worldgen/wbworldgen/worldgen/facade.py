@@ -35,9 +35,7 @@ class WorldBuilder:
 
         self._llm_service = None
         self._settings = None
-        self._world_builder_model = None
         self._world_builder_temperature = None
-        self._enrich_label_model = None
         self._json_retry_attempts = 2
 
         self._persistence = WorldPersistence(worlds_dir)
@@ -67,16 +65,9 @@ class WorldBuilder:
         self._settings = settings
         self._llm_gen._settings = settings
 
-    def set_world_builder_model(self, model: str):
-        self._world_builder_model = model
-        self._llm_gen._model = model
-
     def set_world_builder_temperature(self, temperature: float):
         self._world_builder_temperature = temperature
         self._llm_gen._temperature = temperature
-
-    def set_enrich_label_model(self, model: str):
-        self._enrich_label_model = model
 
     def register_module_hooks(self, registry):
         self._hook_registry.register_from_modules(registry)

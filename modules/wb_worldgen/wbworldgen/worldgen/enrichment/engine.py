@@ -20,8 +20,6 @@ from wbworldgen.worldgen.enrichment.context import (
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "gemini/gemini-2.5-flash"
-
 
 def _terrain_line(terrain: dict) -> str:
     """One-line terrain fact for the enrichment prompt (empty when unknown)."""
@@ -307,7 +305,7 @@ class EnrichmentEngine:
         terrain_str = _terrain_line(context.get("terrain", {}))
 
         host = self._host
-        model = host._enrich_label_model or host._world_builder_model or (self._llm.module_fast_model if self._llm else _DEFAULT_MODEL)
+        model = self._llm.module_fast_model or self._llm.reader_model
         temperature = host._world_builder_temperature or 0.9
 
         system = host._get_prompt(
@@ -395,7 +393,7 @@ Output ONLY valid JSON: {{"name": "...", "label_description": "..."}}""",
         ) or "none"
 
         host = self._host
-        model = host._world_builder_model or (self._llm.reader_model if self._llm else _DEFAULT_MODEL)
+        model = self._llm.reader_model
         temperature = host._world_builder_temperature or 0.9
 
         if existing_description:
