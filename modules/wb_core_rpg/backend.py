@@ -463,7 +463,7 @@ async def on_librarian(state: dict, sdk) -> dict | None:
         return None
 
     char = Character.from_dict(state.get("module_data", {}).get("wb_core_rpg", {}))
-    recent = "\n".join(str(h) for h in history[-3:])[:2500]
+    recent = "\n".join(str(h) for h in history[-3:])[-2500:]
 
     if char.skills:
         skill_lines = ", ".join(f"{n} ({d['rating']}/10, {d.get('type', 'active')})" for n, d in char.skills.items())
@@ -482,8 +482,10 @@ The player's current skills: {skill_lines}
 RECENT NARRATION:
 {recent}
 
+For each added or altered skill, the description must capture the nuance of the power in 1-2 tight sentences: what it does, how it manifests, where it came from, and any limit, cost, or condition the narration implies. Concrete over flowery. Example: "Emberkiss, a boon from the hearth-goddess: the bearer's touch can kindle or snuff small flames, but only fire she can see." not "A powerful fire ability."
+
 Respond with ONLY valid JSON:
-{{"added": [{{"name": "skill_name", "rating": 1-10, "description": "1-2 sentence vivid description", "trigger_words": ["word1", "word2"], "type": "active|passive|curse"}}], "removed": ["skill_name"], "altered": [{{"name": "existing_skill_name", "new_rating": 1-10, "description": "optional updated description"}}]}}"""
+{{"added": [{{"name": "skill_name", "rating": 1-10, "description": "what it does, how it manifests, source, limits — 1-2 tight sentences", "trigger_words": ["word1", "word2"], "type": "active|passive|curse"}}], "removed": ["skill_name"], "altered": [{{"name": "existing_skill_name", "new_rating": 1-10, "description": "optional updated description"}}]}}"""
 
     try:
         sdk.llm._current_module = "wb_core_rpg"

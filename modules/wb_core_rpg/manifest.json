@@ -57,7 +57,7 @@
   "mutation_schema": {
     "hp_change": "integer, HP gained or lost by the player in the story. Use 0 if no player HP changed.",
     "stat_changes": "object mapping stat name (power/agility/vitality/intelligence/spirit/charm) to integer change. Empty object if none.",
-    "skill_changes": "object mapping skill name to {rating: int, description: str, trigger_words: [str], type: 'active'|'passive'|'curse'}. For new skills, provide rating/description/trigger_words/type. For existing, just rating. Empty object if none.",
+    "skill_changes": "object mapping skill name to {rating: int, description: str, trigger_words: [str], type: 'active'|'passive'|'curse'}. For new skills, provide rating/description/trigger_words/type. description: 1-2 tight sentences stating what the ability actually does, how it manifests, its source, and any limits/costs/conditions shown in the story — concrete and specific to this story, never generic filler like 'skilled in X'. For existing skills, just rating. Empty object if none.",
     "xp_gained": "integer, experience points the character earned from this action. Use 0 if none."
   },
   "character_creation": {
