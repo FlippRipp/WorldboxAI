@@ -15,6 +15,7 @@ import MemoryBrowser from './components/MemoryBrowser';
 import CharacterView from './components/CharacterView/CharacterView';
 import ModuleGameOverlay from './components/shared/ModuleGameOverlay';
 import MainMenu from './components/Menu/MainMenu';
+import OnboardingWizard from './components/Onboarding/OnboardingWizard';
 import SaveSelectScreen from './components/Menu/SaveSelectScreen';
 import ExitWarning from './components/Menu/ExitWarning';
 import CharacterListScreen from './components/CharacterBuilder/CharacterListScreen';
@@ -51,8 +52,16 @@ function PlaceholderMode({ title, onBack }) {
   );
 }
 
+const ONBOARDING_DONE_KEY = 'wb_onboarding_done';
+
 function AppContent() {
   const [currentMode, setCurrentMode] = useState(null);
+  // First-launch onboarding: null = checking, true = show wizard, false = no.
+  // Shown once, only when no AI provider is configured anywhere (fresh
+  // install); a returning user whose key broke gets the menu card instead.
+  const [showOnboarding, setShowOnboarding] = useState(() =>
+    localStorage.getItem(ONBOARDING_DONE_KEY) ? false : null
+  );
   const [showExitWarning, setShowExitWarning] = useState(false);
   const [editCharacterId, setEditCharacterId] = useState(null);
   const [editCharacterData, setEditCharacterData] = useState(null);
@@ -226,6 +235,19 @@ function AppContent() {
   }, []);
 
   useEffect(() => {
+    if (showOnboarding !== null) return;
+    api.getHealth()
+      .then((health) => setShowOnboarding(health.status === 'missing_api_key'))
+      .catch(() => setShowOnboarding(false));
+  }, [showOnboarding]);
+
+  const handleFinishOnboarding = useCallback((nextMode) => {
+    localStorage.setItem(ONBOARDING_DONE_KEY, '1');
+    setShowOnboarding(false);
+    if (nextMode) setCurrentMode(nextMode);
+  }, []);
+
+  useEffect(() => {
     if (session.sessionState) {
       setGameState(prev => ({
         ...prev,
@@ -250,6 +272,14 @@ function AppContent() {
   }, [currentMode, ws.isConnected]);
 
   if (currentMode === null) {
+    // Hold the menu back until the first-launch check resolves (fast, local)
+    // so a fresh install doesn't flash the menu before the wizard.
+    if (showOnboarding === null) {
+      return <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950" />;
+    }
+    if (showOnboarding) {
+      return <OnboardingWizard onFinish={handleFinishOnboarding} />;
+    }
     return (
       <MainMenu
         onSelectMode={setCurrentMode}
