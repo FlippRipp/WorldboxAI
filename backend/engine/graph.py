@@ -42,7 +42,11 @@ class EngineGraph:
         self.prompt_compiler = PromptCompiler()
         self.memory = None # Lazy initialized
         self.memory_db_path = "data/saves/autosave/vector_index"
+        # Story-source providers registered by modules (e.g. wb_worldgen). Maps a
+        # source type -> async provider used by create_save to build a story.
+        self.story_sources = {}
         self.sdk.llm._set_service(self.llm)
+        self.sdk.memory._set_engine(self)
         self._register_settings()
         
         workflow = StateGraph(WorldState)
@@ -103,9 +107,23 @@ class EngineGraph:
             min=0, max=10,
         )
 
+    def register_story_source(self, source_type: str, provider):
+        """Register a story-source provider (e.g. the world module's world source).
+
+        ``provider`` is an async callable invoked by create_save to turn a
+        selected source id into a playable save (producing world_data, location,
+        RAG index, etc.).
+        """
+        self.story_sources[source_type] = provider
+
     def set_memory_path(self, memory_db_path: str):
         if memory_db_path != self.memory_db_path:
             self.memory_db_path = memory_db_path
+            self.memory = None
+
+    def close_memory(self):
+        if self.memory is not None:
+            self.memory.close()
             self.memory = None
     
     def set_world_index_path(self, world_index_path: str):
@@ -162,12 +180,20 @@ class EngineGraph:
         levels = self._get_module_execution_levels()
         accumulated_state = deepcopy(state)
 
+        # A save may restrict which modules are active (chosen at story start via
+        # the module toggle). When the reserved key is present, modules outside
+        # the active set are skipped entirely for this save.
+        active_modules = accumulated_state.get("module_configs", {}).get("__active_modules__")
+        active_set = set(active_modules) if isinstance(active_modules, list) else None
+
         for level in levels:
             tasks = {}
             task_meta = {}
 
             for mod_id in level:
                 if mod_id not in self.registry.get_modules():
+                    continue
+                if active_set is not None and mod_id not in active_set:
                     continue
                 mod_data = self.registry.get_modules()[mod_id]
                 backend = mod_data["backend"]
@@ -283,7 +309,7 @@ class EngineGraph:
             dummy_vector = await self.llm.get_embedding("init",
                 inspector_ctx={"call_type": "embedding", "step": "ensure_memory"})
             dim_size = len(dummy_vector)
-            print(f"[Engine] Initializing LanceDB with dynamic vector dimension: {dim_size}")
+            print(f"[Engine] Initializing memory store with dynamic vector dimension: {dim_size}")
             self.memory = MemoryManager(self.memory_db_path, dim_size)
 
     async def initialize_module_data(self, state: dict) -> dict:
@@ -299,11 +325,28 @@ class EngineGraph:
     async def _ensure_memory(self):
         await self.ensure_memory()
 
-    async def generate_intro(self, state: dict, streaming_callback=None) -> str:
+    async def generate_intro(self, state: dict, streaming_callback=None) -> dict:
         character = state.get("characters", {}).get("default_player", {})
         character_name = character.get("name", "Adventurer")
         module_data = state.get("module_data", {})
         world_data = state.get("world_data")
+        scenario_data = state.get("scenario_data")
+
+        # Basic scenario story source: when a scenario supplies a literal opening
+        # message, the story opens with it verbatim (no LLM generation).
+        if scenario_data:
+            starting_prompt = (scenario_data.get("starting_prompt") or "").strip()
+            if starting_prompt:
+                # Emit the literal opening through the streaming callback so the
+                # client receives it the same way it receives LLM-generated text.
+                # Without this, no token is streamed and the frontend's `done`
+                # handler skips appending the message (it only appends streamed
+                # content), so the opening only appears after a reload.
+                if streaming_callback is not None:
+                    await streaming_callback(starting_prompt)
+                # Return the same {content, reasoning} shape as the LLM path so
+                # the caller can read intro_result["content"] uniformly.
+                return {"content": starting_prompt, "reasoning": ""}
 
         parts = []
 
@@ -332,46 +375,31 @@ class EngineGraph:
         character_lines.append("</character>")
         parts.append("\n".join(character_lines))
 
-        if world_data:
-            rules = world_data.get("rules", {})
-            lore = world_data.get("lore", {})
-            if rules:
-                parts.append("<world_rules>")
-                parts.append(f"Genre: {rules.get('genre', 'N/A')}")
-                parts.append(f"Tone: {rules.get('tone', 'N/A')}")
-                parts.append(f"Magic Level: {rules.get('magic_level', 'N/A')}")
-                parts.append(f"Technology Era: {rules.get('tech_era', 'N/A')}")
-                parts.append(f"Lethality: {rules.get('lethality', 'N/A')}/10")
-                custom_rules = rules.get("custom_rules", [])
-                if custom_rules:
-                    parts.append("Custom Rules:")
-                    for rule in custom_rules:
-                        parts.append(f"  - {rule}")
-                parts.append("</world_rules>")
-            if lore:
-                parts.append("<world_premise>")
-                world_name = lore.get("world_name", "")
-                if world_name:
-                    parts.append(f"World: {world_name}")
-                premise = lore.get("premise", "")
-                if premise:
-                    parts.append(premise)
-                central_conflict = lore.get("central_conflict", "")
-                if central_conflict:
-                    parts.append(f"Central Conflict: {central_conflict}")
-                creation_myth = lore.get("creation_myth", "")
-                if creation_myth:
-                    parts.append(f"Creation Myth: {creation_myth}")
-                eras = lore.get("historical_eras", [])
-                if eras:
-                    parts.append("Historical Eras:")
-                    for era in eras:
-                        parts.append(f"  - {era.get('name', '')}: {era.get('summary', '')}")
-                parts.append("</world_premise>")
+        # World/setting context for the opening scene is contributed by modules
+        # (e.g. wb_worldgen) via on_intro_context, respecting the active set.
+        intro_active = state.get("module_configs", {}).get("__active_modules__")
+        intro_active_set = set(intro_active) if isinstance(intro_active, list) else None
+        for mod_id, mod_data in self.registry.get_modules().items():
+            if intro_active_set is not None and mod_id not in intro_active_set:
+                continue
+            hook = getattr(mod_data["backend"], "on_intro_context", None)
+            if hook is None:
+                continue
+            try:
+                module_state = self._build_module_state(state, mod_id, mod_data["manifest"].get("consumes", {}))
+                res = await hook(module_state, self.sdk)
+                text = res if isinstance(res, str) else (res.get("content", "") if isinstance(res, dict) else "")
+                if text:
+                    parts.append(text)
+            except Exception as e:
+                print(f"Error in {mod_id} on_intro_context: {e}")
 
-            location_text = self._build_location_context(state, world_data)
-            if location_text:
-                parts.append(location_text)
+        if scenario_data:
+            description = (scenario_data.get("scenario_description") or "").strip()
+            if description:
+                parts.append("<scenario>")
+                parts.append(description)
+                parts.append("</scenario>")
 
         parts.append("<instructions>")
         parts.append("Write the opening scene for this adventure. Do the following:")
@@ -393,7 +421,8 @@ class EngineGraph:
         ]
 
         return await self.llm.generate_story_from_messages(messages, streaming_callback,
-            inspector_ctx={"call_type": "storyteller", "step": "generate_intro"})
+            inspector_ctx={"call_type": "storyteller", "step": "generate_intro"},
+            reasoning_callback=self.sdk.ui.emit_reasoning_token)
 
     def _check_veto(self, state: WorldState) -> str:
         if state.get("needs_rewrite") and state.get("veto_retries", 0) < VETO_MAX_RETRIES:
@@ -459,12 +488,8 @@ class EngineGraph:
             except Exception as e:
                 print(f"Error fetching RAG memories: {e}")
 
-        world_data = state.get("world_data")
-        if world_data:
-            location_context = self._build_location_context(state, world_data)
-            if location_context:
-                gathered_context.append(location_context)
-
+        # Location/world context is contributed by modules (e.g. wb_worldgen) via
+        # on_gather_context -> context_string, collected below.
         context_strings = []
 
         def collect_gather(mod_id, mod_data, result, produces):
@@ -490,88 +515,6 @@ class EngineGraph:
 
         return return_val
 
-    def _build_location_context(self, state: dict, world_data: dict) -> str:
-        node_id = state.get("player_location_node_id")
-        region_name = state.get("player_location_region")
-        layer_id = state.get("player_location_layer_id")
-        nodes = world_data.get("map", {}).get("nodes", [])
-        map_layers = world_data.get("map_layers", [])
-        regions = world_data.get("regions", {}).get("regions", [])
-        layer_info = world_data.get("layers", [])
-
-        if map_layers:
-            all_nodes = []
-            for layer in map_layers:
-                all_nodes.extend(layer.get("map", {}).get("nodes", []))
-            nodes = all_nodes
-
-        current_node = None
-        for n in nodes:
-            if n.get("id") == node_id:
-                current_node = n
-                break
-
-        current_region = None
-        if region_name:
-            for r in regions:
-                if r.get("name") == region_name:
-                    current_region = r
-                    break
-
-        current_layer = None
-        if layer_id:
-            for layer in layer_info:
-                if layer.get("layer_id") == layer_id:
-                    current_layer = layer
-                    break
-
-        if not current_node and not current_region and not current_layer:
-            return ""
-
-        parts = ["<current_location>"]
-        if current_layer:
-            parts.append(f"Layer: {current_layer.get('name', layer_id)} — {current_layer.get('description', '')[:300]}")
-            # Inject layer-specific rules
-            layer_rules = world_data.get("layer_rules", [])
-            for lr in layer_rules:
-                if lr.get("layer_id") == layer_id:
-                    rules = lr.get("rules", [])
-                    if rules:
-                        parts.append("<layer_rules>")
-                        for rule in rules:
-                            parts.append(f"  - {rule}")
-                        parts.append("</layer_rules>")
-                    break
-        if current_node:
-            node_name = current_node.get("name", "")
-            node_type = current_node.get("type", "location")
-            node_desc = current_node.get("description", "")
-            if node_name and node_desc:
-                parts.append(f"Location: {node_name} ({node_type}) — {node_desc[:600]}")
-            elif node_name:
-                parts.append(f"Location: {node_name} ({node_type})")
-            if current_node.get("interlayer_connection_id"):
-                map_connections = world_data.get("map_connections", [])
-                for lc in map_connections:
-                    if lc.get("id") == current_node.get("interlayer_connection_id"):
-                        target_layer = lc.get("to_layer_id") if lc.get("from_layer_id") == layer_id else lc.get("from_layer_id")
-                        parts.append(f"Inter-layer connection: {lc.get('connection_type', 'passage')} to layer '{target_layer}' — {lc.get('description', '')[:200]}")
-                        break
-        if current_region:
-            parts.append(f"Region: {current_region.get('name', '')}")
-            parts.append(f"Terrain: {current_region.get('terrain', 'N/A')[:400]}")
-            parts.append(f"Climate: {current_region.get('climate', 'N/A')[:200]}")
-            landmarks = current_region.get("landmarks", [])
-            if landmarks:
-                parts.append(f"Nearby Landmarks: {', '.join(landmarks[:5])}")
-            factions = current_region.get("factions", [])
-            if factions:
-                parts.append(f"Local Factions: {', '.join(factions[:5])}")
-        if not current_region and region_name:
-            parts.append(f"Region: {region_name}")
-        parts.append("</current_location>")
-        return "\n".join(parts)
-
     async def storyteller_node(self, state: WorldState):
         print("\n[Node: Storyteller] Assembling prompt and calling LLM...")
 
@@ -591,15 +534,27 @@ class EngineGraph:
         else:
             compiled_prompt = self.prompt_compiler.compile(state, module_blocks=module_prompt_blocks)
 
-        story_output = await self.llm.generate_story_from_messages(
+        # Don't stream on veto rewrites — the first attempt already sent tokens to
+        # the client, so streaming again would produce a second visible response.
+        story_result = await self.llm.generate_story_from_messages(
             compiled_prompt["messages"],
-            streaming_callback=self.sdk.ui.emit_token,
+            streaming_callback=None if needs_rewrite else self.sdk.ui.emit_token,
             inspector_ctx={"call_type": "storyteller", "step": "storyteller_node"},
+            reasoning_callback=None if needs_rewrite else self.sdk.ui.emit_reasoning_token,
         )
+        story_output = story_result["content"]
+        story_reasoning = story_result.get("reasoning", "")
+
+        # The narration is done — finalize it on the client now so the message
+        # renders immediately instead of waiting for the reader/librarian nodes.
+        # Skip on veto rewrites (those don't stream and are replaced wholesale).
+        if not needs_rewrite:
+            await self.sdk.ui.emit_message_complete(story_output, story_reasoning)
 
         new_history = state.get("history", []) + [story_output]
 
-        result = {"history": new_history, "last_prompt_trace": compiled_prompt["trace"], "needs_rewrite": False, "veto_reason": None}
+        result = {"history": new_history, "last_prompt_trace": compiled_prompt["trace"], "needs_rewrite": False, "veto_reason": None, "last_reasoning": story_reasoning,
+                  "last_model": story_result.get("model", ""), "last_usage": story_result.get("usage", {})}
 
         if needs_rewrite:
             result["veto_retries"] = veto_retries + 1
@@ -734,9 +689,23 @@ class EngineGraph:
             if mutation_schema:
                 schema[mod_id] = mutation_schema
 
-        if state.get("world_id"):
-            world_data = state.get("world_data", {})
-            schema["_world"] = self._build_location_mutation_schema(world_data)
+        # Modules may offer a dynamic mutation schema (e.g. wb_worldgen movement,
+        # whose options depend on the loaded world). Respect the active set.
+        reader_active = state.get("module_configs", {}).get("__active_modules__")
+        reader_active_set = set(reader_active) if isinstance(reader_active, list) else None
+        for mod_id, mod_data in self.registry.get_modules().items():
+            if reader_active_set is not None and mod_id not in reader_active_set:
+                continue
+            dyn_hook = getattr(mod_data["backend"], "on_mutation_schema", None)
+            if dyn_hook is None:
+                continue
+            try:
+                module_state = self._build_module_state(state, mod_id, mod_data["manifest"].get("consumes", {}))
+                dyn_schema = await dyn_hook(module_state, self.sdk)
+                if isinstance(dyn_schema, dict) and dyn_schema:
+                    schema[mod_id] = {**schema.get(mod_id, {}), **dyn_schema}
+            except Exception as e:
+                print(f"Error in {mod_id} on_mutation_schema: {e}")
 
         mutations = await self.llm.extract_mutations(latest_story, schema,
             inspector_ctx={"call_type": "reader", "step": "reader_node"}) if schema else {}
@@ -747,109 +716,35 @@ class EngineGraph:
         def build_mutate_args(mod_id, mod_data, module_state):
             return (mutations.get(mod_id, {}),)
 
+        # Capture sanctioned location state keys a module's on_mutate_state may
+        # return (e.g. wb_worldgen movement + fog-of-war reveal).
+        location_update = {}
+
+        def collect_location(mod_id, mod_data, result, produces):
+            for key in ("player_location_node_id", "player_location_region",
+                        "player_location_layer_id", "revealed_node_ids"):
+                if key in result:
+                    location_update[key] = result[key]
+
         accumulated = await self._run_modules_in_levels(
             "on_mutate_state",
             state,
             build_args=build_mutate_args,
+            collect=collect_location,
             merge_module_data=True,
         )
 
         state_update["module_data"] = accumulated.get("module_data", state_update["module_data"])
-        
-        world_mutations = mutations.get("_world", {})
-        if world_mutations:
-            new_node_id = world_mutations.get("player_location_node_id")
-            new_region = world_mutations.get("player_location_region")
-            new_layer_id = world_mutations.get("player_location_layer_id")
-            if new_node_id and new_node_id != state.get("player_location_node_id"):
-                state_update["player_location_node_id"] = new_node_id
-                state_update["player_location_region"] = new_region or state.get("player_location_region")
-                state_update["player_location_layer_id"] = new_layer_id or state.get("player_location_layer_id")
-                print(f"[Node: Reader] Player moved to node={new_node_id}, region={new_region}, layer={new_layer_id}")
 
-                revealed = list(set(state.get("revealed_node_ids", [])))
-                world_data = state.get("world_data", {})
-                adjacency = self._build_graph_adjacency(world_data)
-                new_revealed = self._reveal_bfs(new_node_id, adjacency, radius=1)
-                for nid in new_revealed:
-                    if nid not in revealed:
-                        revealed.append(nid)
-                state_update["revealed_node_ids"] = revealed
+        if location_update.get("player_location_node_id"):
+            state_update.update(location_update)
+            print(f"[Node: Reader] Player moved to node={location_update.get('player_location_node_id')}, "
+                  f"region={location_update.get('player_location_region')}, "
+                  f"layer={location_update.get('player_location_layer_id')}")
 
         turn = state.get("turn", 0) + 1
         
         return self._deep_merge(state_update, {"current_context": [], "input_text": "", "turn": turn})
-
-    def _build_location_mutation_schema(self, world_data: dict) -> dict:
-        nodes = world_data.get("map", {}).get("nodes", [])
-        map_layers = world_data.get("map_layers", [])
-        if map_layers:
-            all_nodes = []
-            for layer in map_layers:
-                all_nodes.extend(layer.get("map", {}).get("nodes", []))
-            nodes = all_nodes
-        regions = world_data.get("regions", {}).get("regions", [])
-        location_options = []
-        for n in nodes:
-            if n.get("name"):
-                location_options.append(f"{n['id']} ({n.get('name', '')})")
-        if not location_options:
-            location_options = ["any"]
-        region_names = [r.get("name", "") for r in regions if r.get("name")]
-        layers_list = world_data.get("layers", [])
-        layer_options = [f"{l.get('layer_id', '')} ({l.get('name', '')})" for l in layers_list if l.get("layer_id")]
-        if not layer_options:
-            layer_options = ["surface"]
-        return {
-            "player_location_changed": {"type": "boolean", "label": "Did the player move to a new location?"},
-            "player_location_node_id": {
-                "type": "select",
-                "label": "New location node ID",
-                "options": location_options[:30],
-                "description": "The node_id of the location the player moved to. Set only if player_location_changed is true."
-            },
-            "player_location_region": {
-                "type": "select",
-                "label": "New region name",
-                "options": region_names[:20],
-                "description": "The region the player moved into. Set only if player_location_changed is true."
-            },
-            "player_location_layer_id": {
-                "type": "select",
-                "label": "New layer ID",
-                "options": layer_options[:10],
-                "description": "The layer_id the player moved to (e.g., overworld, underground). Set only if the layer changed."
-            },
-        }
-
-    def _build_graph_adjacency(self, world_data: dict) -> dict[str, list[str]]:
-        edges = world_data.get("map", {}).get("edges", [])
-        map_layers = world_data.get("map_layers", [])
-        all_edges = list(edges)
-        if map_layers:
-            all_edges = []
-            for layer in map_layers:
-                all_edges.extend(layer.get("map", {}).get("edges", []))
-        adj = {}
-        for e in all_edges:
-            fr, to = e.get("from"), e.get("to")
-            if fr and to:
-                adj.setdefault(fr, []).append(to)
-                adj.setdefault(to, []).append(fr)
-        return adj
-
-    def _reveal_bfs(self, start_id: str, adjacency: dict[str, list[str]], radius: int) -> set[str]:
-        visited = {start_id}
-        frontier = [start_id]
-        for _ in range(radius):
-            next_frontier = []
-            for nid in frontier:
-                for nb in adjacency.get(nid, []):
-                    if nb not in visited:
-                        visited.add(nb)
-                        next_frontier.append(nb)
-            frontier = next_frontier
-        return visited
 
     async def librarian_node(self, state: WorldState):
         await self._ensure_memory()
@@ -898,17 +793,44 @@ class EngineGraph:
             except Exception as e:
                 print(f"[Node: Librarian] Error generating memory: {e}")
         
+        # Capture sanctioned canonical-character updates a module's on_librarian may
+        # return (e.g. wb_character_tracker evolving appearance/identity/personality).
+        # Only these known identity fields are accepted from modules — stats, skills
+        # and HP remain owned by module_data.
+        CHARACTER_UPDATE_FIELDS = (
+            "name", "gender", "race", "short_appearance", "full_appearance", "personality",
+        )
+        character_update = {}
+
+        def collect_character(mod_id, mod_data, result_, produces):
+            update = result_.get("character_update")
+            if isinstance(update, dict):
+                for key in CHARACTER_UPDATE_FIELDS:
+                    val = update.get(key)
+                    if val:
+                        character_update[key] = val
+
         # Dispatch on_librarian to all modules in parallel for post-storyteller processing
         accumulated = await self._run_modules_in_levels(
             "on_librarian",
             state,
+            collect=collect_character,
             merge_module_data=True,
         )
-        
+
         if accumulated.get("module_data"):
             result["module_data"] = self._deep_merge(
                 result.get("module_data", {}),
                 accumulated["module_data"],
             )
-        
+
+        if character_update:
+            characters = deepcopy(state.get("characters", {}))
+            player = characters.get("default_player")
+            if isinstance(player, dict):
+                player.update(character_update)
+                characters["default_player"] = player
+                result["characters"] = characters
+                print(f"[Node: Librarian] Player character updated: {', '.join(character_update.keys())}")
+
         return result

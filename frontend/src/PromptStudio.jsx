@@ -1,13 +1,13 @@
 import { useEffect, useState, useRef } from 'react';
 import { api } from './lib/api';
 
-const BLOCK_TYPES = ['static_text', 'engine_context', 'world_context', 'module_prompt'];
+const BLOCK_TYPES = ['static_text', 'engine_context', 'world_context', 'character_context', 'module_prompt'];
 const ROLES = ['system', 'user', 'assistant'];
 const PLACEMENTS = ['system_relative', 'chat_injection'];
 const CATEGORIES = ['system_prompt', 'post_history', 'narrator', 'world_context', 'character', 'utility', 'other'];
 const GENERATION_TYPES = ['storytelling', 'world_building', 'character_creation', 'narration', 'combat', 'memory', 'validation'];
 
-const DEFAULT_BLOCK_IDS = ['core_narrator_rules', 'world_rules_context', 'engine_context', 'storyteller_task'];
+const DEFAULT_BLOCK_IDS = ['core_narrator_rules', 'world_rules_context', 'player_character_context', 'engine_context', 'storyteller_task'];
 
 const CATEGORY_LABELS = {
   system_prompt: 'System Prompt',
@@ -41,6 +41,7 @@ function getBlockDescription(block) {
   switch (block.type) {
     case 'engine_context': return 'Auto-generated game state context';
     case 'world_context': return 'World rules & lore from data';
+    case 'character_context': return 'Player character identity';
     case 'static_text': return (block.config?.text || '').substring(0, 80) + ((block.config?.text || '').length > 80 ? '...' : '') || 'Static prompt text';
     case 'module_prompt': return 'Module-managed prompt block';
     default: return '';
@@ -51,21 +52,31 @@ function isDefaultBlock(block) {
   return block.source === 'engine' && DEFAULT_BLOCK_IDS.includes(block.id);
 }
 
-function BlockCard({ block, index, draft, dragIndex, onMove, onRemove, onEdit, onSaveAsTemplate, onDragStart, onDragOver, onDrop }) {
+function BlockCard({ block, index, draft, dragIndex, onMove, onRemove, onEdit, onSaveAsTemplate, onToggle, onDragStart, onDragOver, onDrop }) {
   const catColor = CATEGORY_COLORS[block.category] || 'border-l-gray-500';
   const displayName = block.display_name || block.id;
   const isDefault = isDefaultBlock(block);
   const isEngine = block.source === 'engine';
+  const isOff = block.enabled === false;
 
   return (
     <div
-      className={`border border-l-4 ${catColor} rounded-lg p-3 space-y-3 ${isDefault ? 'bg-purple-950/25 border-purple-800/60' : 'bg-gray-900/70 border-gray-700'}`}
+      className={`relative border border-l-4 rounded-lg p-3 space-y-3 transition-colors ${
+        isOff
+          ? 'border-l-red-500/70 bg-gray-800/60 border-dashed border-red-900/40'
+          : `${catColor} ${isDefault ? 'bg-purple-950/40 border-purple-800/60' : 'bg-gray-950/80 border-gray-700'}`
+      }`}
       draggable
       onDragStart={(e) => onDragStart(e, index)}
       onDragOver={onDragOver}
       onDrop={(e) => onDrop(e, index)}
       style={{ opacity: dragIndex === index ? 0.4 : 1 }}
     >
+      {isOff && (
+        <span className="absolute top-2 right-2 text-[9px] font-bold uppercase tracking-widest text-red-400/40 select-none pointer-events-none rotate-[-4deg]">
+          Disabled
+        </span>
+      )}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <span className="cursor-grab text-gray-500 text-xs select-none">{'\u22EE\u22EE'}</span>
@@ -76,18 +87,33 @@ function BlockCard({ block, index, draft, dragIndex, onMove, onRemove, onEdit, o
           {isEngine && !isDefault && (
             <span className="text-[10px] px-1.5 py-0.5 bg-blue-900/50 text-blue-300 rounded font-semibold uppercase tracking-wide">Engine</span>
           )}
-          <span className="text-sm font-semibold text-gray-200 truncate max-w-[160px]" title={block.id}>
+          {isOff && (
+            <span className="text-[10px] px-1.5 py-0.5 bg-red-600 text-white rounded font-bold uppercase tracking-wide flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-white inline-block" />OFF
+            </span>
+          )}
+          <span className={`text-sm font-semibold truncate max-w-[160px] ${isOff ? 'text-gray-500 line-through decoration-red-500/50' : 'text-gray-200'}`} title={block.id}>
             {displayName || block.id}
           </span>
           {displayName && (
             <span className="text-[10px] font-mono text-gray-600 truncate max-w-[100px]" title={block.id}>{block.id}</span>
           )}
-          {!block.enabled && <span className="text-[10px] px-1 py-0.5 bg-red-900/60 text-red-300 rounded">OFF</span>}
           {block.category && (
             <span className="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded">{CATEGORY_LABELS[block.category] || block.category}</span>
           )}
         </div>
         <div className="flex items-center gap-1 text-xs">
+          <button
+            onClick={() => onToggle(index, isOff)}
+            className={`px-2 py-1 rounded font-semibold transition-colors ${
+              isOff
+                ? 'bg-red-950/70 text-red-300 hover:bg-red-900'
+                : 'bg-emerald-900/50 text-emerald-300 hover:bg-emerald-800'
+            }`}
+            title={isOff ? 'Block is off — click to enable' : 'Block is on — click to disable'}
+          >
+            {isOff ? 'OFF' : 'ON'}
+          </button>
           <button onClick={() => onMove(index, -1)} disabled={index === 0} className="px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 rounded transition-colors">&#8593;</button>
           <button onClick={() => onMove(index, 1)} disabled={index === draft.length - 1} className="px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 rounded transition-colors">&#8595;</button>
           <button onClick={() => onEdit(block, index)} className="px-2 py-1 bg-gray-800 hover:bg-gray-700 rounded transition-colors" title="Edit block">&#9998;</button>
@@ -96,11 +122,11 @@ function BlockCard({ block, index, draft, dragIndex, onMove, onRemove, onEdit, o
         </div>
       </div>
 
-      <div className="text-xs text-gray-400">
-        {getBlockDescription(block)}
+      <div className={`text-xs ${isOff ? 'text-gray-600 italic' : 'text-gray-400'}`}>
+        {isOff ? 'Excluded from the compiled prompt — this block is skipped.' : getBlockDescription(block)}
       </div>
 
-      <div className="grid grid-cols-3 gap-2 text-[10px] text-gray-600">
+      <div className={`grid grid-cols-3 gap-2 text-[10px] ${isOff ? 'text-gray-700' : 'text-gray-600'}`}>
         <span>{blockLabel(block.type)}</span>
         <span>{block.role_type}</span>
         <span>{block.placement === 'chat_injection' ? `injected @ depth ${block.depth ?? 0}` : 'system top'}</span>
@@ -112,13 +138,25 @@ function BlockCard({ block, index, draft, dragIndex, onMove, onRemove, onEdit, o
 function QuickEditSection({ category, label, draft, defaults, onUpdateBlock, onUpdateConfig, onOpenEditModal, onRestoreBlock, macros, showMacros, setShowMacros }) {
   const block = draft.find((b) => b.category === category);
   const missing = !block;
+  const isOff = !missing && block.enabled === false;
   const text = block?.config?.text || '';
   const displayName = block?.display_name || label;
 
   return (
-    <div className={`bg-gray-900/70 border rounded-lg p-3 space-y-2 ${missing ? 'border-dashed border-gray-700' : 'border-gray-700'}`}>
+    <div className={`border rounded-lg p-3 space-y-2 transition-colors ${
+      missing ? 'bg-gray-900/70 border-dashed border-gray-700'
+      : isOff ? 'bg-gray-950/80 border-dashed border-red-900/40'
+      : 'bg-gray-900/70 border-gray-700'
+    }`}>
       <div className="flex items-center justify-between">
-        <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-300">{displayName}</h4>
+        <div className="flex items-center gap-2">
+          <h4 className={`text-xs font-semibold uppercase tracking-wide ${isOff ? 'text-gray-500 line-through decoration-red-500/50' : 'text-gray-300'}`}>{displayName}</h4>
+          {isOff && (
+            <span className="text-[10px] px-1.5 py-0.5 bg-red-600 text-white rounded font-bold uppercase tracking-wide flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-white inline-block" />OFF
+            </span>
+          )}
+        </div>
         {!missing && (
           <div className="flex items-center gap-2">
             <button
@@ -128,12 +166,12 @@ function QuickEditSection({ category, label, draft, defaults, onUpdateBlock, onU
             >
               &#9998; Edit Full
             </button>
-            <label className="flex items-center gap-1 text-xs text-gray-400">
+            <label className={`flex items-center gap-1 text-xs ${isOff ? 'text-red-300' : 'text-gray-400'}`}>
               <input type="checkbox" checked={block.enabled !== false} onChange={(e) => {
                 const idx = draft.indexOf(block);
                 if (idx >= 0) onUpdateBlock(idx, { enabled: e.target.checked });
               }} className="accent-purple-500" />
-              on
+              {isOff ? 'off' : 'on'}
             </label>
           </div>
         )}
@@ -350,6 +388,10 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
   const [templateCategory, setTemplateCategory] = useState('');
   const [showMacros, setShowMacros] = useState(null);
   const [showAddMenu, setShowAddMenu] = useState(false);
+  const [continueText, setContinueText] = useState('');
+  const [continueDefault, setContinueDefault] = useState('');
+  const [continueSaving, setContinueSaving] = useState(false);
+  const [continueDirty, setContinueDirty] = useState(false);
   const importFileRef = useRef(null);
   const stImportRef = useRef(null);
   const addMenuRef = useRef(null);
@@ -375,6 +417,41 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
     } catch { setDefaults([]); }
   };
 
+  const loadContinuePrompt = async () => {
+    try {
+      const data = await api.getContinuePrompt();
+      setContinueText(data.text || '');
+      setContinueDefault(data.default || '');
+      setContinueDirty(false);
+    } catch { /* leave as-is */ }
+  };
+
+  const handleSaveContinue = async () => {
+    setContinueSaving(true);
+    setError('');
+    try {
+      const data = await api.updateContinuePrompt(continueText);
+      setContinueText(data.text ?? continueText);
+      setContinueDirty(false);
+    } catch (err) {
+      setError(err.message || 'Failed to save continue prompt.');
+    } finally {
+      setContinueSaving(false);
+    }
+  };
+
+  const handleResetContinue = async () => {
+    if (!confirm('Reset the continue prompt to its default?')) return;
+    setError('');
+    try {
+      const data = await api.resetContinuePrompt();
+      setContinueText(data.text || '');
+      setContinueDirty(false);
+    } catch (err) {
+      setError(err.message || 'Failed to reset continue prompt.');
+    }
+  };
+
   useEffect(() => {
     if (isOpen) {
       setDraft(cloneBlocks(promptPipeline));
@@ -384,6 +461,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
       loadTemplates();
       loadMacros();
       loadDefaults();
+      loadContinuePrompt();
     }
   }, [isOpen]);
 
@@ -662,7 +740,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
   };
 
   const handleClose = () => {
-    if (hasUnsavedChanges) {
+    if (hasUnsavedChanges || continueDirty) {
       setShowCloseConfirm(true);
     } else {
       onClose();
@@ -708,6 +786,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
               {[
                 { key: 'pipeline', label: 'Pipeline Blocks' },
                 { key: 'library', label: 'Prompt Library' },
+                { key: 'continue', label: 'Continue Prompt' },
               ].map((tab) => (
                 <button
                   key={tab.key}
@@ -802,6 +881,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                       onRemove={removeBlock}
                       onEdit={openEditModal}
                       onSaveAsTemplate={saveAsTemplate}
+                      onToggle={(idx, currentlyOff) => updateBlock(idx, { enabled: currentlyOff })}
                       onDragStart={handleDragStart}
                       onDragOver={handleDragOver}
                       onDrop={handleDrop}
@@ -886,6 +966,58 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                     </div>
                   )}
                 </div>
+              </section>
+            )}
+
+            {activeTab === 'continue' && (
+              <section className="space-y-3">
+                <div>
+                  <h3 className="text-sm font-semibold uppercase tracking-wide text-purple-300">Continue Prompt</h3>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    Sent as the player turn when you press Send with an empty box. The normal
+                    context is compiled without a player message, and this instruction is
+                    appended so the story advances on its own. Supports the same variables as
+                    pipeline blocks.
+                  </p>
+                </div>
+
+                <textarea
+                  value={continueText}
+                  onChange={(e) => { setContinueText(e.target.value); setContinueDirty(true); }}
+                  rows={8}
+                  className="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 font-mono resize-y"
+                  placeholder="Continue the story from where it left off..."
+                />
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={() => setShowMacros(showMacros === 'continue' ? null : 'continue')}
+                    className="text-xs px-2 py-0.5 bg-purple-900/50 hover:bg-purple-800 rounded text-purple-300 transition-colors"
+                  >
+                    {showMacros === 'continue' ? 'Hide Variables' : 'Insert Variable'}
+                  </button>
+                  <div className="flex-1" />
+                  <button
+                    onClick={handleResetContinue}
+                    className="text-xs px-3 py-1.5 bg-red-950/70 hover:bg-red-900 text-red-200 rounded transition-colors"
+                  >
+                    Reset to Default
+                  </button>
+                  <button
+                    onClick={handleSaveContinue}
+                    disabled={continueSaving || !continueDirty}
+                    className="text-xs px-3 py-1.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded font-medium transition-colors"
+                  >
+                    {continueSaving ? 'Saving...' : 'Save Continue Prompt'}
+                  </button>
+                </div>
+                {showMacros === 'continue' && <MacroPanel macros={macros} onInsert={() => setShowMacros(null)} />}
+
+                {continueDefault && continueText.trim() !== continueDefault.trim() && (
+                  <p className="text-[11px] text-gray-600">
+                    Customized — differs from the built-in default.
+                  </p>
+                )}
               </section>
             )}
           </div>

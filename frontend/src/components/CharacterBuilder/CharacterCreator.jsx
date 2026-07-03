@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../../lib/api';
 import CharacterModuleForm from './CharacterModuleForm';
+import ModuleTogglePanel from '../shared/ModuleTogglePanel';
+import ModuleInline from '../shared/ModuleInline';
 
 function AutoTextarea({ value, onChange, disabled, minRows = 3, placeholder }) {
   const ref = useRef(null);
@@ -26,7 +28,6 @@ function AutoTextarea({ value, onChange, disabled, minRows = 3, placeholder }) {
 }
 
 export default function CharacterCreator({ onBack, onSaved, editCharacterId, initialData }) {
-  const [worlds, setWorlds] = useState([]);
   const [modules, setModules] = useState([]);
   const [moduleDefaults, setModuleDefaults] = useState({});
   const [loading, setLoading] = useState(false);
@@ -35,7 +36,9 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
   const [generatingAppearance, setGeneratingAppearance] = useState(false);
   const [generatingStats, setGeneratingStats] = useState(false);
 
-  const [worldId, setWorldId] = useState('');
+  // Generic generation context contributed by modules (e.g. wb_worldgen reports
+  // { world_id }). Merged from each enabled module's character_context widget.
+  const [moduleContext, setModuleContext] = useState({});
   const [gender, setGender] = useState('');
   const [race, setRace] = useState('');
   const [name, setName] = useState('');
@@ -45,20 +48,36 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
   const [backstory, setBackstory] = useState('');
   const [moduleData, setModuleData] = useState({});
   const [saveId, setSaveId] = useState('');
+  const [enabledModules, setEnabledModules] = useState(() => new Set());
 
   useEffect(() => {
     api.getModules()
-      .then(data => setModules(data.modules || []))
-      .catch(() => {});
-
-    api.listWorlds()
-      .then(data => setWorlds(data.worlds || []))
+      .then(data => {
+        const mods = data.modules || [];
+        setModules(mods);
+        // Default: enable every module that contributes to character creation —
+        // either a module-data form (character_creation) or a generation-context
+        // widget (character_context, e.g. the world picker).
+        setEnabledModules(new Set(
+          mods.filter(m => m.has_character_creation || m.character_context).map(m => m.id)
+        ));
+      })
       .catch(() => {});
   }, []);
 
+  const toggleModule = (modId, on) => {
+    // Note: moduleData is intentionally retained when a module is disabled, so
+    // re-enabling restores any values the user already entered.
+    setEnabledModules(prev => {
+      const next = new Set(prev);
+      if (on) next.add(modId); else next.delete(modId);
+      return next;
+    });
+  };
+
   useEffect(() => {
     if (initialData && editCharacterId) {
-      setWorldId(initialData.world_id || '');
+      setModuleContext(initialData.context || (initialData.world_id ? { world_id: initialData.world_id } : {}));
       setGender(initialData.gender || '');
       setRace(initialData.race || '');
       setName(initialData.name || '');
@@ -71,7 +90,7 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
   }, [initialData, editCharacterId]);
 
   useEffect(() => {
-    api.getCharacterModuleDefaults(worldId || undefined)
+    api.getCharacterModuleDefaults(moduleContext)
       .then(data => {
         setModuleDefaults(data.module_defaults || {});
         if (!editCharacterId) {
@@ -85,17 +104,13 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
         }
       })
       .catch(() => {});
-  }, [worldId, editCharacterId]);
-
-  const handleWorldChange = (e) => {
-    setWorldId(e.target.value);
-  };
+  }, [JSON.stringify(moduleContext), editCharacterId]);
 
   const handleGenerateName = async () => {
     setGeneratingName(true);
     try {
       const result = await api.generateCharacterName({
-        world_id: worldId || null,
+        context: moduleContext,
         gender,
         race,
       });
@@ -111,7 +126,7 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
     setGeneratingRace(true);
     try {
       const result = await api.generateCharacterRace({
-        world_id: worldId || null,
+        context: moduleContext,
         gender,
       });
       setRace(result.race || '');
@@ -128,9 +143,10 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
     try {
       const result = await api.generateCharacterAppearance({
         short_description: shortAppearance,
-        world_id: worldId || null,
+        context: moduleContext,
         gender,
         race,
+        name,
       });
       setFullAppearance(result.full_appearance || '');
     } catch (e) {
@@ -146,9 +162,12 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
     try {
       const result = await api.generateCharacterStats({
         concept: concept.trim(),
-        world_id: worldId || null,
+        context: moduleContext,
         gender,
         race,
+        name,
+        short_appearance: shortAppearance,
+        full_appearance: fullAppearance,
       });
       const vit = result.stats?.vitality ?? 10;
       const maxHp = vit * 7 + 2;
@@ -189,7 +208,7 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
         race: race.trim(),
         short_appearance: shortAppearance.trim(),
         full_appearance: fullAppearance.trim(),
-        world_id: worldId || null,
+        context: moduleContext,
         module_data: moduleData,
       });
       if (result.saved) {
@@ -206,7 +225,7 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
     setModuleData(prev => ({ ...prev, [modId]: { ...prev[modId], ...data } }));
   };
 
-  const characterModules = modules.filter(m => m.has_character_creation);
+  const characterModules = modules.filter(m => m.has_character_creation && enabledModules.has(m.id));
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col p-6">
@@ -221,27 +240,33 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
             </svg>
             Back
           </button>
-          <h2 className="text-xl font-bold text-gray-100">
-            {editCharacterId ? 'Edit Character' : 'New Character'}
-          </h2>
-        </div>
-
-        <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-6 space-y-4">
-          <div>
-            <h3 className="text-lg font-semibold text-gray-200 mb-1">World Context <span className="text-gray-500 text-sm font-normal">(optional)</span></h3>
-            <p className="text-xs text-gray-500 mb-3">Select a world to help the AI generate theme-appropriate details.</p>
-            <select
-              value={worldId}
-              onChange={handleWorldChange}
-              className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-2.5 text-gray-200 focus:border-purple-500 focus:outline-none"
-            >
-              <option value="">None (generic character)</option>
-              {worlds.map(w => (
-                <option key={w.id} value={w.id}>{w.name}</option>
-              ))}
-            </select>
+          <div className="flex items-center gap-3">
+            <ModuleTogglePanel
+              modules={modules.filter(m => m.has_character_creation || m.character_context)}
+              enabled={enabledModules}
+              onToggle={toggleModule}
+              label="Modules"
+            />
+            <h2 className="text-xl font-bold text-gray-100">
+              {editCharacterId ? 'Edit Character' : 'New Character'}
+            </h2>
           </div>
         </div>
+
+        {/* Generation-context widgets contributed by enabled modules (e.g.
+            wb_worldgen's world picker). Each reports a context fragment that is
+            merged into moduleContext and threaded into the generate calls. */}
+        {modules
+          .filter((m) => m.character_context && enabledModules.has(m.id))
+          .map((m) => (
+            <ModuleInline
+              key={m.id}
+              modId={m.id}
+              file={m.character_context.screen}
+              value={moduleContext}
+              onContext={(frag) => setModuleContext((prev) => ({ ...prev, ...frag }))}
+            />
+          ))}
 
         <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-6 space-y-4">
           <h3 className="text-lg font-semibold text-gray-200">Basic Info</h3>
@@ -400,7 +425,7 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
                   modId={mod.id}
                   value={moduleData[mod.id]}
                   onChange={(data) => handleModuleChange(mod.id, data)}
-                  worldId={worldId}
+                  context={moduleContext}
                 />
               ))}
             </div>

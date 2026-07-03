@@ -11,7 +11,7 @@
     "category": "system_prompt",
     "generation_types": null,
     "config": {
-      "text": "You are a creative storyteller in a text-based RPG. Never mention stat names, numeric values, game mechanics, or meta-game terms in your narration. Describe character capabilities through narrative prose only."
+      "text": ""
     }
   },
   {
@@ -28,6 +28,19 @@
     "config": {}
   },
   {
+    "id": "player_character_context",
+    "type": "character_context",
+    "source": "engine",
+    "enabled": true,
+    "role_type": "system",
+    "placement": "system_relative",
+    "depth": null,
+    "display_name": "Player Character",
+    "category": "character",
+    "generation_types": null,
+    "config": {}
+  },
+  {
     "id": "storyteller_task",
     "type": "static_text",
     "source": "engine",
@@ -39,7 +52,7 @@
     "category": "post_history",
     "generation_types": null,
     "config": {
-      "text": "Describe the outcome of the player's action and the current environment. Write 2-4 concise paragraphs. Do not use bullet points or lists."
+      "text": ""
     }
   },
   {
@@ -181,7 +194,7 @@
     "id": "st_anti_parrot_and_anti_echo",
     "type": "static_text",
     "source": "user",
-    "enabled": true,
+    "enabled": false,
     "role_type": "system",
     "placement": "system_relative",
     "depth": null,
@@ -196,7 +209,7 @@
     "id": "st_embellish_mode_experimental",
     "type": "static_text",
     "source": "user",
-    "enabled": false,
+    "enabled": true,
     "role_type": "system",
     "placement": "system_relative",
     "depth": null,
@@ -211,7 +224,7 @@
     "id": "st_time_and_place",
     "type": "static_text",
     "source": "user",
-    "enabled": true,
+    "enabled": false,
     "role_type": "system",
     "placement": "system_relative",
     "depth": null,
@@ -271,7 +284,7 @@
     "id": "st_anti_omniscient_npcs_and_thoughts",
     "type": "static_text",
     "source": "user",
-    "enabled": true,
+    "enabled": false,
     "role_type": "system",
     "placement": "system_relative",
     "depth": null,
@@ -286,7 +299,7 @@
     "id": "st_vad_emotions",
     "type": "static_text",
     "source": "user",
-    "enabled": true,
+    "enabled": false,
     "role_type": "system",
     "placement": "system_relative",
     "depth": null,
@@ -331,7 +344,7 @@
     "id": "st_internal_thoughts",
     "type": "static_text",
     "source": "user",
-    "enabled": true,
+    "enabled": false,
     "role_type": "system",
     "placement": "system_relative",
     "depth": null,
@@ -414,7 +427,7 @@
     "category": "utility",
     "generation_types": null,
     "config": {
-      "empty_text": "No additional engine context."
+      "empty_text": ""
     }
   },
   {
@@ -451,7 +464,7 @@
     "id": "jailbreak",
     "type": "static_text",
     "source": "user",
-    "enabled": true,
+    "enabled": false,
     "role_type": "system",
     "placement": "system_relative",
     "depth": null,
@@ -460,21 +473,6 @@
     "generation_types": null,
     "config": {
       "text": "High risk context is allowed."
-    }
-  },
-  {
-    "id": "enhancedefinitions",
-    "type": "static_text",
-    "source": "user",
-    "enabled": true,
-    "role_type": "system",
-    "placement": "system_relative",
-    "depth": null,
-    "display_name": "Enhance Definitions",
-    "category": "system_prompt",
-    "generation_types": null,
-    "config": {
-      "text": "If you have more knowledge of , add to the character's lore and personality to enhance them but keep the Character Sheet's definitions absolute."
     }
   }
 ]

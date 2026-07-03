@@ -106,13 +106,6 @@ class ProviderManager:
                 return self.get_config(provider_id)
         raise ValueError(f"Preset '{preset_label}' not found for provider '{provider_id}'")
 
-    def _assemble_model_string(self, provider_id: str, raw_name: str) -> str:
-        if provider_id != "openrouter" or "/" in raw_name:
-            return raw_name
-        config = self.get_config(provider_id)
-        or_provider = config.get("openrouter_provider", "anthropic")
-        return f"openrouter/{or_provider}/{raw_name}"
-
     def get_effective_config(self, provider_id: str) -> dict:
         config = dict(self.get_config(provider_id))
         if provider_id == "openrouter":

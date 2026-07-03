@@ -15,11 +15,12 @@ class LLMCallRecord:
     step: str
     module_source: str
     streaming: bool
-    duration_ms: int
-    tokens_in: int
-    tokens_out: int
-    input_summary: str
-    output_summary: str
+    status: str = "running"  # running | complete | error
+    duration_ms: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    input_summary: str = ""
+    output_summary: str = ""
     full_input: Any = None
     full_output: str = ""
     error: str = ""
@@ -41,7 +42,9 @@ class LLMInspector:
     def __init__(self, max_records: int = 200):
         self._calls: deque[LLMCallRecord] = deque(maxlen=max_records)
         self._ws_broadcast: Optional[Callable] = None
-        self._pending: dict[str, dict] = {}
+        # In-flight calls awaiting completion, keyed by call id. The record
+        # object is shared with self._calls so updates are reflected in both.
+        self._records: dict[str, LLMCallRecord] = {}
 
     def set_ws_broadcast(self, fn):
         self._ws_broadcast = fn
@@ -56,24 +59,31 @@ class LLMInspector:
             except Exception:
                 pass
 
-    def start_call(
+    async def start_call(
         self,
         call_type: str,
         model: str,
         step: str,
         module_source: str = "",
         streaming: bool = False,
+        input_data: Any = None,
     ) -> str:
         call_id = uuid.uuid4().hex[:8]
-        self._pending[call_id] = {
-            "id": call_id,
-            "timestamp": time.time(),
-            "call_type": call_type,
-            "model": model,
-            "step": step,
-            "module_source": module_source,
-            "streaming": streaming,
-        }
+        record = LLMCallRecord(
+            id=call_id,
+            timestamp=time.time(),
+            call_type=call_type,
+            model=model,
+            step=step,
+            module_source=module_source,
+            streaming=streaming,
+            status="running",
+            input_summary=self._summarize(input_data, 200),
+            full_input=input_data,
+        )
+        self._records[call_id] = record
+        self._calls.append(record)
+        await self._broadcast(record)
         return call_id
 
     async def end_call(
@@ -85,33 +95,22 @@ class LLMInspector:
         tokens_out: int = 0,
         error: str = "",
     ):
-        pending = self._pending.pop(call_id, None)
-        if pending is None:
+        record = self._records.pop(call_id, None)
+        if record is None:
             return
 
-        duration_ms = max(1, int((time.time() - pending["timestamp"]) * 1000))
-        input_summary = self._summarize(input_data, 200)
-        output_summary = self._summarize(output_data, 200)
+        record.duration_ms = max(1, int((time.time() - record.timestamp) * 1000))
+        # Input is captured at start_call; only overwrite if provided here.
+        if input_data is not None:
+            record.full_input = input_data
+            record.input_summary = self._summarize(input_data, 200)
+        record.full_output = str(output_data) if output_data else ""
+        record.output_summary = self._summarize(output_data, 200)
+        record.tokens_in = tokens_in
+        record.tokens_out = tokens_out
+        record.error = error
+        record.status = "error" if error else "complete"
 
-        record = LLMCallRecord(
-            id=pending["id"],
-            timestamp=pending["timestamp"],
-            call_type=pending["call_type"],
-            model=pending["model"],
-            step=pending["step"],
-            module_source=pending["module_source"],
-            streaming=pending["streaming"],
-            duration_ms=duration_ms,
-            tokens_in=tokens_in,
-            tokens_out=tokens_out,
-            input_summary=input_summary,
-            output_summary=output_summary,
-            full_input=input_data,
-            full_output=str(output_data) if output_data else "",
-            error=error,
-        )
-
-        self._calls.append(record)
         await self._broadcast(record)
 
     def get_calls(self, since_id: str = "", limit: int = 50) -> list[dict]:
@@ -138,7 +137,7 @@ class LLMInspector:
 
     def clear(self):
         self._calls.clear()
-        self._pending.clear()
+        self._records.clear()
 
     def _summarize(self, data: Any, max_chars: int) -> str:
         if data is None:
@@ -174,6 +173,7 @@ class LLMInspector:
             "step": r.step,
             "module_source": r.module_source,
             "streaming": r.streaming,
+            "status": r.status,
             "duration_ms": r.duration_ms,
             "tokens_in": r.tokens_in,
             "tokens_out": r.tokens_out,

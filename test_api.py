@@ -76,14 +76,16 @@ def test_websocket_mock_turn_returns_done_state(tmp_path, monkeypatch):
             if message["type"] == "done":
                 received_done = message
                 break
+            assert message["type"] != "error", f"turn failed: {message.get('detail')}"
             if message["type"] == "llm_call":
                 continue
-            assert message["type"] == "token"
+            assert message["type"] in ("token", "reasoning_token", "message_complete")
 
     assert received_done is not None
     state = received_done["state"]
     assert state["turn"] == 1
-    assert state["chat_messages"][-2] == {"role": "user", "content": "I test the websocket turn."}
+    assert state["chat_messages"][-2]["role"] == "user"
+    assert state["chat_messages"][-2]["content"] == "I test the websocket turn."
     assert state["chat_messages"][-1]["role"] == "ai"
     assert state["history"][-1].startswith("Mock outcome: I test the websocket turn.")
 
@@ -96,6 +98,7 @@ def test_save_undo_endpoint_restores_prior_turn(tmp_path, monkeypatch):
             websocket.send_json({"text": text})
             for _ in range(64):
                 message = websocket.receive_json()
+                assert message["type"] != "error", f"turn failed: {message.get('detail')}"
                 if message["type"] == "done":
                     break
 
@@ -108,7 +111,8 @@ def test_save_undo_endpoint_restores_prior_turn(tmp_path, monkeypatch):
     undo_data = undo_response.json()
     assert undo_data["session"]["turn"] == 1
     assert undo_data["state"]["turn"] == 1
-    assert undo_data["state"]["chat_messages"][-2] == {"role": "user", "content": "I take the first action."}
+    assert undo_data["state"]["chat_messages"][-2]["role"] == "user"
+    assert undo_data["state"]["chat_messages"][-2]["content"] == "I take the first action."
     assert undo_data["state"]["chat_messages"][-1]["role"] == "ai"
     assert "second action" not in "\n".join(message["content"] for message in undo_data["state"]["chat_messages"])
 

@@ -31,7 +31,7 @@ PROVIDERS = {
             "embedding_model": {
                 "type": "text",
                 "label": "Embedding Model",
-                "default": "gemini/text-embedding-004",
+                "default": "gemini/gemini-embedding-001",
                 "description": "Model for vector embeddings. Must support embeddings API.",
             },
             "module_fast_model": {
@@ -84,8 +84,8 @@ PROVIDERS = {
             },
         },
         "presets": [
-            {"label": "Gemini 2.5 Flash (Recommended)", "models": {"storyteller_model": "gemini/gemini-2.5-flash", "reader_model": "gemini/gemini-2.5-flash", "embedding_model": "gemini/text-embedding-004", "module_fast_model": "gemini/gemini-2.5-flash"}},
-            {"label": "Gemini 2.5 Pro", "models": {"storyteller_model": "gemini/gemini-2.5-pro", "reader_model": "gemini/gemini-2.5-flash", "embedding_model": "gemini/text-embedding-004", "module_fast_model": "gemini/gemini-2.5-flash"}},
+            {"label": "Gemini 2.5 Flash (Recommended)", "models": {"storyteller_model": "gemini/gemini-2.5-flash", "reader_model": "gemini/gemini-2.5-flash", "embedding_model": "gemini/gemini-embedding-001", "module_fast_model": "gemini/gemini-2.5-flash"}},
+            {"label": "Gemini 2.5 Pro", "models": {"storyteller_model": "gemini/gemini-2.5-pro", "reader_model": "gemini/gemini-2.5-flash", "embedding_model": "gemini/gemini-embedding-001", "module_fast_model": "gemini/gemini-2.5-flash"}},
         ],
     },
     "openrouter": {
@@ -338,7 +338,7 @@ PROVIDERS = {
                 "type": "text",
                 "label": "Embedding Model",
                 "default": "",
-                "description": "DeepSeek does not provide embeddings. Use a Gemini or OpenAI model (e.g., gemini/text-embedding-004).",
+                "description": "DeepSeek does not provide embeddings. Use a Gemini or OpenAI model (e.g., gemini/gemini-embedding-001).",
             },
             "module_fast_model": {
                 "type": "text",

@@ -1,5 +1,10 @@
 {
   "id": "default_player",
   "name": "Adventurer",
-  "module_data": {}
+  "module_data": {
+    "wb_core_rpg": {
+      "hp": 85,
+      "max_hp": 85
+    }
+  }
 }

@@ -153,7 +153,8 @@ async def on_gather_context(state: dict, sdk) -> dict:
 
         # Pre-assess action feasibility with a fast model call
         model_pref = config.get("practice_ai_model", "fastest")
-        assessment = await _assess_action(input_text, char, config, sdk, model_pref, state.get("world_data"))
+        recent_story = [entry[-1200:] for entry in (state.get("history") or [])[-2:]]
+        assessment = await _assess_action(input_text, char, config, sdk, model_pref, state.get("world_data"), recent_story)
         char.action_assessment = assessment
 
     # Practice-based progression: use AI to detect which skill the action uses
@@ -184,7 +185,7 @@ async def on_gather_context(state: dict, sdk) -> dict:
     return updates
 
 
-async def _assess_action(input_text: str, char: Character, config: dict, sdk, model_pref: str = "fastest", world_data: dict = None) -> dict:
+async def _assess_action(input_text: str, char: Character, config: dict, sdk, model_pref: str = "fastest", world_data: dict = None, recent_story: list = None) -> dict:
     tier_list = config.get("stat_tiers", DEFAULT_STAT_TIERS) or DEFAULT_STAT_TIERS
     strictness = config.get("action_rating_strictness", 5)
 
@@ -228,19 +229,41 @@ async def _assess_action(input_text: str, char: Character, config: dict, sdk, mo
     if world_lines:
         world_section = "World context:\n" + "\n".join(world_lines) + "\n"
 
+    story_section = ""
+    if recent_story:
+        story_section = "Recent story (most recent last):\n" + "\n---\n".join(recent_story) + "\n"
+
     prompt = f"""Assess this RPG action for a character. Output ONLY valid JSON, no other text.
 
-{world_section}
+First decide whether the player input is a substantive action - something with a contested outcome or mechanical consequence. If the input is pure dialog/speech with nothing at stake, or a trivial everyday action (standing up, walking across a room, looking around, picking up an ordinary object), respond with exactly {{"skip": true}} and nothing else. A social ATTEMPT with a contested outcome (persuading, proposing, deceiving, intimidating, seducing, bargaining) IS substantive - assess it.
+
+{world_section}{story_section}
 Character:
   Level {char.level}, HP {char.hp}/{char.max_hp}{unconscious}
   Stats: {stats_line}
   {chr(10).join(skill_lines) or 'No skills'}
 
 Player action: "{input_text}"
-Strictness: {strictness}/10
+
+Feasibility scale (rate the attempt, not the ambition):
+  1-2: violates the world's rules or established story facts, or is physically/logically impossible. This is the ONLY band where the attempt simply fails.
+  3-4: far beyond current ability or an enormous ask, but not impossible.
+  5-6: challenging; meaningful chance of failure.
+  7-8: within the character's demonstrated abilities.
+  9-10: near-certain success.
+
+Judging guidelines:
+- Social actions: the outcome depends on the TARGET's likely disposition as shown in the recent story and world context, not on the player's stats. A bold ask to a receptive, bored, curious, or amused character is plausible even for a weak character. Only rate a social action 1-2 if the target's established nature makes acceptance truly impossible.
+- Reward creativity: a clever, novel, or dramatically interesting approach that fits the established fiction rates one band higher than a blunt attempt at the same goal. Punish contradiction of established facts, not ambition.
+- Strictness is {strictness}/10: 1-3 means cinematic - lean generous, favor the player and rule-of-cool; 4-6 means balanced; 7-10 means simulationist - judge capabilities strictly. Strictness shifts scores within bands but never turns a merely unlikely action into a 1-2.
+
+outcome_narrative by feasibility band:
+  7-10: they succeed - describe the successful result.
+  3-6: partial success or success at a cost - a complication, price, or twist that moves the story forward. Never a flat refusal or dead end.
+  1-2: the attempt fails - state WHY in world terms and what the failed attempt visibly reveals or provokes. The world reacts; it is not a silent dead end.
 
 JSON response:
-{{"feasibility": int 1-10, "skill_used": "name or empty string", "difficulty": "trivial|easy|moderate|hard|extreme|impossible", "curse_triggered": "name or empty string", "passive_effects": "brief note or empty string", "outcome_narrative": "1-2 concise objective sentences. Start with 'They attempt to {input_text} but only manage to [brief result].' Then state every passive and every curse with a short description of each. Be objective and factual, not narrative or flowery. Never mention stat names, numbers, or game mechanics."}}"""
+{{"feasibility": int 1-10, "skill_used": "name or empty string", "difficulty": "trivial|easy|moderate|hard|extreme|impossible", "curse_triggered": "name or empty string", "passive_effects": "brief note or empty string", "outcome_narrative": "1-2 concise objective sentences describing the outcome per the band rules above. Then state every passive and every curse with a short description of each. Be objective and factual, not narrative or flowery. Never mention stat names, numbers, or game mechanics."}}"""
 
     try:
         result = await sdk.llm.generate(prompt, model_preference=model_pref)
@@ -267,6 +290,8 @@ JSON response:
                 print(f"[RPG] Action assessment failed: response is not JSON: {cleaned[:200]}")
                 return {}
         if not isinstance(assessment, dict):
+            return {}
+        if assessment.get("skip"):
             return {}
         return {
             "feasibility": max(1, min(10, int(assessment.get("feasibility", 5)))),
@@ -404,6 +429,124 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
     return {}
 
 
+def _parse_json_block(raw: str):
+    """Strip Markdown code fences and parse a JSON object/array from an LLM reply."""
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        text = parts[1] if len(parts) > 1 else text
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+async def on_librarian(state: dict, sdk) -> dict | None:
+    """After the storyteller, detect skills granted, removed, or altered by
+    EXTERNAL forces acting on the player (divine boons, curses, blessings,
+    magical injuries, a mentor's gift). This is distinct from the player's own
+    practice/XP progression and from the Reader's action-driven skill_changes."""
+    config = state.get("module_configs", {}).get("wb_core_rpg", {})
+    if not config.get("external_skill_events_enabled", True):
+        return None
+
+    if state.get("turn", 0) == 0:
+        return None
+
+    history = state.get("history", [])
+    if not history:
+        return None
+
+    char = Character.from_dict(state.get("module_data", {}).get("wb_core_rpg", {}))
+    recent = "\n".join(str(h) for h in history[-3:])[:2500]
+
+    if char.skills:
+        skill_lines = ", ".join(f"{n} ({d['rating']}/10, {d.get('type', 'active')})" for n, d in char.skills.items())
+    else:
+        skill_lines = "(none)"
+
+    model_pref = config.get("practice_ai_model", "fastest")
+    prompt = f"""You are the game system that records supernatural or external changes to a player character's abilities in a text RPG.
+
+Read the recent narration and detect ONLY skill changes that an EXTERNAL force imposed on the player: a god or spirit granting a power, a curse or hex stripping/weakening an ability, a blessing or artifact bestowing a skill, a magical injury disabling a skill, or a mentor/entity directly gifting knowledge.
+
+Do NOT report skills the player improved through their own effort, practice, training, or repeated use — those are handled elsewhere. If nothing external happened, return empty arrays.
+
+The player's current skills: {skill_lines}
+
+RECENT NARRATION:
+{recent}
+
+Respond with ONLY valid JSON:
+{{"added": [{{"name": "skill_name", "rating": 1-10, "description": "1-2 sentence vivid description", "trigger_words": ["word1", "word2"], "type": "active|passive|curse"}}], "removed": ["skill_name"], "altered": [{{"name": "existing_skill_name", "new_rating": 1-10, "description": "optional updated description"}}]}}"""
+
+    try:
+        sdk.llm._current_module = "wb_core_rpg"
+        raw = await sdk.llm.generate(prompt, model_preference=model_pref)
+    finally:
+        sdk.llm._current_module = ""
+
+    parsed = _parse_json_block(raw)
+    if not isinstance(parsed, dict):
+        return None
+
+    updated = False
+
+    for entry in parsed.get("added", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "")).strip().lower()
+        if not name or name in char.skills:
+            continue
+        skill_type = entry.get("type", "active")
+        if skill_type not in ("active", "passive", "curse"):
+            skill_type = "active"
+        char.skills[name] = {
+            "rating": max(1, min(10, int(entry.get("rating", 3) or 3))),
+            "description": str(entry.get("description", "")) or f"Granted power: {name}",
+            "trigger_words": [str(w) for w in entry.get("trigger_words", []) if w],
+            "type": skill_type,
+        }
+        updated = True
+        print(f"[RPG] External event granted skill '{name}' ({char.skills[name]['rating']}/10, {skill_type})")
+
+    for name in parsed.get("removed", []) or []:
+        key = str(name).strip().lower()
+        if key in char.skills:
+            del char.skills[key]
+            char.practice_counters.pop(key, None)
+            updated = True
+            print(f"[RPG] External event removed skill '{key}'")
+
+    for entry in parsed.get("altered", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("name", "")).strip().lower()
+        if key not in char.skills:
+            continue
+        if entry.get("new_rating") is not None:
+            try:
+                char.skills[key]["rating"] = max(1, min(10, int(entry["new_rating"])))
+                updated = True
+            except (TypeError, ValueError):
+                pass
+        desc = entry.get("description")
+        if desc:
+            char.skills[key]["description"] = str(desc)
+            updated = True
+        if updated:
+            print(f"[RPG] External event altered skill '{key}' -> {char.skills[key]['rating']}/10")
+
+    if updated:
+        return {"module_data": {"wb_core_rpg": char.to_dict()}}
+    return None
+
+
 async def on_command_stats(args: list[str], state: dict, sdk):
     char = Character.from_dict(state.get("module_data", {}).get("wb_core_rpg", {}))
     lines = [f"[Stats] Level {char.level} ({char.xp} XP)"]
@@ -539,9 +682,16 @@ def _build_action_feasibility_prompt(char: Character, input_text: str, config: d
     if not outcome:
         return ""
 
+    difficulty = assessment.get("difficulty", "moderate")
     lines = [
         f"The player attempted to: \"{input_text}\"",
+        f"Assessed difficulty: {difficulty}",
         f"Suggested outcome: {outcome}",
+        "Guidance: This assessment is advisory. Honor its difficulty, but adapt the "
+        "specifics to the living scene - if established characters or events make a "
+        "different outcome more natural, follow the story. Unless the difficulty is "
+        "\"impossible\", do not resolve the action as a flat refusal or dead end: "
+        "fail forward with a cost, complication, partial result, or new opportunity.",
     ]
     return "\n".join(lines)
 
@@ -585,8 +735,16 @@ DEATH_PHYSICAL_VETO = (
 )
 
 
+# Temporarily disabled: the unconscious/dead physical-action veto triggers a
+# storyteller rewrite loop. Set back to True to re-enable validation.
+VALIDATE_OUTPUT_ENABLED = False
+
+
 async def on_validate_output(llm_output: str, state: dict, sdk) -> None:
     """Validate that the Storyteller doesn't have unconscious/dead characters acting."""
+    if not VALIDATE_OUTPUT_ENABLED:
+        return
+
     char_data = state.get("module_data", {}).get("wb_core_rpg", {})
     if not char_data:
         return

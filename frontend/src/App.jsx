@@ -12,17 +12,19 @@ import SettingsModal from './SettingsModal';
 import PromptStudio from './PromptStudio';
 import HealthPanel from './components/Header/HealthPanel';
 import MemoryBrowser from './components/MemoryBrowser';
-import GameMapOverlay from './components/GameMapOverlay';
+import CharacterView from './components/CharacterView/CharacterView';
+import ModuleGameOverlay from './components/shared/ModuleGameOverlay';
 import MainMenu from './components/Menu/MainMenu';
 import SaveSelectScreen from './components/Menu/SaveSelectScreen';
 import ExitWarning from './components/Menu/ExitWarning';
-import WorldBuilderWizard from './components/WorldBuilder/WorldBuilderWizard';
-import WorldListScreen from './components/WorldBuilder/WorldListScreen';
-import WorldReviewScreen from './components/WorldBuilder/WorldReviewScreen';
 import CharacterListScreen from './components/CharacterBuilder/CharacterListScreen';
 import CharacterCreator from './components/CharacterBuilder/CharacterCreator';
-import ModelSettings from './components/ModelSettings/ModelSettings';
+import SettingsScreen from './components/Settings/SettingsScreen';
+import ModuleScreen from './components/shared/ModuleScreen';
+import ScenarioManager from './components/Scenario/ScenarioManager';
+import { useToasts, ToastStack } from './components/shared/Toasts';
 import { LLMInspectorProvider, useLLMInspector } from './hooks/useLLMInspector';
+import { ThemeProvider, useTheme } from './hooks/useTheme';
 import LLMInspectorButton from './components/LLMInspector/LLMInspectorButton';
 import LLMInspectorPanel from './components/LLMInspector/LLMInspectorPanel';
 import { api } from './lib/api';
@@ -51,11 +53,9 @@ function PlaceholderMode({ title, onBack }) {
 function AppContent() {
   const [currentMode, setCurrentMode] = useState(null);
   const [showExitWarning, setShowExitWarning] = useState(false);
-  const [reviewWorldId, setReviewWorldId] = useState(null);
   const [editCharacterId, setEditCharacterId] = useState(null);
   const [editCharacterData, setEditCharacterData] = useState(null);
   const [gameState, setGameState] = useState({});
-  const [wizardKey, setWizardKey] = useState(0);
 
   const handleStateFromServer = useCallback((state) => {
     setGameState(prev => ({
@@ -75,15 +75,95 @@ function AppContent() {
   const ws = useWebSocket(handleStateFromServer, addCall);
   const session = useSession();
   const { modules, setModules } = useModules();
+  const { toasts, showToast, dismissToast } = useToasts();
+  const { density } = useTheme();
+  const [editRequest, setEditRequest] = useState(null);
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHealthOpen, setIsHealthOpen] = useState(false);
   const [isMemoryOpen, setIsMemoryOpen] = useState(false);
+  const [isCharacterOpen, setIsCharacterOpen] = useState(false);
   const sentIntroRef = useRef(false);
 
   const handleSend = useCallback((text) => {
     ws.sendMessage(text);
   }, [ws]);
+
+  const handleContinue = useCallback(() => {
+    ws.sendContinue();
+  }, [ws]);
+
+  const handleRegenerate = useCallback(() => {
+    ws.sendRegenerate();
+  }, [ws]);
+
+  const handleStop = useCallback(() => {
+    ws.sendStop();
+  }, [ws]);
+
+  // ArrowUp in the empty composer edits the player's most recent message.
+  const handleEditLast = useCallback(() => {
+    const msgs = ws.messages;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'user') {
+        setEditRequest({ index: i, at: Date.now() });
+        return;
+      }
+    }
+  }, [ws.messages]);
+
+  // Fork the story at a given turn and jump into the branch: the server copies
+  // the save (rolled back to that turn), we load it and replay its transcript.
+  const handleBranchMessage = useCallback(async (turn) => {
+    const saveId = session.sessionState?.active_save_id;
+    if (!saveId) return;
+    try {
+      const r = await api.branchSave(saveId, { targetTurn: turn });
+      await session.loadSave(r.branch.id);
+      ws.sendIntro();
+      showToast(`Branched into "${r.branch.display_name || r.branch.id}"`, 'info');
+    } catch (e) {
+      showToast(`Failed to branch: ${e.message}`);
+    }
+  }, [session, ws, showToast]);
+
+  const handleSwipe = useCallback(async (index) => {
+    try {
+      const r = await api.selectSwipe(index);
+      ws.applyServerState(r.state);
+      session.refreshSession();
+    } catch (e) { showToast(`Failed to switch variant: ${e.message}`); }
+  }, [ws, session, showToast]);
+
+  // Keyboard swipes from the empty composer: ←/→ walk the last turn's
+  // variants; → past the newest one regenerates (same as the swipe buttons).
+  const handleSwipePrev = useCallback(() => {
+    const s = ws.swipes;
+    if (s && s.active > 0) handleSwipe(s.active - 1);
+  }, [ws.swipes, handleSwipe]);
+
+  const handleSwipeNext = useCallback(() => {
+    const s = ws.swipes;
+    if (!s) return;
+    if (s.active < s.count - 1) handleSwipe(s.active + 1);
+    else ws.sendRegenerate();
+  }, [ws, handleSwipe]);
+
+  const handleEditMessage = useCallback(async (index, content) => {
+    try {
+      const r = await api.editMessage(index, content);
+      ws.applyServerState(r.state);
+      session.refreshSession();
+    } catch (e) { showToast(`Failed to edit: ${e.message}`); }
+  }, [ws, session, showToast]);
+
+  const handleDeleteMessage = useCallback(async (index) => {
+    try {
+      const r = await api.deleteMessage(index);
+      ws.applyServerState(r.state);
+      session.refreshSession();
+    } catch (e) { showToast(`Failed to delete: ${e.message}`); }
+  }, [ws, session, showToast]);
 
   const handleSaveModuleConfigs = useCallback(async (nextConfigs) => {
     await session.updateModuleConfigs(nextConfigs);
@@ -126,6 +206,10 @@ function AppContent() {
       !sentIntroRef.current
     ) {
       sentIntroRef.current = true;
+      // Clear any messages left over from a previously opened story before the
+      // intro arrives. Existing stories get replaced via `state_load`, but a new
+      // story streams its opening and would otherwise append to the stale list.
+      ws.setMessages([]);
       ws.sendIntro();
     }
   }, [currentMode, ws.isConnected]);
@@ -140,6 +224,23 @@ function AppContent() {
     );
   }
 
+  // Module-contributed full-screen modes: "module:{modId}:{modeId}".
+  if (typeof currentMode === 'string' && currentMode.startsWith('module:')) {
+    const [, modId, modeId] = currentMode.split(':');
+    const mod = (modules || []).find((m) => m.id === modId);
+    const mode = (mod?.modes || []).find((md) => md.id === modeId);
+    if (mod && mode?.screen) {
+      return (
+        <ModuleScreen
+          modId={modId}
+          screen={mode.screen}
+          onBack={() => setCurrentMode(null)}
+        />
+      );
+    }
+    return <PlaceholderMode title={mode?.label || 'Module'} onBack={() => setCurrentMode(null)} />;
+  }
+
   if (currentMode === 'storyteller-select') {
     return (
       <SaveSelectScreen
@@ -150,9 +251,11 @@ function AppContent() {
     );
   }
 
-  if (currentMode === 'model-settings') {
+  // 'settings' is the unified Model + Appearance screen. 'model-settings' is kept
+  // as an alias so any older navigation still lands on the same place.
+  if (currentMode === 'settings' || currentMode === 'model-settings') {
     return (
-      <ModelSettings
+      <SettingsScreen
         onBack={() => setCurrentMode(null)}
       />
     );
@@ -162,70 +265,33 @@ function AppContent() {
     return <PromptStudioStandalone onBack={() => setCurrentMode(null)} />;
   }
 
-  if (currentMode === 'world-building') {
-    return (
-      <WorldListScreen
-        onBack={() => setCurrentMode(null)}
-        onOpenWorld={(id, resume = false) => {
-          if (id) {
-            if (resume) {
-              api.resumeWorld(id).then(() => {
-                setWizardKey((k) => k + 1);
-                setCurrentMode('world-create');
-              }).catch((e) => alert('Failed to resume: ' + e.message));
-            } else {
-              setReviewWorldId(id);
-              setCurrentMode('world-review');
-            }
-          } else {
-            api.discardWorld();
-            setWizardKey((k) => k + 1);
-            setCurrentMode('world-create');
-          }
-        }}
-      />
-    );
-  }
-
-  if (currentMode === 'world-create') {
-    return (
-      <WorldBuilderWizard
-        key={wizardKey}
-        onBack={() => setCurrentMode('world-building')}
-        onWorldCreated={() => setCurrentMode('world-building')}
-      />
-    );
-  }
-
-  if (currentMode === 'world-review') {
-    return (
-      <WorldReviewScreen
-        worldId={reviewWorldId}
-        onBack={() => setCurrentMode('world-building')}
-      />
-    );
+  if (currentMode === 'scenario-manager') {
+    return <ScenarioManager onBack={() => setCurrentMode(null)} />;
   }
 
   if (currentMode === 'character-creator') {
     return (
-      <CharacterListScreen
-        onBack={() => setCurrentMode(null)}
-        onOpenCharacter={(id) => {
-          if (id) {
-            setEditCharacterId(id);
-            api.loadCharacter(id).then(data => {
-              setEditCharacterData(data);
+      <>
+        <CharacterListScreen
+          onBack={() => setCurrentMode(null)}
+          onOpenCharacter={(id) => {
+            if (id) {
+              setEditCharacterId(id);
+              api.loadCharacter(id).then(data => {
+                setEditCharacterData(data);
+                setCurrentMode('character-create');
+              }).catch(e => {
+                showToast('Failed to load character: ' + e.message);
+              });
+            } else {
+              setEditCharacterId(null);
+              setEditCharacterData(null);
               setCurrentMode('character-create');
-            }).catch(e => {
-              alert('Failed to load character: ' + e.message);
-            });
-          } else {
-            setEditCharacterId(null);
-            setEditCharacterData(null);
-            setCurrentMode('character-create');
-          }
-        }}
-      />
+            }
+          }}
+        />
+        <ToastStack toasts={toasts} onDismiss={dismissToast} />
+      </>
     );
   }
 
@@ -241,34 +307,68 @@ function AppContent() {
   }
 
   if (currentMode === 'storyteller-game') {
+    // A save restricts which modules are active (chosen at story start / edited
+    // later via the cog). Filter the UI to that set so disabled modules
+    // contribute no sidebar/header/settings/overlay UI. Legacy saves without the
+    // reserved key get all modules.
+    const activeModuleIds = session.moduleConfigs?.__active_modules__;
+    const gameModules = Array.isArray(activeModuleIds)
+      ? (modules || []).filter((m) => activeModuleIds.includes(m.id))
+      : modules;
     return (
     <ModuleEventProvider>
       <div className="flex h-screen bg-gray-900 text-gray-100 font-sans overflow-hidden">
         <Sidebar
           session={session}
-          modules={modules}
+          modules={gameModules}
           gameState={gameState}
         />
 
         <div className="flex-1 flex flex-col min-w-0">
           <Header
-            modules={modules}
+            modules={gameModules}
             gameState={gameState}
             ws={ws}
             session={session}
             onOpenSettings={() => setIsSettingsOpen(true)}
             onOpenHealth={() => setIsHealthOpen(true)}
             onOpenMemories={() => setIsMemoryOpen(true)}
+            onOpenCharacter={() => setIsCharacterOpen(true)}
             onBack={handleExitMode}
           />
 
           <ChatFeed
             messages={ws.messages}
             currentStream={ws.currentStream}
+            currentReasoning={ws.currentReasoning}
+            swipes={ws.swipes}
+            busy={ws.currentStream != null || ws.postProcessing}
+            editRequest={editRequest}
+            currentTurn={gameState.turn ?? null}
+            density={density}
+            onBranchMessage={handleBranchMessage}
+            onRegenerate={handleRegenerate}
+            onSwipe={handleSwipe}
+            onEditMessage={handleEditMessage}
+            onDeleteMessage={handleDeleteMessage}
           />
+
+          {(!ws.isConnected || ws.isReconnecting) && (
+            <div className="flex items-center justify-center gap-2 px-4 py-1.5 bg-red-950/60 border-t border-red-900/60 text-xs text-red-200">
+              <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse" />
+              Connection lost — reconnecting…
+            </div>
+          )}
 
           <ChatInput
             onSend={handleSend}
+            onContinue={handleContinue}
+            onStop={handleStop}
+            onEditLast={handleEditLast}
+            onSwipePrev={handleSwipePrev}
+            onSwipeNext={handleSwipeNext}
+            restoredInput={ws.restoredInput}
+            busy={ws.currentStream != null || ws.postProcessing}
             disabled={!ws.isConnected || ws.isReconnecting}
           />
         </div>
@@ -276,7 +376,7 @@ function AppContent() {
         <SettingsModal
           isOpen={isSettingsOpen}
           onClose={() => setIsSettingsOpen(false)}
-          modules={modules}
+          modules={gameModules}
           moduleConfigs={session.moduleConfigs}
           onSaveModuleConfigs={handleSaveModuleConfigs}
           gameState={gameState}
@@ -292,14 +392,23 @@ function AppContent() {
           onClose={() => setIsMemoryOpen(false)}
         />
 
-        {gameState.world_data && (
-          <GameMapOverlay
-            worldData={gameState.world_data}
-            playerNodeId={gameState.player_location_node_id}
-            playerLayerId={gameState.player_location_layer_id}
-            revealedNodeIds={gameState.revealed_node_ids || []}
-          />
-        )}
+        <CharacterView
+          isOpen={isCharacterOpen}
+          onClose={() => setIsCharacterOpen(false)}
+          modules={gameModules}
+          gameState={gameState}
+        />
+
+        {(gameModules || [])
+          .filter((m) => m.game_overlay)
+          .map((m) => (
+            <ModuleGameOverlay
+              key={m.id}
+              modId={m.id}
+              file={m.game_overlay}
+              state={gameState}
+            />
+          ))}
       </div>
 
       {showExitWarning && (
@@ -308,6 +417,8 @@ function AppContent() {
           onCancel={() => setShowExitWarning(false)}
         />
       )}
+
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </ModuleEventProvider>
     );
   }
@@ -378,10 +489,12 @@ function PromptStudioStandalone({ onBack }) {
 
 export default function App() {
   return (
-    <LLMInspectorProvider>
-      <AppContent />
-      <LLMInspectorButton />
-      <LLMInspectorPanel />
-    </LLMInspectorProvider>
+    <ThemeProvider>
+      <LLMInspectorProvider>
+        <AppContent />
+        <LLMInspectorButton />
+        <LLMInspectorPanel />
+      </LLMInspectorProvider>
+    </ThemeProvider>
   );
 }

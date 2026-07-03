@@ -11,17 +11,17 @@ function requireMock(moduleName) {
   throw new Error(`Module "${moduleName}" not available to widgets`);
 }
 
-function WidgetRenderer({ componentRef, value, onChange, worldId, modId }) {
+function WidgetRenderer({ componentRef, value, onChange, context, modId }) {
   const Comp = componentRef.current;
   if (!Comp) return null;
   return (
     <WidgetErrorBoundary modId={modId}>
-      <Comp value={value} onChange={onChange} worldId={worldId} />
+      <Comp value={value} onChange={onChange} context={context} />
     </WidgetErrorBoundary>
   );
 }
 
-export default function CharacterModuleForm({ modId, value, onChange, worldId }) {
+export default function CharacterModuleForm({ modId, value, onChange, context }) {
   const componentRef = useRef(widgetCache.get(`char_${modId}`) || null);
   const [loaded, setLoaded] = useState(widgetCache.has(`char_${modId}`));
   const mountedRef = useRef(true);
@@ -88,7 +88,7 @@ export default function CharacterModuleForm({ modId, value, onChange, worldId })
       componentRef={componentRef}
       value={value}
       onChange={onChange}
-      worldId={worldId}
+      context={context}
       modId={modId}
     />
   );

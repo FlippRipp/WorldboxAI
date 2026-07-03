@@ -12,7 +12,10 @@ class CharacterBuilder:
         self.characters_dir = characters_dir
         self._llm_service = None
         self._settings = None
-        self._world_builder = None
+        # Context providers let modules contribute setting context to character
+        # generation. Each provider is called as provider(context: dict) -> dict
+        # and the merged result is offered to every generation method.
+        self._context_providers = []
         os.makedirs(self.characters_dir, exist_ok=True)
 
     def set_llm_service(self, llm_service):
@@ -21,8 +24,32 @@ class CharacterBuilder:
     def set_settings(self, settings):
         self._settings = settings
 
-    def set_world_builder(self, world_builder):
-        self._world_builder = world_builder
+    def register_context_provider(self, provider):
+        """Register a provider(context: dict) -> dict of setting-context fields.
+
+        ``context`` is an opaque, module-contributed dict (e.g. the world module
+        reads ``context['world_id']``); providers ignore keys they don't own.
+        """
+        self._context_providers.append(provider)
+
+    def _gather_context(self, context: dict) -> dict:
+        """Merge setting context from all registered providers."""
+        context = context or {}
+        ctx = {}
+        for provider in self._context_providers:
+            try:
+                data = provider(context)
+                if isinstance(data, dict):
+                    ctx.update(data)
+            except Exception as e:
+                print(f"[CharacterBuilder] Context provider failed: {e}")
+        return ctx
+
+    @staticmethod
+    def _context_json(ctx: dict, fields: list[str]) -> str:
+        """Serialize a subset of gathered context, omitting empty values."""
+        subset = {k: ctx[k] for k in fields if ctx.get(k)}
+        return json.dumps(subset, indent=2) if subset else ""
 
     def _sanitize_id(self, character_id: str) -> str:
         sanitized = re.sub(r"[^a-zA-Z0-9_-]", "", character_id).lower()
@@ -31,23 +58,14 @@ class CharacterBuilder:
     def _get_character_path(self, character_id: str) -> str:
         return os.path.join(self.characters_dir, self._sanitize_id(character_id))
 
-    async def generate_name(self, world_id: Optional[str] = None, gender: str = "", race: str = "", seed: str = "") -> dict:
+    async def generate_name(self, context: Optional[dict] = None, gender: str = "", race: str = "", seed: str = "") -> dict:
         if not self._llm_service:
             return {"name": self._random_name()}
 
-        world_context = ""
-        if world_id and self._world_builder:
-            try:
-                world_state = self._world_builder.load_world(world_id)
-                compiled = self._world_builder.compile_world(world_state)
-                world_context = json.dumps({
-                    "world_name": compiled.get("lore", {}).get("world_name", ""),
-                    "premise": compiled.get("lore", {}).get("premise", ""),
-                    "genre": compiled.get("rules", {}).get("genre", ""),
-                    "regions": [r.get("name") for r in compiled.get("regions", {}).get("regions", [])],
-                }, indent=2)
-            except Exception as e:
-                print(f"[CharacterBuilder] Failed to load world '{world_id}' for name generation: {e}")
+        world_context = self._context_json(
+            self._gather_context(context),
+            ["world_name", "premise", "genre", "regions"],
+        )
 
         constraints = []
         if gender:
@@ -78,25 +96,14 @@ Respond with ONLY the name, nothing else. The name should be 2-3 words at most, 
             print(f"[CharacterBuilder] Name generation failed: {e}")
             return {"name": self._random_name()}
 
-    async def generate_race(self, world_id: Optional[str] = None, gender: str = "", seed: str = "") -> dict:
+    async def generate_race(self, context: Optional[dict] = None, gender: str = "", seed: str = "") -> dict:
         if not self._llm_service:
             return {"race": ""}
 
-        world_context = ""
-        if world_id and self._world_builder:
-            try:
-                world_state = self._world_builder.load_world(world_id)
-                compiled = self._world_builder.compile_world(world_state)
-                regions_data = compiled.get("regions", {})
-                world_context = json.dumps({
-                    "world_name": compiled.get("lore", {}).get("world_name", ""),
-                    "premise": compiled.get("lore", {}).get("premise", ""),
-                    "genre": compiled.get("rules", {}).get("genre", ""),
-                    "regions": [r.get("name") for r in regions_data.get("regions", [])],
-                    "factions": regions_data.get("factions", []),
-                }, indent=2)
-            except Exception as e:
-                print(f"[CharacterBuilder] Failed to load world '{world_id}' for race generation: {e}")
+        world_context = self._context_json(
+            self._gather_context(context),
+            ["world_name", "premise", "genre", "regions", "factions"],
+        )
 
         constraints = []
         if gender:
@@ -128,22 +135,14 @@ Respond with ONLY the race name, nothing else. Keep it to 1-2 words maximum."""
             print(f"[CharacterBuilder] Race generation failed: {e}")
             return {"race": ""}
 
-    async def generate_full_appearance(self, short_desc: str, world_id: Optional[str] = None, gender: str = "", race: str = "") -> dict:
+    async def generate_full_appearance(self, short_desc: str, context: Optional[dict] = None, gender: str = "", race: str = "", name: str = "") -> dict:
         if not self._llm_service or not short_desc.strip():
             return {"full_appearance": short_desc}
 
-        world_context = ""
-        if world_id and self._world_builder:
-            try:
-                world_state = self._world_builder.load_world(world_id)
-                compiled = self._world_builder.compile_world(world_state)
-                world_context = json.dumps({
-                    "world_name": compiled.get("lore", {}).get("world_name", ""),
-                    "genre": compiled.get("rules", {}).get("genre", ""),
-                    "tone": compiled.get("rules", {}).get("tone", ""),
-                }, indent=2)
-            except Exception as e:
-                print(f"[CharacterBuilder] Failed to load world '{world_id}' for appearance generation: {e}")
+        world_context = self._context_json(
+            self._gather_context(context),
+            ["world_name", "genre", "tone"],
+        )
 
         world_text = f"\n\nThe character exists in this world (use for thematic inspiration):\n{world_context}" if world_context else ""
         traits = []
@@ -153,11 +152,15 @@ Respond with ONLY the race name, nothing else. Keep it to 1-2 words maximum."""
             traits.append(f"Race: {race}")
         traits_text = f"\n\n{', '.join(traits)}" if traits else ""
 
+        name_instruction = (
+            f' Refer to the character by their name, "{name}", instead of pronouns like "her", "him", "he", or "she".'
+            if name else ""
+        )
         prompt = f"""Expand this short character appearance into a vivid, detailed 2-3 sentence description:
 
 Short description: "{short_desc}"{traits_text}{world_text}
 
-Write a rich physical description that brings this character to life. Include details like build, facial features, hair, eyes, distinctive marks, clothing style, and overall bearing. Make it immersive and evocative. Write ONLY the expanded description, nothing else."""
+Write a rich physical description that brings this character to life. Include details like build, facial features, hair, eyes, skin, and distinctive marks (scars, tattoos, etc). Do NOT describe clothing, attire, equipment, or anything worn — physical body only.{name_instruction} Make it immersive and evocative. Write ONLY the expanded description, nothing else."""
         try:
             full = await self._llm_service.simple_completion(
                 messages=[{"role": "user", "content": prompt}],
@@ -171,33 +174,35 @@ Write a rich physical description that brings this character to life. Include de
             print(f"[CharacterBuilder] Appearance generation failed: {e}")
             return {"full_appearance": short_desc}
 
-    async def generate_stats(self, concept: str, world_id: Optional[str] = None, gender: str = "", race: str = "") -> dict:
+    async def generate_stats(
+        self,
+        concept: str,
+        context: Optional[dict] = None,
+        gender: str = "",
+        race: str = "",
+        name: str = "",
+        short_appearance: str = "",
+        full_appearance: str = "",
+    ) -> dict:
         """Generate stats, skills, and a polished backstory from a character concept description."""
         if not self._llm_service or not concept.strip():
             return {"stats": {}, "skills": {}, "backstory": ""}
 
-        world_context = ""
-        if world_id and self._world_builder:
-            try:
-                world_state = self._world_builder.load_world(world_id)
-                compiled = self._world_builder.compile_world(world_state)
-                world_context = json.dumps({
-                    "world_name": compiled.get("lore", {}).get("world_name", ""),
-                    "genre": compiled.get("rules", {}).get("genre", ""),
-                    "tone": compiled.get("rules", {}).get("tone", ""),
-                    "magic_level": compiled.get("rules", {}).get("magic_level", ""),
-                    "tech_era": compiled.get("rules", {}).get("tech_era", ""),
-                    "premise": compiled.get("lore", {}).get("premise", ""),
-                }, indent=2)
-            except Exception as e:
-                print(f"[CharacterBuilder] Failed to load world '{world_id}' for stats generation: {e}")
+        world_context = self._context_json(
+            self._gather_context(context),
+            ["world_name", "genre", "tone", "magic_level", "tech_era", "premise"],
+        )
 
         traits = []
+        if name:
+            traits.append(f"Name: {name}")
         if gender:
             traits.append(f"Gender: {gender}")
         if race:
             traits.append(f"Race: {race}")
         traits_text = f"\n\nCharacter traits: {', '.join(traits)}" if traits else ""
+        appearance = full_appearance or short_appearance
+        appearance_text = f"\n\nCharacter appearance: {appearance}" if appearance else ""
         world_text = f"\n\nWorld context (use for thematic inspiration):\n{world_context}" if world_context else ""
 
         system = """You are a character designer for an isekai / light-novel RPG. Given a character concept, you design their attributes in the style of an ability panel from a fantasy world.
@@ -261,7 +266,7 @@ OUTPUT FORMAT: Return ONLY valid JSON matching this exact schema:
   "backstory": "2-4 sentence polished backstory in light-novel third-person style"
 }"""  # noqa: E501
 
-        prompt = f"""Create a character based on this concept: "{concept}"{traits_text}{world_text}
+        prompt = f"""Create a character based on this concept: "{concept}"{traits_text}{appearance_text}{world_text}
 
 Return ONLY the JSON object, no other text."""
         try:
@@ -285,13 +290,13 @@ Return ONLY the JSON object, no other text."""
                 stats[s] = max(1, min(30, int(val)))
 
             validated_skills = {}
-            for name, data in skills.items():
+            for skill_name, data in skills.items():
                 if isinstance(data, dict):
                     rating = max(1, min(10, int(data.get("rating", 5))))
                     skill_type = data.get("type", "active")
                     if skill_type not in ("active", "passive", "curse"):
                         skill_type = "active"
-                    validated_skills[str(name)] = {
+                    validated_skills[str(skill_name)] = {
                         "type": skill_type,
                         "rating": rating,
                         "description": str(data.get("description", "")),
@@ -325,7 +330,8 @@ Return ONLY the JSON object, no other text."""
             "race": state.get("race", ""),
             "short_appearance": state.get("short_appearance", ""),
             "full_appearance": state.get("full_appearance", ""),
-            "world_id": state.get("world_id", ""),
+            # Opaque module-contributed generation context (e.g. {"world_id": ...}).
+            "context": state.get("context") or {},
             "module_data": state.get("module_data", {}),
             "created_at": state.get("created_at", datetime.now(timezone.utc).isoformat()),
         }
@@ -337,7 +343,7 @@ Return ONLY the JSON object, no other text."""
             "id": char_id,
             "name": character_data["name"],
             "created_at": character_data["created_at"],
-            "has_world": bool(character_data["world_id"]),
+            "has_context": bool(character_data["context"]),
         }
         with open(os.path.join(char_path, "metadata.json"), "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2)
@@ -352,7 +358,11 @@ Return ONLY the JSON object, no other text."""
             raise FileNotFoundError(f"Character '{character_id}' not found.")
 
         with open(char_file, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        # Back-compat: migrate legacy world_id records into the generic context.
+        if "context" not in data:
+            data["context"] = {"world_id": data["world_id"]} if data.get("world_id") else {}
+        return data
 
     def list_characters(self) -> list[dict]:
         if not os.path.exists(self.characters_dir):
@@ -377,7 +387,7 @@ Return ONLY the JSON object, no other text."""
                         "id": data.get("id", item),
                         "name": data.get("name", item),
                         "created_at": data.get("created_at", ""),
-                        "has_world": bool(data.get("world_id", "")),
+                        "has_context": bool(data.get("context") or data.get("world_id")),
                     })
 
         characters.sort(key=lambda c: c.get("created_at", ""), reverse=True)

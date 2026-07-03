@@ -1,0 +1,48 @@
+{
+  "id": "wb_character_tracker",
+  "name": "Player Character Tracker",
+  "version": "1.0.0",
+  "dependencies": [],
+  "consumes": {
+    "state": ["input_text", "turn", "history", "characters"],
+    "module_data": [],
+    "module_configs": [],
+    "world_data": false
+  },
+  "produces": {
+    "module_data": true,
+    "context_string": false,
+    "messages": false
+  },
+  "settings_schema": {
+    "evolution_enabled": {
+      "type": "toggle",
+      "default": true,
+      "label": "Track Character Changes",
+      "category": "Character Tracker",
+      "description": "After each turn, detect changes to the player character's appearance, identity (name/race/title), and personality, and record them into the character."
+    },
+    "evolution_frequency": {
+      "type": "slider",
+      "min": 1,
+      "max": 10,
+      "default": 1,
+      "label": "Detection Frequency (turns)",
+      "category": "Character Tracker",
+      "description": "Run the change-detection pass every N turns."
+    },
+    "evolution_ai_model": {
+      "type": "select",
+      "options": [
+        {"value": "fastest", "label": "Fastest (cheapest)"},
+        {"value": "balanced", "label": "Balanced (default)"},
+        {"value": "smartest", "label": "Smartest (most accurate)"}
+      ],
+      "default": "balanced"
+    }
+  },
+  "character_panel": "character_panel.jsx",
+  "commands": {
+    "/character": "on_command_character"
+  }
+}

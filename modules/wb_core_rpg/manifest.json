@@ -15,6 +15,7 @@
     "messages": true
   },
   "ui_slots": ["slot_sidebar"],
+  "character_panel": "character_panel.jsx",
   "settings_schema": {
     "progression_system": {
       "type": "select",
@@ -39,7 +40,14 @@
     "action_rating_strictness": {"type": "slider", "min": 1, "max": 10, "default": 5},
     "skill_improvement_rate": {"type": "slider", "min": 1, "max": 10, "default": 5},
     "max_stat_value": {"type": "slider", "min": 15, "max": 30, "default": 20},
-    "skill_pool_start": {"type": "slider", "min": 3, "max": 20, "default": 8}
+    "skill_pool_start": {"type": "slider", "min": 3, "max": 20, "default": 8},
+    "external_skill_events_enabled": {
+      "type": "toggle",
+      "default": true,
+      "label": "External Skill Events",
+      "category": "Core RPG System",
+      "description": "After each turn, detect skills granted, removed, or altered by external forces acting on the player (divine boons, curses, blessings, magical injuries, a mentor's gift) — separate from the player's own practice/XP progression."
+    }
   },
   "commands": {
     "/stats": "on_command_stats",

@@ -1,21 +1,42 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 
-export default function ChatInput({ onSend, disabled }) {
+export default function ChatInput({ onSend, onContinue, onStop, onEditLast, onSwipePrev, onSwipeNext, restoredInput, busy, disabled }) {
   const [inputValue, setInputValue] = useState('');
+  const isEmpty = !inputValue.trim();
+  const blocked = disabled || busy;
+
+  // When a turn is stopped, the server echoes the discarded input back so the
+  // player can tweak and resend it instead of retyping.
+  useEffect(() => {
+    if (restoredInput?.text) setInputValue(restoredInput.text);
+  }, [restoredInput]);
 
   const handleSend = useCallback(() => {
-    if (!inputValue.trim() || disabled) return;
+    if (blocked) return;
+    if (isEmpty) {
+      onContinue?.();
+      return;
+    }
     onSend(inputValue);
     setInputValue('');
-  }, [inputValue, disabled, onSend]);
+  }, [inputValue, isEmpty, blocked, onSend, onContinue]);
 
   const handleKeyDown = useCallback((e) => {
     if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
+    } else if (e.key === 'ArrowUp' && isEmpty && !blocked) {
+      e.preventDefault();
+      onEditLast?.();
+    } else if (e.key === 'ArrowLeft' && isEmpty && !blocked) {
+      e.preventDefault();
+      onSwipePrev?.();
+    } else if (e.key === 'ArrowRight' && isEmpty && !blocked) {
+      e.preventDefault();
+      onSwipeNext?.();
     }
-  }, [handleSend]);
+  }, [handleSend, isEmpty, blocked, onEditLast, onSwipePrev, onSwipeNext]);
 
   return (
     <div className="p-4 border-t border-gray-700 bg-gray-800">
@@ -30,19 +51,45 @@ export default function ChatInput({ onSend, disabled }) {
           disabled={disabled}
           aria-label="Type your action"
         />
-        <button
-          onClick={handleSend}
-          disabled={disabled || !inputValue.trim()}
-          className="m-2 p-2 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 transition-colors"
-          aria-label="Send message"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-            <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
-          </svg>
-        </button>
+        {busy ? (
+          <button
+            onClick={() => onStop?.()}
+            disabled={disabled}
+            className="m-2 p-2 rounded-lg bg-gray-700 hover:bg-red-900/70 text-gray-200 hover:text-red-200 disabled:opacity-50 transition-colors"
+            aria-label="Stop generating"
+            title="Stop generating"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+              <rect x="5" y="5" width="10" height="10" rx="1.5" />
+            </svg>
+          </button>
+        ) : (
+          <button
+            onClick={handleSend}
+            disabled={blocked}
+            className="m-2 p-2 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 transition-colors"
+            aria-label={isEmpty ? 'Continue the story' : 'Send message'}
+            title={isEmpty ? 'Continue the story (no input)' : 'Send message'}
+          >
+            {isEmpty ? (
+              // Fast-forward icon → "continue the story on its own"
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M4.5 4.5a.75.75 0 011.2-.6l5.5 4.125V5.1a.75.75 0 011.2-.6l6 4.5a.75.75 0 010 1.2l-6 4.5a.75.75 0 01-1.2-.6v-2.925L5.7 15.9a.75.75 0 01-1.2-.6v-10.8z" />
+              </svg>
+            ) : (
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
+              </svg>
+            )}
+          </button>
+        )}
       </div>
       <div className="text-center mt-2 text-xs text-gray-500">
-        Press Enter to send, Shift+Enter for new line.
+        {busy
+          ? 'Generating… press the stop button to interrupt.'
+          : isEmpty
+            ? 'Enter alone continues the story · ↑ edit last message · ←/→ switch variants.'
+            : 'Press Enter to send, Shift+Enter for new line.'}
       </div>
     </div>
   );

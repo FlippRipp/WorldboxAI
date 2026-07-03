@@ -1,0 +1,90 @@
+{
+  "id": "wb_time_tracker",
+  "name": "Time Tracker",
+  "version": "1.0.0",
+  "dependencies": [],
+  "consumes": {
+    "state": ["turn", "history"],
+    "module_data": [],
+    "module_configs": [],
+    "world_data": false
+  },
+  "produces": {
+    "module_data": true,
+    "context_string": false,
+    "messages": false
+  },
+  "settings_schema": {
+    "starting_year": {
+      "type": "slider",
+      "min": 1,
+      "max": 9999,
+      "default": 1,
+      "label": "Starting Year",
+      "category": "Time Tracker",
+      "description": "The in-world year the story begins on"
+    },
+    "starting_month": {
+      "type": "slider",
+      "min": 1,
+      "max": 12,
+      "default": 1,
+      "label": "Starting Month",
+      "category": "Time Tracker",
+      "description": "The in-world month the story begins on (1-12)"
+    },
+    "starting_day": {
+      "type": "slider",
+      "min": 1,
+      "max": 30,
+      "default": 1,
+      "label": "Starting Day",
+      "category": "Time Tracker",
+      "description": "The in-world day of the month the story begins on"
+    },
+    "starting_hour": {
+      "type": "slider",
+      "min": 0,
+      "max": 23,
+      "default": 8,
+      "label": "Starting Hour",
+      "category": "Time Tracker",
+      "description": "The in-world hour (0-23) the story begins on"
+    },
+    "days_per_month": {
+      "type": "slider",
+      "min": 28,
+      "max": 31,
+      "default": 30,
+      "label": "Days Per Month",
+      "category": "Time Tracker",
+      "description": "Number of days in each in-world month, used to roll days into months"
+    },
+    "months_per_year": {
+      "type": "slider",
+      "min": 1,
+      "max": 13,
+      "default": 12,
+      "label": "Months Per Year",
+      "category": "Time Tracker",
+      "description": "Number of months in each in-world year, used to roll months into years"
+    }
+  },
+  "mutation_schema": {
+    "time_elapsed_minutes": "integer, your best estimate of how many in-world minutes passed during the scene just narrated. Use the pacing of the narration as a guide: a short exchange or single action ~5-15 minutes, a conversation or exploring a room ~15-60 minutes, travel across a town or short journey ~30-180 minutes, a long journey or montage ~360-1440 minutes, sleeping through the night ~480 minutes. Use 0 only if the narration explicitly described no time passing (e.g. a pause mid-action)."
+  },
+  "prompt_blocks": [
+    {
+      "id": "time_context",
+      "type": "module_prompt",
+      "enabled": true,
+      "role_type": "system",
+      "placement": "system_relative",
+      "depth": null,
+      "config": {}
+    }
+  ],
+  "commands": {
+    "/time": "on_command_time"
+  }
+}

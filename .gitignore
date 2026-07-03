@@ -16,6 +16,9 @@ backend_output.log
 server.log
 server_err.log
 
+# Provider configs contain API keys — commit config.example.json instead
+data/providers/*/config.json
+
 # Frontend
 frontend/node_modules/
 frontend/dist/
@@ -28,5 +31,21 @@ frontend/dist/
 Thumbs.db
 .DS_Store
 
-# Save data (user-specific)
+# User data (characters, worlds, scenarios, saves, theme)
 data/saves/
+data/characters/
+data/worlds/
+data/scenarios/
+data/theme.json
+
+# Experimental terrain visualization outputs (generated artifacts)
+data/terrain_experiments/
+_scratch/
+
+# Claude Code local state
+.claude/settings.local.json
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+
+# Packaged module artifacts
+modules/*.zip

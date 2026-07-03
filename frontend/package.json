@@ -12,6 +12,8 @@
   "dependencies": {
     "@babel/standalone": "^8.0.1",
     "d3-delaunay": "^6.0.4",
+    "dompurify": "^3.4.11",
+    "marked": "^18.0.5",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },

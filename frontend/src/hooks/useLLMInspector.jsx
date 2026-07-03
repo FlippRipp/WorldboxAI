@@ -23,11 +23,17 @@ export function LLMInspectorProvider({ children }) {
 
   const addCall = useCallback((call) => {
     setCalls(prev => {
-      const exists = prev.some(c => c.id === call.id);
-      if (exists) return prev;
-      const next = [call, ...prev];
+      // Upsert: a call is broadcast once when it starts (status "running") and
+      // again when it finishes, both with the same id. Merge into the existing
+      // entry so the running entry fills out in place instead of duplicating.
+      const idx = prev.findIndex(c => c.id === call.id);
+      if (idx !== -1) {
+        const next = prev.slice();
+        next[idx] = { ...next[idx], ...call };
+        return next;
+      }
       if (call.id) lastIdRef.current = call.id;
-      return next;
+      return [call, ...prev];
     });
   }, []);
 
@@ -43,10 +49,14 @@ export function LLMInspectorProvider({ children }) {
       const newCalls = data.calls || [];
       if (newCalls.length > 0) {
         setCalls(prev => {
-          const existing = new Set(prev.map(c => c.id));
+          // Upsert returned calls (their status/output may have changed since
+          // we last saw them) without disturbing entries we already hold.
+          const byId = new Map(prev.map(c => [c.id, c]));
           const merged = [...prev];
           for (const c of newCalls) {
-            if (!existing.has(c.id)) merged.unshift(c);
+            const idx = merged.findIndex(m => m.id === c.id);
+            if (idx !== -1) merged[idx] = { ...merged[idx], ...c };
+            else if (!byId.has(c.id)) merged.unshift(c);
           }
           return merged;
         });

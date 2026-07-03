@@ -3,11 +3,18 @@ from copy import deepcopy
 from typing import Any
 
 
-ALLOWED_BLOCK_TYPES = {"static_text", "engine_context", "module_prompt", "world_context"}
+ALLOWED_BLOCK_TYPES = {"static_text", "engine_context", "module_prompt", "world_context", "character_context"}
 ALLOWED_PLACEMENTS = {"system_relative", "chat_injection"}
 ALLOWED_ROLES = {"system", "user", "assistant"}
 ALLOWED_CATEGORIES = {"system_prompt", "post_history", "narrator", "world_context", "character", "utility", "other"}
 ALLOWED_GENERATION_TYPES = {"storytelling", "world_building", "character_creation", "narration", "combat", "memory", "validation"}
+
+# Injected as the final user turn when the player sends an empty message ("continue"):
+# the normal context is compiled, minus any player input, plus this instruction.
+DEFAULT_CONTINUE_PROMPT = (
+    "Continue the story from where it left off. Advance the scene naturally, moving "
+    "events, NPCs, and the world forward without waiting for the player to act."
+)
 
 AVAILABLE_MACROS = [
     {"key": "${player_name}", "description": "Name of the player character"},
@@ -54,6 +61,19 @@ def default_prompt_pipeline() -> list[dict[str, Any]]:
             "depth": None,
             "display_name": "World Rules & Lore",
             "category": "world_context",
+            "generation_types": None,
+            "config": {},
+        },
+        {
+            "id": "player_character_context",
+            "type": "character_context",
+            "source": "engine",
+            "enabled": True,
+            "role_type": "system",
+            "placement": "system_relative",
+            "depth": None,
+            "display_name": "Player Character",
+            "category": "character",
             "generation_types": None,
             "config": {},
         },
@@ -298,6 +318,10 @@ class PromptCompiler:
             text = self._render_world_context(state, config)
             return self.resolve_macros(text, state)
 
+        if block_type == "character_context":
+            text = self._render_character_context(state, config)
+            return self.resolve_macros(text, state)
+
         if block_type == "module_prompt":
             text = config.get("text", "")
             return self.resolve_macros(text, state)
@@ -346,6 +370,34 @@ class PromptCompiler:
             parts.append("</world_premise>")
         return "\n".join(parts)
 
+    def _render_character_context(self, state: dict[str, Any], config: dict[str, Any]) -> str:
+        """Render the player character's identity so the storyteller always knows
+        who the player is. Reads the per-save character record; evolving fields
+        (appearance/personality) reflect any changes recorded during play."""
+        characters = state.get("characters") or {}
+        player = characters.get("default_player") or {}
+        if not isinstance(player, dict):
+            return ""
+
+        fields = [
+            ("Name", (player.get("name") or "").strip()),
+            ("Race", (player.get("race") or "").strip()),
+            ("Gender", (player.get("gender") or "").strip()),
+            ("Appearance", (player.get("full_appearance") or player.get("short_appearance") or "").strip()),
+            ("Personality", (player.get("personality") or "").strip()),
+        ]
+        field_lines = [f"{label}: {value}" for label, value in fields if value]
+        if not field_lines:
+            return ""
+
+        lines = [
+            "<player_character>",
+            "The player controls the following character. Refer to them consistently and never contradict these details:",
+            *field_lines,
+            "</player_character>",
+        ]
+        return "\n".join(lines)
+
     def _chat_messages(self, state: dict[str, Any]) -> list[dict[str, str]]:
         messages = []
         for message in state.get("chat_messages", []):
@@ -358,8 +410,14 @@ class PromptCompiler:
             if role in {"user", "assistant", "system"}:
                 messages.append({"role": role, "content": content})
 
-        input_text = state.get("input_text") or "I look around."
-        messages.append({"role": "user", "content": input_text})
+        input_text = (state.get("input_text") or "").strip()
+        if input_text:
+            messages.append({"role": "user", "content": input_text})
+        else:
+            # Empty input = a "continue" turn: no player message, just an
+            # editable instruction to advance the story on its own.
+            continue_prompt = (state.get("continue_prompt") or "").strip() or DEFAULT_CONTINUE_PROMPT
+            messages.append({"role": "user", "content": self.resolve_macros(continue_prompt, state)})
         return messages
 
     def _validation_veto_block(self, validation_veto: str) -> dict[str, Any]:

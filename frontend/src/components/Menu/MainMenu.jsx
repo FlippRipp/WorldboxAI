@@ -9,10 +9,10 @@ const CORE_MODES = [
     icon: '📜',
   },
   {
-    id: 'world-building',
-    label: 'World Generation',
-    description: 'Create a new world from a prompt',
-    icon: '🌍',
+    id: 'scenario-manager',
+    label: 'Scenarios',
+    description: 'Create a simple starting scenario (no world required)',
+    icon: '🎬',
   },
   {
     id: 'character-creator',
@@ -27,9 +27,9 @@ const CORE_MODES = [
     icon: '💬',
   },
   {
-    id: 'model-settings',
-    label: 'Model Settings',
-    description: 'Configure AI providers, models, and API keys',
+    id: 'settings',
+    label: 'Settings',
+    description: 'AI providers, models, and appearance / theme',
     icon: '⚙️',
   },
 ];

@@ -81,7 +81,7 @@ export default function CharacterListScreen({ onOpenCharacter, onBack }) {
               >
                 <h3 className="text-lg font-semibold text-gray-100 mb-1 truncate">{character.name}</h3>
                 <p className="text-xs text-gray-500 mb-3">
-                  {character.has_world ? 'World-themed' : 'Generic'}
+                  {character.has_context ? 'Themed' : 'Generic'}
                 </p>
                 <div className="flex items-center gap-3 text-xs text-gray-500 mb-4">
                   {character.created_at && (

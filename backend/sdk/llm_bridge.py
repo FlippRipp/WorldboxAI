@@ -35,7 +35,7 @@ class LLMBridge:
         if self._mode == "mock":
             result = f"[mock llm response for: {prompt[:80]}...]"
             if self._inspector:
-                cid = self._inspector.start_call(call_type="module_fast", model="mock", step="module:generate", module_source=mod_src)
+                cid = await self._inspector.start_call(call_type="module_fast", model="mock", step="module:generate", module_source=mod_src, input_data=prompt)
                 await self._inspector.end_call(cid, prompt, result, 0, 0)
             return result
 
@@ -51,7 +51,7 @@ class LLMBridge:
                 )
             cid = None
             if self._inspector:
-                cid = self._inspector.start_call(call_type="module_fast", model=model, step="module:generate", module_source=mod_src)
+                cid = await self._inspector.start_call(call_type="module_fast", model=model, step="module:generate", module_source=mod_src, input_data=messages)
             from litellm import acompletion
             response = await acompletion(model=model, messages=messages, max_tokens=max_tokens)
             content = response.choices[0].message.content or ""

@@ -1,0 +1,38 @@
+{
+  "id": "wb_worldgen",
+  "name": "World Generation",
+  "version": "1.0.0",
+  "dependencies": [],
+  "consumes": {
+    "state": ["world_id", "player_location_node_id", "player_location_region", "player_location_layer_id", "revealed_node_ids"],
+    "module_data": [],
+    "module_configs": [],
+    "world_data": true
+  },
+  "produces": {
+    "context_string": true
+  },
+  "modes": [
+    {
+      "id": "world-gen",
+      "label": "World Generation",
+      "description": "Create a new world from a prompt",
+      "icon": "🌍",
+      "screen": "ui/WorldGenScreen.jsx"
+    },
+    {
+      "id": "terrain-lab",
+      "label": "Experimental World Visualization",
+      "description": "Procedural terrain: heightmap, tectonics, erosion",
+      "icon": "🗺️",
+      "screen": "ui/TerrainLab/TerrainLab.jsx"
+    }
+  ],
+  "game_overlay": "ui/GameMapOverlay.jsx",
+  "storyteller_start": {
+    "screen": "ui/storyteller_start.jsx"
+  },
+  "character_context": {
+    "screen": "ui/character_context.jsx"
+  }
+}

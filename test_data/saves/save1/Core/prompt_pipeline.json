@@ -28,6 +28,19 @@
     "config": {}
   },
   {
+    "id": "player_character_context",
+    "type": "character_context",
+    "source": "engine",
+    "enabled": true,
+    "role_type": "system",
+    "placement": "system_relative",
+    "depth": null,
+    "display_name": "Player Character",
+    "category": "character",
+    "generation_types": null,
+    "config": {}
+  },
+  {
     "id": "engine_context",
     "type": "engine_context",
     "source": "engine",
@@ -54,7 +67,7 @@
     "category": "post_history",
     "generation_types": null,
     "config": {
-      "text": "Describe the outcome of the player's action and the current environment."
+      "text": "Describe the outcome of the player's action and the current environment. Write 2-4 concise paragraphs. Do not use bullet points or lists."
     }
   }
 ]

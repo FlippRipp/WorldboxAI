@@ -1,8 +1,57 @@
 @import "tailwindcss";
 
+/* Module UIs live outside frontend/src (e.g. modules/wb_worldgen/ui) and are
+   loaded at runtime, so Tailwind's default src scan misses their classes. Scan
+   the modules tree too, otherwise classes used only there (e.g. tooltip
+   `opacity-0`/`group-hover:opacity-100`) are never generated. */
+@source "../../modules/**/*.{js,jsx}";
+
 @theme {
   --color-gray-750: #2d3748;
   --color-gray-850: #1a202c;
+}
+
+/* ── Runtime theming ───────────────────────────────────────────────────────
+   Tailwind v4 color utilities compile to var(--color-*). We re-theme the whole
+   app by overriding those palette variables here, derived from four semantic
+   base colors that the ThemeProvider sets inline on <html>:
+     --app-primary    accent / interactive (purple family)
+     --app-bg         base surface (the gray "surface" ramp end)
+     --app-text       body text (the gray "text" ramp end)
+     --app-dialogue   in-story quoted speech (.text-quote)
+   The gray scale is a single luminance ramp interpolated from --app-bg (dark
+   end) to --app-text (light end), so surfaces and text both follow their picker.
+   This :root is unlayered and after @import, so it wins over Tailwind's theme
+   defaults; inline vars on <html> in turn win over these defaults. */
+:root {
+  --app-primary: #9333ea;
+  --app-bg: #111827;
+  --app-text: #e5e7eb;
+  --app-dialogue: #d4a574;
+
+  /* Surface → text luminance ramp */
+  --color-gray-950: color-mix(in srgb, var(--app-bg), black 35%);
+  --color-gray-900: var(--app-bg);
+  --color-gray-850: color-mix(in srgb, var(--app-text) 4%, var(--app-bg));
+  --color-gray-800: color-mix(in srgb, var(--app-text) 8%, var(--app-bg));
+  --color-gray-750: color-mix(in srgb, var(--app-text) 14%, var(--app-bg));
+  --color-gray-700: color-mix(in srgb, var(--app-text) 22%, var(--app-bg));
+  --color-gray-600: color-mix(in srgb, var(--app-text) 34%, var(--app-bg));
+  --color-gray-500: color-mix(in srgb, var(--app-text) 46%, var(--app-bg));
+  --color-gray-400: color-mix(in srgb, var(--app-text) 62%, var(--app-bg));
+  --color-gray-300: color-mix(in srgb, var(--app-text) 82%, var(--app-bg));
+  --color-gray-200: var(--app-text);
+  --color-gray-100: color-mix(in srgb, var(--app-text), white 30%);
+
+  /* Accent ramp from --app-primary */
+  --color-purple-300: color-mix(in srgb, var(--app-primary), white 45%);
+  --color-purple-400: color-mix(in srgb, var(--app-primary), white 28%);
+  --color-purple-500: color-mix(in srgb, var(--app-primary), white 14%);
+  --color-purple-600: var(--app-primary);
+  --color-purple-700: color-mix(in srgb, var(--app-primary), black 16%);
+  --color-purple-900: color-mix(in srgb, var(--app-primary), black 42%);
+  /* Title gradient partner — harmonize with the accent */
+  --color-pink-400: color-mix(in srgb, var(--app-primary), white 30%);
 }
 
 @keyframes slide-in {
@@ -46,5 +95,115 @@
 }
 
 .text-quote {
-  color: #d4a574;
+  color: var(--app-dialogue);
+}
+
+/* ── Story markdown (MarkdownRenderer / lib/markdown.js) ──────────────────── */
+
+.md-content > :first-child { margin-top: 0; }
+.md-content > :last-child { margin-bottom: 0; }
+
+.md-content p { margin-bottom: 0.5rem; }
+
+.md-content h1, .md-content h2 { font-size: 1.25rem; font-weight: 600; margin: 1rem 0 0.5rem; }
+.md-content h3 { font-size: 1.125rem; font-weight: 600; margin: 1rem 0 0.5rem; }
+.md-content h4, .md-content h5, .md-content h6 { font-size: 1rem; font-weight: 600; margin: 0.75rem 0 0.25rem; }
+
+.md-content ul { list-style: disc; margin: 0.5rem 0 0.5rem 1.5rem; }
+.md-content ol { list-style: decimal; margin: 0.5rem 0 0.5rem 1.5rem; }
+.md-content li { margin: 0.125rem 0; }
+
+.md-content blockquote {
+  border-left: 2px solid var(--color-gray-600);
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  color: var(--color-gray-400);
+  font-style: italic;
+}
+
+.md-content code {
+  background: var(--color-gray-700);
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.875em;
+}
+
+.md-content .code-block { position: relative; margin: 0.75rem 0; }
+.md-content .code-block pre {
+  background: var(--color-gray-950);
+  border: 1px solid var(--color-gray-700);
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  overflow-x: auto;
+}
+.md-content .code-block code { background: transparent; padding: 0; font-size: 0.8125rem; }
+.md-content .code-copy {
+  position: absolute;
+  top: 0.375rem;
+  right: 0.375rem;
+  padding: 0.125rem 0.5rem;
+  font-size: 0.6875rem;
+  color: var(--color-gray-400);
+  background: var(--color-gray-800);
+  border: 1px solid var(--color-gray-700);
+  border-radius: 0.25rem;
+  opacity: 0;
+  transition: opacity 0.15s;
+  cursor: pointer;
+}
+.md-content .code-block:hover .code-copy { opacity: 1; }
+.md-content .code-copy.copied { color: var(--color-purple-300); opacity: 1; }
+
+.md-content table {
+  border-collapse: collapse;
+  margin: 0.75rem 0;
+  font-size: 0.9em;
+}
+.md-content th, .md-content td {
+  border: 1px solid var(--color-gray-700);
+  padding: 0.375rem 0.625rem;
+  text-align: left;
+}
+.md-content th { background: var(--color-gray-800); font-weight: 600; }
+
+.md-content hr { border-color: var(--color-gray-700); margin: 1rem 0; }
+
+.md-content a { color: var(--color-purple-400); text-decoration: underline; }
+.md-content a:hover { color: var(--color-purple-300); }
+
+/* Message action bar: hover-revealed on desktop; touch devices have no hover,
+   so keep it always visible there. */
+@media (hover: none) {
+  .msg-actions { opacity: 1; }
+}
+
+/* Crossfade when switching swipe variants of the last AI message. */
+@keyframes swipe-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.swipe-fade { animation: swipe-fade-in 0.25s ease-out; }
+
+/* Compact message density: tighter padding and smaller story text. */
+.chat-compact .max-w-\[720px\] { padding-top: 0.75rem; padding-bottom: 0.75rem; }
+.chat-compact .text-lg { font-size: 1rem; line-height: 1.6; }
+
+/* Streaming caret: rides the last rendered element whatever the markdown
+   structure is (paragraph, list item, table cell); shows on the empty
+   container before the first token arrives. */
+@keyframes caret-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.2; }
+}
+
+.streaming-md > :last-child::after,
+.streaming-md:empty::after {
+  content: '';
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  margin-left: 2px;
+  background: currentColor;
+  vertical-align: text-bottom;
+  animation: caret-pulse 1s ease-in-out infinite;
 }

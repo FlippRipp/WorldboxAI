@@ -2,10 +2,10 @@
   "id": "wb_npc_system",
   "name": "NPC System",
   "version": "1.0.0",
-  "dependencies": [],
+  "dependencies": ["wb_time_tracker"],
   "consumes": {
-    "state": ["input_text", "turn", "history", "player_location_node_id", "player_location_region"],
-    "module_data": [],
+    "state": ["input_text", "turn", "history", "player_location_node_id", "player_location_region", "player_location_layer_id"],
+    "module_data": ["wb_time_tracker"],
     "module_configs": [],
     "world_data": true
   },
@@ -39,10 +39,34 @@
       "label": "Max Unintroduced Pool",
       "category": "NPC System",
       "description": "Maximum NPCs kept in the unintroduced pool before generation stops"
+    },
+    "autonomous_travel_enabled": {
+      "type": "toggle",
+      "default": true,
+      "label": "Enable Autonomous NPC Travel",
+      "category": "NPC System",
+      "description": "Let unintroduced/cooled-down NPCs wander the world over time"
+    },
+    "travel_cooldown_turns": {
+      "type": "slider",
+      "min": 3,
+      "max": 30,
+      "default": 10,
+      "label": "Travel Cooldown (turns)",
+      "category": "NPC System",
+      "description": "Turns since last contact before an introduced NPC can resume autonomous travel"
+    },
+    "travel_motivation_use_llm": {
+      "type": "toggle",
+      "default": false,
+      "label": "LLM-Based Travel Motivation",
+      "category": "NPC System",
+      "description": "Use an LLM to decide which NPCs are motivated to travel toward the player (richer but slower/costlier). When off, a fast rule-based heuristic is used."
     }
   },
   "mutation_schema": {
-    "npc_introductions": "array of objects: {npc_id: string, name: string (the character's name as mentioned in the story), first_impression: string (one sentence describing how they met the player), notes: string (optional evolving observations about the character)}"
+    "npc_introductions": "array of objects: {npc_id: string, name: string (the character's name as mentioned in the story), first_impression: string (one sentence describing how they met the player), notes: string (optional evolving observations about the character)}",
+    "npc_party_travel": "array of objects: {npc_id: string, joining: boolean (true if the narrative shows this NPC joining the player as a traveling companion, false if it shows them leaving/parting ways with the player)}"
   },
   "prompt_blocks": [
     {

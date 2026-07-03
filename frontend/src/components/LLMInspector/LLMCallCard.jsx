@@ -1,13 +1,25 @@
 const TYPE_COLORS = {
-  storyteller:    { bg: 'bg-purple-900/30', text: 'text-purple-300', border: 'border-purple-700/50', icon: '\uD83D\uDCD6' },
-  reader:         { bg: 'bg-blue-900/30', text: 'text-blue-300', border: 'border-blue-700/50', icon: '\uD83D\uDCCA' },
-  embedding:      { bg: 'bg-gray-800/30', text: 'text-gray-400', border: 'border-gray-700/50', icon: '\uD83E\uDDEC' },
-  librarian:      { bg: 'bg-emerald-900/30', text: 'text-emerald-300', border: 'border-emerald-700/50', icon: '\uD83D\uDCDA' },
-  world_build:    { bg: 'bg-orange-900/30', text: 'text-orange-300', border: 'border-orange-700/50', icon: '\uD83C\uDF0D' },
-  character_build:{ bg: 'bg-pink-900/30', text: 'text-pink-300', border: 'border-pink-700/50', icon: '\uD83D\uDC64' },
-  module_fast:    { bg: 'bg-yellow-900/30', text: 'text-yellow-300', border: 'border-yellow-700/50', icon: '\u26A1' },
-  diagnostic:     { bg: 'bg-red-900/30', text: 'text-red-300', border: 'border-red-700/50', icon: '\uD83D\uDD27' },
+  storyteller:    { bg: 'bg-purple-900/30', text: 'text-purple-300', border: 'border-purple-700/50', icon: '📖' },
+  reader:         { bg: 'bg-blue-900/30', text: 'text-blue-300', border: 'border-blue-700/50', icon: '📊' },
+  embedding:      { bg: 'bg-gray-800/30', text: 'text-gray-400', border: 'border-gray-700/50', icon: '🧬' },
+  librarian:      { bg: 'bg-emerald-900/30', text: 'text-emerald-300', border: 'border-emerald-700/50', icon: '📚' },
+  world_build:    { bg: 'bg-orange-900/30', text: 'text-orange-300', border: 'border-orange-700/50', icon: '🌍' },
+  character_build:{ bg: 'bg-pink-900/30', text: 'text-pink-300', border: 'border-pink-700/50', icon: '👤' },
+  module_fast:    { bg: 'bg-yellow-900/30', text: 'text-yellow-300', border: 'border-yellow-700/50', icon: '⚡' },
+  diagnostic:     { bg: 'bg-red-900/30', text: 'text-red-300', border: 'border-red-700/50', icon: '🔧' },
 };
+
+// Per-role styling for the split input messages.
+const ROLE_COLORS = {
+  system:    { text: 'text-amber-300', dot: 'bg-amber-400' },
+  user:      { text: 'text-sky-300', dot: 'bg-sky-400' },
+  assistant: { text: 'text-emerald-300', dot: 'bg-emerald-400' },
+  tool:      { text: 'text-violet-300', dot: 'bg-violet-400' },
+};
+
+function roleColors(role) {
+  return ROLE_COLORS[role] || { text: 'text-gray-400', dot: 'bg-gray-500' };
+}
 
 function formatDuration(ms) {
   if (ms < 1000) return `${ms}ms`;
@@ -21,16 +33,16 @@ function formatTimestamp(ts) {
 
 function formatTokens(tIn, tOut) {
   if (!tIn && !tOut) return '';
-  return `\u2B06${tIn || 0} \u2B07${tOut || 0}`;
+  return `⬆${tIn || 0} ⬇${tOut || 0}`;
 }
 
 export default function LLMCallCard({ call, expanded, onToggle }) {
   const colors = TYPE_COLORS[call.call_type] || TYPE_COLORS.storyteller;
+  const isRunning = call.status === 'running';
   const hasError = !!call.error;
-  const hasFullData = call.full_input != null || call.full_output;
 
   return (
-    <div className={`border ${hasError ? 'border-red-700/80 bg-red-950/20' : colors.border} ${colors.bg} rounded-lg overflow-hidden`}>
+    <div className={`border ${hasError ? 'border-red-700/80 bg-red-950/20' : colors.border} ${colors.bg} rounded-lg overflow-hidden ${isRunning ? 'ring-1 ring-amber-500/40' : ''}`}>
       {/* Collapsed row */}
       <button
         onClick={onToggle}
@@ -45,8 +57,21 @@ export default function LLMCallCard({ call, expanded, onToggle }) {
           </span>
         )}
         {hasError && <span className="text-xs text-red-400">ERR</span>}
-        <span className="text-[10px] text-gray-500 w-10 text-right">{formatDuration(call.duration_ms)}</span>
-        <span className="text-[10px] text-gray-600 w-16 text-right">{formatTokens(call.tokens_in, call.tokens_out)}</span>
+        {/* Status / duration */}
+        {isRunning ? (
+          <span className="flex items-center gap-1 text-[10px] text-amber-300 w-16 justify-end">
+            <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z" />
+            </svg>
+            running
+          </span>
+        ) : (
+          <>
+            <span className="text-[10px] text-gray-500 w-10 text-right">{formatDuration(call.duration_ms)}</span>
+            <span className="text-[10px] text-gray-600 w-16 text-right">{formatTokens(call.tokens_in, call.tokens_out)}</span>
+          </>
+        )}
         <svg className={`w-3 h-3 text-gray-500 transition-transform ${expanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
@@ -62,6 +87,7 @@ export default function LLMCallCard({ call, expanded, onToggle }) {
             <span>Step: {call.step}</span>
             <span>Model: {call.model}</span>
             {call.streaming && <span className="text-purple-400">Streaming</span>}
+            {isRunning && <span className="text-amber-300">In progress…</span>}
           </div>
 
           {/* Error */}
@@ -72,22 +98,24 @@ export default function LLMCallCard({ call, expanded, onToggle }) {
           )}
 
           {/* Input */}
-          {call.input_summary && (
-            <div>
-              <div className="text-[10px] text-gray-600 mb-1">Input</div>
-              <pre className="text-[11px] text-gray-300 bg-black/30 rounded p-2 overflow-x-auto max-h-40 whitespace-pre-wrap break-all font-mono leading-relaxed">
-                {expanded && hasFullData ? renderInput(call.full_input) : call.input_summary}
-              </pre>
-            </div>
-          )}
+          <div>
+            <div className="text-[10px] text-gray-600 mb-1">Input</div>
+            <InputView input={call.full_input} fallback={call.input_summary} />
+          </div>
 
           {/* Output */}
-          {(call.output_summary || call.full_output) && !hasError && (
+          {!hasError && (
             <div>
               <div className="text-[10px] text-gray-600 mb-1">Output</div>
-              <pre className="text-[11px] text-gray-300 bg-black/30 rounded p-2 overflow-x-auto max-h-40 whitespace-pre-wrap break-all font-mono leading-relaxed">
-                {expanded && call.full_output ? call.full_output : call.output_summary}
-              </pre>
+              {(call.full_output || call.output_summary) ? (
+                <pre className="text-[11px] text-gray-300 bg-black/30 rounded p-2 overflow-x-auto max-h-40 whitespace-pre-wrap break-all font-mono leading-relaxed">
+                  {call.full_output || call.output_summary}
+                </pre>
+              ) : (
+                <div className="text-[11px] text-gray-500 italic bg-black/30 rounded p-2">
+                  {isRunning ? 'Waiting for response…' : '(no output)'}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -96,16 +124,43 @@ export default function LLMCallCard({ call, expanded, onToggle }) {
   );
 }
 
-function renderInput(input) {
-  if (!input) return '';
-  if (typeof input === 'string') return input;
-  if (Array.isArray(input)) {
-    return input.map(m => {
-      if (typeof m === 'object' && m !== null) {
-        return `[${m.role || '?'}] ${m.content || ''}`;
-      }
-      return String(m);
-    }).join('\n');
+// Renders the input. When it's a list of chat messages, each message is shown
+// as its own block labeled with its role; otherwise it falls back to plain text.
+function InputView({ input, fallback }) {
+  if (Array.isArray(input) && input.length > 0) {
+    return (
+      <div className="space-y-1.5">
+        {input.map((m, i) => {
+          const role = (m && m.role) || '?';
+          const content = m && typeof m === 'object' ? (m.content ?? '') : String(m);
+          const rc = roleColors(role);
+          return (
+            <div key={i} className="bg-black/30 rounded p-2">
+              <div className="flex items-center gap-1.5 mb-1">
+                <span className={`w-1.5 h-1.5 rounded-full ${rc.dot}`} />
+                <span className={`text-[10px] font-semibold uppercase tracking-wide ${rc.text}`}>{role}</span>
+              </div>
+              <pre className="text-[11px] text-gray-300 overflow-x-auto max-h-40 whitespace-pre-wrap break-words font-mono leading-relaxed">
+                {typeof content === 'string' ? content : JSON.stringify(content, null, 2)}
+              </pre>
+            </div>
+          );
+        })}
+      </div>
+    );
   }
-  return JSON.stringify(input, null, 2);
+
+  const text = typeof input === 'string'
+    ? input
+    : input != null
+      ? JSON.stringify(input, null, 2)
+      : (fallback || '');
+
+  if (!text) return <div className="text-[11px] text-gray-500 italic bg-black/30 rounded p-2">(no input)</div>;
+
+  return (
+    <pre className="text-[11px] text-gray-300 bg-black/30 rounded p-2 overflow-x-auto max-h-40 whitespace-pre-wrap break-all font-mono leading-relaxed">
+      {text}
+    </pre>
+  );
 }

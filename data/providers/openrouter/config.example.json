@@ -1,0 +1,19 @@
+{
+  "api_key": "",
+  "openrouter_provider": "",
+  "openrouter_storyteller_provider": "",
+  "openrouter_fallback_provider": "",
+  "openrouter_reader_provider": "",
+  "openrouter_embedding_provider": "",
+  "openrouter_fast_provider": "",
+  "storyteller_model": "deepseek/deepseek-v4-pro",
+  "storyteller_fallback_models": "",
+  "reader_model": "deepseek/deepseek-v4-pro",
+  "embedding_model": "google/gemini-embedding-2",
+  "module_fast_model": "deepseek/deepseek-v4-flash",
+  "retry_attempts": 3,
+  "retry_delay_seconds": 1,
+  "temperature": 0.9,
+  "top_p": 1,
+  "max_output_tokens": 32768
+}

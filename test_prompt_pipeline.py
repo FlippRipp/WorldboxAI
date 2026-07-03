@@ -25,6 +25,7 @@ def test_default_pipeline_compiles_messages():
     assert [entry["id"] for entry in compiled["trace"]] == [
         "core_narrator_rules",
         "world_rules_context",
+        "player_character_context",
         "engine_context",
         "storyteller_task",
     ]
@@ -109,34 +110,56 @@ async def _graph_records_prompt_trace():
         with tempfile.TemporaryDirectory() as temp_dir:
             engine = EngineGraph(registry)
             engine.set_memory_path(os.path.join(temp_dir, "vector_index"))
-
-            result = await engine.app.ainvoke({
-                "active_save_id": "prompt_test",
-                "input_text": "I test the compiler.",
-                "module_data": {"wb_core_rpg": {"hp": 85}},
-                "module_configs": {"wb_core_rpg": {"progression_system": "xp"}},
-                "characters": {},
-                "current_context": [],
-                "history": [],
-                "chat_messages": [],
-                "turn": 0,
-            })
-
-            assert result["history"][-1].startswith("Mock outcome: I test the compiler.")
-            assert [entry["id"] for entry in result["last_prompt_trace"]] == [
-                "core_narrator_rules",
-                "world_rules_context",
-                "engine_context",
-                "storyteller_task",
-                "wb_core_rpg:character_sheet",
-                "wb_core_rpg:action_feasibility",
-            ]
-            print("Graph prompt trace test passed.")
+            try:
+                await _assert_prompt_trace(engine)
+            finally:
+                # Windows: the open SQLite handle would make the temp dir
+                # cleanup fail with PermissionError.
+                engine.close_memory()
     finally:
         if previous_mode is None:
             os.environ.pop("LLM_MODE", None)
         else:
             os.environ["LLM_MODE"] = previous_mode
+
+
+async def _assert_prompt_trace(engine):
+    result = await engine.app.ainvoke({
+        "active_save_id": "prompt_test",
+        "input_text": "I test the compiler.",
+        "module_data": {"wb_core_rpg": {"hp": 85}},
+        "module_configs": {"wb_core_rpg": {"progression_system": "xp"}},
+        "characters": {},
+        "current_context": [],
+        "history": [],
+        "chat_messages": [],
+        "turn": 0,
+    })
+
+    assert result["history"][-1].startswith("Mock outcome: I test the compiler.")
+
+    trace = result["last_prompt_trace"]
+    trace_ids = [entry["id"] for entry in trace]
+    # Core engine blocks and the RPG module blocks must appear in this
+    # order; other loaded modules may contribute additional entries.
+    expected_order = [
+        "core_narrator_rules",
+        "world_rules_context",
+        "player_character_context",
+        "engine_context",
+        "storyteller_task",
+        "wb_core_rpg:character_sheet",
+        "wb_core_rpg:action_feasibility",
+    ]
+    positions = [trace_ids.index(block_id) for block_id in expected_order]
+    assert positions == sorted(positions), f"Trace order mismatch: {trace_ids}"
+
+    by_id = {entry["id"]: entry for entry in trace}
+    assert not by_id["wb_core_rpg:character_sheet"]["skipped"]
+    # In mock mode the LLM returns non-JSON, so the action assessment
+    # stays empty and the feasibility block renders no content.
+    assert by_id["wb_core_rpg:action_feasibility"]["skipped"]
+    print("Graph prompt trace test passed.")
 
 
 def test_graph_records_prompt_trace():
@@ -153,8 +176,13 @@ async def _graph_prompt_preview_includes_messages_and_module_blocks():
         {
             "active_save_id": "preview_test",
             "input_text": "I preview the prompt.",
-            "module_data": {"wb_core_rpg": {"hp": 42, "action_assessment": {"feasibility": 7, "skill_used": "sword_stance", "difficulty": "moderate"}}},
-                "module_configs": {"wb_core_rpg": {"progression_system": "xp"}},
+            "module_data": {"wb_core_rpg": {"hp": 42, "action_assessment": {
+                "feasibility": 7,
+                "skill_used": "sword_stance",
+                "difficulty": "moderate",
+                "outcome_narrative": "They attempt to preview the prompt but only manage a glance.",
+            }}},
+            "module_configs": {"wb_core_rpg": {"progression_system": "xp"}},
             "characters": {},
             "current_context": ["<scene>A stone hallway.</scene>"],
             "history": [],
@@ -180,9 +208,11 @@ async def _graph_prompt_preview_includes_messages_and_module_blocks():
 
     assert contents[0] == "Preview this prompt exactly."
     assert "I preview the prompt." in contents
-    assert any("action_assessment" in content for content in contents)
+    # The seeded action assessment must render through the feasibility block.
+    assert any("Suggested outcome:" in content for content in contents)
     assert "preview_rules" in trace_ids
     assert "wb_core_rpg:character_sheet" in trace_ids
+    assert "wb_core_rpg:action_feasibility" in trace_ids
     print("Graph prompt preview test passed.")
 
 

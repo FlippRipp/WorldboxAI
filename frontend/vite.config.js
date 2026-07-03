@@ -10,6 +10,10 @@ export default defineConfig({
     }
   },
   server: {
+    // Listen on all network interfaces (0.0.0.0) so other devices on the same
+    // LAN can reach the dev server at http://<this-machine-ip>:5173. All API/WS
+    // calls are relative, so Vite proxies them to the backend on localhost:8000.
+    host: true,
     proxy: {
       '/api': {
         target: 'http://localhost:8000',

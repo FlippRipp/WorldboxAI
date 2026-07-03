@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import hashlib
 import asyncio
@@ -10,6 +11,21 @@ from backend.engine.llm_inspector import LLMInspector
 
 def _llm_debug():
     return os.getenv("LLM_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+_THINK_RE = re.compile(r"^\s*<think>(.*?)</think>\s*", re.IGNORECASE | re.DOTALL)
+
+
+def _split_think(content: str, reasoning: str) -> tuple[str, str]:
+    """Some models emit their chain-of-thought as a separate reasoning channel
+    (``delta.reasoning_content``); others wrap it in a leading ``<think>...</think>``
+    block inside the normal content. When no separate reasoning was captured, pull a
+    leading think-block out of the content so the narration stays clean."""
+    if not reasoning and content:
+        m = _THINK_RE.match(content)
+        if m:
+            return content[m.end():], m.group(1).strip()
+    return content, reasoning
 
 
 def _llm_log_req(tag, model, messages, extra=""):
@@ -69,10 +85,14 @@ class LLMService:
         self.storyteller_model = "gemini/gemini-2.5-flash"
         self.storyteller_fallback_models = []
         self.reader_model = "gemini/gemini-2.5-flash"
-        self.embedding_model = "gemini/text-embedding-004"
+        self.embedding_model = "gemini/gemini-embedding-001"
         self.module_fast_model = "gemini/gemini-2.5-flash"
         self.provider_retry_attempts = 2
         self.provider_retry_delay_seconds = 1.0
+        #: Maps an (effective) model string -> OpenRouter upstream provider to
+        #: pin via the request-body ``provider`` routing param. Empty for
+        #: non-OpenRouter providers.
+        self._or_provider_routes: dict[str, str] = {}
         self._temperature = None
         self._top_p = None
         self._max_output_tokens = None
@@ -113,9 +133,43 @@ class LLMService:
                 elif attr == "_max_output_tokens":
                     val = int(val)
                 setattr(self, attr, val)
+
+        # Build per-slot OpenRouter provider routing. A per-slot provider wins;
+        # otherwise the singular "Default Provider" applies. Keyed by the same
+        # effective model string later passed to acompletion/aembedding.
+        self._or_provider_routes = {}
+        if provider_id == "openrouter":
+            default_prov = config.get("openrouter_provider") or ""
+            slot_pairs = [
+                (self.storyteller_model, config.get("openrouter_storyteller_provider")),
+                (self.reader_model, config.get("openrouter_reader_provider")),
+                (self.embedding_model, config.get("openrouter_embedding_provider")),
+                (self.module_fast_model, config.get("openrouter_fast_provider")),
+            ]
+            for model_str, prov in slot_pairs:
+                route = (prov or default_prov).strip() if isinstance(prov or default_prov, str) else ""
+                if model_str and route:
+                    self._or_provider_routes[model_str] = route
+            fb_prov = (config.get("openrouter_fallback_provider") or default_prov)
+            fb_route = fb_prov.strip() if isinstance(fb_prov, str) else ""
+            if fb_route:
+                for model_str in self.storyteller_fallback_models:
+                    if model_str:
+                        self._or_provider_routes[model_str] = fb_route
+            if self._or_provider_routes:
+                print(f"[LLMService] OpenRouter provider routes: {self._or_provider_routes}")
+
         print(f"[LLMService] Reconfigured for provider '{provider_id}': storyteller={self.storyteller_model}, reader={self.reader_model}, embedding={self.embedding_model}")
 
-    async def simple_completion(self, messages: list[dict[str, str]], model: str = None, max_tokens: int = None, temperature: float = None, top_p: float = None, response_format: Any = None, inspector_ctx: dict = None) -> str:
+    def _provider_route_kwargs(self, model: str) -> dict:
+        """Return litellm kwargs that pin the OpenRouter upstream provider for
+        ``model`` via the request-body ``provider`` routing param, or ``{}``."""
+        prov = self._or_provider_routes.get(model)
+        if not prov:
+            return {}
+        return {"extra_body": {"provider": {"order": [prov]}}}
+
+    async def simple_completion(self, messages: list[dict[str, str]], model: str = None, max_tokens: int = None, temperature: float = None, top_p: float = None, response_format: Any = None, inspector_ctx: dict = None, return_reasoning: bool = False, return_usage: bool = False):
         # NOTE: `max_tokens` should NOT be used for content generation. It cuts off LLM output
         # mid-sentence and causes bugs. Prefer prompt-level output control instead
         # (e.g. "respond ONLY with valid JSON", "keep to one sentence", "3 paragraphs of prose").
@@ -130,6 +184,7 @@ class LLMService:
             kwargs["top_p"] = top_p
         if response_format is not None:
             kwargs["response_format"] = response_format
+        kwargs.update(self._provider_route_kwargs(model))
         extra_parts = []
         if max_tokens is not None:
             extra_parts.append(f"max_tokens: {max_tokens}")
@@ -143,16 +198,19 @@ class LLMService:
         ctx = inspector_ctx or {}
         cid = None
         if self.inspector:
-            cid = self.inspector.start_call(
+            cid = await self.inspector.start_call(
                 call_type=ctx.get("call_type", "reader"),
                 model=model,
                 step=ctx.get("step", "simple_completion"),
                 module_source=ctx.get("module_source", ""),
+                input_data=messages,
             )
 
         try:
             response = await acompletion(**kwargs)
-            content = response.choices[0].message.content or ""
+            message = response.choices[0].message
+            content = message.content or ""
+            reasoning = getattr(message, 'reasoning_content', '') or ''
             usage = response.usage.to_dict() if hasattr(response, 'usage') else {}
             _llm_log_res("simple_completion", content, usage, response.choices[0].finish_reason)
 
@@ -160,7 +218,9 @@ class LLMService:
                 await self.inspector.end_call(cid, messages, content,
                                         usage.get("prompt_tokens", 0),
                                         usage.get("completion_tokens", 0))
-            return content
+            if return_usage:
+                return content, reasoning, usage
+            return (content, reasoning) if return_reasoning else content
         except Exception as e:
             if self.inspector and cid:
                 await self.inspector.end_call(cid, messages, "", error=str(e))
@@ -170,11 +230,12 @@ class LLMService:
         ctx = inspector_ctx or {}
         cid = None
         if self.inspector:
-            cid = self.inspector.start_call(
+            cid = await self.inspector.start_call(
                 call_type=ctx.get("call_type", "embedding"),
                 model=self.embedding_model,
                 step=ctx.get("step", "get_embedding"),
                 module_source=ctx.get("module_source", ""),
+                input_data=text,
             )
 
         if self.mode == "mock":
@@ -191,10 +252,9 @@ class LLMService:
             print("=" * 60)
 
         try:
-            response = await aembedding(
-                model=self.embedding_model,
-                input=text
-            )
+            emb_kwargs = {"model": self.embedding_model, "input": text}
+            emb_kwargs.update(self._provider_route_kwargs(self.embedding_model))
+            response = await aembedding(**emb_kwargs)
             embedding = response.data[0]["embedding"]
             if _llm_debug():
                 print(f"=== LLM EMB RES ===")
@@ -213,28 +273,36 @@ class LLMService:
     async def generate_story(self, prompt: str, streaming_callback=None) -> str:
         messages = [{"role": "system", "content": "You are a creative storyteller in a text-based RPG."},
                     {"role": "user", "content": prompt}]
-        return await self.generate_story_from_messages(messages, streaming_callback)
+        result = await self.generate_story_from_messages(messages, streaming_callback)
+        return result["content"]
 
-    async def generate_story_from_messages(self, messages: list[dict[str, str]], streaming_callback=None, inspector_ctx: dict = None) -> str:
+    async def generate_story_from_messages(self, messages: list[dict[str, str]], streaming_callback=None, inspector_ctx: dict = None, reasoning_callback=None) -> dict[str, str]:
+        """Generate storyteller narration. Returns ``{"content", "reasoning", "model", "usage"}``
+        where ``reasoning`` is the model's thinking (separate channel or a <think> block,
+        empty when the model produced none), ``model`` is the model that answered (after
+        fallbacks), and ``usage`` is the provider's token usage dict ({} when unreported)."""
         ctx = inspector_ctx or {}
         if self.mode == "mock":
             story = self._mock_story_from_messages(messages)
+            reasoning = self._mock_reasoning(messages)
             if self.inspector:
-                cid = self.inspector.start_call(call_type=ctx.get("call_type", "storyteller"), model="mock", step=ctx.get("step", "storyteller"), module_source=ctx.get("module_source", ""), streaming=bool(streaming_callback))
+                cid = await self.inspector.start_call(call_type=ctx.get("call_type", "storyteller"), model="mock", step=ctx.get("step", "storyteller"), module_source=ctx.get("module_source", ""), streaming=bool(streaming_callback), input_data=messages)
                 await self.inspector.end_call(cid, messages, story, 0, 0)
+            if reasoning_callback and reasoning:
+                await reasoning_callback(reasoning)
             if streaming_callback:
                 for token in story.split(" "):
                     await streaming_callback(token + " ")
-            return story
+            return {"content": story, "reasoning": reasoning, "model": "mock", "usage": {}}
 
-        return await self._complete_story_with_fallbacks(messages, streaming_callback, inspector_ctx)
+        return await self._complete_story_with_fallbacks(messages, streaming_callback, inspector_ctx, reasoning_callback)
 
     async def extract_mutations(self, story_text: str, schema: dict, inspector_ctx: dict = None) -> dict:
         ctx = inspector_ctx or {}
         if self.mode == "mock":
             result = self._mock_mutations(schema)
             if self.inspector:
-                cid = self.inspector.start_call(call_type=ctx.get("call_type", "reader"), model="mock", step=ctx.get("step", "reader"), module_source=ctx.get("module_source", ""))
+                cid = await self.inspector.start_call(call_type=ctx.get("call_type", "reader"), model="mock", step=ctx.get("step", "reader"), module_source=ctx.get("module_source", ""), input_data=story_text)
                 await self.inspector.end_call(cid, story_text, str(result), 0, 0)
             return result
 
@@ -282,7 +350,7 @@ Respond ONLY with valid JSON. Do not include markdown formatting like ```json.
         if self.mode == "mock":
             result = self._mock_memory_summary(text, turn_range)
             if self.inspector:
-                cid = self.inspector.start_call(call_type=ctx.get("call_type", "librarian"), model="mock", step=ctx.get("step", "librarian:summary"), module_source=ctx.get("module_source", ""))
+                cid = await self.inspector.start_call(call_type=ctx.get("call_type", "librarian"), model="mock", step=ctx.get("step", "librarian:summary"), module_source=ctx.get("module_source", ""), input_data=text)
                 await self.inspector.end_call(cid, text, result.summary, 0, 0)
             return result
 
@@ -333,7 +401,7 @@ Return a JSON object with:
         if self.mode == "mock":
             result = self._mock_memory_importance(summary)
             if self.inspector:
-                cid = self.inspector.start_call(call_type=ctx.get("call_type", "librarian"), model="mock", step=ctx.get("step", "librarian:importance"), module_source=ctx.get("module_source", ""))
+                cid = await self.inspector.start_call(call_type=ctx.get("call_type", "librarian"), model="mock", step=ctx.get("step", "librarian:importance"), module_source=ctx.get("module_source", ""), input_data=summary)
                 await self.inspector.end_call(cid, summary, f"importance={result.importance} permanent={result.permanent}", 0, 0)
             return result
 
@@ -382,30 +450,31 @@ Return a JSON object with:
             raise ValueError("Reader response must be a JSON object.")
         return parsed
 
-    async def _complete_story_with_fallbacks(self, messages: list[dict[str, str]], streaming_callback=None, inspector_ctx: dict = None) -> str:
+    async def _complete_story_with_fallbacks(self, messages: list[dict[str, str]], streaming_callback=None, inspector_ctx: dict = None, reasoning_callback=None) -> dict[str, str]:
         errors = []
         models = [self.storyteller_model] + [model for model in self.storyteller_fallback_models if model != self.storyteller_model]
+        # Only stream on the very first attempt. If it fails (even after partial tokens
+        # were already sent to the client), retry without streaming to avoid sending a
+        # second response stream on top of the first.
+        streaming_used = False
 
         for model in models:
             for attempt in range(self.provider_retry_attempts):
+                cb = streaming_callback if not streaming_used else None
+                rcb = reasoning_callback if not streaming_used else None
                 try:
-                    return await self._complete_story_once(model, messages, streaming_callback, inspector_ctx)
+                    return await self._complete_story_once(model, messages, cb, inspector_ctx, rcb)
                 except Exception as exc:
+                    if cb:
+                        streaming_used = True
                     errors.append(f"{model} attempt {attempt + 1}: {exc}")
                     print(f"Storyteller provider call failed for {model} on attempt {attempt + 1}: {exc}")
                     if attempt + 1 < self.provider_retry_attempts and self.provider_retry_delay_seconds:
                         await asyncio.sleep(self.provider_retry_delay_seconds)
 
-                    if streaming_callback:
-                        try:
-                            return await self._complete_story_once(model, messages, None, inspector_ctx)
-                        except Exception as fallback_exc:
-                            errors.append(f"{model} non-stream fallback: {fallback_exc}")
-                            print(f"Storyteller non-stream fallback failed for {model}: {fallback_exc}")
-
         raise LLMProviderError("Storyteller provider unavailable. " + " | ".join(errors[-3:]))
 
-    async def _complete_story_once(self, model: str, messages: list[dict[str, str]], streaming_callback=None, inspector_ctx: dict = None) -> str:
+    async def _complete_story_once(self, model: str, messages: list[dict[str, str]], streaming_callback=None, inspector_ctx: dict = None, reasoning_callback=None) -> dict[str, str]:
         kwargs = {"model": model, "messages": messages}
         if self._temperature is not None:
             kwargs["temperature"] = self._temperature
@@ -420,43 +489,68 @@ Return a JSON object with:
         ctx = inspector_ctx or {}
         cid = None
         if self.inspector:
-            cid = self.inspector.start_call(
+            cid = await self.inspector.start_call(
                 call_type=ctx.get("call_type", "storyteller"),
                 model=model,
                 step=ctx.get("step", "storyteller"),
                 module_source=ctx.get("module_source", ""),
                 streaming=bool(streaming_callback),
+                input_data=messages,
             )
 
         try:
             if streaming_callback:
                 kwargs["stream"] = True
+                kwargs.update(self._provider_route_kwargs(model))
                 extra = f"stream: True | max_tokens: {self._max_output_tokens}" if self._max_output_tokens is not None else "stream: True"
                 _llm_log_req("storyteller_stream", model, messages, extra)
                 response = await acompletion(**kwargs)
                 full_text = ""
+                full_reasoning = ""
+                usage = {}
                 async for chunk in response:
+                    # Some providers attach token usage to the final chunk.
+                    chunk_usage = getattr(chunk, 'usage', None)
+                    if chunk_usage:
+                        usage = chunk_usage.to_dict() if hasattr(chunk_usage, 'to_dict') else dict(chunk_usage)
+                    if not chunk.choices:
+                        continue
                     delta = chunk.choices[0].delta
                     content = getattr(delta, 'content', '')
+                    reasoning = getattr(delta, 'reasoning_content', '') or ''
+                    if reasoning:
+                        full_reasoning += reasoning
+                        if reasoning_callback:
+                            await reasoning_callback(reasoning)
                     if content:
                         full_text += content
                         await streaming_callback(content)
-                _llm_log_res("storyteller_stream", full_text)
+                full_text, full_reasoning = _split_think(full_text, full_reasoning)
+                _llm_log_res("storyteller_stream", full_text, usage or None)
                 if self.inspector and cid:
-                    await self.inspector.end_call(cid, messages, full_text)
-                return full_text
+                    await self.inspector.end_call(cid, messages, full_text,
+                                            usage.get("prompt_tokens", 0),
+                                            usage.get("completion_tokens", 0))
+                return {"content": full_text, "reasoning": full_reasoning, "model": model, "usage": usage}
 
-            result = await self.simple_completion(
+            # No inspector_ctx here: this call is already recorded above as the
+            # storyteller call, so passing ctx would create a duplicate record.
+            result, reasoning, usage = await self.simple_completion(
                 messages=messages,
                 model=model,
                 temperature=self._temperature,
                 top_p=self._top_p,
                 max_tokens=self._max_output_tokens,
-                inspector_ctx=ctx,
+                return_usage=True,
             )
+            result, reasoning = _split_think(result, reasoning)
+            if reasoning_callback and reasoning:
+                await reasoning_callback(reasoning)
             if self.inspector and cid:
-                await self.inspector.end_call(cid, messages, result)
-            return result
+                await self.inspector.end_call(cid, messages, result,
+                                        usage.get("prompt_tokens", 0),
+                                        usage.get("completion_tokens", 0))
+            return {"content": result, "reasoning": reasoning, "model": model, "usage": usage}
         except Exception as e:
             if self.inspector and cid:
                 await self.inspector.end_call(cid, messages, "", error=str(e))
@@ -474,6 +568,19 @@ Return a JSON object with:
         if marker in player_action:
             player_action = player_action.split(marker, 1)[1].strip().splitlines()[0].strip() or player_action
         return f"Mock outcome: {player_action} resolves without major lasting consequences."
+
+    def _mock_reasoning(self, messages: list[dict[str, str]]) -> str:
+        """Deterministic fake chain-of-thought so the collapsible thinking UI can be
+        exercised in mock mode without a reasoning-capable provider."""
+        player_action = "the player's action"
+        for message in reversed(messages):
+            if message.get("role") == "user":
+                player_action = (message.get("content", "").strip() or player_action)[:80]
+                break
+        return (
+            f"(mock reasoning) The player attempts: {player_action}. "
+            "Weighing plausible outcomes, narrative stakes, and continuity before narrating a measured result."
+        )
 
     def _mock_mutations(self, schema: dict) -> dict:
         mutations = {}

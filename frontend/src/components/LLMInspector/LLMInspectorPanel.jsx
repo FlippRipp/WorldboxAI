@@ -30,10 +30,15 @@ export default function LLMInspectorPanel() {
   }
 
   const panel = (
-    <div className="fixed inset-0 z-[9998] pointer-events-none">
+    <div className="fixed inset-0 z-[9998]">
+      {/* Dim backdrop — click to close */}
+      <div
+        className="absolute inset-0 bg-black/50"
+        onClick={() => setIsOpen(false)}
+      />
       <div
         ref={panelRef}
-        className="pointer-events-auto absolute top-0 right-0 h-full w-96 bg-gray-950 border-l border-gray-800 shadow-2xl flex flex-col"
+        className="absolute top-0 right-0 h-full w-1/2 min-w-[480px] bg-gray-950 border-l border-gray-800 shadow-2xl flex flex-col"
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800 shrink-0">
           <h2 className="text-sm font-semibold text-gray-200">

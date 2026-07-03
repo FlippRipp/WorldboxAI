@@ -1,29 +1,30 @@
-import React, { useMemo } from 'react';
+import { useMemo, useCallback } from 'react';
+import { renderMarkdown } from '../../lib/markdown';
 
-function simpleMarkdownToHtml(text) {
-  if (!text) return '';
-  let html = text
-    .replace(/"([^"]+)"/g, '<span class="text-quote">"$1"</span>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/`([^`]+)`/g, '<code class="bg-gray-700 px-1 py-0.5 rounded text-sm">$1</code>')
-    .replace(/^### (.+)$/gm, '<h4 class="text-base font-semibold mt-3 mb-1">$1</h4>')
-    .replace(/^## (.+)$/gm, '<h3 class="text-lg font-semibold mt-4 mb-2">$1</h3>')
-    .replace(/^# (.+)$/gm, '<h2 class="text-xl font-semibold mt-4 mb-2">$1</h2>')
-    .replace(/^- (.+)$/gm, '<li class="ml-4 list-disc">$1</li>')
-    .replace(/^\d+\. (.+)$/gm, '<li class="ml-4 list-decimal">$1</li>')
-    .replace(/\n\n/g, '</p><p class="mb-2">')
-    .replace(/\n/g, '<br/>');
+export default function MarkdownRenderer({ content, streaming = false }) {
+  const html = useMemo(() => renderMarkdown(content), [content]);
 
-  return `<p class="mb-2">${html}</p>`;
-}
-
-export default function MarkdownRenderer({ content }) {
-  const html = useMemo(() => simpleMarkdownToHtml(content), [content]);
+  // Copy buttons are rendered inside the sanitized HTML, so handle their
+  // clicks by delegation instead of wiring listeners into the DOM per render.
+  const onClick = useCallback((e) => {
+    const btn = e.target.closest('.code-copy');
+    if (!btn) return;
+    const code = btn.closest('.code-block')?.querySelector('code');
+    if (!code) return;
+    navigator.clipboard.writeText(code.innerText).then(() => {
+      btn.textContent = 'Copied';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.textContent = 'Copy';
+        btn.classList.remove('copied');
+      }, 1500);
+    });
+  }, []);
 
   return (
     <div
-      className="prose prose-invert prose-sm max-w-none"
+      className={`md-content max-w-none${streaming ? ' streaming-md' : ''}`}
+      onClick={onClick}
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );

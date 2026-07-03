@@ -20,7 +20,7 @@ ALLOWED_SETTING_TYPES = {"slider", "toggle", "select", "text"}
 VALID_CONSUME_KEYS = {"state", "module_data", "module_configs", "world_data"}
 VALID_PRODUCE_KEYS = {"module_data", "context_string", "messages"}
 VALID_STATE_KEYS = {
-    "input_text", "turn", "history", "chat_messages",
+    "input_text", "turn", "history", "chat_messages", "characters",
     "world_id", "player_location_node_id", "player_location_region",
     "player_location_layer_id", "revealed_node_ids",
     "current_context", "prompt_pipeline", "last_prompt_trace",
@@ -72,7 +72,7 @@ class ModuleRegistry:
         if not os.path.exists(manifest_path) or not os.path.exists(backend_path):
             return None
              
-        with open(manifest_path, 'r') as f:
+        with open(manifest_path, 'r', encoding='utf-8') as f:
             try:
                 manifest = json.load(f)
             except json.JSONDecodeError:
@@ -145,10 +145,36 @@ class ModuleRegistry:
                     "manifest": manifest,
                     "backend": module,
                     "path": mod_path,
+                    "router": self._extract_router(module, mod_name),
                 }
                 print(f"[Registry] Loaded module: {manifest.get('name', mod_name)}")
             except Exception as e:
                 logger.error(f"Failed to execute module {mod_name}: {e}")
+
+    def _extract_router(self, module, mod_name: str):
+        """Return a FastAPI APIRouter exposed by a module's backend, if any.
+
+        A module can own backend endpoints by exposing either a module-level
+        ``router`` attribute or a ``get_router()`` factory. The router is mounted
+        by the server under ``/api/modules/{mod_id}``.
+        """
+        router = None
+        factory = getattr(module, "get_router", None)
+        if callable(factory):
+            try:
+                router = factory()
+            except Exception as e:
+                logger.error(f"Module {mod_name} get_router() failed: {e}")
+                return None
+        else:
+            router = getattr(module, "router", None)
+        if router is None:
+            return None
+        # Duck-type check so registry stays import-light (no hard FastAPI dep).
+        if not hasattr(router, "routes"):
+            logger.error(f"Module {mod_name} exposed a non-router 'router'; ignoring.")
+            return None
+        return router
 
     def _validate_manifest(self, manifest: dict, mod_name: str):
         for field in ["id", "name", "version"]:
@@ -245,6 +271,17 @@ class ModuleRegistry:
             seen_mode_ids.add(mode_id)
             if not isinstance(mode_entry.get("label", ""), str):
                 raise ManifestValidationError(f"modes[{index}].label must be a string.")
+            screen = mode_entry.get("screen")
+            if screen is not None and (not isinstance(screen, str) or not screen.endswith(".jsx")):
+                raise ManifestValidationError(f"modes[{index}].screen must be a .jsx filename.")
+
+        storyteller_start = manifest.get("storyteller_start")
+        if storyteller_start is not None:
+            if not isinstance(storyteller_start, dict):
+                raise ManifestValidationError("storyteller_start must be an object.")
+            st_screen = storyteller_start.get("screen")
+            if not isinstance(st_screen, str) or not st_screen.endswith(".jsx"):
+                raise ManifestValidationError("storyteller_start.screen must be a .jsx filename.")
 
         character_creation = manifest.get("character_creation")
         if character_creation is not None:

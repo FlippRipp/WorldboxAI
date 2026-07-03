@@ -11,6 +11,10 @@ class WorldState(TypedDict):
     chat_messages: list[dict[str, str]] # UI chat stream with user and AI messages
     prompt_pipeline: list[dict[str, Any]] # Configurable prompt block array
     last_prompt_trace: list[dict[str, Any]] # Debug trace from the latest prompt compile
+    last_reasoning: Optional[str] # Model chain-of-thought for the latest storyteller output
+    last_model: Optional[str]    # Model that produced the latest storyteller output
+    last_usage: Optional[dict[str, Any]] # Token usage of the latest storyteller call, when the provider reported it
+    continue_prompt: Optional[str] # Instruction injected as the user turn on an empty ("continue") send
     turn: int                    # Current turn number
     veto_retries: int            # Count of rewrite attempts for current turn (0-3)
     veto_reason: Optional[str]   # Reason injected into Storyteller on rewrite

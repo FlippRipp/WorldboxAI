@@ -3,7 +3,7 @@ import SlotRenderer from '../Slots/SlotRenderer';
 
 export default function Header({
   modules, gameState, ws, session,
-  onOpenSettings, onOpenHealth, onOpenMemories,
+  onOpenSettings, onOpenHealth, onOpenMemories, onOpenCharacter,
   onBack
 }) {
   return (
@@ -34,12 +34,34 @@ export default function Header({
         </div>
 
         <div className="flex items-center gap-2">
+          {ws.postProcessing && (
+            <div
+              className="flex items-center gap-1.5 text-xs text-purple-300 px-2 py-1 rounded bg-purple-500/10 border border-purple-500/30"
+              title="The reader and librarian are processing this turn (memories, character updates, module hooks)."
+              aria-live="polite"
+            >
+              <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              <span className="hidden sm:inline">Processing…</span>
+            </div>
+          )}
+
           <SlotRenderer
             slotName="slot_header"
             modules={modules}
             state={gameState}
             config={gameState?.module_configs}
           />
+
+          <button
+            className="text-gray-400 hover:text-white px-3 py-2 text-sm border border-gray-700 rounded hover:border-purple-500 transition-colors"
+            onClick={onOpenCharacter}
+            aria-label="Open character view"
+          >
+            Character
+          </button>
 
           <button
             className="text-gray-400 hover:text-white px-3 py-2 text-sm border border-gray-700 rounded hover:border-purple-500 transition-colors"

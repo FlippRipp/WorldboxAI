@@ -40,11 +40,16 @@ async def _mock_engine_turn():
                 "turn": 0,
             }
 
-            result = await engine.app.ainvoke(state)
-            assert result["turn"] == 1
-            assert result["history"][-1].startswith("Mock outcome:")
-            assert result["module_data"]["wb_core_rpg"]["hp"] == 85
-            print("Mock engine turn test passed.")
+            try:
+                result = await engine.app.ainvoke(state)
+                assert result["turn"] == 1
+                assert result["history"][-1].startswith("Mock outcome:")
+                assert result["module_data"]["wb_core_rpg"]["hp"] == 85
+                print("Mock engine turn test passed.")
+            finally:
+                # Windows: the open SQLite handle would make the temp dir
+                # cleanup fail with PermissionError.
+                engine.close_memory()
     finally:
         set_env("LLM_MODE", previous_mode)
 
@@ -103,6 +108,7 @@ async def _storyteller_stream_failure_uses_non_stream_fallback():
 
     class Choice:
         message = Message()
+        finish_reason = "stop"
 
     class Response:
         choices = [Choice()]
@@ -128,7 +134,7 @@ async def _storyteller_stream_failure_uses_non_stream_fallback():
             streaming_callback=stream_token,
         )
 
-        assert story == "Fallback story completed."
+        assert story["content"] == "Fallback story completed."
         assert streamed_tokens == []
         print("Storyteller stream fallback test passed.")
     finally:

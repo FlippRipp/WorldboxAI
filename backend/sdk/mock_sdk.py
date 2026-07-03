@@ -1,4 +1,5 @@
 from backend.sdk.llm_bridge import LLMBridge
+from backend.sdk.memory_bridge import MemoryBridge
 
 
 class ValidationVeto(Exception):
@@ -11,10 +12,23 @@ class ValidationVeto(Exception):
 class WorldBoxUI:
     def __init__(self):
         self.on_token = None
+        self.on_reasoning_token = None
+        self.on_message_complete = None
 
     async def emit_token(self, token: str):
         if self.on_token:
             await self.on_token(token)
+
+    async def emit_reasoning_token(self, token: str):
+        if self.on_reasoning_token:
+            await self.on_reasoning_token(token)
+
+    async def emit_message_complete(self, content: str, reasoning: str = ""):
+        """Signal that the storyteller's narration is fully generated, so the
+        client can finalize the message immediately — before the reader agent
+        runs its (non-visible) mutation-extraction pass."""
+        if self.on_message_complete:
+            await self.on_message_complete(content, reasoning)
 
 class WorldBoxSDK:
     """Mock SDK for Phase 1/2/3 to satisfy module function signatures."""
@@ -24,6 +38,7 @@ class WorldBoxSDK:
         self.version = "1.0.0"
         self.ui = WorldBoxUI()
         self.llm = LLMBridge()
+        self.memory = MemoryBridge()
         self._session_state_ref = None
 
     def bind_session_state(self, state_ref):

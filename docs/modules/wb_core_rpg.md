@@ -71,15 +71,17 @@ Stored in `state["module_data"]["wb_core_rpg"]`:
 
 ## Action Feasibility
 
-Before the Storyteller generates narrative, the module injects an `<action_assessment>` block:
+Before the Storyteller generates narrative, a fast-model pre-assessment rates the player's action and injects an advisory `action_feasibility` block into the Storyteller prompt:
 
-1. The character's current stats and skills are listed
-2. The player's action text is presented
-3. The Storyteller is instructed to silently assess feasibility (1-10 rating) based on the character's capabilities
-4. The Storyteller narrates the outcome reflecting the rating — higher ratings mean easier success, lower ratings mean creative complications or failure
-5. The Storyteller includes a `[Feasibility: X/10]` marker and extracts skill usage into `skill_changes`
+1. The pre-assessment sees the character sheet, world rules/lore, **and the last two storyteller outputs** — so NPC dispositions and established story facts inform the rating (e.g. a bold ask to a bored, receptive NPC is judged against the NPC's disposition, not the player's stats).
+2. Feasibility is rated 1-10 against an explicit rubric: **1-2** = violates world rules or established facts (the only band where the attempt simply fails), **3-4** = far beyond current ability but not impossible, **5-6** = challenging, **7-8** = within demonstrated abilities, **9-10** = near-certain.
+3. Creative, novel approaches that fit the established fiction rate one band higher than blunt attempts — ambition is rewarded, contradiction of established facts is punished.
+4. The suggested outcome **fails forward**: scores of 3-6 produce partial success or success-at-a-cost, never a flat refusal; even 1-2 failures describe why in world terms and how the world reacts.
+5. The injected block is explicitly advisory — the Storyteller honors the difficulty but adapts specifics to the living scene, and never resolves a non-impossible action as a dead end.
 
-This approach uses the existing Storyteller LLM call (no extra API cost) and keeps the assessment narrative-aware rather than mechanical.
+The `action_rating_strictness` slider (1-10) shifts judgment within the rubric: 1-3 is cinematic (favor the player, rule-of-cool), 4-6 balanced, 7-10 simulationist. Strictness never turns a merely unlikely action into a 1-2.
+
+Only substantive actions are assessed: pure dialog with nothing at stake or trivial everyday actions (standing up, looking around, etc.) are skipped entirely — no feasibility rating or suggested outcome is generated or injected for that turn. Social *attempts* with a contested outcome (persuading, proposing, deceiving, intimidating) are substantive and are assessed.
 
 ## Pipeline Hooks
 

@@ -3,22 +3,6 @@ import SlotRenderer from '../Slots/SlotRenderer';
 
 export default function Sidebar({ session, modules, gameState }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [showConfirmUndo, setShowConfirmUndo] = useState(false);
-
-  const handleUndoClick = () => {
-    if (!session.sessionState || session.sessionState.turn <= 0) return;
-    setShowConfirmUndo(true);
-  };
-
-  const handleUndoConfirm = async () => {
-    const targetTurn = session.sessionState.turn - 1;
-    try {
-      await session.undoTurn(targetTurn);
-    } catch (e) {
-      alert(`Failed to undo: ${e.message}`);
-    }
-    setShowConfirmUndo(false);
-  };
 
   const sidebarContent = (
     <div className="flex flex-col h-full p-4 gap-4 overflow-y-auto">
@@ -37,10 +21,6 @@ export default function Sidebar({ session, modules, gameState }) {
           <span className="text-gray-500">Turn</span>
           <span className="text-gray-200 font-mono">{session.sessionState?.turn ?? 0}</span>
         </div>
-
-        <button onClick={handleUndoClick} disabled={!session.sessionState || session.sessionState.turn <= 0} className="w-full bg-gray-700 hover:bg-gray-600 disabled:opacity-50 rounded px-2 py-1 transition-colors">
-          Undo
-        </button>
       </div>
 
       <SlotRenderer
@@ -90,26 +70,6 @@ export default function Sidebar({ session, modules, gameState }) {
               </button>
             </div>
             {sidebarContent}
-          </div>
-        </div>
-      )}
-
-      {/* Undo confirmation dialog */}
-      {showConfirmUndo && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" role="dialog" aria-modal="true">
-          <div className="bg-gray-800 rounded-xl p-6 max-w-sm w-full mx-4 shadow-2xl">
-            <h3 className="text-lg font-semibold mb-2">Undo Turn</h3>
-            <p className="text-gray-300 text-sm mb-6">
-              Revert to turn {session.sessionState.turn - 1}? This will discard all turns after this point.
-            </p>
-            <div className="flex justify-end gap-3">
-              <button onClick={() => setShowConfirmUndo(false)} className="px-4 py-2 text-sm rounded-lg bg-gray-700 hover:bg-gray-600 transition-colors">
-                Cancel
-              </button>
-              <button onClick={handleUndoConfirm} className="px-4 py-2 text-sm rounded-lg bg-red-600 hover:bg-red-500 text-white transition-colors">
-                Undo
-              </button>
-            </div>
           </div>
         </div>
       )}

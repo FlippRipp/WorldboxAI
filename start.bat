@@ -103,8 +103,12 @@ echo.
 :: ── Start frontend in foreground ──
 echo [2/2] Starting React Frontend (Vite)...
 echo.
-echo ==== Open http://localhost:5173 in your browser ====
-echo ==== Press Ctrl+C to stop both servers           ====
+echo ==== Open http://localhost:5173 in your browser        ====
+echo ==== On the same network, other devices can connect at: ====
+for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /c:"IPv4"') do (
+    for /f "tokens=* delims= " %%b in ("%%a") do echo ====   http://%%b:5173
+)
+echo ==== Press Ctrl+C to stop both servers                  ====
 echo.
 
 cd frontend
