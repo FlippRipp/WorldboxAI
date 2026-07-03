@@ -1,8 +1,9 @@
 """Probe widget endpoints on the running server."""
+import os
 import urllib.request
 import sys
 
-BASE = "http://localhost:8000"
+BASE = "http://localhost:%s" % os.environ.get("WB_PORT", "8321")
 modules = [
     ("wb_core_rpg", "widget.jsx"),
     ("wb_core_rpg", "widget_settings.jsx"),

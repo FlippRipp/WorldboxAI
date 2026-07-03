@@ -3,6 +3,10 @@
 set -u
 cd "$(dirname "$0")"
 
+# Backend port; exported so main.py and the Vite proxy pick it up.
+WB_PORT="${WB_PORT:-8321}"
+export WB_PORT
+
 echo "=============================================="
 echo "      WorldBox AI RPG Engine - Startup"
 echo "=============================================="
@@ -116,7 +120,7 @@ trap cleanup EXIT
 
 # ── Delete stale PID file, start backend in background ──
 rm -f .backend_pid.tmp
-echo "[1/2] Starting Python Backend (port 8000)..."
+echo "[1/2] Starting Python Backend (port $WB_PORT)..."
 "$PY" main.py > "$BACKEND_LOG" 2>&1 &
 
 # ── Wait for backend to write its PID file ──
@@ -134,7 +138,7 @@ done
 # ── Wait for backend health endpoint ──
 echo "Waiting for backend to be ready..."
 health_ok() {
-    "$PY" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)" >/dev/null 2>&1
+    "$PY" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:$WB_PORT/api/health', timeout=2)" >/dev/null 2>&1
 }
 RETRIES=0
 until health_ok; do
@@ -151,8 +155,9 @@ until health_ok; do
 done
 
 "$PY" - <<'EOF'
-import json, urllib.request
-h = json.load(urllib.request.urlopen("http://127.0.0.1:8000/api/health", timeout=5))
+import json, os, urllib.request
+port = os.environ.get("WB_PORT", "8321")
+h = json.load(urllib.request.urlopen("http://127.0.0.1:%s/api/health" % port, timeout=5))
 print("  Mode: " + str(h.get("llm_mode")))
 print("  Modules: " + str(len(h.get("modules", []))))
 print("  Memory: " + str(h.get("memory", {}).get("status")))

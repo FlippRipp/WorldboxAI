@@ -15,6 +15,9 @@ if /i not "%~f0"=="%TEMP%\worldbox_start.bat" (
 cd /d "%WORLDBOX_DIR%"
 title WorldBox
 
+:: Backend port; inherited by main.py and the Vite proxy.
+if not defined WB_PORT set WB_PORT=8321
+
 echo ==============================================
 echo       WorldBox AI RPG Engine - Startup
 echo ==============================================
@@ -101,7 +104,7 @@ if "%NEED_NPM_INSTALL%"=="1" (
 del .backend_pid.tmp >nul 2>&1
 
 :: ── Start backend in background (same console) ──
-echo [1/2] Starting Python Backend (port 8000)...
+echo [1/2] Starting Python Backend (port %WB_PORT%)...
 set BACKEND_LOG=backend_output.log
 start /b "" ".\venv\Scripts\python.exe" main.py > %BACKEND_LOG% 2>&1
 
@@ -125,9 +128,9 @@ echo Waiting for backend to be ready...
 
 set RETRIES=0
 :wait_backend
-powershell -Command "try { Invoke-WebRequest http://127.0.0.1:8000/api/health -TimeoutSec 2 -UseBasicParsing | Out-Null; exit 0 } catch { exit 1 }" >nul 2>&1
+powershell -Command "try { Invoke-WebRequest http://127.0.0.1:%WB_PORT%/api/health -TimeoutSec 2 -UseBasicParsing | Out-Null; exit 0 } catch { exit 1 }" >nul 2>&1
 if not errorlevel 1 (
-    powershell -Command "$h = Invoke-RestMethod http://127.0.0.1:8000/api/health; Write-Host ('  Mode: ' + $h.llm_mode); Write-Host ('  Modules: ' + $h.modules.Count); Write-Host ('  Memory: ' + $h.memory.status)"
+    powershell -Command "$h = Invoke-RestMethod http://127.0.0.1:%WB_PORT%/api/health; Write-Host ('  Mode: ' + $h.llm_mode); Write-Host ('  Modules: ' + $h.modules.Count); Write-Host ('  Memory: ' + $h.memory.status)"
     goto backend_ready
 )
 

@@ -1,10 +1,13 @@
 import asyncio
+import os
 import websockets
 import json
 import urllib.request
 
+PORT = os.environ.get("WB_PORT", "8321")
+
 async def test_websocket():
-    uri = "ws://localhost:8000/ws/chat"
+    uri = f"ws://localhost:{PORT}/ws/chat"
     try:
         async with websockets.connect(uri) as websocket:
             print("Connected to WebSocket.")
@@ -31,7 +34,7 @@ async def test_websocket():
         print(f"WebSocket error: {e}")
 
 def test_asset_mount():
-    url = "http://localhost:8000/assets/wb_core_combat/test_image.png"
+    url = f"http://localhost:{PORT}/assets/wb_core_combat/test_image.png"
     print(f"\nTesting Asset Mount: {url}")
     try:
         response = urllib.request.urlopen(url)

@@ -54,7 +54,9 @@ Start the backend:
 python main.py
 ```
 
-The backend listens on `http://127.0.0.1:8000`.
+The backend listens on `http://127.0.0.1:8321` (set the `WB_PORT`
+environment variable to change it; the default avoids port 8000, which
+SillyTavern and other tools commonly occupy).
 
 ## Frontend Setup
 
@@ -88,7 +90,7 @@ This starts the backend and frontend in separate terminal windows.
 When the backend is running, open:
 
 ```text
-http://127.0.0.1:8000/api/health
+http://127.0.0.1:8321/api/health
 ```
 
 The health response reports:

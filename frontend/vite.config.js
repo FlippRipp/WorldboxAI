@@ -3,10 +3,11 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/postcss'
 
 export default defineConfig(({ mode }) => {
-  // Backend origin is overridable (e.g. WB_BACKEND=http://localhost:8001 in
-  // .env.<mode>) so a second dev stack can run beside the default one.
+  // Backend origin follows WB_PORT (default kept in sync with main.py).
+  // WB_BACKEND overrides the whole origin (e.g. in .env.<mode>) so a second
+  // dev stack can run beside the default one.
   const env = loadEnv(mode, __dirname, '')
-  const backend = env.WB_BACKEND || 'http://localhost:8000'
+  const backend = env.WB_BACKEND || `http://localhost:${env.WB_PORT || 8321}`
   const backendWs = backend.replace(/^http/, 'ws')
 
   return {

@@ -125,10 +125,10 @@ npm run dev
 ```
 
 Then open **http://localhost:5173** in Chrome/Firefox on the phone. The Vite
-dev server proxies `/api` and `/ws` to the backend on port 8000, so nothing
+dev server proxies `/api` and `/ws` to the backend on port 8321, so nothing
 else needs configuring.
 
-Health check: http://localhost:8000/api/health
+Health check: http://localhost:8321/api/health
 
 ### Alternative: single terminal with tmux
 
@@ -236,7 +236,7 @@ phantom process killer) — it applies here too.
    ```
 
    Open **http://localhost:5173** in the phone's browser.
-   Health check: http://localhost:8000/api/health
+   Health check: http://localhost:8321/api/health
 
 ---
 

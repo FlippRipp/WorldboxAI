@@ -19,4 +19,6 @@ if __name__ == "__main__":
         f.write(str(os.getpid()))
 
     print(f"Starting WorldBox API Server (reload={reload})...")
-    uvicorn.run("backend.api.server:app", host="127.0.0.1", port=8000, reload=reload)
+    # 8321 by default: 8000 collides with SillyTavern and friends.
+    port = int(os.environ.get("WB_PORT", "8321"))
+    uvicorn.run("backend.api.server:app", host="127.0.0.1", port=port, reload=reload)
