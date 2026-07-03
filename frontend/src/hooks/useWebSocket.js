@@ -24,6 +24,9 @@ export function useWebSocket(onStateChange, onLLMCall) {
   // server-side, i.e. after the narration streamed (`message_complete`) but
   // before the turn fully resolves (`done`/`error`).
   const [postProcessing, setPostProcessing] = useState(false);
+  // Latest pipeline stage reported by the server ({ stage, label } or null),
+  // e.g. "Recalling memories…" / "Updating the world…". Purely informational.
+  const [pipelineStatus, setPipelineStatus] = useState(null);
   const [messages, setMessages] = useState([]);
   const [swipes, setSwipes] = useState(null);
   // Set when the user stops a turn: the discarded input, so the composer can
@@ -78,6 +81,7 @@ export function useWebSocket(onStateChange, onLLMCall) {
           setCurrentStream(null);
           setCurrentReasoning(null);
           setPostProcessing(false);
+          setPipelineStatus(null);
           streamRef.current = '';
           reasoningRef.current = '';
           ws.send(JSON.stringify({ action: 'sync' }));
@@ -116,12 +120,17 @@ export function useWebSocket(onStateChange, onLLMCall) {
         if (streamed) {
           setMessages(msgs => [...msgs, { role: 'assistant', content: streamed, reasoning }]);
         }
+      } else if (data.type === 'status') {
+        // Pipeline stage update (gather_context / storyteller / reader /
+        // librarian). Shown as a live status line while the turn runs.
+        setPipelineStatus({ stage: data.stage, label: data.label });
       } else if (data.type === 'done') {
         cancelFlush();
         const streamed = streamRef.current;
         setCurrentStream(null);
         setCurrentReasoning(null);
         setPostProcessing(false);
+        setPipelineStatus(null);
         streamRef.current = '';
         reasoningRef.current = '';
         // Rebuild the transcript from authoritative server state so regenerate,
@@ -142,6 +151,7 @@ export function useWebSocket(onStateChange, onLLMCall) {
         setCurrentStream(null);
         setCurrentReasoning(null);
         setPostProcessing(false);
+        setPipelineStatus(null);
         streamRef.current = '';
         reasoningRef.current = '';
         const chatMsgs = data.state?.chat_messages;
@@ -156,6 +166,7 @@ export function useWebSocket(onStateChange, onLLMCall) {
         setCurrentStream(null);
         setCurrentReasoning(null);
         setPostProcessing(false);
+        setPipelineStatus(null);
         streamRef.current = '';
         reasoningRef.current = '';
         setMessages(prev => [...prev, { role: 'system', content: data.message || 'Turn failed.', error: true }]);
@@ -191,6 +202,7 @@ export function useWebSocket(onStateChange, onLLMCall) {
     cancelFlush();
     setCurrentStream('');
     setCurrentReasoning('');
+    setPipelineStatus(null);
     streamRef.current = '';
     reasoningRef.current = '';
   }, [cancelFlush]);
@@ -261,7 +273,7 @@ export function useWebSocket(onStateChange, onLLMCall) {
   }, [connect, cancelFlush]);
 
   return {
-    isConnected, isReconnecting, messages, currentStream, currentReasoning, swipes, postProcessing, restoredInput,
+    isConnected, isReconnecting, messages, currentStream, currentReasoning, swipes, postProcessing, pipelineStatus, restoredInput,
     sendMessage, sendRegenerate, sendContinue, sendIntro, sendStop, setMessages, setSwipes, applyServerState,
   };
 }

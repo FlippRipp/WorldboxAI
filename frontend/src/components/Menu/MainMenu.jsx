@@ -1,5 +1,6 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '../../lib/api';
+import FirstRunSetup from './FirstRunSetup';
 
 const CORE_MODES = [
   {
@@ -35,9 +36,18 @@ const CORE_MODES = [
 ];
 
 export default function MainMenu({ onSelectMode, modules, onModulesLoaded }) {
+  // First-run detection: no provider has an API key (config or .env) and the
+  // backend isn't in mock mode -> show the guided setup card. "Skip for now"
+  // hides it until the next visit to the menu.
+  const [needsSetup, setNeedsSetup] = useState(false);
+  const [setupDismissed, setSetupDismissed] = useState(false);
+
   useEffect(() => {
     api.getModules()
       .then(data => onModulesLoaded?.(data.modules || []))
+      .catch(() => {});
+    api.getHealth()
+      .then(health => setNeedsSetup(health.status === 'missing_api_key'))
       .catch(() => {});
   }, []);
 
@@ -63,6 +73,13 @@ export default function MainMenu({ onSelectMode, modules, onModulesLoaded }) {
           AI-driven roleplaying engine
         </p>
       </div>
+
+      {needsSetup && !setupDismissed && (
+        <FirstRunSetup
+          onDone={() => setNeedsSetup(false)}
+          onDismiss={() => setSetupDismissed(true)}
+        />
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 max-w-4xl w-full">
         {allModes.map(mode => (

@@ -771,10 +771,10 @@ async def health_check():
 
     providers_status = {}
     for p in provider_manager.get_all():
-        config = provider_manager.get_config(p["id"])
         providers_status[p["id"]] = {
             "active": p["active"],
-            "api_key_set": bool(config.get("api_key", "")),
+            # Counts keys from the provider config *or* its env var (.env).
+            "api_key_set": provider_manager.has_api_key(p["id"]),
         }
 
     has_provider = (
@@ -1048,9 +1048,13 @@ async def websocket_endpoint(websocket: WebSocket):
             "reasoning": reasoning,
         })
 
+    async def stream_status(stage: str, label: str):
+        await websocket.send_json({"type": "status", "stage": stage, "label": label})
+
     engine.sdk.ui.on_token = stream_token
     engine.sdk.ui.on_reasoning_token = stream_reasoning
     engine.sdk.ui.on_message_complete = stream_message_complete
+    engine.sdk.ui.on_status = stream_status
 
     async def broadcast_inspector_call(record):
         try:

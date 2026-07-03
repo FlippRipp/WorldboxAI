@@ -14,6 +14,7 @@ class WorldBoxUI:
         self.on_token = None
         self.on_reasoning_token = None
         self.on_message_complete = None
+        self.on_status = None
 
     async def emit_token(self, token: str):
         if self.on_token:
@@ -22,6 +23,16 @@ class WorldBoxUI:
     async def emit_reasoning_token(self, token: str):
         if self.on_reasoning_token:
             await self.on_reasoning_token(token)
+
+    async def emit_status(self, stage: str, label: str):
+        """Tell the client which pipeline stage is running so the wait between
+        narration and turn completion isn't a silent dead zone. Best-effort:
+        status is cosmetic, so failures must never break a turn."""
+        if self.on_status:
+            try:
+                await self.on_status(stage, label)
+            except Exception:
+                pass
 
     async def emit_message_complete(self, content: str, reasoning: str = ""):
         """Signal that the storyteller's narration is fully generated, so the

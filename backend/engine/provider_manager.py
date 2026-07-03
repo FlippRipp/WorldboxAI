@@ -137,6 +137,16 @@ class ProviderManager:
                     config[field] = new_val
         return config
 
+    def has_api_key(self, provider_id: str) -> bool:
+        """True if a key exists in the provider config or its environment
+        variable (e.g. set via backend/.env)."""
+        if provider_id not in PROVIDERS:
+            return False
+        if self.get_config(provider_id).get("api_key", ""):
+            return True
+        env_var = PROVIDERS[provider_id]["fields"].get("api_key", {}).get("env_var", "")
+        return bool(env_var and os.getenv(env_var, ""))
+
     async def test_connection(self, provider_id: str) -> dict:
         if provider_id not in PROVIDERS:
             raise ValueError(f"Unknown provider: {provider_id}")
@@ -145,7 +155,11 @@ class ProviderManager:
             config = self.get_effective_config(provider_id)
             api_key = config.get("api_key", "")
             if not api_key:
+                env_var = PROVIDERS[provider_id]["fields"].get("api_key", {}).get("env_var", "")
+                api_key = os.getenv(env_var, "") if env_var else ""
+            if not api_key:
                 return {"success": False, "error": "No API key configured"}
+            self._apply_api_keys(provider_id, config)
 
             test_model = config.get("reader_model") or config.get("storyteller_model", "")
             if not test_model:

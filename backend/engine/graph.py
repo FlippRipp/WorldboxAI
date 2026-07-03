@@ -438,6 +438,7 @@ class EngineGraph:
 
     async def gather_context_node(self, state: WorldState):
         print("\n[Node: Gather Context] Collecting data from modules...")
+        await self.sdk.ui.emit_status("gather_context", "Recalling memories…")
         gathered_context = []
 
         await self._ensure_memory()
@@ -523,6 +524,11 @@ class EngineGraph:
         needs_rewrite = state.get("needs_rewrite", False)
         veto_retries = state.get("veto_retries", 0)
 
+        await self.sdk.ui.emit_status(
+            "storyteller",
+            "Rewriting the response…" if needs_rewrite else "Writing the story…",
+        )
+
         if needs_rewrite and veto_retries < VETO_MAX_RETRIES:
             veto_reason = state.get("veto_reason", "Unknown validation failure")
             print(f"[Node: Storyteller] REWRITE attempt {veto_retries + 1}/{VETO_MAX_RETRIES}: {veto_reason[:100]}")
@@ -561,10 +567,14 @@ class EngineGraph:
             result["needs_rewrite"] = False
             result["veto_reason"] = None
 
-        # Dispatch on_validate_output to all modules in parallel
+        # Dispatch on_validate_output to all active modules in parallel
         validate_tasks = {}
         merged_state = self._deep_merge(state, result)
+        validate_active = merged_state.get("module_configs", {}).get("__active_modules__")
+        validate_active_set = set(validate_active) if isinstance(validate_active, list) else None
         for mod_id, mod_data in self.registry.get_modules().items():
+            if validate_active_set is not None and mod_id not in validate_active_set:
+                continue
             backend = mod_data["backend"]
             if hasattr(backend, "on_validate_output"):
                 module_state = self._build_module_state(merged_state, mod_id, mod_data["manifest"].get("consumes", {}))
@@ -607,7 +617,11 @@ class EngineGraph:
     async def _module_prompt_blocks(self, state: WorldState) -> list[dict]:
         blocks = []
 
+        blocks_active = state.get("module_configs", {}).get("__active_modules__")
+        blocks_active_set = set(blocks_active) if isinstance(blocks_active, list) else None
         for mod_id, mod_data in self.registry.get_modules().items():
+            if blocks_active_set is not None and mod_id not in blocks_active_set:
+                continue
             for manifest_block in mod_data["manifest"].get("prompt_blocks", []):
                 block = deepcopy(manifest_block)
                 local_block_id = block["id"]
@@ -680,19 +694,23 @@ class EngineGraph:
 
     async def reader_node(self, state: WorldState):
         print("\n[Node: Reader] Parsing story output for state mutations...")
-        
+        await self.sdk.ui.emit_status("reader", "Updating the world…")
+
         latest_story = state["history"][-1]
         
+        reader_active = state.get("module_configs", {}).get("__active_modules__")
+        reader_active_set = set(reader_active) if isinstance(reader_active, list) else None
+
         schema = {}
         for mod_id, mod_data in self.registry.get_modules().items():
+            if reader_active_set is not None and mod_id not in reader_active_set:
+                continue
             mutation_schema = mod_data["manifest"].get("mutation_schema", {})
             if mutation_schema:
                 schema[mod_id] = mutation_schema
 
         # Modules may offer a dynamic mutation schema (e.g. wb_worldgen movement,
         # whose options depend on the loaded world). Respect the active set.
-        reader_active = state.get("module_configs", {}).get("__active_modules__")
-        reader_active_set = set(reader_active) if isinstance(reader_active, list) else None
         for mod_id, mod_data in self.registry.get_modules().items():
             if reader_active_set is not None and mod_id not in reader_active_set:
                 continue
@@ -747,8 +765,9 @@ class EngineGraph:
         return self._deep_merge(state_update, {"current_context": [], "input_text": "", "turn": turn})
 
     async def librarian_node(self, state: WorldState):
+        await self.sdk.ui.emit_status("librarian", "Recording memories…")
         await self._ensure_memory()
-        
+
         turn = state.get("turn", 1)
         history = state.get("history", [])
         result = {}

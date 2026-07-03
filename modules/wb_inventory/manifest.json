@@ -1,0 +1,79 @@
+{
+  "id": "wb_inventory",
+  "name": "Inventory & Economy",
+  "version": "1.0.0",
+  "icon": "🎒",
+  "description": "Tracks the player's items and money. The reader records gains and losses each turn, the storyteller sees what the player carries, and narration that spends money or items the player doesn't have gets rewritten.",
+  "dependencies": [],
+  "consumes": {
+    "state": ["input_text", "turn", "history", "veto_retries"],
+    "module_data": [],
+    "module_configs": [],
+    "world_data": false
+  },
+  "produces": {
+    "module_data": true,
+    "context_string": false,
+    "messages": true
+  },
+  "ui_slots": ["slot_sidebar"],
+  "settings_schema": {
+    "starting_currency": {
+      "type": "slider",
+      "min": 0,
+      "max": 500,
+      "default": 25,
+      "label": "Starting Currency",
+      "category": "Inventory"
+    },
+    "currency_name": {
+      "type": "text",
+      "default": "gold",
+      "label": "Currency Name",
+      "category": "Inventory"
+    },
+    "enforcement_enabled": {
+      "type": "toggle",
+      "default": true,
+      "label": "Enforce Inventory Consistency",
+      "category": "Inventory",
+      "description": "Veto narration where the player spends currency or uses significant items they don't have. Costs one extra fast LLM call on suspicious turns and may trigger a single storyteller rewrite."
+    },
+    "enforcement_ai_model": {
+      "type": "select",
+      "options": [
+        {"value": "fastest", "label": "Fastest (cheapest)"},
+        {"value": "balanced", "label": "Balanced"}
+      ],
+      "default": "fastest",
+      "label": "Enforcement Model",
+      "category": "Inventory"
+    }
+  },
+  "commands": {
+    "/inventory": "on_command_inventory",
+    "/inv": "on_command_inventory"
+  },
+  "mutation_schema": {
+    "items_gained": "array of {name: str, qty: int, description: str (short, optional), tags: [str] (optional)} — items the PLAYER acquired in the narration (picked up, bought, was given, crafted, looted). Empty array if none.",
+    "items_lost": "array of {name: str, qty: int} — items the player lost, consumed, sold, gave away, or had destroyed. Empty array if none.",
+    "currency_change": "integer — net change to the player's money (positive for earnings/loot, negative for spending). Use 0 if no money changed hands."
+  },
+  "prompt_blocks": [
+    {
+      "id": "inventory_context",
+      "type": "module_prompt",
+      "enabled": true,
+      "role_type": "system",
+      "placement": "system_relative",
+      "depth": null,
+      "config": {}
+    }
+  ],
+  "character_creation": {
+    "default_state": {
+      "items": [],
+      "currency": 25
+    }
+  }
+}

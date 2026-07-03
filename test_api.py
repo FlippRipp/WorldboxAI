@@ -71,6 +71,7 @@ def test_websocket_mock_turn_returns_done_state(tmp_path, monkeypatch):
         websocket.send_json({"text": "I test the websocket turn."})
 
         received_done = None
+        status_stages = []
         for _ in range(64):
             message = websocket.receive_json()
             if message["type"] == "done":
@@ -79,9 +80,15 @@ def test_websocket_mock_turn_returns_done_state(tmp_path, monkeypatch):
             assert message["type"] != "error", f"turn failed: {message.get('detail')}"
             if message["type"] == "llm_call":
                 continue
+            if message["type"] == "status":
+                assert message["label"]
+                status_stages.append(message["stage"])
+                continue
             assert message["type"] in ("token", "reasoning_token", "message_complete")
 
     assert received_done is not None
+    # Each pipeline node reports itself so the client can show progress.
+    assert status_stages == ["gather_context", "storyteller", "reader", "librarian"]
     state = received_done["state"]
     assert state["turn"] == 1
     assert state["chat_messages"][-2]["role"] == "user"

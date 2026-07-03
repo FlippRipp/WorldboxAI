@@ -386,6 +386,8 @@ function AppContent() {
             currentReasoning={ws.currentReasoning}
             swipes={ws.swipes}
             busy={ws.currentStream != null || ws.postProcessing}
+            postProcessing={ws.postProcessing}
+            pipelineStatus={ws.pipelineStatus}
             editRequest={editRequest}
             currentTurn={gameState.turn ?? null}
             density={density}

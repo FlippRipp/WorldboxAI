@@ -293,7 +293,7 @@ function MessageBlock({ message, index, isLastAssistant, swipes, busy, editReque
   );
 }
 
-function StreamingBlock({ content, reasoning }) {
+function StreamingBlock({ content, reasoning, status }) {
   if (content == null && !reasoning) return null;
 
   return (
@@ -305,7 +305,7 @@ function StreamingBlock({ content, reasoning }) {
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" />
             <span className="relative inline-flex rounded-full h-2 w-2 bg-purple-500" />
           </span>
-          <span className="text-xs text-gray-500 animate-pulse">AI is writing...</span>
+          <span className="text-xs text-gray-500 animate-pulse">{status?.label || 'AI is writing…'}</span>
         </div>
         <div className="text-lg leading-relaxed">
           <MarkdownRenderer content={content || ''} streaming />
@@ -315,7 +315,22 @@ function StreamingBlock({ content, reasoning }) {
   );
 }
 
-export function ChatFeed({ messages, currentStream, currentReasoning, swipes, busy, editRequest, currentTurn, density = 'comfortable', scrollControlRef, onUserScroll, onBranchMessage, onRegenerate, onSwipe, onEditMessage, onDeleteMessage }) {
+// Shown after the narration finishes but before the turn resolves, while the
+// reader/librarian run server-side. Previously this window was a silent
+// blocked-input dead zone.
+function PostProcessingLine({ status }) {
+  return (
+    <div className="max-w-[720px] mx-auto px-8 py-3 flex items-center gap-2">
+      <span className="relative flex h-2 w-2">
+        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" />
+        <span className="relative inline-flex rounded-full h-2 w-2 bg-purple-500" />
+      </span>
+      <span className="text-xs text-gray-500 animate-pulse">{status?.label || 'Finishing up…'}</span>
+    </div>
+  );
+}
+
+export function ChatFeed({ messages, currentStream, currentReasoning, swipes, busy, postProcessing, pipelineStatus, editRequest, currentTurn, density = 'comfortable', scrollControlRef, onUserScroll, onBranchMessage, onRegenerate, onSwipe, onEditMessage, onDeleteMessage }) {
   // Auto-scroll the feed as messages/tokens grow, but only while the user is at
   // the bottom; scrolling up cancels it until they return to the bottom.
   const feed = useStickToBottom([messages, currentStream, currentReasoning], { onUserScroll });
@@ -405,7 +420,9 @@ export function ChatFeed({ messages, currentStream, currentReasoning, swipes, bu
           />
         ))}
 
-        <StreamingBlock content={currentStream} reasoning={currentReasoning} />
+        <StreamingBlock content={currentStream} reasoning={currentReasoning} status={pipelineStatus} />
+
+        {postProcessing && !streaming && <PostProcessingLine status={pipelineStatus} />}
       </div>
 
       {!feed.pinned && !isEmpty && (

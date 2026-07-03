@@ -7,6 +7,13 @@
       "runtimeArgs": ["run", "dev", "--prefix", "frontend", "--", "--port", "5174", "--strictPort"],
       "port": 5174,
       "autoPort": false
+    },
+    {
+      "name": "frontend-verify",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "frontend", "--", "--port", "5175", "--strictPort", "--mode", "verify"],
+      "port": 5175,
+      "autoPort": false
     }
   ]
 }
