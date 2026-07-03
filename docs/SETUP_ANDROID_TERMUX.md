@@ -130,6 +130,11 @@ else needs configuring.
 
 Health check: http://localhost:8321/api/health
 
+**Install as an app:** in Chrome, ⋮ menu → **Install app** gives a standalone
+window (no URL bar) with a launcher icon. This only works on `localhost` —
+browsing from another device via a LAN IP (`http://192.168.x.x:5173`) is not a
+secure context, so Chrome won't offer the install there.
+
 ### Alternative: single terminal with tmux
 
 ```bash
