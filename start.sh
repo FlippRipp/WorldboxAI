@@ -51,10 +51,17 @@ install_python_deps() {
     if [ "$IS_ANDROID" = "1" ]; then
         # No Android builds exist for sqlite-vec (bundled in vendor/) or
         # numba (worldgen falls back to numpy). TUR provides prebuilt
-        # wheels for the heavy packages.
+        # wheels for the heavy packages; --prefer-binary stops pip from
+        # picking a newer source-only release over a TUR wheel, which
+        # would mean an hours-long (or failing) on-device compile.
+        if ! "$PY" -c "import numpy" >/dev/null 2>&1; then
+            echo "[HINT] 'pkg install python-numpy python-scipy python-pillow'"
+            echo "       installs the heavy packages prebuilt in seconds;"
+            echo "       pip may otherwise try to compile them from source."
+        fi
         REQ_TMP=$(mktemp)
         grep -vE '^(sqlite-vec|numba)' requirements.txt > "$REQ_TMP"
-        "$PY" -m pip install \
+        "$PY" -m pip install --prefer-binary \
             --extra-index-url https://termux-user-repository.github.io/pypi/ \
             -r "$REQ_TMP"
         rm -f "$REQ_TMP"
