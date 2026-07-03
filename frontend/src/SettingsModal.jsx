@@ -232,14 +232,15 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
   const hasModuleSettings = modules.some(mod => Object.keys(mod.settings_schema || {}).length > 0);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" role="dialog" aria-modal="true">
-      <div className="bg-gray-800 w-full max-w-2xl rounded-lg shadow-2xl border border-gray-700 flex flex-col max-h-[85vh]">
-        <div className="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900 rounded-t-lg">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 sm:p-4" role="dialog" aria-modal="true">
+      {/* Full-height sheet on phones, centered card on larger screens. */}
+      <div className="bg-gray-800 w-full max-w-2xl sm:rounded-lg shadow-2xl border border-gray-700 flex flex-col h-full sm:h-auto sm:max-h-[85vh]">
+        <div className="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900 sm:rounded-t-lg">
           <h2 className="text-xl font-bold text-gray-100">{isGlobal ? 'Model Settings' : 'Settings'}</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-white text-2xl leading-none" aria-label="Close settings">&times;</button>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
           {loading && (
             <div className="text-center text-gray-400 italic py-8 animate-pulse">Loading settings...</div>
           )}
@@ -320,7 +321,7 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
           )}
         </div>
 
-        <div className="p-4 border-t border-gray-700 bg-gray-900 rounded-b-lg flex justify-end">
+        <div className="p-4 border-t border-gray-700 bg-gray-900 sm:rounded-b-lg flex justify-end">
           <button
             onClick={handleSave}
             className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-medium transition-colors"

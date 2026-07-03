@@ -436,11 +436,11 @@ export default function ModelSettings({ onBack, embedded = false }) {
                     <div key={slot.key}>
                       <label className="text-sm text-gray-300">{slot.label}</label>
                       {fdef.description && <p className="text-xs text-gray-500 mb-1">{fdef.description}</p>}
-                      <div className="flex gap-2">
+                      <div className="flex flex-col sm:flex-row gap-2">
                         <select
                           value={curVal}
                           onChange={(e) => handleFieldChange(slot.key, e.target.value)}
-                          className={`flex-1 ${SELECT_CLASS} font-mono`}
+                          className={`sm:flex-1 min-w-0 ${SELECT_CLASS} font-mono`}
                         >
                           <option value="">Select a model...</option>
                           {slotModels.map((m) => (
@@ -453,7 +453,7 @@ export default function ModelSettings({ onBack, embedded = false }) {
                           <select
                             value={config[slot.orProviderKey] || ''}
                             onChange={(e) => handleOrProviderChange(slot.orProviderKey, e.target.value)}
-                            className={`flex-1 ${SELECT_CLASS}`}
+                            className={`sm:flex-1 min-w-0 ${SELECT_CLASS}`}
                           >
                             <option value="">Any provider (let OpenRouter decide)</option>
                             {(slot.embedding ? orEmbeddingProviders : orProviders).map((p) => (
