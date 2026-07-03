@@ -8,6 +8,29 @@ echo       WorldBox AI RPG Engine - Startup
 echo ==============================================
 echo.
 
+:: ── Update project from git ──
+set UPDATED=0
+where git >nul 2>nul
+if errorlevel 1 (
+    echo [WARN] git not found on PATH. Skipping update check.
+    echo.
+) else (
+    echo Checking for updates...
+    set BEFORE=
+    for /f %%h in ('git rev-parse HEAD 2^>nul') do set BEFORE=%%h
+    git pull --ff-only
+    if errorlevel 1 (
+        echo [WARN] git pull failed. Starting with current version.
+    ) else (
+        for /f %%h in ('git rev-parse HEAD 2^>nul') do set AFTER=%%h
+        if not "!BEFORE!"=="!AFTER!" (
+            set UPDATED=1
+            echo Project updated. Dependencies will be refreshed.
+        )
+    )
+    echo.
+)
+
 :: ── Preflight: Python virtual environment ──
 if not exist ".\venv\Scripts\python.exe" (
     echo [ERROR] Python virtual environment not found at .\venv
@@ -16,6 +39,13 @@ if not exist ".\venv\Scripts\python.exe" (
     echo.
     pause
     exit /b 1
+)
+
+:: ── Refresh Python dependencies after update ──
+if "%UPDATED%"=="1" (
+    echo Refreshing Python dependencies...
+    ".\venv\Scripts\python.exe" -m pip install -r requirements.txt
+    echo.
 )
 
 :: ── Preflight: backend .env ──
@@ -35,16 +65,20 @@ if errorlevel 1 (
 )
 
 :: ── Preflight: frontend dependencies ──
-if not exist ".\frontend\node_modules" (
-    echo [WARN] frontend\node_modules not found. Installing...
+set NEED_NPM_INSTALL=0
+if not exist ".\frontend\node_modules" set NEED_NPM_INSTALL=1
+if "%UPDATED%"=="1" set NEED_NPM_INSTALL=1
+if "%NEED_NPM_INSTALL%"=="1" (
+    echo Installing/refreshing frontend dependencies...
     cd frontend
     call npm install
-    cd ..
     if errorlevel 1 (
         echo [ERROR] npm install failed.
+        cd ..
         pause
         exit /b 1
     )
+    cd ..
     echo.
 )
 

@@ -20,6 +20,24 @@ npm install
 .\start.bat
 ```
 
+On Linux/macOS:
+
+```bash
+# Install backend
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+cp backend/.env.example backend/.env
+# Edit backend/.env with your GEMINI_API_KEY
+
+# Install frontend
+cd frontend && npm install && cd ..
+
+# Run both
+./start.sh
+```
+
+Both start scripts pull the latest changes from git on launch (skipped gracefully if offline) and refresh pip/npm dependencies when an update was pulled.
+
 ## Documentation
 
 See [docs/index.md](docs/index.md) for full documentation including:
