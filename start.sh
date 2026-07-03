@@ -46,9 +46,8 @@ if [ ! -x "$PY" ]; then
     fi
 fi
 
-# ── Refresh Python dependencies after update ──
-if [ "$UPDATED" = "1" ]; then
-    echo "Refreshing Python dependencies..."
+# ── Install/refresh Python dependencies ──
+install_python_deps() {
     if [ "$IS_ANDROID" = "1" ]; then
         # No Android builds exist for sqlite-vec (bundled in vendor/) or
         # numba (worldgen falls back to numpy). TUR provides prebuilt
@@ -62,6 +61,15 @@ if [ "$UPDATED" = "1" ]; then
     else
         "$PY" -m pip install -r requirements.txt
     fi
+}
+
+if [ "$UPDATED" = "1" ]; then
+    echo "Refreshing Python dependencies..."
+    install_python_deps
+    echo
+elif ! "$PY" -c "import fastapi, uvicorn, langgraph, litellm, numpy" >/dev/null 2>&1; then
+    echo "Python dependencies missing or incomplete. Installing..."
+    install_python_deps
     echo
 fi
 

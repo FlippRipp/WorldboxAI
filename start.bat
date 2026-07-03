@@ -53,9 +53,12 @@ if not exist ".\venv\Scripts\python.exe" (
     exit /b 1
 )
 
-:: ── Refresh Python dependencies after update ──
-if "%UPDATED%"=="1" (
-    echo Refreshing Python dependencies...
+:: ── Install/refresh Python dependencies ──
+set NEED_PIP=%UPDATED%
+".\venv\Scripts\python.exe" -c "import fastapi, uvicorn, langgraph, litellm, numpy" >nul 2>&1
+if errorlevel 1 set NEED_PIP=1
+if "%NEED_PIP%"=="1" (
+    echo Installing/refreshing Python dependencies...
     ".\venv\Scripts\python.exe" -m pip install -r requirements.txt
     echo.
 )
