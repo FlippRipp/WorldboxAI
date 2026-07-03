@@ -190,7 +190,7 @@ function MessageBlock({ message, index, isLastAssistant, swipes, busy, editReque
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(message.content);
-  const touchStartX = useRef(null);
+  const touchStart = useRef(null);
 
   // External edit request (e.g. ArrowUp in the empty composer targets the last
   // user message). `at` distinguishes repeated requests for the same index.
@@ -213,10 +213,13 @@ function MessageBlock({ message, index, isLastAssistant, swipes, busy, editReque
   }, [active, count, onSwipe, onRegenerate]);
 
   const onTouchEnd = (e) => {
-    if (touchStartX.current == null || busy) { touchStartX.current = null; return; }
-    const dx = e.changedTouches[0].clientX - touchStartX.current;
-    touchStartX.current = null;
-    if (Math.abs(dx) < 50) return;
+    if (touchStart.current == null || busy) { touchStart.current = null; return; }
+    const dx = e.changedTouches[0].clientX - touchStart.current.x;
+    const dy = e.changedTouches[0].clientY - touchStart.current.y;
+    touchStart.current = null;
+    // Must be a deliberate, mostly-horizontal gesture — a diagonal scroll
+    // flick that drifts sideways shouldn't trigger a swipe.
+    if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 2) return;
     if (dx < 0) goNext(); else goPrev();
   };
 
@@ -226,7 +229,7 @@ function MessageBlock({ message, index, isLastAssistant, swipes, busy, editReque
   return (
     <div
       className={`group ${style.bg} ${style.text}`}
-      onTouchStart={showSwipes ? (e) => { touchStartX.current = e.touches[0].clientX; } : undefined}
+      onTouchStart={showSwipes ? (e) => { touchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY }; } : undefined}
       onTouchEnd={showSwipes ? onTouchEnd : undefined}
     >
       <div className="max-w-[720px] mx-auto px-8 py-6 relative">
