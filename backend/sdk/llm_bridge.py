@@ -9,8 +9,9 @@ class LLMBridge:
     """Modules never name models — they ask for a preference slot
     ("fastest"/"balanced"/"smartest") which is resolved against the live
     LLMService at call time, so provider reconfiguration mid-session is
-    always respected. Env vars are a last resort for service-less use
-    (tests); there are no hardcoded model fallbacks."""
+    always respected. The provider settings UI is the only source of
+    model names; env vars are a last resort for service-less use (tests)
+    and never override a configured service."""
 
     def __init__(self):
         self._service = None
@@ -42,12 +43,9 @@ class LLMBridge:
 
     @property
     def _fast_model(self) -> str:
-        env = os.getenv("MODULE_FAST_MODEL", "")
-        if env:
-            return env
         if self._service is not None:
             return getattr(self._service, "module_fast_model", "") or self._service.reader_model
-        return self._reader_model
+        return os.getenv("MODULE_FAST_MODEL", "") or self._reader_model
 
     async def generate(self, prompt: str, model_preference: str = "balanced", max_tokens: int = None) -> str:
         # NOTE: `max_tokens` should NOT be used for content generation. It cuts off LLM output
