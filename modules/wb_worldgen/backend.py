@@ -168,6 +168,25 @@ def set_services(services: dict):
     world_builder.set_llm_service(engine.llm)
     if settings is not None:
         world_builder.set_settings(settings)
+        try:
+            settings.register(
+                "world.enrichment_concurrency", "slider", 3,
+                label="Enrichment Concurrency",
+                category="World Building",
+                description="How many map nodes are labeled/described in parallel during world enrichment. Set to 1 for rate-limited providers.",
+                is_global=True,
+                min=1, max=6,
+            )
+            settings.register(
+                "world.enrichment_batch_size", "slider", 8,
+                label="Enrichment Label Batch Size",
+                category="World Building",
+                description="How many map nodes are named per LLM call during enrichment. 1 disables batching (one call per node).",
+                is_global=True,
+                min=1, max=10,
+            )
+        except Exception as e:
+            print(f"[wb_worldgen] Failed to register enrichment settings: {e}")
     if registry is not None:
         world_builder.register_module_hooks(registry)
     register_default_steps(world_builder)

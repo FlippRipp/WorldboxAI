@@ -28,13 +28,24 @@ def resolve_order(steps: dict) -> list[str]:
     return resolved
 
 
-def build_chain_context(ordered_ids: list[str], world_state: dict, up_to_step_id: str) -> dict:
-    """Collect prior approved-step data up to (but excluding) ``up_to_step_id``."""
+def build_chain_context(ordered_ids: list[str], world_state: dict, up_to_step_id: str,
+                        steps: dict = None) -> dict:
+    """Collect prior approved-step data up to (but excluding) ``up_to_step_id``.
+
+    When ``steps`` is given, each step's ``context_view`` shapes what downstream
+    prompts see (so bulky UI/procedural payloads stay out of LLM context).
+    """
     context = {}
     for sid in ordered_ids:
         if sid == up_to_step_id:
             break
         data = world_state.get("steps", {}).get(sid, {}).get("data")
         if data:
+            step = (steps or {}).get(sid)
+            if step is not None and hasattr(step, "context_view"):
+                try:
+                    data = step.context_view(data)
+                except Exception:
+                    pass  # fall back to the raw data
             context[sid] = data
     return context

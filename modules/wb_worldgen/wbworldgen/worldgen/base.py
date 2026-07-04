@@ -53,6 +53,12 @@ class Step:
             "schema": self.schema,
         }
 
+    def context_view(self, data):
+        """The view of this step's data that downstream steps see in their
+        prompts. Override to trim payloads that only exist for the UI or for
+        procedural steps (raster metadata, structured summaries, ...)."""
+        return data
+
 
 #: Ordered list of registered step classes (registration order preserved).
 STEP_REGISTRY: list[type] = []

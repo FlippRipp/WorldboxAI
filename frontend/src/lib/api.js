@@ -146,6 +146,48 @@ export const api = {
     const qs = layerId ? `?layer_id=${encodeURIComponent(layerId)}` : '';
     return request(`/api/world/${worldId}/enrich/progress${qs}`);
   },
+  // Server-driven enrichment run: one POST that streams SSE progress events
+  // ({type:"phase"|"node"|"failed"}) and resolves with the terminal
+  // {type:"done"} summary. Pass an AbortController signal to stop mid-run.
+  enrichRun: async (worldId, { phase = 'all', count = null, layerId = null, rework = false, excludeNodeIds = null } = {}, onEvent, signal) => {
+    const body = { phase, rework };
+    if (count) body.count = count;
+    if (layerId) body.layer_id = layerId;
+    if (excludeNodeIds?.length) body.exclude_node_ids = excludeNodeIds;
+    const res = await fetch(`${API}/api/world/${worldId}/enrich/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!res.ok || !res.body) {
+      const err = await res.json().catch(() => ({}));
+      throw new ApiError(res.status, err.detail || res.statusText);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let final = null;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        const dataLine = block.split('\n').find((l) => l.startsWith('data:'));
+        if (!dataLine) continue;
+        const data = JSON.parse(dataLine.slice(5).trim());
+        if (data.type === 'error') throw new ApiError(500, data.detail || 'enrichment run failed');
+        if (data.type === 'done') final = data;
+        else onEvent?.(data);
+      }
+    }
+    if (!final) throw new ApiError(500, 'enrichment stream ended without a result');
+    return final;
+  },
+  enrichCancel:           (worldId) => request(`/api/world/${worldId}/enrich/cancel`, { method: 'POST' }),
   enrichCommit:           (worldId, stepId) => request(`/api/world/${worldId}/enrich/commit`, { method: 'POST', body: JSON.stringify({ step_id: stepId }) }),
   // Debug / seed
   debugSeedWorld:         (seedPrompt, worldId = null, totalNodes = 60) => request('/api/world/debug/seed', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, world_id: worldId, total_nodes: totalNodes }) }),

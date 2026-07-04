@@ -7,13 +7,14 @@ the shared engine services are populated by ``configure()`` which backend.py
 calls from ``set_services``.
 """
 
+import asyncio
 import os
 import json
 import random
 from typing import Optional, Any
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 import logging
 
@@ -108,11 +109,30 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
 
     if request.skip_review:
         enrichment_steps = {"node_labeling", "node_descriptions"}
-        for step_id in world_builder._ordered_ids:
-            if step_id in enrichment_steps:
-                continue
-            data = await world_builder.generate_step(step_id, state, request.seed_prompt)
-            state["steps"][step_id] = {"data": data, "approved": True}
+        terrain_task = None
+        try:
+            for step_id in world_builder._ordered_ids:
+                if step_id in enrichment_steps:
+                    continue
+                if step_id == "terrain_generation" and terrain_task is not None:
+                    data = await terrain_task
+                    terrain_task = None
+                else:
+                    data = await world_builder.generate_step(step_id, state, request.seed_prompt)
+                state["steps"][step_id] = {"data": data, "approved": True}
+                if step_id == "layer_design" and "terrain_generation" in world_builder._steps:
+                    # Terrain generation only reads layer_design data, so start
+                    # it now and let it overlap the layer_rules LLM call. Pin
+                    # the draft id first: the step assigns it, and it must not
+                    # race the concurrently-running step's own resolution.
+                    from wbworldgen.worldgen.persistence import resolve_world_id
+                    state["_draft_id"] = resolve_world_id(state)
+                    terrain_task = asyncio.create_task(
+                        world_builder.generate_step("terrain_generation", state, request.seed_prompt))
+        except Exception:
+            if terrain_task is not None and not terrain_task.done():
+                terrain_task.cancel()
+            raise
         state["complete"] = True
         return {"state": state, "complete": True}
 
@@ -537,6 +557,72 @@ async def enrich_describe_next(world_id: str, request: EnrichRequest = None, ses
         return {"world_id": world_id, **result}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+class EnrichRunRequest(BaseModel):
+    phase: str = "all"  # "label" | "describe" | "all"
+    count: Optional[int] = None
+    layer_id: Optional[str] = None
+    rework: bool = False
+    # Rework batching: nodes already redone this session, so consecutive
+    # partial runs move through the remaining nodes instead of repeating.
+    exclude_node_ids: Optional[list[str]] = None
+
+
+@router.post("/api/world/{world_id}/enrich/run")
+async def enrich_run(world_id: str, request: EnrichRunRequest, session_id: str = "default"):
+    """Server-driven enrichment over many nodes in one request. Streams one SSE
+    ``data:`` JSON object per event: {type:"phase"|"node"|"failed"} during the
+    run, then a terminal {type:"done", labeled, described, ...} (or
+    {type:"error", detail}). Replaces the old frontend loop of one
+    label-next/describe-next call per node."""
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def on_event(evt: dict):
+        queue.put_nowait(evt)
+
+    async def runner():
+        try:
+            await world_builder.enrich_run(
+                world_id, phase=request.phase, count=request.count,
+                layer_filter=request.layer_id, rework=request.rework,
+                exclude_node_ids=request.exclude_node_ids,
+                on_event=on_event,
+            )
+        except FileNotFoundError as exc:
+            queue.put_nowait({"type": "error", "detail": str(exc)})
+        except Exception as exc:
+            logger.exception("enrichment run failed for world %s", world_id)
+            queue.put_nowait({"type": "error", "detail": str(exc)})
+        finally:
+            queue.put_nowait(None)
+
+    task = asyncio.create_task(runner())
+
+    async def event_stream():
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if item.get("type") == "node":
+                    _sync_enrichment_result_to_draft(session_id, world_id, item)
+                yield "data: " + json.dumps(item) + "\n\n"
+        finally:
+            # Client disconnected (or stream ended): stop the run; the engine
+            # flushes already-generated results on cancellation.
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+@router.post("/api/world/{world_id}/enrich/cancel")
+async def enrich_cancel(world_id: str):
+    world_builder.enrich_cancel(world_id)
+    return {"world_id": world_id, "cancelling": True}
 
 
 @router.get("/api/world/{world_id}/enrich/progress")

@@ -45,7 +45,12 @@ class WorldBuilder:
         self._enrichment_cache_max = self._persistence._enrichment_cache_max
         self._enrichment_prompts = self._persistence._enrichment_prompts
         self._enrichment_delay_ms = 300
-        self._enrichment_semaphore = asyncio.Semaphore(1)
+        # Global ceiling on concurrent enrichment LLM calls (legacy per-node
+        # endpoints + batch runs share it). Resized from the
+        # world.enrichment_concurrency setting at run start.
+        self._enrichment_concurrency = 3
+        self._enrichment_batch_size = 8
+        self._enrichment_semaphore = asyncio.Semaphore(self._enrichment_concurrency)
 
         self._hook_registry = HookRegistry()
         self._module_hooks = self._hook_registry.hooks
@@ -87,7 +92,7 @@ class WorldBuilder:
         return [self._steps[sid].to_frontend() for sid in self._ordered_ids]
 
     def _build_chain_context(self, world_state: dict, up_to_step_id: str) -> dict:
-        return _pipeline.build_chain_context(self._ordered_ids, world_state, up_to_step_id)
+        return _pipeline.build_chain_context(self._ordered_ids, world_state, up_to_step_id, self._steps)
 
     # --- generation ---------------------------------------------------------
 
@@ -107,7 +112,9 @@ class WorldBuilder:
 
         uses = getattr(step, "uses", "llm")
         if step_id == "map_generation" or uses == USES_MAP:
-            return self._map_gen.generate(world_state, config)
+            # Delaunay + road pathfinding are CPU-bound; keep the event loop free.
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, self._map_gen.generate, world_state, config)
 
         if self._llm_service and self._llm_service.mode != "mock":
             context = self._build_chain_context(world_state, step_id)
@@ -202,19 +209,27 @@ class WorldBuilder:
         return self._persistence.list_worlds()
 
     def save_world(self, world_id: str, world_state: dict) -> str:
-        return self._persistence.save_world(world_id, world_state)
+        saved_id = self._persistence.save_world(world_id, world_state)
+        self._enrichment.invalidate_compiled(saved_id)
+        return saved_id
 
     def save_draft(self, world_id: str, world_state: dict) -> str:
-        return self._persistence.save_draft(world_id, world_state)
+        saved_id = self._persistence.save_draft(world_id, world_state)
+        self._enrichment.invalidate_compiled(saved_id)
+        return saved_id
 
     def load_world(self, world_id: str) -> dict:
         return self._persistence.load_world(world_id)
 
     def save_step(self, world_id: str, step_id: str, step_data: dict):
-        return self._persistence.save_step(world_id, step_id, step_data)
+        result = self._persistence.save_step(world_id, step_id, step_data)
+        self._enrichment.invalidate_compiled(world_id)
+        return result
 
     def delete_world(self, world_id: str):
-        return self._persistence.delete_world(world_id)
+        result = self._persistence.delete_world(world_id)
+        self._enrichment.invalidate_compiled(world_id)
+        return result
 
     def seed_world(self, seed_prompt: str, world_id: str = None, total_nodes: int = 60) -> dict:
         import uuid
@@ -283,6 +298,42 @@ class WorldBuilder:
 
     async def enrich_next_description(self, world_id: str, labeled_node_ids: list = None, layer_filter: str = None, rework: bool = False) -> dict:
         return await self._enrichment.describe_next(world_id, labeled_node_ids, layer_filter, rework=rework)
+
+    def _resolve_enrichment_setting(self, key: str, current: int, lo: int, hi: int) -> int:
+        """Live-read an integer enrichment setting; clamp to a sane range."""
+        value = current
+        if self._settings is not None:
+            try:
+                configured = self._settings.get(key)
+                if configured is not None:
+                    value = int(configured)
+            except Exception:
+                pass
+        return max(lo, min(value, hi))
+
+    async def enrich_run(self, world_id: str, phase: str = "all", count: int = None,
+                         layer_filter: str = None, rework: bool = False,
+                         exclude_node_ids: list = None, on_event=None) -> dict:
+        # 1 keeps the old fully-serialized behavior for rate-limited providers.
+        concurrency = self._resolve_enrichment_setting(
+            "world.enrichment_concurrency", self._enrichment_concurrency, 1, 8)
+        # Batch size 1 disables batched labeling (one node per LLM call).
+        batch_size = self._resolve_enrichment_setting(
+            "world.enrichment_batch_size", self._enrichment_batch_size, 1, 10)
+        self._enrichment_batch_size = batch_size
+        if concurrency != self._enrichment_concurrency:
+            # Swap in a right-sized semaphore; in-flight holders release on the
+            # old object they acquired, so resizing mid-flight is safe.
+            self._enrichment_concurrency = concurrency
+            self._enrichment_semaphore = asyncio.Semaphore(concurrency)
+        return await self._enrichment.run(
+            world_id, phase=phase, count=count, layer_filter=layer_filter,
+            rework=rework, exclude_node_ids=exclude_node_ids,
+            concurrency=concurrency, batch_size=batch_size, on_event=on_event,
+        )
+
+    def enrich_cancel(self, world_id: str):
+        self._enrichment.cancel(world_id)
 
     # --- start locations ----------------------------------------------------
 

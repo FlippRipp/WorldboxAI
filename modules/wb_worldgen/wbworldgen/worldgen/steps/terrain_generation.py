@@ -8,6 +8,7 @@ persisted under the world's terrain directory and a small per-layer summary flow
 into downstream prompts via the normal chain context.
 """
 
+import asyncio
 import logging
 import zlib
 
@@ -52,6 +53,19 @@ class TerrainGenerationStep(Step):
         }},
     }
 
+    def context_view(self, data):
+        """Downstream prompts only need the readable per-layer ``summary`` —
+        the structured ``summary_data`` (biome histograms) duplicates it and
+        the image filenames mean nothing to an LLM."""
+        if not isinstance(data, dict):
+            return data
+        layers = [
+            {k: v for k, v in tl.items() if k not in ("summary_data", "images")}
+            if isinstance(tl, dict) else tl
+            for tl in data.get("layers", [])
+        ]
+        return {**data, "layers": layers}
+
     async def generate(self, ctx) -> dict:
         world_state = ctx.world_state
         services = ctx.services
@@ -64,40 +78,50 @@ class TerrainGenerationStep(Step):
         resolution = int(config.get("resolution", _TERRAIN_RESOLUTION))
         biome_mode = config.get("biome_mode", "realistic")
 
+        loop = asyncio.get_running_loop()
         out_layers = []
+        # Layers stay sequential (each raster pipeline peaks at several 1024²
+        # arrays); the executor offload is about keeping the event loop — and
+        # with it the API/chat — responsive during the CPU-heavy generation.
         for spec in _layer_specs(world_state):
-            ltype = str(spec.get("layer_type", "surface")).lower()
-            lid = spec.get("layer_id") or "main"
-            seed = _layer_seed(world_id, int(spec.get("index", 0)))
-            # Underground layers get the bespoke cave generator (tunnels/caverns,
-            # subterranean water, cave biomes); everything else gets surface
-            # terrain. Both emit the same ``layers`` contract downstream.
-            is_cave = ltype == "underground"
-            if is_cave:
-                params = CaveParams(seed=seed, resolution=resolution)
-                result = generate_cave_terrain(params)
-                summary_mode = "cave"
-            else:
-                params = TerrainParams(seed=seed, resolution=resolution,
-                                       biome_mode=biome_mode)
-                result = generate_terrain(params)
-                summary_mode = biome_mode
-            out_dir = persistence.terrain_dir(world_id, lid)
-            meta = _ts.save_terrain(str(out_dir), result.layers, result.params)
-            summary = _ts.build_terrain_summary(result.layers, summary_mode)
-            out_layers.append({
-                "layer_id": lid,
-                "name": spec.get("name", lid),
-                "layer_type": ltype,
-                "seed": seed,
-                "resolution": resolution,
-                "summary": _summary_text(summary),
-                "summary_data": summary,
-                **meta,
-            })
-            logger.info("terrain generated for layer %s (%s)", lid, world_id)
+            entry = await loop.run_in_executor(
+                None, _build_layer_terrain, world_id, spec, resolution, biome_mode, persistence)
+            out_layers.append(entry)
+            logger.info("terrain generated for layer %s (%s)", entry["layer_id"], world_id)
 
         return {"layers": out_layers, "world_id": world_id}
+
+
+def _build_layer_terrain(world_id: str, spec: dict, resolution: int,
+                         biome_mode: str, persistence) -> dict:
+    """Generate + persist one layer's terrain. Pure CPU + disk on local data —
+    safe to run in a worker thread."""
+    ltype = str(spec.get("layer_type", "surface")).lower()
+    lid = spec.get("layer_id") or "main"
+    seed = _layer_seed(world_id, int(spec.get("index", 0)))
+    # Underground layers get the bespoke cave generator (tunnels/caverns,
+    # subterranean water, cave biomes); everything else gets surface
+    # terrain. Both emit the same ``layers`` contract downstream.
+    if ltype == "underground":
+        result = generate_cave_terrain(CaveParams(seed=seed, resolution=resolution))
+        summary_mode = "cave"
+    else:
+        result = generate_terrain(TerrainParams(seed=seed, resolution=resolution,
+                                                biome_mode=biome_mode))
+        summary_mode = biome_mode
+    out_dir = persistence.terrain_dir(world_id, lid)
+    meta = _ts.save_terrain(str(out_dir), result.layers, result.params)
+    summary = _ts.build_terrain_summary(result.layers, summary_mode)
+    return {
+        "layer_id": lid,
+        "name": spec.get("name", lid),
+        "layer_type": ltype,
+        "seed": seed,
+        "resolution": resolution,
+        "summary": _summary_text(summary),
+        "summary_data": summary,
+        **meta,
+    }
 
 
 def _summary_text(summary: dict) -> str:

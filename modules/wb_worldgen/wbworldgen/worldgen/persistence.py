@@ -101,6 +101,8 @@ class WorldPersistence:
         for step_id, step_data in steps.items():
             with open(world_dir / f"step_{step_id}.json", "w", encoding="utf-8") as f:
                 json.dump(step_data, f, indent=2, default=str)
+        if "map_generation" in steps:
+            self.invalidate_enrichment_cache(safe_id)
 
         lore_data = steps.get("lore", {}).get("data", {})
         world_name = lore_data.get("world_name", safe_id) if isinstance(lore_data, dict) else safe_id
@@ -149,12 +151,15 @@ class WorldPersistence:
             raise FileNotFoundError(f"World '{world_id}' not found.")
         with open(world_dir / f"step_{step_id}.json", "w", encoding="utf-8") as f:
             json.dump(step_data, f, indent=2, default=str)
+        if step_id == "map_generation":
+            self.invalidate_enrichment_cache(world_id)
 
     def delete_world(self, world_id: str):
         world_dir = self._dir / world_id
         if not world_dir.is_dir():
             raise FileNotFoundError(f"World '{world_id}' not found.")
         shutil.rmtree(world_dir)
+        self.invalidate_enrichment_cache(world_id)
 
     def terrain_dir(self, world_id: str, layer_id: str = "") -> Path:
         """Directory holding a world's terrain rasters/images. When ``layer_id``
@@ -176,7 +181,7 @@ class WorldPersistence:
         if step_data is None:
             if len(self._enrichment_cache) >= self._enrichment_cache_max:
                 oldest = next(iter(self._enrichment_cache))
-                self.write_enrichment_to_disk(oldest)
+                self.write_enrichment_to_disk(oldest, evict=True)
             with open(step_path, "r", encoding="utf-8") as f:
                 step_data = json.load(f)
             self._enrichment_cache[world_id] = step_data
@@ -197,14 +202,25 @@ class WorldPersistence:
             for wid in list(self._enrichment_cache.keys()):
                 self.write_enrichment_to_disk(wid)
 
-    def write_enrichment_to_disk(self, world_id: str):
-        step_data = self._enrichment_cache.pop(world_id, None)
+    def write_enrichment_to_disk(self, world_id: str, evict: bool = False):
+        """Write-through: persist the cached enrichment state but keep the entry
+        cached so the next save doesn't re-read the whole map step from disk.
+        ``evict=True`` drops the entry afterwards (LRU making room)."""
+        step_data = self._enrichment_cache.get(world_id)
         if step_data is None:
             return
         step_path = self._dir / world_id / "step_map_generation.json"
-        step_data.pop("_node_index", None)
+        to_dump = {k: v for k, v in step_data.items() if k != "_node_index"}
         with open(step_path, "w", encoding="utf-8") as f:
-            json.dump(step_data, f, indent=2, default=str)
+            json.dump(to_dump, f, indent=2, default=str)
+        if evict:
+            self._enrichment_cache.pop(world_id, None)
+
+    def invalidate_enrichment_cache(self, world_id: str):
+        """Drop the cached copy after an external write to the world's step
+        files so a later flush can't resurrect stale map data over it."""
+        self._enrichment_cache.pop(world_id, None)
+        self._enrichment_cache.pop(safe_world_id(world_id), None)
 
     @staticmethod
     def build_enrichment_node_index(map_data: dict) -> dict:

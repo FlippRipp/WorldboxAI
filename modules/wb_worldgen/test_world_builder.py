@@ -566,11 +566,12 @@ def test_enrichment_cache_flush(builder):
         "seed_prompt": "test",
         "steps": {"map_generation": {"data": {"nodes": [{"id": "n1", "name": "", "description": ""}], "edges": []}, "approved": True}},
     })
-    node_data = {"id": "n1"}
     builder._save_node_enrichment(wid, "n1", "name", "Abyss Gate")
-    builder._enrichment_cache[wid]["data"]["nodes"][0]["name"] = "Abyss Gate"
     builder._flush_enrichment_cache(wid)
-    assert wid not in builder._enrichment_cache
+    # Write-through: the flush persists but keeps the entry cached (with its
+    # node index) so the next save doesn't re-read the map step from disk.
+    assert wid in builder._enrichment_cache
+    assert "_node_index" in builder._enrichment_cache[wid]
     loaded = builder.load_world(wid)
     map_step = loaded["steps"]["map_generation"]["data"]
     assert map_step["nodes"][0]["name"] == "Abyss Gate"
@@ -590,8 +591,43 @@ def test_enrichment_cache_flush_all(builder):
     assert wid1 in builder._enrichment_cache
     assert wid2 in builder._enrichment_cache
     builder._flush_enrichment_cache()
-    assert wid1 not in builder._enrichment_cache
-    assert wid2 not in builder._enrichment_cache
+    for wid, expected in ((wid1, "Alpha"), (wid2, "Beta")):
+        loaded = builder.load_world(wid)
+        assert loaded["steps"]["map_generation"]["data"]["nodes"][0]["name"] == expected
+
+
+def test_enrichment_cache_evicts_oldest_when_full(builder):
+    """The LRU path still evicts: filling the cache past its max writes the
+    oldest world to disk and drops it."""
+    wids = []
+    for i in range(builder._enrichment_cache_max + 1):
+        wid = builder.save_world(f"lru{i}", {
+            "seed_prompt": "t",
+            "steps": {"map_generation": {"data": {"nodes": [{"id": "n1", "name": "", "description": ""}]}, "approved": True}},
+        })
+        builder._save_node_enrichment(wid, "n1", "name", f"Name{i}")
+        wids.append(wid)
+    assert wids[0] not in builder._enrichment_cache
+    assert len(builder._enrichment_cache) == builder._enrichment_cache_max
+    loaded = builder.load_world(wids[0])
+    assert loaded["steps"]["map_generation"]["data"]["nodes"][0]["name"] == "Name0"
+
+
+def test_enrichment_cache_invalidated_by_external_map_write(builder):
+    """save_step on map_generation drops the cached copy so a later flush
+    cannot resurrect stale map data over the external write."""
+    wid = builder.save_world("inval_test", {
+        "seed_prompt": "t",
+        "steps": {"map_generation": {"data": {"nodes": [{"id": "n1", "name": "", "description": ""}]}, "approved": True}},
+    })
+    builder._save_node_enrichment(wid, "n1", "name", "Old Name")
+    builder._flush_enrichment_cache(wid)
+    assert wid in builder._enrichment_cache
+    builder.save_step(wid, "map_generation", {"data": {"nodes": [{"id": "n1", "name": "External", "description": ""}]}, "approved": True})
+    assert wid not in builder._enrichment_cache
+    builder._flush_enrichment_cache(wid)  # no-op: nothing cached
+    loaded = builder.load_world(wid)
+    assert loaded["steps"]["map_generation"]["data"]["nodes"][0]["name"] == "External"
 
 
 def test_enrichment_cache_save_node_no_map_file(builder):
@@ -607,7 +643,8 @@ def test_enrichment_cache_flush_nonexistent_world(builder):
     })
     builder._enrichment_cache["fake_world"] = {"data": {"nodes": []}}
     builder._flush_enrichment_cache("fake_world")
-    assert "fake_world" not in builder._enrichment_cache
+    # Write-through keeps the entry; flushing an unknown/empty world must not error.
+    assert builder._enrichment_cache["fake_world"] == {"data": {"nodes": []}}
 
 
 # ---------------------------------------------------------------------------
@@ -752,6 +789,7 @@ def test_register_default_steps_produces_known_pipeline(builder):
         "lore",
         "layer_design",
         "layer_rules",
+        "terrain_generation",
         "terrain_regions",
         "natural_landmarks",
         "society_factions",

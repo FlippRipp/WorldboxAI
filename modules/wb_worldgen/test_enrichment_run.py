@@ -1,0 +1,413 @@
+"""Tests for the server-driven enrichment run: bounded concurrency, batched
+labeling, flush cadence, cancellation, the compiled-world cache, the SSE route
+and the skip_review terrain pre-warm.
+
+Run by explicit path (the root pytest.ini python_files whitelist does not
+include module tests): python -m pytest modules/wb_worldgen/test_enrichment_run.py
+"""
+
+import asyncio
+import json
+import shutil
+import tempfile
+import types
+
+import pytest
+
+from wbworldgen.worldgen import WorldBuilder
+from wbworldgen.worldgen.enrichment.context import collect_nodes_by_layer
+
+
+@pytest.fixture
+def tmpdir():
+    d = tempfile.mkdtemp(prefix="wb_enrich_")
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
+
+
+@pytest.fixture
+def builder(tmpdir):
+    wb = WorldBuilder(worlds_dir=tmpdir)
+    wb._llm_service = types.SimpleNamespace(
+        mode="live", module_fast_model="fast-slot", reader_model="reader-slot")
+    return wb
+
+
+def _map_world(builder, n_nodes=6, world_id="run_world"):
+    """Persist a flat single-layer world whose map has n_nodes unenriched nodes
+    in strictly decreasing importance (n0 is the most important)."""
+    nodes = [
+        {"id": f"n{i}", "type": "town", "importance": n_nodes - i,
+         "x": float(i), "y": 0.0, "name": "", "description": "", "region": ""}
+        for i in range(n_nodes)
+    ]
+    edges = [{"from": f"n{i}", "to": f"n{i + 1}"} for i in range(n_nodes - 1)]
+    return builder.save_world(world_id, {
+        "seed_prompt": "test",
+        "steps": {"map_generation": {"data": {"nodes": nodes, "edges": edges}, "approved": True}},
+    })
+
+
+# ---------------------------------------------------------------------------
+# engine.run — phases, concurrency, ordering, failures, flushes, cancellation
+# ---------------------------------------------------------------------------
+
+def test_run_all_labels_then_describes(builder):
+    wid = _map_world(builder, 6)
+    builder._enrichment_batch_size = 1  # single-node path for this test
+    calls = {"label": [], "desc": []}
+    active = {"now": 0, "max": 0}
+
+    async def fake_label(node, context):
+        active["now"] += 1
+        active["max"] = max(active["max"], active["now"])
+        await asyncio.sleep(0.01)
+        active["now"] -= 1
+        calls["label"].append(node["id"])
+        return f"Name {node['id']}", f"snippet {node['id']}"
+
+    async def fake_desc(node, context, existing_description=""):
+        calls["desc"].append(node["id"])
+        return f"Flavor text for {node['name']}"
+
+    builder._enrichment._live_label = fake_label
+    builder._enrichment._live_description = fake_desc
+
+    events = []
+
+    async def on_event(evt):
+        events.append(evt)
+
+    summary = asyncio.run(builder.enrich_run(wid, phase="all", on_event=on_event))
+
+    assert summary["labeled"] == 6
+    assert summary["described"] == 6
+    assert summary["failed_node_ids"] == []
+    # Work is dispatched by descending importance.
+    assert set(calls["label"][:3]) == {"n0", "n1", "n2"}
+    assert set(calls["desc"][:3]) == {"n0", "n1", "n2"}
+    # Bounded concurrency: overlapped, but never above the default of 3.
+    assert 2 <= active["max"] <= 3
+    # Everything persisted.
+    nodes = builder.load_world(wid)["steps"]["map_generation"]["data"]["nodes"]
+    assert all(n["name"] and n["description"] for n in nodes)
+    # Event stream shape.
+    kinds = [e["type"] for e in events]
+    assert kinds.count("phase") == 2 and kinds[-1] == "done"
+    node_events = [e for e in events if e["type"] == "node"]
+    assert len(node_events) == 12
+    assert all("per_layer" in e and "total_labeled" in e for e in node_events)
+
+
+def test_run_partial_failure_continues(builder):
+    wid = _map_world(builder, 4)
+    builder._enrichment_batch_size = 1
+
+    async def fake_label(node, context):
+        if node["id"] == "n1":
+            raise ValueError("boom")
+        return f"Name {node['id']}", ""
+
+    builder._enrichment._live_label = fake_label
+    events = []
+
+    async def on_event(evt):
+        events.append(evt)
+
+    summary = asyncio.run(builder.enrich_run(wid, phase="label", on_event=on_event))
+
+    assert summary["labeled"] == 3
+    assert summary["failed_node_ids"] == ["n1"]
+    assert any(e["type"] == "failed" and e["node_id"] == "n1" for e in events)
+    nodes = builder.load_world(wid)["steps"]["map_generation"]["data"]["nodes"]
+    assert sum(1 for n in nodes if n["name"]) == 3
+
+
+def test_run_cancel_stops_midway(builder):
+    wid = _map_world(builder, 12)
+    builder._enrichment_batch_size = 1
+    builder._enrichment_concurrency = 1
+
+    async def fake_label(node, context):
+        await asyncio.sleep(0.005)
+        return f"Name {node['id']}", ""
+
+    builder._enrichment._live_label = fake_label
+
+    async def main():
+        seen = []
+
+        async def on_event(evt):
+            if evt["type"] == "node":
+                seen.append(evt)
+                if len(seen) == 2:
+                    builder.enrich_cancel(wid)
+
+        return await builder.enrich_run(wid, phase="label", on_event=on_event)
+
+    summary = asyncio.run(main())
+    assert summary["cancelled"] is True
+    assert 0 < summary["labeled"] < 12
+    # Finished nodes were flushed despite the cancel.
+    nodes = builder.load_world(wid)["steps"]["map_generation"]["data"]["nodes"]
+    assert sum(1 for n in nodes if n["name"]) == summary["labeled"]
+
+
+def test_run_flushes_every_ten_not_every_node(builder, monkeypatch):
+    wid = _map_world(builder, 25)
+    builder._enrichment_batch_size = 1
+
+    async def fake_label(node, context):
+        return f"Name {node['id']}", ""
+
+    builder._enrichment._live_label = fake_label
+
+    writes = []
+    orig = builder._persistence.write_enrichment_to_disk
+
+    def counting(world_id, evict=False):
+        writes.append(world_id)
+        return orig(world_id, evict=evict)
+
+    monkeypatch.setattr(builder._persistence, "write_enrichment_to_disk", counting)
+
+    summary = asyncio.run(builder.enrich_run(wid, phase="label"))
+    assert summary["labeled"] == 25
+    # Two cadence flushes (10, 20) + the end-of-phase flush — not one per node.
+    assert 2 <= len(writes) <= 5
+    nodes = builder.load_world(wid)["steps"]["map_generation"]["data"]["nodes"]
+    assert all(n["name"] for n in nodes)
+
+
+def test_run_respects_count_and_exclude(builder):
+    wid = _map_world(builder, 6)
+    builder._enrichment_batch_size = 1
+
+    async def fake_label(node, context):
+        return f"Name {node['id']}", ""
+
+    builder._enrichment._live_label = fake_label
+
+    summary = asyncio.run(builder.enrich_run(
+        wid, phase="label", count=2, exclude_node_ids=["n0"]))
+    assert summary["labeled"] == 2
+    nodes = builder.load_world(wid)["steps"]["map_generation"]["data"]["nodes"]
+    named = {n["id"] for n in nodes if n["name"]}
+    # n0 excluded; the two most important remaining nodes were labeled.
+    assert named == {"n1", "n2"}
+
+
+# ---------------------------------------------------------------------------
+# Batched labeling
+# ---------------------------------------------------------------------------
+
+def test_run_label_batch_partial_validation(builder):
+    wid = _map_world(builder, 4)
+
+    async def fake_batch(batch, contexts, used_names):
+        return {"nodes": [
+            {"id": "n0", "name": "The Emberfall", "label_description": "d0"},  # strips to Emberfall
+            {"id": "n1", "name": "Emberfall", "label_description": "dup"},     # duplicate after strip
+            {"id": "n3", "name": "", "label_description": ""},                 # empty name
+            {"id": "zz", "name": "Ghost", "label_description": ""},            # id never requested
+        ]}  # n2 missing entirely
+
+    builder._enrichment._live_label_batch = fake_batch
+    compiled = builder._enrichment._load_compiled(wid)
+    all_nodes, _ = collect_nodes_by_layer(compiled)
+
+    results, leftovers = asyncio.run(
+        builder._enrichment._run_label_batch(all_nodes, all_nodes, compiled, []))
+
+    assert results == {"n0": ("Emberfall", "d0")}
+    assert {n["id"] for n in leftovers} == {"n1", "n2", "n3"}
+
+
+def test_run_label_batch_failure_bisects_then_singles(builder):
+    wid = _map_world(builder, 8)
+    attempts = []
+
+    async def fake_batch(batch, contexts, used_names):
+        attempts.append(len(batch))
+        raise ValueError("malformed json")
+
+    builder._enrichment._live_label_batch = fake_batch
+    compiled = builder._enrichment._load_compiled(wid)
+    all_nodes, _ = collect_nodes_by_layer(compiled)
+
+    results, leftovers = asyncio.run(
+        builder._enrichment._run_label_batch(all_nodes, all_nodes, compiled, []))
+
+    assert results == {}
+    assert len(leftovers) == 8  # everything falls back to single-node calls
+    assert attempts == [8, 4, 4]  # full batch, then one bisect of each half
+
+
+def test_run_batched_labels_end_to_end(builder):
+    wid = _map_world(builder, 10)
+    builder._enrichment_batch_size = 8
+    batch_sizes = []
+
+    async def fake_batch(batch, contexts, used_names):
+        batch_sizes.append(len(batch))
+        return {"nodes": [
+            {"id": n["id"], "name": f"Uniq {n['id']}", "label_description": "x"}
+            for n in batch
+        ]}
+
+    builder._enrichment._live_label_batch = fake_batch
+
+    summary = asyncio.run(builder.enrich_run(wid, phase="label"))
+    assert summary["labeled"] == 10
+    assert sorted(batch_sizes) == [2, 8]
+    nodes = builder.load_world(wid)["steps"]["map_generation"]["data"]["nodes"]
+    assert len({n["name"] for n in nodes}) == 10
+
+
+# ---------------------------------------------------------------------------
+# Compiled-world cache (legacy per-node endpoints)
+# ---------------------------------------------------------------------------
+
+def test_label_next_reuses_compiled_and_sees_prior_labels(builder):
+    wid = _map_world(builder, 3)
+    names = iter(["Alpha", "Beta", "Gamma"])
+    labeled = []
+
+    async def fake_label(node, context):
+        labeled.append(node["id"])
+        return next(names), ""
+
+    builder._enrichment._live_label = fake_label
+
+    loads = []
+    real_load = WorldBuilder.load_world
+
+    def counting_load(world_id):
+        loads.append(world_id)
+        return real_load(builder, world_id)
+
+    builder.load_world = counting_load
+
+    for _ in range(3):
+        result = asyncio.run(builder.enrich_next_label(wid))
+        assert result["node_id"] is not None
+    done = asyncio.run(builder.enrich_next_label(wid))
+
+    assert labeled == ["n0", "n1", "n2"]  # each call advanced; no repeats
+    assert done["complete"] is True
+    assert len(loads) == 1  # world read from disk once, then served from cache
+
+
+def test_save_step_invalidates_compiled_cache(builder):
+    wid = _map_world(builder, 2)
+
+    async def fake_label(node, context):
+        return f"Name {node['id']}", ""
+
+    builder._enrichment._live_label = fake_label
+    asyncio.run(builder.enrich_next_label(wid))
+    assert wid in builder._enrichment._compiled_cache
+
+    step_data = builder.load_world(wid)["steps"]["map_generation"]
+    builder.save_step(wid, "map_generation", step_data)
+    assert wid not in builder._enrichment._compiled_cache
+
+
+# ---------------------------------------------------------------------------
+# Routes: SSE enrichment stream + skip_review terrain pre-warm
+# ---------------------------------------------------------------------------
+
+def test_enrich_run_route_streams_sse_and_syncs_draft():
+    import routes as world_routes
+
+    class FakeBuilder:
+        async def enrich_run(self, world_id, phase="all", count=None, layer_filter=None,
+                             rework=False, exclude_node_ids=None, on_event=None):
+            await on_event({"type": "phase", "phase": "label", "pending": 1,
+                            "total_labeled": 0, "total_nodes": 1, "per_layer": {}})
+            await on_event({"type": "node", "phase": "label", "node_id": "n1",
+                            "label": "Emberhold", "label_description": "snippet",
+                            "layer_id": "", "total_labeled": 1, "total_nodes": 1,
+                            "per_layer": {}})
+            await on_event({"type": "done", "labeled": 1, "described": 0,
+                            "failed_node_ids": [], "cancelled": False})
+            return {"labeled": 1, "described": 0, "failed_node_ids": [], "cancelled": False}
+
+        def sync_enrichment_to_map_state(self, map_data, node_map):
+            for n in map_data.get("nodes", []):
+                if n["id"] in node_map:
+                    n.update(node_map[n["id"]])
+
+    old_builder = world_routes.world_builder
+    world_routes.world_builder = FakeBuilder()
+    world_routes.world_gen_sessions["sse_test"] = {
+        "steps": {"map_generation": {"data": {"nodes": [{"id": "n1", "name": ""}]},
+                                     "approved": False}},
+    }
+    world_routes.world_draft_ids["sse_test"] = "wid1"
+    try:
+        async def main():
+            resp = await world_routes.enrich_run(
+                "wid1", world_routes.EnrichRunRequest(phase="all"), session_id="sse_test")
+            assert resp.media_type == "text/event-stream"
+            chunks = []
+            async for chunk in resp.body_iterator:
+                chunks.append(chunk if isinstance(chunk, str) else chunk.decode())
+            return "".join(chunks)
+
+        body = asyncio.run(main())
+        frames = [json.loads(block[len("data: "):])
+                  for block in body.strip().split("\n\n")]
+        assert [f["type"] for f in frames] == ["phase", "node", "done"]
+        # The node event was mirrored into the in-memory draft.
+        synced = world_routes.world_gen_sessions["sse_test"]["steps"]["map_generation"]["data"]["nodes"][0]
+        assert synced["name"] == "Emberhold"
+    finally:
+        world_routes.world_builder = old_builder
+        world_routes.world_gen_sessions.pop("sse_test", None)
+        world_routes.world_draft_ids.pop("sse_test", None)
+
+
+def test_skip_review_prewarms_terrain_during_layer_rules():
+    import routes as world_routes
+
+    class FakeBuilder:
+        def __init__(self):
+            self._ordered_ids = ["world_rules", "lore", "layer_design", "layer_rules",
+                                 "terrain_generation", "terrain_regions", "map_generation",
+                                 "node_labeling", "node_descriptions"]
+            self._steps = {sid: object() for sid in self._ordered_ids}
+            self.timeline = {}
+
+        async def generate_step(self, step_id, state, prompt, user_note="", config=None):
+            loop = asyncio.get_running_loop()
+            self.timeline[step_id] = {"start": loop.time()}
+            if step_id == "terrain_generation":
+                assert state.get("_draft_id"), "_draft_id must be pinned before the pre-warm"
+                await asyncio.sleep(0.03)
+            elif step_id == "layer_rules":
+                await asyncio.sleep(0.03)
+            else:
+                await asyncio.sleep(0.001)
+            self.timeline[step_id]["end"] = loop.time()
+            return {"step": step_id}
+
+    fake = FakeBuilder()
+    old_builder = world_routes.world_builder
+    world_routes.world_builder = fake
+    try:
+        resp = asyncio.run(world_routes.generate_world(
+            world_routes.WorldGenerateRequest(seed_prompt="seed", skip_review=True),
+            session_id="prewarm_test"))
+    finally:
+        world_routes.world_builder = old_builder
+        world_routes.world_gen_sessions.pop("prewarm_test", None)
+
+    assert resp["complete"] is True
+    generated = set(resp["state"]["steps"])
+    assert generated == set(fake._ordered_ids) - {"node_labeling", "node_descriptions"}
+    # Terrain ran concurrently with the layer_rules "LLM call": it started
+    # before layer_rules finished instead of waiting its turn in the chain.
+    assert fake.timeline["terrain_generation"]["start"] < fake.timeline["layer_rules"]["end"]
+    # And downstream steps only started after terrain completed.
+    assert fake.timeline["terrain_regions"]["start"] >= fake.timeline["terrain_generation"]["end"]

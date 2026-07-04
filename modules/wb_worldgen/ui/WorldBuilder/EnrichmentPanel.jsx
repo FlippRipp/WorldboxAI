@@ -27,7 +27,7 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldI
   const [labelSessionIds, setLabelSessionIds] = useState([]);
   const [descSessionIds, setDescSessionIds] = useState([]);
   const [reworkMode, setReworkMode] = useState(false);
-  const abortRef = useRef(false);
+  const abortRef = useRef(null); // in-flight run's AbortController
 
   const isLabeling = stepId === 'node_labeling';
 
@@ -47,7 +47,7 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldI
   }, [fetchProgress]);
 
   useEffect(() => {
-    return () => { abortRef.current = true; };
+    return () => { abortRef.current?.abort(); };
   }, []);
 
   const perLayer = progress?.per_layer || {};
@@ -64,97 +64,96 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldI
     setTargetCount(Math.max(1, parseInt(e.target.value) || 1));
   };
 
-  const startEnriching = async () => {
-    if (!worldId || targetCount <= 0 || isComplete) return;
-    abortRef.current = false;
+  // mode 'all' = one server run that labels then describes every node.
+  // Otherwise runs just this step's phase, honoring the target count.
+  const startEnriching = async (mode) => {
+    const everything = mode === 'all';
+    if (!worldId || (!everything && (targetCount <= 0 || isComplete))) return;
+    const controller = new AbortController();
+    abortRef.current = controller;
     onEnrichingChange(true);
     setEnrichResults([]);
 
     const newResults = [];
     const newLabeled = [...labelSessionIds];
     const newDescribed = [...descSessionIds];
-    let generated = 0;
 
-    while (generated < targetCount && !abortRef.current) {
-      let result;
-      try {
-        if (isLabeling) {
-          result = await api.enrichLabelNext(worldId, layerFilter || null, newLabeled, reworkMode);
-        } else {
-          result = await api.enrichDescribeNext(worldId, layerFilter || null, newDescribed, reworkMode);
-        }
-      } catch (e) {
-        console.error('Enrich step failed:', e);
-        break;
-      }
-
-      if (result.complete) {
+    const onEvent = (evt) => {
+      if (evt.type === 'phase') {
         setProgress({
-          per_layer: result.per_layer,
-          total_nodes: result.total_nodes,
-          total_labeled: result.total_labeled,
+          per_layer: evt.per_layer,
+          total_nodes: evt.total_nodes,
+          total_labeled: evt.total_labeled,
         });
-        break;
+        return;
       }
+      if (evt.type !== 'node' && evt.type !== 'failed') return;
 
-      if (result.failed_node_ids && result.failed_node_ids.length > 0) {
+      if (evt.type === 'failed') {
         newResults.push({
-          node_id: result.failed_node_ids[0],
+          node_id: evt.node_id,
           label: null,
           name: null,
           description: null,
-          layer_id: result.layer_id,
+          layer_id: evt.layer_id,
           failed: true,
         });
-        generated++;
-        setEnrichResults([...newResults]);
-        setProgress({
-          per_layer: result.per_layer,
-          total_nodes: result.total_nodes,
-          total_labeled: result.total_labeled,
-        });
-        continue;
-      }
-
-      if (result.node_id) {
-        if (isLabeling) {
-          newLabeled.push(result.node_id);
-        } else {
-          newDescribed.push(result.node_id);
-        }
+      } else {
+        if (evt.phase === 'label') newLabeled.push(evt.node_id);
+        else newDescribed.push(evt.node_id);
         newResults.push({
-          node_id: result.node_id,
-          label: result.label,
-          name: result.label,
-          description: result.description,
-          layer_id: result.layer_id,
+          node_id: evt.node_id,
+          label: evt.label,
+          name: evt.label,
+          description: evt.description,
+          layer_id: evt.layer_id,
         });
-        generated++;
-        setEnrichResults([...newResults]);
         setLabelSessionIds([...newLabeled]);
         setDescSessionIds([...newDescribed]);
         onResult?.({
-          node_id: result.node_id,
-          label: result.label,
-          description: result.description,
-          layer_id: result.layer_id,
-        });
-        setProgress({
-          per_layer: result.per_layer,
-          total_nodes: result.total_nodes,
-          total_labeled: result.total_labeled,
+          node_id: evt.node_id,
+          label: evt.label,
+          description: evt.description,
+          layer_id: evt.layer_id,
         });
       }
+      setEnrichResults([...newResults]);
+      setProgress({
+        per_layer: evt.per_layer,
+        total_nodes: evt.total_nodes,
+        total_labeled: evt.total_labeled,
+      });
+    };
 
-      // Delay between calls to avoid overwhelming the LLM service
-      await new Promise((r) => setTimeout(r, 300));
+    try {
+      await api.enrichRun(
+        worldId,
+        {
+          phase: everything ? 'all' : (isLabeling ? 'label' : 'describe'),
+          count: everything ? null : targetCount,
+          layerId: layerFilter || null,
+          rework: !everything && reworkMode,
+          excludeNodeIds: !everything && reworkMode
+            ? (isLabeling ? newLabeled : newDescribed)
+            : null,
+        },
+        onEvent,
+        controller.signal,
+      );
+    } catch (e) {
+      if (e.name !== 'AbortError') console.error('Enrichment run failed:', e);
+    } finally {
+      abortRef.current = null;
+      onEnrichingChange(false);
+      fetchProgress();
     }
-
-    onEnrichingChange(false);
   };
 
   const stopEnriching = () => {
-    abortRef.current = true;
+    // Tell the server to stop (it flushes finished nodes), then drop the stream.
+    api.enrichCancel(worldId).catch(() => {});
+    abortRef.current?.abort();
+    abortRef.current = null;
     onEnrichingChange(false);
   };
 
@@ -259,13 +258,25 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldI
           )}
 
           {!enriching ? (
-            <button
-              onClick={startEnriching}
-              disabled={parentLoading || isComplete}
-              className="px-4 py-1.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
-            >
-              Start
-            </button>
+            <>
+              <button
+                onClick={() => startEnriching()}
+                disabled={parentLoading || isComplete}
+                className="px-4 py-1.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+              >
+                Start
+              </button>
+              {isLabeling && (
+                <button
+                  onClick={() => startEnriching('all')}
+                  disabled={parentLoading}
+                  title="Label and describe every remaining node in one run"
+                  className="px-4 py-1.5 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+                >
+                  Enrich everything
+                </button>
+              )}
+            </>
           ) : (
             <button
               onClick={stopEnriching}

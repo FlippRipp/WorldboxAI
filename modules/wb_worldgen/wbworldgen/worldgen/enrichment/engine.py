@@ -9,6 +9,7 @@ templates) from a ``host`` object (the WorldBuilder facade).
 import asyncio
 import logging
 import re
+import time
 
 from wbworldgen.worldgen.compiler import compile_world
 from wbworldgen.worldgen.generation.llm import json_retry_completion
@@ -72,32 +73,102 @@ def _strip_leading_the(name: str) -> str:
     return stripped or name.strip()
 
 
+# Substrings that identify a provider rate-limit error; when one is seen all
+# in-flight enrichment workers back off together instead of hammering the API.
+_RATE_LIMIT_MARKERS = ("429", "rate limit", "rate_limit", "quota",
+                       "resource_exhausted", "too many requests")
+
+
 class EnrichmentEngine:
     def __init__(self, host):
         self._host = host
+        self._cancel_flags: set = set()
+        self._backoff_until: float = 0.0
+        # Compiled-world cache (size 1: the actively-enriched world). Skips the
+        # full world re-read + compile + terrain npz decompress per node call.
+        # Entries are mutated in place as enrichment lands and dropped whenever
+        # the world's step files are written by anything else.
+        self._compiled_cache: dict = {}
 
     @property
     def _llm(self):
         return self._host._llm_service
 
+    # --- shared throttling ---------------------------------------------------
+
+    def _note_rate_limit(self, exc) -> bool:
+        msg = str(exc).lower()
+        if any(marker in msg for marker in _RATE_LIMIT_MARKERS):
+            self._backoff_until = max(self._backoff_until, time.monotonic() + 5.0)
+            return True
+        return False
+
+    async def _wait_for_backoff(self):
+        while True:
+            delay = self._backoff_until - time.monotonic()
+            if delay <= 0:
+                return
+            await asyncio.sleep(min(delay, 5.0))
+
     def _load_compiled(self, world_id: str) -> dict:
-        world_data = self._host.load_world(world_id)
-        compiled = compile_world(world_data, getattr(self._host, "_steps", None))
-        self._attach_terrain(world_id, world_data, compiled)
+        compiled = self._compiled_cache.get(world_id)
+        if compiled is None:
+            world_data = self._host.load_world(world_id)
+            compiled = compile_world(world_data, getattr(self._host, "_steps", None))
+            tg = world_data.get("steps", {}).get("terrain_generation", {}).get("data", {})
+            compiled["_terrain_meta"] = tg.get("layers", []) if isinstance(tg, dict) else []
+            self._compiled_cache.clear()
+            self._compiled_cache[world_id] = compiled
+        self._ensure_terrain(world_id, compiled)
         return compiled
 
-    def _attach_terrain(self, world_id: str, world_data: dict, compiled: dict):
+    def invalidate_compiled(self, world_id: str = None):
+        """Drop cached compiled state (after the world's step files were written
+        by something other than enrichment, or the world was deleted)."""
+        if world_id is None:
+            self._compiled_cache.clear()
+        else:
+            self._compiled_cache.pop(world_id, None)
+
+    def release_terrain(self, world_id: str):
+        """Free the decompressed terrain rasters (tens of MB) while keeping the
+        cheap compiled JSON cached; they lazily re-attach on the next call."""
+        compiled = self._compiled_cache.get(world_id)
+        if compiled is not None:
+            compiled.pop("_terrain_layers", None)
+
+    def _update_cached_node(self, compiled: dict, node_id: str, field: str, value: str):
+        """Mirror an enrichment write onto the compiled world's own node dicts
+        so the cached compiled state stays truthful across calls/runs (the node
+        lists handed to prompts are per-call copies)."""
+        index = compiled.get("_node_by_id")
+        if index is None:
+            index = {}
+            if compiled.get("map_layers"):
+                for ml in compiled["map_layers"]:
+                    for n in ml.get("map", {}).get("nodes", []):
+                        index[n.get("id")] = n
+            else:
+                for n in compiled.get("map", {}).get("nodes", []):
+                    index[n.get("id")] = n
+            compiled["_node_by_id"] = index
+        node = index.get(node_id)
+        if node is not None:
+            node[field] = value
+
+    def _ensure_terrain(self, world_id: str, compiled: dict):
         """Load persisted terrain rasters per layer so enrichment context can
-        sample biome/elevation at each node's coordinate. Best-effort."""
+        sample biome/elevation at each node's coordinate. Best-effort; no-op
+        when already attached."""
+        if "_terrain_layers" in compiled:
+            return
         try:
             from wbworldgen.worldgen import terrain_store as _ts
             persistence = getattr(self._host, "_persistence", None)
             if persistence is None:
                 return
-            tg = world_data.get("steps", {}).get("terrain_generation", {}).get("data", {})
-            tlayers = tg.get("layers", []) if isinstance(tg, dict) else []
             terrain_by_layer = {}
-            for tl in tlayers:
+            for tl in compiled.get("_terrain_meta", []):
                 lid = tl.get("layer_id", "main")
                 out_dir = persistence.terrain_dir(world_id, lid)
                 layers = _ts.load_terrain(str(out_dir))
@@ -154,26 +225,9 @@ class EnrichmentEngine:
 
         node = unlabeled[0]
         context = build_enrichment_context(node, all_nodes, compiled, include_descriptions=False)
-        name = snippet = None
-
-        for attempt in range(3):
-            try:
-                async with self._host._enrichment_semaphore:
-                    name, snippet = await self._live_label(node, context)
-                break
-            except (asyncio.TimeoutError, ConnectionError, OSError) as e:
-                logger.warning("Transient error labeling node %s (attempt %d): %s", node.get("id"), attempt + 1, e)
-                if attempt < 2:
-                    await asyncio.sleep(0.5 * (attempt + 1))
-                    continue
-            except Exception as e:
-                logger.error("Label generation failed for node %s: %s", node.get("id"), e)
-                if attempt < 2:
-                    await asyncio.sleep(0.5 * (attempt + 1))
-                    continue
+        name, snippet = await self._label_with_retries(node, context)
 
         if name is None:
-            logger.error("Label generation exhausted retries for node %s, skipping", node.get("id"))
             return {"node_id": node.get("id"), "label": None, "label_description": None,
                     "layer_id": node.get("layer_id", ""),
                     "per_layer": per_layer, "total_labeled": total_labeled,
@@ -183,8 +237,10 @@ class EnrichmentEngine:
         node_id = node.get("id")
         lid = node.get("layer_id", "")
         self._host._save_node_enrichment(world_id, node_id, "name", name)
+        self._update_cached_node(compiled, node_id, "name", name)
         if snippet:
             self._host._save_node_enrichment(world_id, node_id, "label_description", snippet)
+            self._update_cached_node(compiled, node_id, "label_description", snippet)
         self._host._flush_enrichment_cache(world_id)
 
         if lid in per_layer:
@@ -244,26 +300,9 @@ class EnrichmentEngine:
         node = undescribed[0]
         context = build_enrichment_context(node, all_nodes, compiled, include_descriptions=True)
         existing_description = node.get("description", "") if rework else ""
-        desc_with_links = None
-
-        for attempt in range(3):
-            try:
-                async with self._host._enrichment_semaphore:
-                    desc_with_links = await self._live_description(node, context, existing_description=existing_description)
-                break
-            except (asyncio.TimeoutError, ConnectionError, OSError) as e:
-                logger.warning("Transient error describing node %s (attempt %d): %s", node.get("id"), attempt + 1, e)
-                if attempt < 2:
-                    await asyncio.sleep(0.5 * (attempt + 1))
-                    continue
-            except Exception as e:
-                logger.error("Description generation failed for node %s: %s", node.get("id"), e)
-                if attempt < 2:
-                    await asyncio.sleep(0.5 * (attempt + 1))
-                    continue
+        desc_with_links = await self._describe_with_retries(node, context, existing_description)
 
         if desc_with_links is None:
-            logger.error("Description generation exhausted retries for node %s, skipping", node.get("id"))
             return {"node_id": node.get("id"), "description": None,
                     "layer_id": node.get("layer_id", ""),
                     "per_layer": per_layer, "total_labeled": total_described,
@@ -274,6 +313,7 @@ class EnrichmentEngine:
         node_id = node.get("id")
         lid = node.get("layer_id", "")
         self._host._save_node_enrichment(world_id, node_id, "description", desc)
+        self._update_cached_node(compiled, node_id, "description", desc)
         self._host._flush_enrichment_cache(world_id)
 
         if lid in per_layer:
@@ -282,6 +322,386 @@ class EnrichmentEngine:
         return {"node_id": node_id, "description": desc, "layer_id": lid,
                 "per_layer": per_layer, "total_labeled": total_described + 1,
                 "total_nodes": total_labeled_nodes, "complete": len(undescribed) <= 1, "failed_node_ids": []}
+
+    # --- retry wrappers -------------------------------------------------------
+
+    async def _label_with_retries(self, node, context) -> tuple:
+        """Label one node with transient-error retries. (None, None) on failure."""
+        for attempt in range(3):
+            try:
+                await self._wait_for_backoff()
+                async with self._host._enrichment_semaphore:
+                    return await self._live_label(node, context)
+            except (asyncio.TimeoutError, ConnectionError, OSError) as e:
+                logger.warning("Transient error labeling node %s (attempt %d): %s", node.get("id"), attempt + 1, e)
+            except Exception as e:
+                self._note_rate_limit(e)
+                logger.error("Label generation failed for node %s: %s", node.get("id"), e)
+            if attempt < 2:
+                await asyncio.sleep(0.5 * (attempt + 1))
+        logger.error("Label generation exhausted retries for node %s, skipping", node.get("id"))
+        return None, None
+
+    async def _describe_with_retries(self, node, context, existing_description: str = ""):
+        """Describe one node with transient-error retries. None on failure."""
+        for attempt in range(3):
+            try:
+                await self._wait_for_backoff()
+                async with self._host._enrichment_semaphore:
+                    return await self._live_description(node, context, existing_description=existing_description)
+            except (asyncio.TimeoutError, ConnectionError, OSError) as e:
+                logger.warning("Transient error describing node %s (attempt %d): %s", node.get("id"), attempt + 1, e)
+            except Exception as e:
+                self._note_rate_limit(e)
+                logger.error("Description generation failed for node %s: %s", node.get("id"), e)
+            if attempt < 2:
+                await asyncio.sleep(0.5 * (attempt + 1))
+        logger.error("Description generation exhausted retries for node %s, skipping", node.get("id"))
+        return None
+
+    # --- batched labeling -----------------------------------------------------
+
+    async def _run_label_batch(self, batch: list, all_nodes: list, compiled: dict,
+                               used_names: list, _depth: int = 0) -> tuple:
+        """One batched labeling call. Returns (results, leftovers): results maps
+        node_id -> (name, snippet) for entries that validated; leftovers are
+        nodes to re-run as single-node calls (missing/invalid/duplicate names,
+        or the whole batch when the call itself kept failing)."""
+        if len(batch) == 1:
+            # Degenerate batch: the single-node path has the better retry story.
+            return {}, list(batch)
+        contexts = {
+            n.get("id"): build_enrichment_context(n, all_nodes, compiled, include_descriptions=False)
+            for n in batch
+        }
+        try:
+            await self._wait_for_backoff()
+            async with self._host._enrichment_semaphore:
+                parsed = await self._live_label_batch(batch, contexts, used_names)
+        except Exception as e:
+            self._note_rate_limit(e)
+            if _depth == 0 and len(batch) >= 4:
+                logger.warning("Batch labeling failed (%d nodes), bisecting: %s", len(batch), e)
+                mid = len(batch) // 2
+                res_a, left_a = await self._run_label_batch(batch[:mid], all_nodes, compiled, used_names, _depth=1)
+                res_b, left_b = await self._run_label_batch(batch[mid:], all_nodes, compiled, used_names, _depth=1)
+                res_a.update(res_b)
+                return res_a, left_a + left_b
+            logger.warning("Batch labeling failed (%d nodes), falling back to single calls: %s", len(batch), e)
+            return {}, list(batch)
+
+        entries = parsed.get("nodes") if isinstance(parsed, dict) else None
+        by_id = {}
+        for entry in (entries if isinstance(entries, list) else []):
+            if isinstance(entry, dict) and entry.get("id") is not None:
+                by_id[str(entry["id"])] = entry
+
+        results = {}
+        leftovers = []
+        seen = {str(n).strip().lower() for n in used_names if n}
+        for node in batch:
+            node_id = node.get("id")
+            entry = by_id.get(str(node_id))
+            name = _strip_leading_the(str((entry or {}).get("name") or "")).strip()
+            if not name or name.lower() in seen:
+                leftovers.append(node)
+                continue
+            seen.add(name.lower())
+            results[node_id] = (name, str((entry or {}).get("label_description") or ""))
+        return results, leftovers
+
+    async def _live_label_batch(self, batch: list, contexts: dict, used_names: list) -> dict:
+        host = self._host
+        model = self._llm.module_fast_model or self._llm.reader_model
+        temperature = host._world_builder_temperature or 0.9
+
+        # Same world for every node in the batch.
+        world = contexts.get(batch[0].get("id"), {}).get("world", {})
+
+        lines = []
+        for i, node in enumerate(batch, 1):
+            ctx = contexts.get(node.get("id"), {})
+            region = ctx.get("region", {})
+            layer = ctx.get("layer", {})
+            neighbor_names = [n.get("name") for n in ctx.get("neighbors", [])[:4] if n.get("name")]
+            parts = [
+                f"{i}. id: {node.get('id')}",
+                f"type: {node.get('type', 'waypoint')}",
+                f"importance: {node.get('importance', 0)}/10",
+            ]
+            if region.get("name"):
+                parts.append(f"region: {region.get('name')} ({region.get('terrain', '')}, {region.get('climate', '')})")
+            if layer.get("name"):
+                parts.append(f"layer: {layer.get('name')} ({layer.get('type', 'surface')})")
+            terrain = ctx.get("terrain", {})
+            if terrain.get("biome"):
+                parts.append(f"terrain: {terrain['biome']}")
+            if neighbor_names:
+                parts.append(f"near: {', '.join(neighbor_names)}")
+            connection = ctx.get("connection", {})
+            if connection:
+                parts.append(f"NOTE: {_connection_block(connection)}")
+            lines.append(" | ".join(parts))
+        nodes_block = "\n".join(lines)
+
+        avoid = [str(n) for n in used_names if n][-40:]
+        avoid_block = (
+            "Already-used names (do NOT reuse or lightly vary these):\n" + ", ".join(avoid) + "\n\n"
+        ) if avoid else ""
+
+        system = host._get_prompt(
+            "enrich_label_batch_system",
+            "You are a world-building AI. Name several map locations at once. Give each a concise, "
+            "evocative name and a one-line label description. Names must be distinct from each other "
+            "and from the already-used names; vary naming styles across the batch. Never begin a name "
+            "with the word \"The\".",
+        )
+        user_msg = host._get_prompt(
+            "enrich_label_batch_user",
+            f"""World: {world.get('name', 'Unknown')} ({world.get('genre', '')}, {world.get('tone', '')})
+World premise: {world.get('premise', '')}
+
+{avoid_block}Locations to name:
+{nodes_block}
+
+Generate a unique, fitting name and a short one-line label_description for EVERY location above.
+Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_description": "..."}}, ...]}} with exactly {len(batch)} entries whose ids match the list.""",
+            world_name=world.get('name', 'Unknown'),
+            world_genre=world.get('genre', ''),
+            world_tone=world.get('tone', ''),
+            world_premise=world.get('premise', ''),
+            nodes_block=nodes_block,
+            used_names=", ".join(avoid),
+            batch_size=str(len(batch)),
+        )
+
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ]
+        return await json_retry_completion(
+            self._llm,
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            inspector_ctx={"call_type": "world_build", "step": "enrich:label_batch"},
+            step_label=f"enrich:label_batch:{len(batch)}",
+            retry_attempts=host._json_retry_attempts,
+        )
+
+    # --- batch run ------------------------------------------------------------
+
+    def cancel(self, world_id: str):
+        """Request cancellation of an in-flight run for this world (checked
+        between nodes; already-saved results are kept and flushed)."""
+        self._cancel_flags.add(world_id)
+
+    def _pending_for_phase(self, all_nodes: list, layer_map: dict, phase: str,
+                           layer_filter: str, rework: bool) -> tuple:
+        """Work queue + progress baseline for one run phase.
+
+        Returns (pending, per_layer, done, total) where pending is importance-
+        sorted, per_layer mirrors the shape the frontend progress bars consume,
+        and done/total match the legacy *_next counters for that phase."""
+        in_scope = [n for n in all_nodes if not layer_filter or n.get("layer_id", "") == layer_filter]
+        if phase == "label":
+            if rework:
+                pending = [n for n in in_scope if n.get("name")]
+                total = len(pending)
+                done = 0
+            else:
+                pending = [n for n in in_scope if not n.get("name")]
+                total = sum(info["total"] for info in layer_map.values())
+                done = sum(1 for n in all_nodes if n.get("name"))
+            done_field = "name"
+        else:
+            if rework:
+                pending = [n for n in in_scope if n.get("name") and n.get("description")]
+                total = len(pending)
+                done = 0
+            else:
+                pending = [n for n in in_scope if n.get("name") and not n.get("description")]
+                total = sum(1 for n in all_nodes if n.get("name"))
+                done = sum(1 for n in all_nodes if n.get("description"))
+            done_field = "description"
+
+        per_layer = {}
+        for lid, info in layer_map.items():
+            # Flat (single-layer) maps tag nodes with layer_id "" but the layer
+            # map keys them "main" — count both under the map key.
+            lid_done = 0 if rework else sum(
+                1 for n in all_nodes
+                if (n.get("layer_id", "") or "main") == (lid or "main") and n.get(done_field)
+            )
+            per_layer[lid] = {"done": lid_done, "total": info["total"]}
+
+        pending.sort(key=lambda n: -n.get("importance", 0))
+        return pending, per_layer, done, total
+
+    async def run(self, world_id: str, phase: str = "all", count: int = None,
+                  layer_filter: str = None, rework: bool = False,
+                  exclude_node_ids: list = None, concurrency: int = 3,
+                  batch_size: int = 8, on_event=None) -> dict:
+        """Enrich many nodes in one server-driven run with bounded concurrency.
+
+        ``phase`` is "label", "describe" or "all" (label to completion, then
+        describe). The compiled world + terrain rasters are loaded once for the
+        whole run instead of per node. Progress is reported through ``on_event``
+        (async callable) as {"type": "node"|"failed"|"phase"|"done", ...} dicts.
+        Results are write-cached per node and flushed to disk every few nodes,
+        at phase end and on cancellation.
+        """
+        if not self._llm or self._llm.mode == "mock":
+            raise RuntimeError("Enrichment requires an LLM service. The mock enrichment has been removed.")
+        if phase not in ("label", "describe", "all"):
+            raise ValueError(f"Unknown enrichment phase: {phase}")
+
+        async def emit(evt: dict):
+            if on_event is None:
+                return
+            try:
+                await on_event(evt)
+            except Exception:
+                logger.warning("enrichment run event callback failed", exc_info=True)
+
+        concurrency = max(1, int(concurrency))
+        self._cancel_flags.discard(world_id)
+        compiled = self._load_compiled(world_id)
+        # One canonical node list for the whole run: node dicts are mutated in
+        # memory as labels land so the describe phase sees fresh neighbor names
+        # without re-loading the world from disk.
+        all_nodes, layer_map = collect_nodes_by_layer(compiled)
+
+        summary = {"labeled": 0, "described": 0, "failed_node_ids": [], "cancelled": False}
+        flush_pending = 0
+
+        try:
+            for ph in (("label", "describe") if phase == "all" else (phase,)):
+                pending, per_layer, done, total = self._pending_for_phase(
+                    all_nodes, layer_map, ph, layer_filter, rework)
+                if exclude_node_ids:
+                    skip = set(exclude_node_ids)
+                    pending = [n for n in pending if n.get("id") not in skip]
+                if count is not None:
+                    pending = pending[:max(0, int(count))]
+                await emit({"type": "phase", "phase": ph, "pending": len(pending),
+                            "total_labeled": done, "total_nodes": total,
+                            "per_layer": per_layer})
+                if not pending:
+                    continue
+
+                queue = asyncio.Queue()
+                if ph == "label" and batch_size > 1:
+                    # Batched labeling: several nodes per LLM call. Invalid or
+                    # duplicate entries get re-queued as single nodes.
+                    for i in range(0, len(pending), batch_size):
+                        queue.put_nowait(pending[i:i + batch_size])
+                else:
+                    for n in pending:
+                        queue.put_nowait(n)
+
+                # Names already on the map + assigned during this run; recent
+                # ones feed batch prompts as a "do not reuse" list.
+                used_names = [n["name"] for n in all_nodes if n.get("name")]
+
+                def progress_snapshot():
+                    # Copy the shared counters: events sit in the SSE queue while
+                    # other workers keep mutating per_layer.
+                    return {"total_labeled": done, "total_nodes": total,
+                            "per_layer": {lid: dict(v) for lid, v in per_layer.items()}}
+
+                async def record_result(node, event_fields: dict):
+                    nonlocal done, flush_pending
+                    done += 1
+                    lid = node.get("layer_id", "")
+                    layer_key = lid if lid in per_layer else "main"
+                    if layer_key in per_layer:
+                        per_layer[layer_key]["done"] += 1
+                    flush_pending += 1
+                    if flush_pending >= 10:
+                        flush_pending = 0
+                        self._host._flush_enrichment_cache(world_id)
+                    await emit({"type": "node", "phase": ph, "node_id": node.get("id"),
+                                "layer_id": lid, **event_fields, **progress_snapshot()})
+
+                async def record_failure(node):
+                    summary["failed_node_ids"].append(node.get("id"))
+                    await emit({"type": "failed", "phase": ph, "node_id": node.get("id"),
+                                "layer_id": node.get("layer_id", ""), **progress_snapshot()})
+
+                def store_label(node, name, snippet):
+                    node_id = node.get("id")
+                    self._host._save_node_enrichment(world_id, node_id, "name", name)
+                    self._update_cached_node(compiled, node_id, "name", name)
+                    node["name"] = name
+                    used_names.append(name)
+                    if snippet:
+                        self._host._save_node_enrichment(world_id, node_id, "label_description", snippet)
+                        self._update_cached_node(compiled, node_id, "label_description", snippet)
+                        node["label_description"] = snippet
+                    summary["labeled"] += 1
+
+                async def worker():
+                    while world_id not in self._cancel_flags:
+                        try:
+                            item = queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            return
+
+                        if isinstance(item, list):
+                            results, leftovers = await self._run_label_batch(
+                                item, all_nodes, compiled, used_names)
+                            for node in item:
+                                got = results.get(node.get("id"))
+                                if got is None:
+                                    continue
+                                name, snippet = got
+                                store_label(node, name, snippet)
+                                await record_result(node, {"label": name, "label_description": snippet})
+                            for node in leftovers:
+                                queue.put_nowait(node)
+                            continue
+
+                        node = item
+                        if ph == "label":
+                            context = build_enrichment_context(node, all_nodes, compiled, include_descriptions=False)
+                            name, snippet = await self._label_with_retries(node, context)
+                            if name is None:
+                                await record_failure(node)
+                                continue
+                            store_label(node, name, snippet)
+                            await record_result(node, {"label": name, "label_description": snippet})
+                        else:
+                            context = build_enrichment_context(node, all_nodes, compiled, include_descriptions=True)
+                            existing = node.get("description", "") if rework else ""
+                            desc_with_links = await self._describe_with_retries(node, context, existing)
+                            if desc_with_links is None:
+                                await record_failure(node)
+                                continue
+                            desc = postprocess_links(desc_with_links, node, all_nodes)
+                            node_id = node.get("id")
+                            self._host._save_node_enrichment(world_id, node_id, "description", desc)
+                            self._update_cached_node(compiled, node_id, "description", desc)
+                            node["description"] = desc
+                            summary["described"] += 1
+                            await record_result(node, {"description": desc})
+
+                await asyncio.gather(*(worker() for _ in range(min(concurrency, queue.qsize()))))
+                self._host._flush_enrichment_cache(world_id)
+                flush_pending = 0
+                if world_id in self._cancel_flags:
+                    summary["cancelled"] = True
+                    break
+        finally:
+            if flush_pending:
+                self._host._flush_enrichment_cache(world_id)
+            self._cancel_flags.discard(world_id)
+            # Keep the cheap compiled JSON cached but free the decompressed
+            # rasters (tens of MB — matters on Termux).
+            self.release_terrain(world_id)
+
+        await emit({"type": "done", **summary})
+        return summary
 
     # --- live LLM calls -----------------------------------------------------
 
