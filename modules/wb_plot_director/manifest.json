@@ -1,0 +1,88 @@
+{
+  "id": "wb_plot_director",
+  "name": "Plot Director",
+  "version": "1.0.0",
+  "icon": "🎭",
+  "description": "Quietly maintains a hidden overarching plotline. Nudges the storyteller only when the story stalls, and re-plans when the player takes the story in a new direction. Check vague progress with /plot.",
+  "dependencies": [],
+  "consumes": {
+    "state": "*",
+    "module_data": [],
+    "module_configs": [],
+    "world_data": true
+  },
+  "produces": {
+    "module_data": true,
+    "context_string": false,
+    "messages": false
+  },
+  "settings_schema": {
+    "plot_enabled": {
+      "type": "toggle",
+      "default": true,
+      "label": "Plot Direction",
+      "category": "Plot Director",
+      "description": "Maintain a hidden plot outline and gently nudge the story when it stalls. One background LLM call per assessment."
+    },
+    "assessment_frequency": {
+      "type": "slider",
+      "min": 1,
+      "max": 5,
+      "default": 1,
+      "label": "Assessment Frequency (turns)",
+      "category": "Plot Director",
+      "description": "Check plot progress every N turns."
+    },
+    "stall_threshold": {
+      "type": "slider",
+      "min": 1,
+      "max": 10,
+      "default": 3,
+      "label": "Stall Threshold (checks)",
+      "category": "Plot Director",
+      "description": "Number of consecutive no-progress checks before a subtle nudge is injected into the storyteller prompt."
+    },
+    "opportunity_nudges": {
+      "type": "toggle",
+      "default": true,
+      "label": "Opportunistic Nudges",
+      "category": "Plot Director",
+      "description": "Also nudge when a scene presents a natural opening for the plot, even before the stall threshold is reached."
+    },
+    "assessment_ai_model": {
+      "type": "select",
+      "options": [
+        {"value": "fastest", "label": "Fastest (cheapest)"},
+        {"value": "balanced", "label": "Balanced (default)"},
+        {"value": "smartest", "label": "Smartest"}
+      ],
+      "default": "balanced",
+      "label": "Assessment Model",
+      "category": "Plot Director"
+    },
+    "outline_ai_model": {
+      "type": "select",
+      "options": [
+        {"value": "balanced", "label": "Balanced"},
+        {"value": "smartest", "label": "Smartest (default)"}
+      ],
+      "default": "smartest",
+      "label": "Outline / Re-plan Model",
+      "category": "Plot Director"
+    }
+  },
+  "commands": {
+    "/plot": "on_command_plot"
+  },
+  "prompt_blocks": [
+    {
+      "id": "plot_nudge",
+      "type": "module_prompt",
+      "enabled": true,
+      "role_type": "system",
+      "placement": "chat_injection",
+      "depth": 0,
+      "config": {}
+    }
+  ]
+}

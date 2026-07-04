@@ -79,6 +79,28 @@ def test_chat_injection_depth_and_veto_order():
     print("Chat injection depth and veto order test passed.")
 
 
+def test_command_messages_stay_out_of_the_prompt():
+    # Slash-command exchanges live in the transcript for the player but must
+    # never reach the storyteller LLM.
+    compiler = PromptCompiler()
+    state = {
+        "input_text": "I open the iron door.",
+        "chat_messages": [
+            {"role": "user", "content": "I walk into the tavern.", "meta": {"ts": "t"}},
+            {"role": "user", "content": "/plot", "meta": {"ts": "t", "command": True}},
+            {"role": "system", "content": "[Plot] Act 1 of 3.", "meta": {"ts": "t", "command": True}},
+        ],
+    }
+
+    compiled = compiler.compile(state)
+    contents = [message["content"] for message in compiled["messages"]]
+
+    assert "I walk into the tavern." in contents
+    assert "/plot" not in contents
+    assert "[Plot] Act 1 of 3." not in contents
+    print("Command message exclusion test passed.")
+
+
 def test_invalid_pipeline_rejected():
     compiler = PromptCompiler()
     try:

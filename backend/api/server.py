@@ -1218,6 +1218,66 @@ async def websocket_endpoint(websocket: WebSocket):
                 "state": session_manager.state,
             })
 
+    async def try_handle_command(data) -> bool:
+        """Route ``/command`` inputs to module handlers declared in manifests.
+
+        Command turns bypass the story pipeline entirely: the exchange is
+        appended to the transcript (tagged ``meta.command`` so the prompt
+        compiler keeps it away from the LLM), persisted into the current turn,
+        and replayed with the same state_load + done pair the client already
+        handles for sync. Unknown commands fall through to a normal turn.
+        """
+        text = (data.get("text") or "").strip()
+        if not text.startswith("/"):
+            return False
+
+        parts = text.split()
+        command = parts[0].lower()
+        args = parts[1:]
+
+        state = session_manager.state
+        active = state.get("module_configs", {}).get("__active_modules__")
+        active_set = set(active) if isinstance(active, list) else None
+
+        for mod_id, mod_data in registry.get_modules().items():
+            if active_set is not None and mod_id not in active_set:
+                continue
+            manifest = mod_data["manifest"]
+            handler_name = (manifest.get("commands") or {}).get(command)
+            if not handler_name:
+                continue
+            handler = getattr(mod_data["backend"], handler_name, None)
+            if handler is None:
+                continue
+
+            module_state = engine._build_module_state(state, mod_id, manifest.get("consumes", {}))
+            try:
+                engine.sdk.llm._current_module = mod_id
+                result = await handler(args, module_state, engine.sdk)
+                message = result.get("message", "") if isinstance(result, dict) else ""
+            except Exception as exc:
+                print(f"Error in {mod_id}.{handler_name}: {exc}")
+                message = f"[{manifest.get('name', mod_id)}] Command failed."
+            finally:
+                engine.sdk.llm._current_module = ""
+
+            meta = session_manager.build_message_meta()
+            meta["command"] = True
+            chat_messages = state.setdefault("chat_messages", [])
+            chat_messages.append({"role": "user", "content": text, "meta": dict(meta)})
+            chat_messages.append({"role": "system", "content": message or "(no output)", "meta": dict(meta)})
+            session_manager.save_manager.save_turn(
+                session_manager.active_save_id, state, state.get("turn", 0)
+            )
+
+            out_state = dict(state)
+            out_state["swipes"] = session_manager.swipes_meta()
+            await websocket.send_json({"type": "state_load", "chat_messages": chat_messages})
+            await websocket.send_json({"type": "done", "state": out_state})
+            return True
+
+        return False
+
     async def run_action(data):
         action = data.get("action", "turn")
         # Every action generates into the active save; without one there is
@@ -1236,7 +1296,8 @@ async def websocket_endpoint(websocket: WebSocket):
             elif action == "regenerate":
                 await handle_regenerate()
             else:
-                await handle_turn(data)
+                if not await try_handle_command(data):
+                    await handle_turn(data)
         except asyncio.CancelledError:
             # User pressed stop. For a normal turn nothing was saved, so the
             # turn simply didn't happen; a regenerate has already restored the

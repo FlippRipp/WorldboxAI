@@ -405,6 +405,11 @@ class PromptCompiler:
             content = message.get("content")
             if not isinstance(content, str) or not content.strip():
                 continue
+            # Slash-command exchanges (/inventory, /plot, ...) are player-facing
+            # chrome, not story; keep them out of the storyteller's prompt.
+            meta = message.get("meta")
+            if isinstance(meta, dict) and meta.get("command"):
+                continue
             if role == "ai":
                 role = "assistant"
             if role in {"user", "assistant", "system"}:

@@ -98,6 +98,50 @@ def test_websocket_mock_turn_returns_done_state(tmp_path, monkeypatch):
     assert state["history"][-1].startswith("Mock outcome: I test the websocket turn.")
 
 
+def test_websocket_slash_command_bypasses_pipeline(tmp_path, monkeypatch):
+    client, session_manager = make_client(tmp_path, monkeypatch)
+
+    with client.websocket_connect("/ws/chat") as websocket:
+        websocket.send_json({"text": "/plot"})
+        state_load = websocket.receive_json()
+        done = websocket.receive_json()
+
+    assert state_load["type"] == "state_load"
+    assert done["type"] == "done"
+
+    messages = state_load["chat_messages"]
+    assert messages[-2]["role"] == "user"
+    assert messages[-2]["content"] == "/plot"
+    assert messages[-2]["meta"]["command"] is True
+    assert messages[-1]["role"] == "system"
+    assert messages[-1]["content"].startswith("[Plot]")
+    assert messages[-1]["meta"]["command"] is True
+
+    # The story pipeline never ran: no turn consumed, no narration produced.
+    assert done["state"]["turn"] == 0
+    assert session_manager.state["history"] == []
+
+
+def test_websocket_unknown_or_inactive_command_falls_through_to_turn(tmp_path, monkeypatch):
+    client, session_manager = make_client(tmp_path, monkeypatch)
+    # No modules active for this save: /plot must be treated as normal input.
+    session_manager.state.setdefault("module_configs", {})["__active_modules__"] = []
+
+    with client.websocket_connect("/ws/chat") as websocket:
+        websocket.send_json({"text": "/plot"})
+        received_done = None
+        for _ in range(64):
+            message = websocket.receive_json()
+            assert message["type"] != "error", f"turn failed: {message.get('detail')}"
+            if message["type"] == "done":
+                received_done = message
+                break
+
+    assert received_done is not None
+    assert received_done["state"]["turn"] == 1
+    assert received_done["state"]["history"][-1].startswith("Mock outcome: /plot")
+
+
 def test_save_undo_endpoint_restores_prior_turn(tmp_path, monkeypatch):
     client, _ = make_client(tmp_path, monkeypatch)
 
