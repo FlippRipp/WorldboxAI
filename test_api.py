@@ -65,6 +65,55 @@ def test_save_and_prompt_pipeline_endpoints(tmp_path, monkeypatch):
     assert load_response.json()["session"]["active_save_id"] == "autosave"
 
 
+def test_create_save_with_world_and_scenario(tmp_path, monkeypatch):
+    # World + scenario together: world data is used as the setting, the
+    # scenario is persisted alongside it so its starting_prompt overrides
+    # the opening message.
+    client, session_manager = make_client(tmp_path, monkeypatch)
+
+    from backend.engine.scenario import ScenarioStore
+    store = ScenarioStore(str(tmp_path / "data"))
+    record = store.save_scenario({
+        "name": "Ambush",
+        "scenario_description": "Bandits stalk the mountain road.",
+        "starting_prompt": "The wagon wheel snaps at dusk.",
+    })
+    monkeypatch.setattr(server, "scenario_store", store)
+
+    async def fake_world_provider(*, save_id, source_id, start_preference,
+                                  session_manager, engine,
+                                  character_module_data=None, character_data=None):
+        state = session_manager.create_save(save_id)
+        session_manager.state["world_data"] = {"id": source_id}
+        return {"state": state, "start_location": None}
+
+    monkeypatch.setitem(server.engine.story_sources, "world", fake_world_provider)
+
+    resp = client.post("/api/saves", json={
+        "save_id": "combo_save",
+        "world_id": "test_world",
+        "scenario_id": record["id"],
+    })
+    assert resp.status_code == 200
+
+    scenario_file = tmp_path / "data" / "saves" / "combo_save" / "Scenario" / "scenario.json"
+    assert scenario_file.exists()
+    assert session_manager.state["world_data"]["id"] == "test_world"
+    assert session_manager.state["scenario_data"]["starting_prompt"] == "The wagon wheel snaps at dusk."
+
+
+def test_create_save_with_missing_scenario_returns_404(tmp_path, monkeypatch):
+    client, session_manager = make_client(tmp_path, monkeypatch)
+
+    from backend.engine.scenario import ScenarioStore
+    monkeypatch.setattr(server, "scenario_store", ScenarioStore(str(tmp_path / "data")))
+
+    resp = client.post("/api/saves", json={"save_id": "orphan", "scenario_id": "does_not_exist"})
+    assert resp.status_code == 404
+    # The scenario is loaded before any save is created, so nothing is left behind.
+    assert not (tmp_path / "data" / "saves" / "orphan").exists()
+
+
 def test_websocket_mock_turn_returns_done_state(tmp_path, monkeypatch):
     client, _ = make_client(tmp_path, monkeypatch)
 

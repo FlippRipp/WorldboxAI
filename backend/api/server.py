@@ -530,6 +530,34 @@ async def create_save(request: CreateSaveRequest):
             except FileNotFoundError:
                 pass
 
+        # A scenario can be used alone or alongside a world: the world supplies
+        # the setting, the scenario supplies (or rewrites) the opening message.
+        # Loaded up front so a missing scenario fails before any save is created.
+        scenario = None
+        if request.scenario_id:
+            scenario = scenario_store.load_scenario(request.scenario_id)
+            # A modification request is stored on the save's scenario copy and
+            # applied by the engine when the intro is generated (over the
+            # websocket, so the rewritten opening can stream). Persisting it in
+            # the workspace file means it survives a restart between create
+            # and intro. The library scenario is never touched.
+            if request.scenario_request and request.scenario_request.strip():
+                scenario["pending_modification_request"] = request.scenario_request.strip()
+
+        def _persist_scenario():
+            # Write the save's scenario copy (parallel to World/world_data.json)
+            # and expose it in session state for the intro. Must run after the
+            # save workspace exists.
+            if scenario is None:
+                return
+            save_workspace = session_manager.data_dir / "saves" / request.save_id
+            scenario_dir = save_workspace / "Scenario"
+            scenario_dir.mkdir(parents=True, exist_ok=True)
+            import json as _json
+            with open(scenario_dir / "scenario.json", "w", encoding="utf-8") as f:
+                _json.dump(scenario, f, indent=2, ensure_ascii=False)
+            session_manager.state["scenario_data"] = scenario
+
         if request.world_id:
             # World is an optional story source provided by the wb_worldgen module.
             provider = engine.story_sources.get("world")
@@ -547,6 +575,7 @@ async def create_save(request: CreateSaveRequest):
                 character_module_data=character_module_data,
                 character_data=character_data,
             )
+            _persist_scenario()
             _persist_active_modules()
             return {
                 "session": session_manager.get_status(),
@@ -556,28 +585,13 @@ async def create_save(request: CreateSaveRequest):
         elif request.scenario_id:
             # Basic scenario story source: no world, just a system prompt +
             # optional literal opening message (persisted parallel to world_data).
-            scenario = scenario_store.load_scenario(request.scenario_id)
-            # A modification request is stored on the save's scenario copy and
-            # applied by the engine when the intro is generated (over the
-            # websocket, so the rewritten opening can stream). Persisting it in
-            # the workspace file means it survives a restart between create
-            # and intro. The library scenario is never touched.
-            if request.scenario_request and request.scenario_request.strip():
-                scenario["pending_modification_request"] = request.scenario_request.strip()
             state = session_manager.create_save(
                 request.save_id,
                 character_module_data=character_module_data,
                 character_data=character_data,
             )
-            save_workspace = session_manager.data_dir / "saves" / request.save_id
-            scenario_dir = save_workspace / "Scenario"
-            scenario_dir.mkdir(parents=True, exist_ok=True)
-            import json as _json
-            with open(scenario_dir / "scenario.json", "w", encoding="utf-8") as f:
-                _json.dump(scenario, f, indent=2, ensure_ascii=False)
-
+            _persist_scenario()
             engine.set_memory_path(session_manager.get_memory_path())
-            session_manager.state["scenario_data"] = scenario
             session_manager.state["start_preference"] = request.start_preference
             _persist_active_modules()
             return {"session": session_manager.get_status(), "state": state}
@@ -595,6 +609,8 @@ async def create_save(request: CreateSaveRequest):
         raise HTTPException(status_code=400, detail=str(exc))
     except FileExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 @app.post("/api/saves/{save_id}/load")
 async def load_save(save_id: str):

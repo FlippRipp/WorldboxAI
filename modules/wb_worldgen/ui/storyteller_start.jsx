@@ -3,9 +3,9 @@ import { api } from 'api';
 
 // Story-source picker contributed by wb_worldgen, embedded in the storyteller
 // start screen. Controlled component: the host owns the chosen story source
-// (`selected`) and updates it via `onSelect`. Reporting a world clears any other
-// source (the host enforces single-selection). Renders nothing if there are no
-// saved worlds yet.
+// (`selected`) and updates it via `onSelect`. The host may pair the world with
+// an independently chosen scenario (world = setting, scenario = opening).
+// Renders nothing if there are no saved worlds yet.
 export default function StorytellerStart({ selected, onSelect }) {
   const [worlds, setWorlds] = useState([]);
   const [startPreference, setStartPreference] = useState('');
