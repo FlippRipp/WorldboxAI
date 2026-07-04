@@ -219,20 +219,34 @@ function AppContent() {
     setCurrentMode('storyteller-game');
   }, [session]);
 
+  // Completed turns are autosaved server-side, so exiting while idle loses
+  // nothing; only an in-flight generation is at risk (it never gets saved if
+  // interrupted), so that's the only case that warrants a warning.
+  const generating = ws.currentStream != null || ws.postProcessing;
+
   const handleExitMode = useCallback(() => {
-    if (currentMode === 'storyteller-game' && (session.sessionState?.turn ?? 0) > 0) {
+    if (currentMode === 'storyteller-game' && generating) {
       setShowExitWarning(true);
     } else {
       sentIntroRef.current = false;
       setCurrentMode(null);
     }
-  }, [currentMode, session.sessionState]);
+  }, [currentMode, generating]);
 
   const handleConfirmExit = useCallback(() => {
+    // Abandon the in-flight turn; otherwise the server keeps generating into
+    // the story after we've left and re-entering hits a "busy" error.
+    ws.sendStop();
     setShowExitWarning(false);
     sentIntroRef.current = false;
     setCurrentMode(null);
-  }, []);
+  }, [ws]);
+
+  // If the turn finishes while the warning is up, the risk is gone: close it.
+  // The next exit tap leaves silently since everything is saved.
+  useEffect(() => {
+    if (showExitWarning && !generating) setShowExitWarning(false);
+  }, [showExitWarning, generating]);
 
   useEffect(() => {
     if (showOnboarding !== null) return;
@@ -491,6 +505,7 @@ function AppContent() {
 
       {showExitWarning && (
         <ExitWarning
+          savedTurn={gameState.turn ?? session.sessionState?.turn ?? 0}
           onConfirm={handleConfirmExit}
           onCancel={() => setShowExitWarning(false)}
         />

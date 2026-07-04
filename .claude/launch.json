@@ -15,6 +15,13 @@
       "port": 8321
     },
     {
+      "name": "frontend-verify-2",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "frontend", "--", "--port", "5177", "--strictPort", "--mode", "verify"],
+      "port": 5177,
+      "autoPort": false
+    },
+    {
       "name": "frontend-port-test",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev", "--prefix", "frontend", "--", "--port", "5176", "--strictPort"],
