@@ -102,6 +102,24 @@ def test_dependency_order_and_invalid_manifests():
         print("Dependency order and invalid manifest tests passed.")
 
 
+def test_all_shipped_modules_load():
+    # A manifest validation failure silently drops a module from the registry
+    # (wb_character_tracker once vanished because it consumed a state key the
+    # registry whitelist didn't know yet). Every module shipped in modules/
+    # must actually load.
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    modules_dir = os.path.join(base_dir, "modules")
+    registry = ModuleRegistry(modules_dir)
+    registry.load_all_modules()
+
+    expected = sorted(
+        entry for entry in os.listdir(modules_dir)
+        if os.path.isfile(os.path.join(modules_dir, entry, "manifest.json"))
+    )
+    assert sorted(registry.get_modules().keys()) == expected
+    print("All shipped modules load test passed.")
+
+
 async def _module_owned_mutation_dispatch():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     registry = ModuleRegistry(os.path.join(base_dir, "modules"))

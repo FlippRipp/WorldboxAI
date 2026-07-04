@@ -20,7 +20,7 @@ ALLOWED_SETTING_TYPES = {"slider", "toggle", "select", "text"}
 VALID_CONSUME_KEYS = {"state", "module_data", "module_configs", "world_data"}
 VALID_PRODUCE_KEYS = {"module_data", "context_string", "messages"}
 VALID_STATE_KEYS = {
-    "input_text", "turn", "history", "chat_messages", "characters",
+    "input_text", "last_input_text", "turn", "history", "chat_messages", "characters",
     "world_id", "player_location_node_id", "player_location_region",
     "player_location_layer_id", "revealed_node_ids",
     "current_context", "prompt_pipeline", "last_prompt_trace",
