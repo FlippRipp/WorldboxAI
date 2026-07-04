@@ -20,7 +20,7 @@
       "default": true,
       "label": "Track Character Changes",
       "category": "Character Tracker",
-      "description": "After each turn, detect changes to the player character's appearance, identity (name/race/title), and personality, and record them into the character."
+      "description": "After each turn, detect changes to the player character's appearance, identity (name/gender/race/title), and personality, and record them into the character."
     },
     "evolution_frequency": {
       "type": "slider",

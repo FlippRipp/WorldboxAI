@@ -12,7 +12,7 @@ import json
 
 # Canonical character fields this module is allowed to evolve. The engine's
 # librarian node whitelists the same set before merging into the save.
-UPDATABLE_FIELDS = ("name", "race", "full_appearance", "short_appearance", "personality")
+UPDATABLE_FIELDS = ("name", "gender", "race", "full_appearance", "short_appearance", "personality")
 MAX_LOG_ENTRIES = 50
 
 
@@ -64,37 +64,46 @@ async def on_librarian(state: dict, sdk) -> dict | None:
     if not player:
         return None
 
-    recent = "\n".join(str(h) for h in history[-3:])[:2500]
+    # The change being detected is in THIS turn's scene, so it must always be
+    # in the prompt in full; earlier scenes are only context and get whatever
+    # budget is left. (A head-truncated join of the last 3 scenes used to cut
+    # off the newest scene entirely once the story got going.)
+    latest = str(history[-1])[-4000:]
+    earlier = "\n".join(str(h) for h in history[-3:-1])[-2000:]
 
     current = {
         "name": player.get("name", ""),
+        "gender": player.get("gender", ""),
         "race": player.get("race", ""),
         "appearance": player.get("full_appearance") or player.get("short_appearance", ""),
         "personality": player.get("personality", ""),
     }
 
+    earlier_block = f"EARLIER NARRATION (context only):\n{earlier}\n\n" if earlier else ""
+
     prompt = f"""You maintain the character record for the player of a text RPG. After each scene you check whether the narration shows the player character CHANGING in a lasting way.
 
 Report changes ONLY in these areas:
 - appearance / physical condition (new scars, wounds, lost limbs, aging, a transformation, altered hair/eyes/skin)
-- identity (a new name, an earned title or epithet, a change of race/species such as becoming undead or a vampire)
+- identity (a new name, an earned title or epithet, a change of gender, a change of race/species such as becoming undead or a vampire)
 - personality (a lasting shift in temperament, outlook, values, or defining traits)
 
 Do NOT report momentary emotions, temporary states, location changes, inventory, or skills/stats — only durable changes to who the character IS or how they LOOK.
 
 CURRENT CHARACTER RECORD:
   Name: {current['name']}
+  Gender: {current['gender'] or '(not recorded)'}
   Race: {current['race']}
   Appearance: {current['appearance']}
   Personality: {current['personality'] or '(not yet described)'}
 
-RECENT NARRATION:
-{recent}
+{earlier_block}THIS TURN'S SCENE (check this for changes):
+{latest}
 
 Return ONLY the fields that CHANGED this scene. If a field changed, give its NEW full value (rewrite appearance/personality in full, incorporating the change), not just the delta. If nothing durable changed, return an empty object {{}}.
 
 Respond with ONLY valid JSON:
-{{"name": "new name (only if it changed)", "race": "new race (only if it changed)", "full_appearance": "full updated appearance (only if it changed)", "personality": "full updated personality (only if it changed)", "change_note": "one short sentence describing what changed"}}"""
+{{"name": "new name (only if it changed)", "gender": "new gender (only if it changed)", "race": "new race (only if it changed)", "full_appearance": "full updated appearance (only if it changed)", "personality": "full updated personality (only if it changed)", "change_note": "one short sentence describing what changed"}}"""
 
     model_pref = config.get("evolution_ai_model", "balanced")
     try:
