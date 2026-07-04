@@ -42,7 +42,7 @@ export default function Header({
           <span className="lg:hidden font-bold text-purple-400">WorldBox</span>
           {session?.sessionState && (
             <div className="hidden sm:flex items-center gap-2 text-sm text-gray-400">
-              <span className="text-gray-500">{session.sessionState.active_save_id || 'autosave'}</span>
+              <span className="text-gray-500">{session.sessionState.active_save_id || 'No story'}</span>
               <span className="text-gray-600">·</span>
               <span>Turn {session.sessionState.turn ?? 0}</span>
             </div>

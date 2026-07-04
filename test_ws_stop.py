@@ -9,6 +9,7 @@ from backend.engine.session import GameSessionManager
 
 def make_client(tmp_path, monkeypatch):
     session_manager = GameSessionManager(str(tmp_path / "data"))
+    session_manager.create_save("autosave")
     monkeypatch.setattr(server, "session_manager", session_manager)
     server.engine.set_memory_path(session_manager.get_memory_path())
     server.engine.llm.mode = "mock"

@@ -9,7 +9,11 @@ from backend.engine.session import GameSessionManager
 
 @pytest.fixture()
 def session(tmp_path):
-    return GameSessionManager(str(tmp_path / "data"))
+    s = GameSessionManager(str(tmp_path / "data"))
+    # Saves are only ever created explicitly now; the id keeps the old default
+    # name so the assertions below stay readable.
+    s.create_save("autosave")
+    return s
 
 
 def _play_turn(session, user_text, narration, turn):

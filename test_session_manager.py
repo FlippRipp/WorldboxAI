@@ -1,6 +1,8 @@
 import os
 import shutil
 
+import pytest
+
 from backend.engine.session import GameSessionManager
 from backend.engine.prompt_pipeline import default_prompt_pipeline
 
@@ -13,7 +15,12 @@ def test_session_manager_persists_active_state():
         shutil.rmtree(data_dir)
 
     session = GameSessionManager(data_dir)
-    assert session.active_save_id == "autosave"
+    # No implicit default save: nothing is active until a story is created.
+    assert session.active_save_id is None
+    assert session.state["turn"] == 0
+
+    session.create_save("story_one")
+    assert session.active_save_id == "story_one"
     assert session.state["turn"] == 0
     assert session.state["module_data"]["wb_core_rpg"]["hp"] == 85
 
@@ -31,6 +38,7 @@ def test_session_manager_persists_active_state():
     session.save_completed_turn(final_state)
 
     reloaded = GameSessionManager(data_dir)
+    assert reloaded.active_save_id == "story_one"
     assert reloaded.state["turn"] == 1
     assert reloaded.state["history"] == ["A persistent thing happened."]
     messages = reloaded.state["chat_messages"]
@@ -56,8 +64,10 @@ def test_session_manager_save_lifecycle():
         shutil.rmtree(data_dir)
 
     session = GameSessionManager(data_dir)
-    assert any(save["id"] == "autosave" for save in session.list_saves())
+    # A fresh data dir has no saves at all.
+    assert session.list_saves() == []
 
+    session.create_save("first_save")
     new_state = session.create_save("second_save")
     assert session.active_save_id == "second_save"
     assert new_state["turn"] == 0
@@ -75,9 +85,9 @@ def test_session_manager_save_lifecycle():
     assert restored["turn"] == 1
     assert restored["module_data"]["wb_core_rpg"]["hp"] == 70
 
-    autosave_state = session.load_save("autosave")
-    assert session.active_save_id == "autosave"
-    assert autosave_state["turn"] == 0
+    first_state = session.load_save("first_save")
+    assert session.active_save_id == "first_save"
+    assert first_state["turn"] == 0
 
     shutil.rmtree(data_dir)
     print("Session manager lifecycle test passed.")
@@ -103,10 +113,11 @@ def test_session_manager_restores_last_active_save_on_boot():
     assert reloaded.state["turn"] == 1
     assert reloaded.state["history"] == ["A tale in progress."]
 
-    # Deleting the active save resets the marker: next boot falls back.
+    # Deleting the active save clears the marker: next boot has no story.
     reloaded.delete_save("story_two")
+    assert reloaded.active_save_id is None
     fallback = GameSessionManager(data_dir)
-    assert fallback.active_save_id == "autosave"
+    assert fallback.active_save_id is None
 
     shutil.rmtree(data_dir)
 
@@ -118,24 +129,44 @@ def test_session_manager_ignores_broken_active_marker():
     if os.path.exists(data_dir):
         shutil.rmtree(data_dir)
 
-    GameSessionManager(data_dir)  # creates autosave
+    GameSessionManager(data_dir).create_save("real_story")
 
     marker = os.path.join(data_dir, "saves", "active_save.json")
 
-    # Corrupt marker → autosave.
+    # Corrupt marker → no active story.
     with open(marker, "w", encoding="utf-8") as f:
         f.write("{not json")
-    assert GameSessionManager(data_dir).active_save_id == "autosave"
+    assert GameSessionManager(data_dir).active_save_id is None
 
-    # Marker pointing at a save that no longer exists → autosave.
+    # Marker pointing at a save that no longer exists → no active story.
     with open(marker, "w", encoding="utf-8") as f:
         f.write('{"save_id": "vanished_story"}')
-    assert GameSessionManager(data_dir).active_save_id == "autosave"
+    assert GameSessionManager(data_dir).active_save_id is None
 
-    # Marker with an invalid id (path traversal chars) → autosave.
+    # Marker with an invalid id (path traversal chars) → no active story.
     with open(marker, "w", encoding="utf-8") as f:
         f.write('{"save_id": "../evil"}')
-    assert GameSessionManager(data_dir).active_save_id == "autosave"
+    assert GameSessionManager(data_dir).active_save_id is None
+
+    shutil.rmtree(data_dir)
+
+
+def test_session_manager_refuses_turns_without_active_save():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(base_dir, "test_session_no_save_data")
+
+    if os.path.exists(data_dir):
+        shutil.rmtree(data_dir)
+
+    session = GameSessionManager(data_dir)
+    assert session.get_memory_path() is None
+    assert session.swipes_meta() is None
+    assert session.get_status()["active_save_id"] is None
+
+    with pytest.raises(ValueError):
+        session.save_completed_turn(dict(session.state))
+    with pytest.raises(ValueError):
+        session.update_module_configs({})
 
     shutil.rmtree(data_dir)
 
@@ -145,3 +176,4 @@ if __name__ == "__main__":
     test_session_manager_save_lifecycle()
     test_session_manager_restores_last_active_save_on_boot()
     test_session_manager_ignores_broken_active_marker()
+    test_session_manager_refuses_turns_without_active_save()

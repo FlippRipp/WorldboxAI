@@ -13,27 +13,49 @@ from backend.engine.settings_registry import SettingsRegistry
 class GameSessionManager:
     """Owns the active local play session and bridges saves to engine state."""
 
-    def __init__(self, data_dir: str, default_save_id: str = "autosave", settings: SettingsRegistry = None):
+    def __init__(self, data_dir: str, settings: SettingsRegistry = None):
         self.data_dir = Path(data_dir)
         self.save_manager = SaveManager(str(self.data_dir))
         self.prompt_compiler = PromptCompiler()
-        self.default_save_id = default_save_id
-        self.active_save_id = default_save_id
         self.settings = settings or SettingsRegistry()
-        self._ensure_default_save()
+        # No story is active until one is created or loaded. Saves exist only
+        # when the player makes them — there is no implicit default slot.
+        self.active_save_id: Optional[str] = None
+        self.state = self._empty_state()
         # Restore the save that was active before the last shutdown, so a server
-        # restart lands the session where the player left off instead of the
-        # default. Any problem (deleted save, corrupt marker) falls back.
+        # restart lands the session where the player left off. Any problem
+        # (deleted save, corrupt marker) leaves the session without a story.
         restored = self._read_active_marker()
-        if restored and restored != self.active_save_id:
+        if restored:
             try:
                 self.load_save(restored)
-                return
             except Exception as exc:
-                print(f"[Session] Could not restore last active save '{restored}': {exc}. Falling back to '{default_save_id}'.")
-                self.active_save_id = default_save_id
-                self.settings.bind_workspace(str(self.data_dir / "saves" / default_save_id))
-        self.state = self.load_active_state()
+                print(f"[Session] Could not restore last active save '{restored}': {exc}. Starting without an active story.")
+
+    def _empty_state(self) -> dict[str, Any]:
+        """Baseline state while no story is loaded (menu screens, fresh boot).
+        Global resources (prompt pipeline, continue prompt) are still live so
+        Prompt Studio and previews work outside a story."""
+        return {
+            "active_save_id": None,
+            "input_text": "",
+            "module_data": {},
+            "module_configs": {},
+            "characters": {},
+            "current_context": [],
+            "history": [],
+            "chat_messages": [],
+            "prompt_pipeline": self.prompt_compiler.normalize_pipeline(
+                self.save_manager.load_global_prompt_pipeline()
+            ),
+            "continue_prompt": self.save_manager.load_continue_prompt(),
+            "last_prompt_trace": [],
+            "turn": 0,
+        }
+
+    def _require_active_save(self):
+        if not self.active_save_id:
+            raise ValueError("No story is loaded. Create or load a story first.")
 
     # ── Active-save persistence (survives restarts) ──────────────────────
 
@@ -61,30 +83,6 @@ class GameSessionManager:
     def _validate_save_id(self, save_id: str):
         if not re.fullmatch(r"[A-Za-z0-9_-]+", save_id):
             raise ValueError("Save id may only contain letters, numbers, underscores, and hyphens.")
-
-    def _ensure_default_save(self):
-        save_workspace = self.data_dir / "saves" / self.active_save_id
-        save_archive = self.data_dir / "saves" / f"{self.active_save_id}.wbx"
-        if save_workspace.exists() or save_archive.exists():
-            self.settings.bind_workspace(str(save_workspace))
-            return
-
-        default_player = {
-            "id": "default_player",
-            "name": "Adventurer",
-            "module_data": {},
-        }
-        self.save_manager.create_player_template("default_player", default_player)
-        self.save_manager.create_new_save(
-            self.active_save_id,
-            ["default_player"],
-            {
-                "module_data": {
-                    "wb_core_rpg": {"hp": 85, "max_hp": 85},
-                }
-            },
-        )
-        self.settings.bind_workspace(str(save_workspace))
 
     def list_saves(self) -> list[dict[str, Any]]:
         saves_dir = self.data_dir / "saves"
@@ -178,9 +176,14 @@ class GameSessionManager:
     def delete_save(self, save_id: str):
         self._validate_save_id(save_id)
         self.save_manager.delete_save(save_id)
+        if save_id == self.active_save_id:
+            # The active story is gone: drop back to the no-story baseline.
+            self.active_save_id = None
+            self.settings.bind_workspace("")
+            self.state = self._empty_state()
         # The next boot must not try to restore a deleted save.
         if self._read_active_marker() == save_id:
-            self._persist_active_save_id(self.default_save_id)
+            self._persist_active_save_id("")
 
     def load_active_state(self) -> dict[str, Any]:
         saved_state = self.save_manager.load_save(self.active_save_id)
@@ -252,6 +255,7 @@ class GameSessionManager:
         return meta
 
     def save_completed_turn(self, final_state: dict[str, Any]) -> dict[str, Any]:
+        self._require_active_save()
         user_text = self.state.get("input_text", "")
         previous_history = self.state.get("history", [])
         final_history = final_state.get("history", previous_history)
@@ -289,6 +293,7 @@ class GameSessionManager:
         return self.state
 
     def update_module_configs(self, module_configs: dict[str, Any]) -> dict[str, Any]:
+        self._require_active_save()
         self.state["module_configs"] = module_configs
         self.save_manager.save_module_configs(self.active_save_id, module_configs)
         return self.state
@@ -336,6 +341,7 @@ class GameSessionManager:
         return self.state["continue_prompt"]
 
     def undo_turn(self, target_turn: int) -> dict[str, Any]:
+        self._require_active_save()
         if target_turn < 0:
             raise ValueError("Target turn must be zero or greater.")
         self.save_manager.undo_turn(self.active_save_id, target_turn)
@@ -346,6 +352,8 @@ class GameSessionManager:
 
     def swipes_meta(self) -> Optional[dict[str, Any]]:
         """Swipe info for the last turn, for the UI's `i/n` counter (or None)."""
+        if not self.active_save_id:
+            return None
         m = self.save_manager.load_swipe_manifest(self.active_save_id)
         if not m:
             return None
@@ -363,6 +371,8 @@ class GameSessionManager:
 
     def begin_turn_swipes(self):
         """After a normal completed turn, start a fresh swipe set (v0 = this gen)."""
+        if not self.active_save_id:
+            return
         turn = self.state.get("turn", 0)
         if turn <= 0:
             return  # opening scene is not swipeable
@@ -372,6 +382,7 @@ class GameSessionManager:
         """Roll the workspace back to before the last turn and re-seat its user
         input so the pipeline can produce a fresh generation. Returns the turn
         number being regenerated (caller rolls back memory to turn-1)."""
+        self._require_active_save()
         manifest = self.save_manager.load_swipe_manifest(self.active_save_id)
         if not manifest:
             raise ValueError("There is no turn available to regenerate.")
@@ -384,6 +395,7 @@ class GameSessionManager:
         return turn
 
     def add_regenerated_swipe(self) -> dict[str, Any]:
+        self._require_active_save()
         return self.save_manager.add_swipe(self.active_save_id)
 
     def restore_active_swipe(self) -> Optional[dict[str, Any]]:
@@ -391,6 +403,8 @@ class GameSessionManager:
         that was active before the regenerate started, so a stopped or failed
         regenerate leaves the transcript exactly as it was. Returns the reloaded
         state, or None when there is no swipe set to restore."""
+        if not self.active_save_id:
+            return None
         manifest = self.save_manager.load_swipe_manifest(self.active_save_id)
         if not manifest:
             return None
@@ -400,6 +414,7 @@ class GameSessionManager:
         return self.state
 
     def select_swipe(self, index: int) -> dict[str, Any]:
+        self._require_active_save()
         self.save_manager.set_active_swipe(self.active_save_id, index)
         self.state = self.load_active_state()
         # Reloading active state drops the transient `swipes` key, so re-attach it
@@ -422,6 +437,7 @@ class GameSessionManager:
         return hist_idx if 0 <= hist_idx < len(history) else None
 
     def edit_message(self, index: int, content: str) -> dict[str, Any]:
+        self._require_active_save()
         msgs = list(self.state.get("chat_messages", []))
         if index < 0 or index >= len(msgs):
             raise ValueError("Message index out of range.")
@@ -443,6 +459,7 @@ class GameSessionManager:
     def delete_message(self, index: int) -> dict[str, Any]:
         """Delete a chat entry. Deleting the last turn performs a true rollback
         (reverting state); deleting an older entry is a transcript edit only."""
+        self._require_active_save()
         msgs = self.state.get("chat_messages", [])
         n = len(msgs)
         if index < 0 or index >= n:
@@ -597,10 +614,23 @@ class GameSessionManager:
 
         raise ValueError(f"Unsupported export format '{fmt}'. Use md, txt, or jsonl.")
 
-    def get_memory_path(self) -> str:
+    def get_memory_path(self) -> Optional[str]:
+        if not self.active_save_id:
+            return None
         return str(self.data_dir / "saves" / self.active_save_id / "vector_index")
 
     def get_status(self) -> dict[str, Any]:
+        if not self.active_save_id:
+            return {
+                "active_save_id": None,
+                "state_backend": "save_backed_session",
+                "turn": 0,
+                "history_length": 0,
+                "workspace_exists": False,
+                "archive_exists": False,
+                "memory_path": None,
+                "swipes": None,
+            }
         save_workspace = self.data_dir / "saves" / self.active_save_id
         save_archive = self.data_dir / "saves" / f"{self.active_save_id}.wbx"
         return {

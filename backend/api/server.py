@@ -245,7 +245,10 @@ async def get_module_configs():
 
 @app.put("/api/session/module-configs")
 async def update_module_configs(request: ModuleConfigsRequest):
-    state = session_manager.update_module_configs(request.module_configs)
+    try:
+        state = session_manager.update_module_configs(request.module_configs)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return {
         "session": session_manager.get_status(),
         "module_configs": state.get("module_configs", {}),
@@ -1195,6 +1198,16 @@ async def websocket_endpoint(websocket: WebSocket):
 
     async def run_action(data):
         action = data.get("action", "turn")
+        # Every action generates into the active save; without one there is
+        # nowhere to save, so refuse instead of failing mid-pipeline.
+        if session_manager.active_save_id is None:
+            await websocket.send_json({
+                "type": "error",
+                "code": "no_active_save",
+                "message": "No story is loaded. Create or load a story first.",
+                "state": session_manager.state,
+            })
+            return
         try:
             if action == "intro":
                 await handle_intro()

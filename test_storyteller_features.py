@@ -15,11 +15,19 @@ from backend.engine.prompt_pipeline import PromptCompiler, DEFAULT_CONTINUE_PROM
 
 def make_client(tmp_path, monkeypatch):
     session_manager = GameSessionManager(str(tmp_path / "data"))
+    session_manager.create_save("autosave")
     monkeypatch.setattr(server, "session_manager", session_manager)
     server.engine.memory = None
     server.engine.set_memory_path(session_manager.get_memory_path())
     server.engine.llm.mode = "mock"
     return TestClient(server.app), session_manager
+
+
+def _make_session(tmp_path):
+    """Session with one explicitly created save (there is no implicit default)."""
+    session = GameSessionManager(str(tmp_path / "data"))
+    session.create_save("autosave")
+    return session
 
 
 def _seed_two_turns(session):
@@ -62,7 +70,7 @@ def test_reasoning_is_captured_and_streamed(tmp_path, monkeypatch):
 
 
 def test_swipe_manifest_and_roundtrip(tmp_path):
-    session = GameSessionManager(str(tmp_path / "data"))
+    session = _make_session(tmp_path)
     _seed_two_turns(session)
     sm, sid = session.save_manager, session.active_save_id
 
@@ -85,7 +93,7 @@ def test_swipe_manifest_and_roundtrip(tmp_path):
 
 
 def test_prepare_regenerate_rolls_back_to_previous_turn(tmp_path):
-    session = GameSessionManager(str(tmp_path / "data"))
+    session = _make_session(tmp_path)
     _seed_two_turns(session)
     regen_turn = session.prepare_regenerate()
     assert regen_turn == 1
@@ -97,7 +105,7 @@ def test_prepare_regenerate_rolls_back_to_previous_turn(tmp_path):
 
 
 def test_edit_message_updates_content_and_history(tmp_path):
-    session = GameSessionManager(str(tmp_path / "data"))
+    session = _make_session(tmp_path)
     _seed_two_turns(session)
     state = session.edit_message(2, "Edited narration.")
     assert state["chat_messages"][2]["content"] == "Edited narration."
@@ -105,7 +113,7 @@ def test_edit_message_updates_content_and_history(tmp_path):
 
 
 def test_delete_last_turn_rolls_back(tmp_path):
-    session = GameSessionManager(str(tmp_path / "data"))
+    session = _make_session(tmp_path)
     _seed_two_turns(session)
     # chat = [intro(0), user(1), ai(2)], turn 1 → deleting the last ai rolls back.
     state = session.delete_message(2)
@@ -114,7 +122,7 @@ def test_delete_last_turn_rolls_back(tmp_path):
 
 
 def test_delete_last_turn_reseats_swipes_for_new_last_turn(tmp_path):
-    session = GameSessionManager(str(tmp_path / "data"))
+    session = _make_session(tmp_path)
     _seed_two_turns(session)
     sm, sid = session.save_manager, session.active_save_id
     # Add a second player turn (turn 2) with its own swipe set.
@@ -135,7 +143,7 @@ def test_delete_last_turn_reseats_swipes_for_new_last_turn(tmp_path):
 
 
 def test_edit_last_turn_keeps_swipes(tmp_path):
-    session = GameSessionManager(str(tmp_path / "data"))
+    session = _make_session(tmp_path)
     _seed_two_turns(session)
     state = session.edit_message(2, "Edited narration.")
     # The edited generation becomes v0 and stays regeneratable.
@@ -168,7 +176,7 @@ def test_empty_input_without_configured_prompt_falls_back_to_default(tmp_path):
 
 
 def test_continue_prompt_store_roundtrip_and_state(tmp_path):
-    session = GameSessionManager(str(tmp_path / "data"))
+    session = _make_session(tmp_path)
     # Default when nothing is saved.
     assert session.save_manager.load_continue_prompt() == DEFAULT_CONTINUE_PROMPT
     session.update_continue_prompt("Time skips forward.")
@@ -178,7 +186,7 @@ def test_continue_prompt_store_roundtrip_and_state(tmp_path):
 
 
 def test_continue_turn_regenerates_as_continue(tmp_path):
-    session = GameSessionManager(str(tmp_path / "data"))
+    session = _make_session(tmp_path)
     _seed_two_turns(session)
     # A continue turn appends only an ai message (no user message).
     session.state["chat_messages"].append({"role": "ai", "content": "R-cont"})
@@ -192,7 +200,7 @@ def test_continue_turn_regenerates_as_continue(tmp_path):
 
 
 def test_delete_opening_scene_is_rejected(tmp_path):
-    session = GameSessionManager(str(tmp_path / "data"))
+    session = _make_session(tmp_path)
     session.state["chat_messages"] = [{"role": "ai", "content": "Intro."}]
     session.state["history"] = ["Intro."]
     session.state["turn"] = 0

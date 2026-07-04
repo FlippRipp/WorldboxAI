@@ -20,8 +20,11 @@ class SettingsRegistry:
         self._global_path = ""
 
     def bind_workspace(self, save_workspace: str):
+        # An empty workspace unbinds (no story loaded): saves no-op and there
+        # is nothing to load.
         self._workspace = save_workspace
-        self._load()
+        if save_workspace:
+            self._load()
 
     def bind_global(self, global_path: str):
         self._global_path = global_path

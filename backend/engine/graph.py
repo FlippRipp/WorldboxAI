@@ -41,7 +41,9 @@ class EngineGraph:
         print(f"[DEBUG] EngineGraph.__init__: after set_llm_service, reader_model='{self.llm.reader_model}', storyteller_model='{self.llm.storyteller_model}'")
         self.prompt_compiler = PromptCompiler()
         self.memory = None # Lazy initialized
-        self.memory_db_path = "data/saves/autosave/vector_index"
+        # Bound to the active save before any turn runs; None while no story
+        # is loaded.
+        self.memory_db_path = None
         # Story-source providers registered by modules (e.g. wb_worldgen). Maps a
         # source type -> async provider used by create_save to build a story.
         self.story_sources = {}
@@ -306,6 +308,8 @@ class EngineGraph:
 
     async def ensure_memory(self):
         if self.memory is None:
+            if not self.memory_db_path:
+                raise RuntimeError("No story is loaded; the memory store has no save to bind to.")
             dummy_vector = await self.llm.get_embedding("init",
                 inspector_ctx={"call_type": "embedding", "step": "ensure_memory"})
             dim_size = len(dummy_vector)
