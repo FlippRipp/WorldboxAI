@@ -169,7 +169,7 @@ class LLMService:
             if self._or_provider_routes:
                 print(f"[LLMService] OpenRouter provider routes: {self._or_provider_routes}")
 
-        print(f"[LLMService] Reconfigured for provider '{provider_id}': storyteller={self.storyteller_model}, reader={self.reader_model}, embedding={self.embedding_model}")
+        print(f"[LLMService] Reconfigured for provider '{provider_id}': storyteller={self.storyteller_model}, reader={self.reader_model}, embedding={self.embedding_model}, module_fast={self.module_fast_model}")
 
     def _provider_route_kwargs(self, model: str) -> dict:
         """Return litellm kwargs that pin the OpenRouter upstream provider for

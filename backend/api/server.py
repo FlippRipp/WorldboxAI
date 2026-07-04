@@ -770,6 +770,7 @@ async def health_check():
         "STORYTELLER_FALLBACK_MODELS": engine.llm.storyteller_fallback_models,
         "READER_MODEL": engine.llm.reader_model,
         "EMBEDDING_MODEL": engine.llm.embedding_model,
+        "MODULE_FAST_MODEL": engine.llm.module_fast_model,
     }
 
     providers_status = {}
