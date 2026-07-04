@@ -268,7 +268,9 @@ function MessageBlock({ message, index, isLastAssistant, swipes, busy, editReque
             </div>
           </div>
         ) : isUser ? (
-          <p className="text-lg leading-relaxed whitespace-pre-wrap">{message.content}</p>
+          <div className="text-lg leading-relaxed">
+            <MarkdownRenderer content={message.content} />
+          </div>
         ) : isSystem ? (
           <p className="whitespace-pre-wrap text-sm">{message.content}</p>
         ) : (
