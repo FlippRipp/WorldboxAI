@@ -1,6 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 import backend.api.server as server
@@ -115,6 +116,43 @@ def test_ws_stop_cancels_turn_and_rejects_concurrent_turns(tmp_path, monkeypatch
     # Nothing was saved: state is exactly as before the aborted turn.
     assert session_manager.state.get("history", []) == history_before
     assert session_manager.state.get("input_text", "") == ""
+
+
+def test_stop_marks_inflight_llm_call_cancelled(monkeypatch):
+    # CancelledError is a BaseException, so the `except Exception` cleanup in
+    # LLMService never sees it — a stopped turn must still close the inspector
+    # record, otherwise it shows as "running" forever in the LLM inspector.
+    import backend.engine.llm as llm_mod
+    from backend.engine.llm import LLMService
+    from backend.engine.llm_inspector import LLMInspector
+
+    async def hang_forever(**kwargs):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(llm_mod, "acompletion", hang_forever)
+
+    async def scenario():
+        service = LLMService(mode="live")
+        inspector = LLMInspector()
+        service.set_inspector(inspector)
+
+        call = asyncio.create_task(
+            service.simple_completion(
+                [{"role": "user", "content": "hi"}], model="test/model"
+            )
+        )
+        # Let the call reach the (hung) provider await before cancelling.
+        while not inspector.get_calls():
+            await asyncio.sleep(0.01)
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+        records = inspector.get_calls()
+        assert len(records) == 1
+        assert records[0]["status"] == "cancelled"
+
+    asyncio.run(scenario())
 
 
 def test_ws_stop_during_regenerate_restores_last_turn(tmp_path, monkeypatch):

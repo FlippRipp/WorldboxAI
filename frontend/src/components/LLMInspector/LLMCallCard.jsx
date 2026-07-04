@@ -39,6 +39,7 @@ function formatTokens(tIn, tOut) {
 export default function LLMCallCard({ call, expanded, onToggle }) {
   const colors = TYPE_COLORS[call.call_type] || TYPE_COLORS.storyteller;
   const isRunning = call.status === 'running';
+  const isCancelled = call.status === 'cancelled';
   const hasError = !!call.error;
 
   return (
@@ -57,6 +58,7 @@ export default function LLMCallCard({ call, expanded, onToggle }) {
           </span>
         )}
         {hasError && <span className="text-xs text-red-400">ERR</span>}
+        {isCancelled && <span className="text-[10px] text-gray-400 uppercase">stopped</span>}
         {/* Status / duration */}
         {isRunning ? (
           <span className="flex items-center gap-1 text-[10px] text-amber-300 w-16 justify-end">
@@ -88,6 +90,7 @@ export default function LLMCallCard({ call, expanded, onToggle }) {
             <span>Model: {call.model}</span>
             {call.streaming && <span className="text-purple-400">Streaming</span>}
             {isRunning && <span className="text-amber-300">In progress…</span>}
+            {isCancelled && <span className="text-gray-400">Stopped by user</span>}
           </div>
 
           {/* Error */}
@@ -113,7 +116,7 @@ export default function LLMCallCard({ call, expanded, onToggle }) {
                 </pre>
               ) : (
                 <div className="text-[11px] text-gray-500 italic bg-black/30 rounded p-2">
-                  {isRunning ? 'Waiting for response…' : '(no output)'}
+                  {isRunning ? 'Waiting for response…' : isCancelled ? '(stopped before a response arrived)' : '(no output)'}
                 </div>
               )}
             </div>

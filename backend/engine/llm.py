@@ -231,6 +231,13 @@ class LLMService:
             if return_usage:
                 return content, reasoning, usage
             return (content, reasoning) if return_reasoning else content
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so the handler below never
+            # sees it — without this the inspector record stays "running"
+            # forever after the user stops a turn.
+            if self.inspector and cid:
+                await self.inspector.end_call(cid, messages, cancelled=True)
+            raise
         except Exception as e:
             if self.inspector and cid:
                 await self.inspector.end_call(cid, messages, "", error=str(e))
@@ -275,6 +282,10 @@ class LLMService:
                 await self.inspector.end_call(cid, text, f"vector dim={len(embedding)}",
                                         tokens_in=0, tokens_out=0)
             return embedding
+        except asyncio.CancelledError:
+            if self.inspector and cid:
+                await self.inspector.end_call(cid, text, cancelled=True)
+            raise
         except Exception as e:
             if self.inspector and cid:
                 await self.inspector.end_call(cid, text, "", error=str(e))
@@ -561,6 +572,10 @@ Return a JSON object with:
                                         usage.get("prompt_tokens", 0),
                                         usage.get("completion_tokens", 0))
             return {"content": result, "reasoning": reasoning, "model": model, "usage": usage}
+        except asyncio.CancelledError:
+            if self.inspector and cid:
+                await self.inspector.end_call(cid, messages, cancelled=True)
+            raise
         except Exception as e:
             if self.inspector and cid:
                 await self.inspector.end_call(cid, messages, "", error=str(e))

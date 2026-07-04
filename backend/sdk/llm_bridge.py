@@ -1,4 +1,5 @@
 """LLM access bridge exposed to modules through the WorldBox SDK."""
+import asyncio
 import os
 import logging
 
@@ -68,6 +69,7 @@ class LLMBridge:
 
         messages = [{"role": "user", "content": prompt}]
 
+        cid = None
         try:
             if self._service is not None:
                 return await self._service.simple_completion(
@@ -76,7 +78,6 @@ class LLMBridge:
                     max_tokens=max_tokens,
                     inspector_ctx={"call_type": "module_fast", "step": "module:generate", "module_source": mod_src},
                 )
-            cid = None
             if self._inspector:
                 cid = await self._inspector.start_call(call_type="module_fast", model=model, step="module:generate", module_source=mod_src, input_data=messages)
             from litellm import acompletion
@@ -85,6 +86,12 @@ class LLMBridge:
             if self._inspector and cid:
                 await self._inspector.end_call(cid, prompt, content, 0, 0)
             return content
+        except asyncio.CancelledError:
+            # CancelledError bypasses the Exception handler below; close the
+            # inspector record so it doesn't show as running forever.
+            if self._inspector and cid:
+                await self._inspector.end_call(cid, prompt, cancelled=True)
+            raise
         except Exception as e:
             logger.error(f"Module LLM call failed (model={model}): {e}")
             return ""

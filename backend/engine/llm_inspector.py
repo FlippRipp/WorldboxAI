@@ -15,7 +15,7 @@ class LLMCallRecord:
     step: str
     module_source: str
     streaming: bool
-    status: str = "running"  # running | complete | error
+    status: str = "running"  # running | complete | error | cancelled
     duration_ms: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
@@ -94,6 +94,7 @@ class LLMInspector:
         tokens_in: int = 0,
         tokens_out: int = 0,
         error: str = "",
+        cancelled: bool = False,
     ):
         record = self._records.pop(call_id, None)
         if record is None:
@@ -109,7 +110,7 @@ class LLMInspector:
         record.tokens_in = tokens_in
         record.tokens_out = tokens_out
         record.error = error
-        record.status = "error" if error else "complete"
+        record.status = "cancelled" if cancelled else ("error" if error else "complete")
 
         await self._broadcast(record)
 
