@@ -5,12 +5,21 @@ import { useLLMInspector } from '../../hooks/useLLMInspector';
 const STORAGE_KEY = 'worldbox_llm_inspector_pos';
 const DRAG_THRESHOLD = 4;
 
+function maxOffsetX() {
+  return Math.max(8, window.innerWidth - 72);
+}
+
 function loadPosition() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const p = JSON.parse(raw);
-      if (typeof p.x === 'number' && typeof p.y === 'number') return p;
+      if (typeof p.x === 'number' && typeof p.y === 'number') {
+        return {
+          x: Math.max(8, Math.min(maxOffsetX(), p.x)),
+          y: Math.max(8, Math.min(window.innerHeight - 60, p.y)),
+        };
+      }
     }
   } catch (_) {}
   return { x: 16, y: 16 };
@@ -37,7 +46,7 @@ export default function LLMInspectorButton() {
       if (!dragRef.current) return;
       const dx = dragRef.current.startX - e.clientX;
       const dy = dragRef.current.startY - e.clientY;
-      const nx = Math.max(8, Math.min(400, dragRef.current.posX + dx));
+      const nx = Math.max(8, Math.min(Math.min(400, maxOffsetX()), dragRef.current.posX + dx));
       const ny = Math.max(8, Math.min(window.innerHeight - 60, dragRef.current.posY + dy));
       setPosition({ x: nx, y: ny });
     };
