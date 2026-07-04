@@ -460,7 +460,14 @@ async def on_librarian(state: dict, sdk) -> dict | None:
         return None
 
     char = Character.from_dict(state.get("module_data", {}).get("wb_core_rpg", {}))
-    recent = "\n".join(str(h) for h in history[-3:])[-2500:]
+
+    # The grant/curse being detected happened in THIS turn's scene, so that
+    # scene must always be in the prompt (a tail-truncated join of the last 3
+    # scenes used to cut off the start of a long newest scene, missing skills
+    # granted early in it). Earlier scenes are only context.
+    latest = str(history[-1])[-4000:]
+    earlier = "\n".join(str(h) for h in history[-3:-1])[-2000:]
+    earlier_block = f"EARLIER NARRATION (context only):\n{earlier}\n\n" if earlier else ""
 
     if char.skills:
         skill_lines = ", ".join(f"{n} ({d['rating']}/10, {d.get('type', 'active')})" for n, d in char.skills.items())
@@ -476,8 +483,8 @@ Do NOT report skills the player improved through their own effort, practice, tra
 
 The player's current skills: {skill_lines}
 
-RECENT NARRATION:
-{recent}
+{earlier_block}THIS TURN'S SCENE (check this for skill changes):
+{latest}
 
 For each added or altered skill, the description must capture the nuance of the power in 1-2 tight sentences: what it does, how it manifests, where it came from, and any limit, cost, or condition the narration implies. Concrete over flowery. Example: "Emberkiss, a boon from the hearth-goddess: the bearer's touch can kindle or snuff small flames, but only fire she can see." not "A powerful fire ability."
 
