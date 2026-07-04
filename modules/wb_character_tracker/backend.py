@@ -8,6 +8,7 @@ per-save character (characters["default_player"]) via the sanctioned
 human-readable change log is kept in this module's own module_data.
 """
 import json
+import re
 
 
 # Canonical character fields this module is allowed to evolve. The engine's
@@ -81,14 +82,23 @@ async def on_librarian(state: dict, sdk) -> dict | None:
 
     earlier_block = f"EARLIER NARRATION (context only):\n{earlier}\n\n" if earlier else ""
 
-    prompt = f"""You maintain the character record for the player of a text RPG. After each scene you check whether the narration shows the player character CHANGING in a lasting way.
+    player_action = str(state.get("last_input_text") or state.get("input_text") or "").strip()[:600]
+    action_block = f"THE PLAYER'S ACTION THIS TURN:\n{player_action}\n\n" if player_action else ""
+
+    prompt = f"""You maintain the character record for the player of a text RPG. After each scene you check whether the player's action or the narration shows the player character CHANGING in a lasting way.
 
 Report changes ONLY in these areas:
 - appearance / physical condition (new scars, wounds, lost limbs, aging, a transformation, altered hair/eyes/skin)
 - identity (a new name, an earned title or epithet, a change of gender, a change of race/species such as becoming undead or a vampire)
 - personality (a lasting shift in temperament, outlook, values, or defining traits)
 
-Do NOT report momentary emotions, temporary states, location changes, inventory, or skills/stats — only durable changes to who the character IS or how they LOOK.
+NAME CHANGES need no ceremony or magic — report one whenever:
+- the player declares or adopts a new name or alias ("call me X", introducing themselves under a new name, taking a false identity), OR
+- another character gives the player a name, nickname, or title and the player accepts or answers to it, OR
+- the scene consistently calls the player character something other than the recorded name below.
+A deliberate rename is a durable identity change even if it happens casually in dialog.
+
+Do NOT report momentary emotions, temporary states, location changes, inventory, or skills/stats — only durable changes to who the character IS or how they LOOK or what they are CALLED.
 
 CURRENT CHARACTER RECORD:
   Name: {current['name']}
@@ -97,10 +107,10 @@ CURRENT CHARACTER RECORD:
   Appearance: {current['appearance']}
   Personality: {current['personality'] or '(not yet described)'}
 
-{earlier_block}THIS TURN'S SCENE (check this for changes):
+{earlier_block}{action_block}THIS TURN'S SCENE (check this for changes):
 {latest}
 
-Return ONLY the fields that CHANGED this scene. If a field changed, give its NEW full value (rewrite appearance/personality in full, incorporating the change), not just the delta. If nothing durable changed, return an empty object {{}}.
+Return ONLY the fields that CHANGED this scene. If a field changed, give its NEW full value (rewrite appearance/personality in full, incorporating the change), not just the delta. If the name changed, also return any other record field whose text still mentions the old name, rewritten to use the new name. If nothing durable changed, return an empty object {{}}.
 
 Respond with ONLY valid JSON:
 {{"name": "new name (only if it changed)", "gender": "new gender (only if it changed)", "race": "new race (only if it changed)", "full_appearance": "full updated appearance (only if it changed)", "personality": "full updated personality (only if it changed)", "change_note": "one short sentence describing what changed"}}"""
@@ -124,6 +134,20 @@ Respond with ONLY valid JSON:
 
     if not character_update:
         return None
+
+    # A rename must not leave the old name behind elsewhere in the record. The
+    # LLM is asked to rewrite affected fields itself; for any it didn't return,
+    # sweep the old name out deterministically.
+    new_name = character_update.get("name", "")
+    old_name = str(player.get("name") or "").strip()
+    if new_name and old_name and new_name.lower() != old_name.lower():
+        old_name_re = re.compile(rf"\b{re.escape(old_name)}\b", re.IGNORECASE)
+        for field in ("full_appearance", "short_appearance", "personality"):
+            if field in character_update:
+                continue
+            text = player.get(field)
+            if isinstance(text, str) and old_name_re.search(text):
+                character_update[field] = old_name_re.sub(new_name, text)
 
     change_note = str(parsed.get("change_note", "")).strip()
     log = list(_own_data(state).get("evolution_log", []))

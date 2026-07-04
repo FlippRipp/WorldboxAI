@@ -21,16 +21,17 @@ def _make_sdk(reply: str, captured: dict):
     return SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
 
 
-def _state(history):
+def _state(history, last_input_text=""):
     return {
         "turn": 3,
         "history": history,
+        "last_input_text": last_input_text,
         "characters": {
             "default_player": {
                 "name": "Aria",
                 "gender": "female",
                 "race": "human",
-                "full_appearance": "Tall, dark braid, green eyes.",
+                "full_appearance": "Tall, dark braid, green eyes. Aria's scar marks her left cheek.",
                 "personality": "Cautious and curious.",
             }
         },
@@ -71,3 +72,52 @@ def test_gender_change_is_recorded():
     update = result["character_update"]
     assert update["gender"] == "male"
     assert update["name"] == "Aric"
+
+
+def test_player_action_reaches_the_prompt():
+    # A rename is usually declared in the player's own input ("call me X"),
+    # which never appears in history (storyteller outputs only) — the tracker
+    # must see the turn's input too.
+    backend = _load_backend()
+    captured = {}
+    sdk = _make_sdk("{}", captured)
+    state = _state(["The innkeeper nods slowly."], last_input_text='I lean in and whisper: "Call me Nyx from now on."')
+
+    asyncio.run(backend.on_librarian(state, sdk))
+
+    assert "Call me Nyx" in captured["prompt"]
+    assert "PLAYER'S ACTION THIS TURN" in captured["prompt"]
+
+
+def test_rename_sweeps_old_name_from_other_fields():
+    # If the LLM reports only the new name, the old name must still be swept
+    # out of the record's other text fields deterministically.
+    backend = _load_backend()
+    captured = {}
+    reply = json.dumps({"name": "Nyx", "change_note": "Aria now goes by Nyx."})
+    sdk = _make_sdk(reply, captured)
+
+    result = asyncio.run(backend.on_librarian(_state(["'Nyx it is,' the innkeeper says."]), sdk))
+
+    update = result["character_update"]
+    assert update["name"] == "Nyx"
+    assert update["full_appearance"] == "Tall, dark braid, green eyes. Nyx's scar marks her left cheek."
+    # Fields that never mentioned the old name are left untouched.
+    assert "personality" not in update
+
+
+def test_rename_does_not_overwrite_llm_rewritten_fields():
+    # When the LLM already rewrote a field for the rename, the deterministic
+    # sweep must not clobber it.
+    backend = _load_backend()
+    reply = json.dumps({
+        "name": "Nyx",
+        "full_appearance": "Tall, dark braid, green eyes. A fresh brand covers Nyx's old scar.",
+        "change_note": "Aria took the name Nyx and was branded.",
+    })
+    sdk = _make_sdk(reply, {})
+
+    result = asyncio.run(backend.on_librarian(_state(["The brand sizzles."]), sdk))
+
+    update = result["character_update"]
+    assert update["full_appearance"] == "Tall, dark braid, green eyes. A fresh brand covers Nyx's old scar."

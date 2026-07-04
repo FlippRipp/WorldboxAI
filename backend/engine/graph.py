@@ -849,7 +849,10 @@ class EngineGraph:
 
         turn = state.get("turn", 0) + 1
         
-        return self._deep_merge(state_update, {"current_context": [], "input_text": "", "turn": turn})
+        # Preserve the turn's input for post-turn phases (librarian modules like
+        # the character tracker need to see what the player actually declared).
+        return self._deep_merge(state_update, {"current_context": [], "input_text": "",
+                                               "last_input_text": state.get("input_text", ""), "turn": turn})
 
     async def librarian_node(self, state: WorldState):
         await self.sdk.ui.emit_status("librarian", "Recording memories…")

@@ -3,6 +3,7 @@ from typing import TypedDict, Any, Optional
 class WorldState(TypedDict):
     active_save_id: Optional[str] # Current save/session id
     input_text: Optional[str]    # The player's input command
+    last_input_text: Optional[str] # The just-completed turn's player input, kept for post-turn phases (librarian)
     module_data: dict[str, Any]  # e.g., {"wb_core_rpg": {"hp": 100}}
     module_configs: dict[str, Any] # User settings for modules
     characters: dict[str, Any]    # Active character state loaded from save

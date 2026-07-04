@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "dependencies": [],
   "consumes": {
-    "state": ["input_text", "turn", "history", "characters"],
+    "state": ["input_text", "last_input_text", "turn", "history", "characters"],
     "module_data": [],
     "module_configs": [],
     "world_data": false
