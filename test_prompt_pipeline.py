@@ -180,7 +180,7 @@ async def _graph_prompt_preview_includes_messages_and_module_blocks():
                 "feasibility": 7,
                 "skill_used": "sword_stance",
                 "difficulty": "moderate",
-                "outcome_narrative": "They attempt to preview the prompt but only manage a glance.",
+                "failure_reason": "",
             }}},
             "module_configs": {"wb_core_rpg": {"progression_system": "xp"}},
             "characters": {},
@@ -209,7 +209,7 @@ async def _graph_prompt_preview_includes_messages_and_module_blocks():
     assert contents[0] == "Preview this prompt exactly."
     assert "I preview the prompt." in contents
     # The seeded action assessment must render through the feasibility block.
-    assert any("Suggested outcome:" in content for content in contents)
+    assert any("Ruling:" in content for content in contents)
     assert "preview_rules" in trace_ids
     assert "wb_core_rpg:character_sheet" in trace_ids
     assert "wb_core_rpg:action_feasibility" in trace_ids

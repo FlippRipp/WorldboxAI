@@ -257,13 +257,10 @@ Judging guidelines:
 - Reward creativity: a clever, novel, or dramatically interesting approach that fits the established fiction rates one band higher than a blunt attempt at the same goal. Punish contradiction of established facts, not ambition.
 - Strictness is {strictness}/10: 1-3 means cinematic - lean generous, favor the player and rule-of-cool; 4-6 means balanced; 7-10 means simulationist - judge capabilities strictly. Strictness shifts scores within bands but never turns a merely unlikely action into a 1-2.
 
-outcome_narrative by feasibility band:
-  7-10: they succeed - describe the successful result.
-  3-6: partial success or success at a cost - a complication, price, or twist that moves the story forward. Never a flat refusal or dead end.
-  1-2: the attempt fails - state WHY in world terms and what the failed attempt visibly reveals or provokes. The world reacts; it is not a silent dead end.
+You are a referee, not a narrator: determine the outcome, do not describe it. Never write story prose.
 
 JSON response:
-{{"feasibility": int 1-10, "skill_used": "name or empty string", "difficulty": "trivial|easy|moderate|hard|extreme|impossible", "curse_triggered": "name or empty string", "passive_effects": "brief note or empty string", "outcome_narrative": "1-2 concise objective sentences describing the outcome per the band rules above. Then state every passive and every curse with a short description of each. Be objective and factual, not narrative or flowery. Never mention stat names, numbers, or game mechanics."}}"""
+{{"feasibility": int 1-10, "skill_used": "name or empty string", "difficulty": "trivial|easy|moderate|hard|extreme|impossible", "curse_triggered": "name or empty string", "passive_effects": "brief factual note on which passives apply and how, or empty string", "failure_reason": "empty string unless feasibility is 1-2; then one short factual clause naming the world rule or established fact the attempt violates"}}"""
 
     try:
         result = await sdk.llm.generate(prompt, model_preference=model_pref)
@@ -299,7 +296,7 @@ JSON response:
             "difficulty": str(assessment.get("difficulty", "moderate")),
             "curse_triggered": str(assessment.get("curse_triggered", "")),
             "passive_effects": str(assessment.get("passive_effects", "")),
-            "outcome_narrative": str(assessment.get("outcome_narrative", "")),
+            "failure_reason": str(assessment.get("failure_reason", "")),
         }
     except Exception as e:
         print(f"[RPG] Action assessment failed: {type(e).__name__}: {e}")
@@ -680,21 +677,51 @@ def _build_action_feasibility_prompt(char: Character, input_text: str, config: d
     if not assessment:
         return ""
 
-    outcome = assessment.get("outcome_narrative", "")
-    if not outcome:
+    try:
+        feasibility = int(assessment.get("feasibility"))
+    except (TypeError, ValueError):
         return ""
+
+    if feasibility >= 7:
+        ruling = "the attempt succeeds."
+    elif feasibility >= 3:
+        ruling = (
+            "partial success or success at a cost - weave in a complication, "
+            "price, or twist that moves the story forward. Never a flat refusal "
+            "or dead end."
+        )
+    else:
+        reason = str(assessment.get("failure_reason", "")).strip()
+        because = f" because {reason.rstrip('.')}" if reason else ""
+        ruling = (
+            f"the attempt fails{because}. Show what the failed attempt visibly "
+            "reveals or provokes - the world reacts; it is not a silent dead end."
+        )
 
     difficulty = assessment.get("difficulty", "moderate")
     lines = [
         f"The player attempted to: \"{input_text}\"",
         f"Assessed difficulty: {difficulty}",
-        f"Suggested outcome: {outcome}",
-        "Guidance: This assessment is advisory. Honor its difficulty, but adapt the "
-        "specifics to the living scene - if established characters or events make a "
-        "different outcome more natural, follow the story. Unless the difficulty is "
-        "\"impossible\", do not resolve the action as a flat refusal or dead end: "
-        "fail forward with a cost, complication, partial result, or new opportunity.",
+        f"Ruling: {ruling}",
     ]
+    skill_used = str(assessment.get("skill_used", "")).strip()
+    if skill_used:
+        lines.append(f"Skill in play: {skill_used}")
+    curse = str(assessment.get("curse_triggered", "")).strip()
+    if curse:
+        lines.append(f"Curse triggered this turn: {curse}")
+    passives = str(assessment.get("passive_effects", "")).strip()
+    if passives:
+        lines.append(f"Passive effects in play: {passives}")
+    lines.append(
+        "Guidance: The ruling decides only WHETHER the action succeeds - how it "
+        "plays out is yours to narrate. Honor the ruling, but adapt the specifics "
+        "to the living scene - if established characters or events make a "
+        "different outcome more natural, follow the story. Unless the difficulty "
+        "is \"impossible\", do not resolve the action as a flat refusal or dead "
+        "end: fail forward with a cost, complication, partial result, or new "
+        "opportunity."
+    )
     return "\n".join(lines)
 
 
