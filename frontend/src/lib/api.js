@@ -27,6 +27,7 @@ export const api = {
                             world_id: opts.worldId ?? null,
                             scenario_id: opts.scenarioId ?? null,
                             start_preference: opts.startPreference ?? null,
+                            scenario_request: opts.scenarioRequest ?? null,
                             character_id: opts.characterId ?? null,
                             active_modules: opts.activeModules ?? null,
                           }) }),

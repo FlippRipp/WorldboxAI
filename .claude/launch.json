@@ -29,6 +29,19 @@
       "autoPort": false
     },
     {
+      "name": "backend-verify",
+      "runtimeExecutable": "venv/Scripts/python.exe",
+      "runtimeArgs": ["-X", "utf8", "-m", "uvicorn", "backend.api.server:app", "--host", "127.0.0.1", "--port", "8001"],
+      "port": 8001
+    },
+    {
+      "name": "frontend-verify-3",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "frontend", "--", "--port", "5178", "--strictPort", "--mode", "verify"],
+      "port": 5178,
+      "autoPort": false
+    },
+    {
       "name": "frontend-verify",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev", "--prefix", "frontend", "--", "--port", "5175", "--strictPort", "--mode", "verify"],

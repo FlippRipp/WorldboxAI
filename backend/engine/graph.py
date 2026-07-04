@@ -9,6 +9,7 @@ from backend.engine.settings_registry import SettingsRegistry
 from backend.engine.provider_manager import ProviderManager
 from copy import deepcopy
 import asyncio
+import json
 import os
 
 VETO_MAX_RETRIES = 3
@@ -337,20 +338,39 @@ class EngineGraph:
         scenario_data = state.get("scenario_data")
 
         # Basic scenario story source: when a scenario supplies a literal opening
-        # message, the story opens with it verbatim (no LLM generation).
+        # message, the story opens with it verbatim (no LLM generation) — unless
+        # the player requested modifications at story creation, in which case
+        # the scenario is rewritten first and the opening is regenerated as a
+        # streamed LLM response.
         if scenario_data:
-            starting_prompt = (scenario_data.get("starting_prompt") or "").strip()
-            if starting_prompt:
-                # Emit the literal opening through the streaming callback so the
-                # client receives it the same way it receives LLM-generated text.
-                # Without this, no token is streamed and the frontend's `done`
-                # handler skips appending the message (it only appends streamed
-                # content), so the opening only appears after a reload.
-                if streaming_callback is not None:
-                    await streaming_callback(starting_prompt)
-                # Return the same {content, reasoning} shape as the LLM path so
-                # the caller can read intro_result["content"] uniformly.
-                return {"content": starting_prompt, "reasoning": ""}
+            pending_request = (scenario_data.get("pending_modification_request") or "").strip()
+            if pending_request:
+                scenario_data = await self._rewrite_scenario_description(scenario_data, pending_request)
+                state["scenario_data"] = scenario_data
+                original_opening = (scenario_data.get("starting_prompt") or "").strip()
+                if original_opening:
+                    result = await self._rewrite_starting_prompt(
+                        scenario_data, original_opening, pending_request, streaming_callback
+                    )
+                    # The streamed rewrite becomes both the opening message and
+                    # the scenario's new literal starting prompt.
+                    scenario_data["starting_prompt"] = result["content"]
+                    return result
+                # No literal opening: fall through to the generated intro, which
+                # picks up the modified description below.
+            else:
+                starting_prompt = (scenario_data.get("starting_prompt") or "").strip()
+                if starting_prompt:
+                    # Emit the literal opening through the streaming callback so the
+                    # client receives it the same way it receives LLM-generated text.
+                    # Without this, no token is streamed and the frontend's `done`
+                    # handler skips appending the message (it only appends streamed
+                    # content), so the opening only appears after a reload.
+                    if streaming_callback is not None:
+                        await streaming_callback(starting_prompt)
+                    # Return the same {content, reasoning} shape as the LLM path so
+                    # the caller can read intro_result["content"] uniformly.
+                    return {"content": starting_prompt, "reasoning": ""}
 
         parts = []
 
@@ -427,6 +447,69 @@ class EngineGraph:
         return await self.llm.generate_story_from_messages(messages, streaming_callback,
             inspector_ctx={"call_type": "storyteller", "step": "generate_intro"},
             reasoning_callback=self.sdk.ui.emit_reasoning_token)
+
+    async def _rewrite_scenario_description(self, scenario_data: dict, request_text: str) -> dict:
+        """Apply a player's modification request to the save's scenario copy.
+
+        Returns a new scenario dict with the pending request consumed and the
+        description rewritten. Best-effort: on LLM/parse failure the original
+        description is kept so the intro still proceeds.
+        """
+        await self.sdk.ui.emit_status("scenario_modify", "Adapting the scenario…")
+        updated = {k: v for k, v in scenario_data.items() if k != "pending_modification_request"}
+        updated["modified_by_request"] = True
+        updated["applied_modification_request"] = request_text
+        description = (scenario_data.get("scenario_description") or "").strip()
+        if not description:
+            return updated
+        messages = [
+            {"role": "system", "content": (
+                "You revise role-play scenario descriptions. Apply the player's requested "
+                "changes while keeping the same base premise, setting, and roughly the same "
+                "length. Output only valid JSON: {\"scenario_description\": \"...\"}"
+            )},
+            {"role": "user", "content": (
+                f"<scenario_description>\n{description}\n</scenario_description>\n\n"
+                f"<requested_changes>\n{request_text}\n</requested_changes>"
+            )},
+        ]
+        try:
+            content = await self.llm.simple_completion(
+                messages,
+                response_format={"type": "json_object"},
+                inspector_ctx={"call_type": "scenario_modify", "step": "rewrite_description"},
+            )
+            rewritten = (json.loads(content).get("scenario_description") or "").strip()
+            if rewritten:
+                updated["scenario_description"] = rewritten
+        except Exception as e:
+            print(f"[Engine] Scenario description rewrite failed, keeping original: {e}")
+        return updated
+
+    async def _rewrite_starting_prompt(self, scenario_data: dict, original_opening: str,
+                                       request_text: str, streaming_callback=None) -> dict:
+        parts = ["You are a creative storyteller adapting the opening message of a text-based RPG scenario."]
+        description = (scenario_data.get("scenario_description") or "").strip()
+        if description:
+            parts.append("<scenario>")
+            parts.append(description)
+            parts.append("</scenario>")
+        parts.append("<original_opening>")
+        parts.append(original_opening)
+        parts.append("</original_opening>")
+        parts.append("<instructions>")
+        parts.append("Rewrite the opening message so it satisfies the player's requested changes while keeping the original's base situation, voice, structure, and approximate length.")
+        parts.append("Output only the rewritten opening as narrative prose — no preamble, lists, or XML tags.")
+        parts.append("</instructions>")
+        messages = [
+            {"role": "system", "content": "\n\n".join(parts)},
+            {"role": "user", "content": f"Requested changes: {request_text}"},
+        ]
+        return await self.llm.generate_story_from_messages(
+            messages, streaming_callback,
+            inspector_ctx={"call_type": "storyteller", "step": "rewrite_start_message"},
+            reasoning_callback=self.sdk.ui.emit_reasoning_token,
+        )
 
     def _check_veto(self, state: WorldState) -> str:
         if state.get("needs_rewrite") and state.get("veto_retries", 0) < VETO_MAX_RETRIES:

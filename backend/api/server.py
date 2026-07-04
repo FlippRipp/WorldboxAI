@@ -75,6 +75,7 @@ class CreateSaveRequest(BaseModel):
     world_id: Optional[str] = None
     scenario_id: Optional[str] = None
     start_preference: Optional[str] = None
+    scenario_request: Optional[str] = None
     character_id: Optional[str] = None
     active_modules: Optional[list[str]] = None
 
@@ -556,6 +557,13 @@ async def create_save(request: CreateSaveRequest):
             # Basic scenario story source: no world, just a system prompt +
             # optional literal opening message (persisted parallel to world_data).
             scenario = scenario_store.load_scenario(request.scenario_id)
+            # A modification request is stored on the save's scenario copy and
+            # applied by the engine when the intro is generated (over the
+            # websocket, so the rewritten opening can stream). Persisting it in
+            # the workspace file means it survives a restart between create
+            # and intro. The library scenario is never touched.
+            if request.scenario_request and request.scenario_request.strip():
+                scenario["pending_modification_request"] = request.scenario_request.strip()
             state = session_manager.create_save(
                 request.save_id,
                 character_module_data=character_module_data,
@@ -1094,6 +1102,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 session_manager.save_manager.save_turn(
                     session_manager.active_save_id, state, 0
                 )
+                # The engine may have rewritten the scenario to satisfy a
+                # modification request; the workspace copy is what save-load
+                # restores scenario_data from, so it must reflect the rewrite.
+                scenario_data = state.get("scenario_data")
+                if isinstance(scenario_data, dict) and scenario_data.get("modified_by_request"):
+                    scenario_file = (
+                        session_manager.data_dir / "saves" / session_manager.active_save_id
+                        / "Scenario" / "scenario.json"
+                    )
+                    if scenario_file.parent.exists():
+                        import json as _json
+                        with open(scenario_file, "w", encoding="utf-8") as f:
+                            _json.dump(scenario_data, f, indent=2, ensure_ascii=False)
             except Exception as exc:
                 print(f"Error generating intro: {exc}")
                 await websocket.send_json({

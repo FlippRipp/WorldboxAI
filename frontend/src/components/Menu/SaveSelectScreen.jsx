@@ -20,7 +20,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
   const [selectedCharacter, setSelectedCharacter] = useState(null);
   const [newName, setNewName] = useState('');
   // The chosen story source (single selection):
-  //   null | { type:'world', id, startPreference, startLocation } | { type:'scenario', id }
+  //   null | { type:'world', id, startPreference, startLocation } | { type:'scenario', id, modificationRequest }
   // Module-contributed sources (e.g. world) report themselves via onSelect.
   const [storySource, setStorySource] = useState(null);
   const [creating, setCreating] = useState(false);
@@ -157,6 +157,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
         worldId: isWorld ? storySource.id : null,
         scenarioId: isScenario ? storySource.id : null,
         startPreference: pref,
+        scenarioRequest: isScenario ? (storySource.modificationRequest?.trim() || null) : null,
         characterId: selectedCharacter ? selectedCharacter.id : null,
         activeModules: modules.map((m) => m.id).filter((id) => enabledModules.has(id)),
       });
@@ -337,6 +338,22 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                       </button>
                     ))}
                   </div>
+                  {storySource?.type === 'scenario' && (
+                    <div className="space-y-2 pt-2 mt-3 border-t border-gray-700">
+                      <p className="text-xs text-gray-400">Request changes to this scenario (optional)</p>
+                      <input
+                        value={storySource.modificationRequest || ''}
+                        onChange={(e) => setStorySource({ type: 'scenario', id: storySource.id, modificationRequest: e.target.value })}
+                        placeholder="e.g., set it in winter, add a rival"
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500"
+                      />
+                      {storySource.modificationRequest?.trim() ? (
+                        <p className="text-xs text-purple-400/70 italic">The AI will adapt the scenario and its opening message to your request.</p>
+                      ) : (
+                        <p className="text-xs text-gray-500 italic">Leave empty to start the scenario as written.</p>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
