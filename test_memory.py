@@ -119,6 +119,23 @@ class _FakeEmbedder:
         return [0.0, 0.0, 1.0]
 
 
+class _FakeBatchEmbedder(_FakeEmbedder):
+    """Adds the batched API so _embed_texts takes the get_embeddings path;
+    records call shapes to assert batching actually happened."""
+
+    def __init__(self):
+        self.batch_sizes = []
+        self.single_calls = 0
+
+    async def get_embedding(self, text: str, inspector_ctx=None):
+        self.single_calls += 1
+        return await super().get_embedding(text)
+
+    async def get_embeddings(self, texts, inspector_ctx=None):
+        self.batch_sizes.append(len(texts))
+        return [await _FakeEmbedder.get_embedding(self, t) for t in texts]
+
+
 def _lorebook_record(book_id="realm_lore"):
     return {
         "id": book_id,
@@ -178,6 +195,60 @@ def test_embed_world_preserves_lorebook_rows(tmp_path):
         "SELECT COUNT(*) AS n FROM world_entries WHERE source_type = 'lorebook'"
     ).fetchone()["n"]
     assert lorebook_count == 2
+
+
+def test_embed_lorebooks_couples_each_text_with_its_vector(tmp_path):
+    # Concurrent embedding must not scramble text/vector pairing.
+    from backend.engine.memory import _serialize
+
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    manager.init_world_index(str(tmp_path / "world_index"))
+    book = {
+        "id": "coupling",
+        "entries": [
+            {"uid": "0", "title": "", "keys": [], "secondary_keys": [],
+             "content": "A dragon circles the peak.", "constant": False, "enabled": True},
+            {"uid": "1", "title": "", "keys": [], "secondary_keys": [],
+             "content": "The harbor smells of tar.", "constant": False, "enabled": True},
+            {"uid": "2", "title": "", "keys": [], "secondary_keys": [],
+             "content": "Nothing notable here.", "constant": False, "enabled": True},
+        ],
+    }
+    embedder = _FakeEmbedder()
+    _run(manager.embed_lorebooks([book], embedder))
+
+    rows = manager._world_conn.execute(
+        "SELECT text, embedding FROM world_entries WHERE source_type = 'lorebook'"
+    ).fetchall()
+    assert len(rows) == 3
+    for row in rows:
+        expected = _run(embedder.get_embedding(row["text"]))
+        assert row["embedding"] == _serialize(expected)
+
+
+def test_embed_world_uses_batched_embeddings(tmp_path):
+    from backend.engine.memory import _serialize
+
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    manager.init_world_index(str(tmp_path / "world_index"))
+    embedder = _FakeBatchEmbedder()
+    world = {"lore": {
+        "premise": "A dragon rules the skies.",
+        "central_conflict": "The harbor cities resist its tithe.",
+        "creation_myth": "The world hatched from an egg.",
+    }}
+
+    count = _run(manager.embed_world(world, embedder))
+    assert count == 3
+    assert embedder.batch_sizes == [3]  # one provider batch, not per-text calls
+    assert embedder.single_calls == 0
+
+    rows = manager._world_conn.execute(
+        "SELECT text, embedding FROM world_entries"
+    ).fetchall()
+    for row in rows:
+        expected = _run(_FakeEmbedder().get_embedding(row["text"]))
+        assert row["embedding"] == _serialize(expected)
 
 
 def test_lorebook_search_and_constant_injection(tmp_path):

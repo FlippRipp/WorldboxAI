@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import sqlite3
@@ -51,6 +52,13 @@ def _connect(path: str) -> sqlite3.Connection:
 
 def _serialize(vector: List[float]) -> bytes:
     return sqlite_vec.serialize_float32(list(vector))
+
+
+# Bulk-embedding throughput: texts per provider call, and how many of those
+# calls may be in flight at once (same spirit as worldgen's enrichment
+# semaphore — keeps a big world/lorebook from stampeding the provider).
+_EMBED_BATCH_SIZE = 64
+_EMBED_CONCURRENCY = 4
 
 
 class MemoryManager:
@@ -243,8 +251,8 @@ class MemoryManager:
         if not entries:
             self._world_conn.commit()
             return 0
-        for entry in entries:
-            vec = await llm.get_embedding(entry["text"])
+        vectors = await self._embed_texts([e["text"] for e in entries], llm)
+        for entry, vec in zip(entries, vectors):
             self._world_conn.execute(
                 """INSERT INTO world_entries (id, embedding, text, source_type, source_id, region)
                    VALUES (?, ?, ?, ?, ?, ?)""",
@@ -255,6 +263,27 @@ class MemoryManager:
             )
         self._world_conn.commit()
         return len(entries)
+
+    async def _embed_texts(self, texts: list[str], llm) -> list[List[float]]:
+        """Embed texts in _EMBED_BATCH_SIZE provider batches with up to
+        _EMBED_CONCURRENCY batches in flight; result order matches input."""
+        semaphore = asyncio.Semaphore(_EMBED_CONCURRENCY)
+
+        if hasattr(llm, "get_embeddings"):
+            async def embed_chunk(chunk):
+                async with semaphore:
+                    return await llm.get_embeddings(chunk)
+
+            chunks = [texts[i:i + _EMBED_BATCH_SIZE]
+                      for i in range(0, len(texts), _EMBED_BATCH_SIZE)]
+            results = await asyncio.gather(*(embed_chunk(c) for c in chunks))
+            return [vec for chunk_vectors in results for vec in chunk_vectors]
+
+        async def embed_one(text):
+            async with semaphore:
+                return await llm.get_embedding(text)
+
+        return list(await asyncio.gather(*(embed_one(t) for t in texts)))
 
     async def embed_lorebooks(self, lorebooks: list[dict], llm) -> int:
         """Replace all lorebook rows in the world index with the enabled entries
@@ -273,19 +302,13 @@ class MemoryManager:
                     continue
                 pending.append((text, f"{book_id}:{entry.get('uid', '')}",
                                 1 if entry.get("constant") else 0))
-        batch_size = 64
-        for start in range(0, len(pending), batch_size):
-            chunk = pending[start:start + batch_size]
-            if hasattr(llm, "get_embeddings"):
-                vectors = await llm.get_embeddings([t for t, _, _ in chunk])
-            else:
-                vectors = [await llm.get_embedding(t) for t, _, _ in chunk]
-            for (text, source_id, constant), vec in zip(chunk, vectors):
-                self._world_conn.execute(
-                    """INSERT INTO world_entries (id, embedding, text, source_type, source_id, region, constant)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (str(uuid.uuid4()), _serialize(vec), text, "lorebook", source_id, "", constant),
-                )
+        vectors = await self._embed_texts([t for t, _, _ in pending], llm)
+        for (text, source_id, constant), vec in zip(pending, vectors):
+            self._world_conn.execute(
+                """INSERT INTO world_entries (id, embedding, text, source_type, source_id, region, constant)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (str(uuid.uuid4()), _serialize(vec), text, "lorebook", source_id, "", constant),
+            )
         self._world_conn.commit()
         return len(pending)
 
