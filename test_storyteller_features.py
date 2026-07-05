@@ -75,7 +75,7 @@ def test_swipe_manifest_and_roundtrip(tmp_path):
     sm, sid = session.save_manager, session.active_save_id
 
     manifest = sm.load_swipe_manifest(sid)
-    assert manifest == {"turn": 1, "user_input": "A1", "active": 0, "count": 1}
+    assert manifest == {"turn": 1, "user_input": "A1", "active": 0, "count": 1, "auto_mode_prev": False}
 
     # Simulate a regenerated variant: change the last ai text, persist, add a swipe.
     session.state["chat_messages"][-1] = {"role": "ai", "content": "R1-v2"}

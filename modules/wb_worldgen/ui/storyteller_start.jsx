@@ -8,13 +8,21 @@ import { api } from 'api';
 // Renders nothing if there are no saved worlds yet.
 export default function StorytellerStart({ selected, onSelect }) {
   const [worlds, setWorlds] = useState([]);
-  const [startPreference, setStartPreference] = useState('');
-  const [startLocation, setStartLocation] = useState(null);
+  const [worldsError, setWorldsError] = useState(false);
+  // Hydrate from the host's selection so remounting (e.g. leaving and
+  // re-entering the create form) keeps showing the already-picked start.
+  const [startPreference, setStartPreference] = useState(() => selected?.startPreference || '');
+  const [startLocation, setStartLocation] = useState(() => selected?.startLocation || null);
   const [picking, setPicking] = useState(false);
+  const [pickError, setPickError] = useState(null);
 
-  useEffect(() => {
-    api.listWorlds().then((d) => setWorlds(d.worlds || [])).catch(() => {});
-  }, []);
+  const loadWorlds = () => {
+    setWorldsError(false);
+    api.listWorlds()
+      .then((d) => setWorlds(d.worlds || []))
+      .catch(() => setWorldsError(true));
+  };
+  useEffect(loadWorlds, []);
 
   const activeWorldId = selected && selected.type === 'world' ? selected.id : null;
 
@@ -29,6 +37,7 @@ export default function StorytellerStart({ selected, onSelect }) {
   const chooseWorld = (worldId) => {
     setStartPreference('');
     setStartLocation(null);
+    setPickError(null);
     onSelect({ type: 'world', id: worldId, startPreference: '', startLocation: null });
   };
 
@@ -40,18 +49,32 @@ export default function StorytellerStart({ selected, onSelect }) {
   };
 
   const handlePickStart = async () => {
-    if (!activeWorldId || !startPreference.trim()) return;
+    if (!activeWorldId || !startPreference.trim() || picking) return;
     setPicking(true);
+    setPickError(null);
     try {
       const result = await api.pickStartLocation(activeWorldId, startPreference.trim());
       setStartLocation(result.location);
       onSelect({ type: 'world', id: activeWorldId, startPreference, startLocation: result.location });
     } catch (e) {
-      alert(`Failed to pick start location: ${e.message}`);
+      setPickError(e.message);
     }
     setPicking(false);
   };
 
+  if (worldsError) {
+    return (
+      <div className="p-4 rounded-lg border border-gray-700 bg-gray-800/30 flex items-center justify-between gap-3">
+        <p className="text-sm text-red-400">Couldn't load worlds.</p>
+        <button
+          onClick={loadWorlds}
+          className="px-3 py-1.5 rounded-lg border border-gray-700 hover:bg-gray-800 text-xs text-gray-300 transition-colors"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
   if (worlds.length === 0) return null;
 
   return (
@@ -60,26 +83,28 @@ export default function StorytellerStart({ selected, onSelect }) {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
         <button
           onClick={() => onSelect(null)}
+          aria-pressed={!activeWorldId}
           className={`p-3 rounded-lg border text-sm text-left transition-colors ${
             !activeWorldId
               ? 'border-purple-500 bg-purple-900/30 text-purple-200'
               : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'
           }`}
         >
-          <span className="font-medium">No World</span>
+          <span className="font-medium">{!activeWorldId && '✓ '}No World</span>
           <p className="text-xs text-gray-500 mt-0.5">Blank canvas</p>
         </button>
         {worlds.map((w) => (
           <button
             key={w.id}
             onClick={() => chooseWorld(w.id)}
+            aria-pressed={activeWorldId === w.id}
             className={`p-3 rounded-lg border text-sm text-left transition-colors ${
               activeWorldId === w.id
                 ? 'border-purple-500 bg-purple-900/30 text-purple-200'
                 : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'
             }`}
           >
-            <span className="font-medium">{w.name}</span>
+            <span className="font-medium">{activeWorldId === w.id && '✓ '}{w.name}</span>
             <p className="text-xs text-gray-500 mt-0.5 truncate">{(w.seed_prompt || '').substring(0, 60)}</p>
           </button>
         ))}
@@ -93,16 +118,22 @@ export default function StorytellerStart({ selected, onSelect }) {
               value={startPreference}
               onChange={(e) => updatePreference(e.target.value)}
               placeholder="e.g., coastal trading city"
-              className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500"
+              aria-label="Starting location preference"
+              className="flex-1 min-h-[44px] bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500"
             />
             <button
               onClick={handlePickStart}
               disabled={!startPreference.trim() || picking}
-              className="px-3 py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-xs font-medium transition-colors"
+              aria-busy={picking}
+              aria-label="Pick a start location matching my preference"
+              className="px-3 py-1.5 min-h-[44px] rounded-lg bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-xs font-medium transition-colors"
             >
               {picking ? 'Picking...' : 'Pick for me'}
             </button>
           </div>
+          {pickError && (
+            <p className="text-xs text-red-400">Failed to pick start location: {pickError}</p>
+          )}
           {startLocation && (
             <div className="p-2 rounded bg-purple-900/20 border border-purple-800/30 text-sm">
               <p className="text-purple-300 font-medium">{startLocation.name}</p>

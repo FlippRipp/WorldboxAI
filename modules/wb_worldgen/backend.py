@@ -80,12 +80,14 @@ def _initial_adjacency(wd: dict) -> dict:
     return adj
 
 
-async def create_world_story_source(*, save_id, source_id, start_preference, session_manager, engine, character_module_data=None, character_data=None) -> dict:
+async def create_world_story_source(*, save_id, source_id, start_preference, session_manager, engine, start_location_node_id=None, character_module_data=None, character_data=None) -> dict:
     """Story-source provider for create_save: turn a world_id into a playable save.
 
-    Loads + compiles the world, picks a start location (LLM or random), seeds
-    the fog-of-war reveal, persists ``World/world_data.json``, embeds the world
-    into the save's RAG index, and writes the world keys into session state.
+    Uses the start location the player already picked on the start screen
+    (``start_location_node_id``) when given; otherwise picks one (LLM from the
+    preference, or random). Seeds the fog-of-war reveal, persists
+    ``World/world_data.json``, embeds the world into the save's RAG index, and
+    writes the world keys into session state.
     Returns the chosen start_location (for the API response).
     """
     import json as _json
@@ -95,9 +97,13 @@ async def create_world_story_source(*, save_id, source_id, start_preference, ses
     world_state = world_builder.load_world(world_id)
     compiled = world_builder.compile_world(world_state)
 
-    if start_preference:
+    start_location = None
+    if start_location_node_id:
+        locations = world_builder.get_start_locations(world_id)
+        start_location = next((l for l in locations if l.get("node_id") == start_location_node_id), None)
+    if start_location is None and start_preference:
         start_location = await world_builder.llm_pick_start_location(world_id, start_preference, engine.llm)
-    else:
+    if start_location is None:
         locations = world_builder.get_start_locations(world_id)
         start_location = _random.choice(locations) if locations else None
 

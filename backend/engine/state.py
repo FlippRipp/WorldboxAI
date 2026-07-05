@@ -17,7 +17,6 @@ class WorldState(TypedDict):
     last_usage: Optional[dict[str, Any]] # Token usage of the latest storyteller call, when the provider reported it
     continue_prompt: Optional[str] # Instruction injected as the user turn on an empty ("continue") send
     turn: int                    # Current turn number
-    storyteller_auto_mode_prev: bool # Whether the last completed turn ran in storyteller auto mode (drives the one-round hand-back)
     veto_retries: int            # Count of rewrite attempts for current turn (0-3)
     veto_reason: Optional[str]   # Reason injected into Storyteller on rewrite
     needs_rewrite: bool          # Flag set by on_validate_output to trigger rewrite

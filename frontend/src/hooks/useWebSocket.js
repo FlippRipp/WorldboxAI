@@ -37,6 +37,8 @@ export function useWebSocket(onStateChange, onLLMCall) {
   const reasoningRef = useRef('');
   const flushRafRef = useRef(0);
   const reconnectTimeoutRef = useRef(null);
+  // Reconnect backoff: starts at 3s, doubles up to 30s, resets on connect.
+  const reconnectDelayRef = useRef(3000);
   const hadConnectedRef = useRef(false);
   const activeRef = useRef(true);
   const onStateChangeRef = useRef(onStateChange);
@@ -74,6 +76,7 @@ export function useWebSocket(onStateChange, onLLMCall) {
       if (wsRef.current === ws) {
         setIsConnected(true);
         setIsReconnecting(false);
+        reconnectDelayRef.current = 3000;
         if (hadConnectedRef.current) {
           // Reconnect: any in-flight turn died with the old socket. Drop the
           // stale stream and ask the server to replay authoritative state.
@@ -120,6 +123,19 @@ export function useWebSocket(onStateChange, onLLMCall) {
         if (streamed) {
           setMessages(msgs => [...msgs, { role: 'assistant', content: streamed, reasoning }]);
         }
+      } else if (data.type === 'player_action') {
+        // Storyteller auto mode: the server generated the player's in-character
+        // action. Show it as the user message — replacing the locally echoed
+        // guidance text if there was one, appending otherwise (continue turns).
+        setMessages(prev => {
+          const next = [...prev];
+          if (next.length && next[next.length - 1].role === 'user') {
+            next[next.length - 1] = { ...next[next.length - 1], content: data.content };
+          } else {
+            next.push({ role: 'user', content: data.content });
+          }
+          return next;
+        });
       } else if (data.type === 'status') {
         // Pipeline stage update (gather_context / storyteller / reader /
         // librarian). Shown as a live status line while the turn runs.
@@ -188,7 +204,8 @@ export function useWebSocket(onStateChange, onLLMCall) {
       if (wsRef.current === ws) {
         setIsConnected(false);
         setIsReconnecting(true);
-        reconnectTimeoutRef.current = setTimeout(connect, 3000);
+        reconnectTimeoutRef.current = setTimeout(connect, reconnectDelayRef.current);
+        reconnectDelayRef.current = Math.min(reconnectDelayRef.current * 2, 30000);
       }
     };
 

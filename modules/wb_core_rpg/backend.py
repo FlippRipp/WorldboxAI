@@ -151,16 +151,11 @@ async def on_gather_context(state: dict, sdk) -> dict:
                     char.stat_usage[stat] = char.stat_usage.get(stat, 0) + 1
                     break
 
-        # Pre-assess action feasibility with a fast model call. In storyteller
-        # auto mode the input is a narrative nudge, not the character's action,
-        # so there is nothing to assess — clear any stale ruling instead.
-        if state.get("storyteller_auto_mode"):
-            char.action_assessment = {}
-        else:
-            model_pref = config.get("practice_ai_model", "fastest")
-            recent_story = [entry[-1200:] for entry in (state.get("history") or [])[-2:]]
-            assessment = await _assess_action(input_text, char, config, sdk, model_pref, state.get("world_data"), recent_story)
-            char.action_assessment = assessment
+        # Pre-assess action feasibility with a fast model call
+        model_pref = config.get("practice_ai_model", "fastest")
+        recent_story = [entry[-1200:] for entry in (state.get("history") or [])[-2:]]
+        assessment = await _assess_action(input_text, char, config, sdk, model_pref, state.get("world_data"), recent_story)
+        char.action_assessment = assessment
 
     # Practice-based progression: use AI to detect which skill the action uses
     progression = config.get("progression_system", "xp")
@@ -317,8 +312,7 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
         return {"content": _render_character_sheet(char, config)}
     elif block_id == "action_feasibility":
         input_text = state.get("input_text", "").strip()
-        # No ruling in auto mode: the input is a nudge, not a player action.
-        if not input_text or state.get("storyteller_auto_mode"):
+        if not input_text:
             return {}
         return {"content": _build_action_feasibility_prompt(char, input_text, config)}
     return {}

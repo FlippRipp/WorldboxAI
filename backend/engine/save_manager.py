@@ -222,7 +222,7 @@ class SaveManager:
                     metadata = {}
         metadata["turn"] = turn_number
         metadata["last_played"] = datetime.now(timezone.utc).isoformat()
-        for key in ("world_id", "player_location_node_id", "player_location_region", "player_location_layer_id", "revealed_node_ids", "storyteller_auto_mode_prev"):
+        for key in ("world_id", "player_location_node_id", "player_location_region", "player_location_layer_id", "revealed_node_ids"):
             if key in state and state[key] not in (None, ""):
                 metadata[key] = state[key]
         with open(metadata_path, "w", encoding="utf-8") as f:
@@ -475,14 +475,13 @@ class SaveManager:
         self._pack_save(save_id)
         return self.load_save(save_id)
 
-    def reset_swipes(self, save_id: str, turn: int, user_input: str, auto_mode_prev: bool = False):
+    def reset_swipes(self, save_id: str, turn: int, user_input: str):
         """Start a fresh swipe set for `turn`, with the current workspace as v0."""
         self.clear_swipes(save_id)
         self._zip_full_workspace(save_id, self._swipes_dir(save_id) / "v0.zip")
         self._write_swipe_manifest(save_id, {
             "turn": turn,
             "user_input": user_input,
-            "auto_mode_prev": bool(auto_mode_prev),
             "active": 0,
             "count": 1,
         })

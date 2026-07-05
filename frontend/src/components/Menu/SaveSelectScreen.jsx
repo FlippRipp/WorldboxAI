@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../../lib/api';
 import ModuleTogglePanel from '../shared/ModuleTogglePanel';
 import ModuleInline from '../shared/ModuleInline';
@@ -29,6 +29,9 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
   //   null | { id, modificationRequest }
   const [selectedScenario, setSelectedScenario] = useState(null);
   const [creating, setCreating] = useState(false);
+  // Ref mirror of `creating`: state hasn't flushed yet when a second Enter
+  // keydown lands in the same tick, so the guard needs a synchronous check.
+  const creatingRef = useRef(false);
   const [loadingSave, setLoadingSave] = useState(null);
   // 'list' shows the saves + "Create New Story"; 'create' shows the new-story form.
   const [view, setView] = useState('list');
@@ -38,8 +41,15 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
   const [editName, setEditName] = useState('');
   const [savingSettings, setSavingSettings] = useState(false);
   const [branching, setBranching] = useState(false);
+  // Inline error messages, one per section, instead of blocking alert()s.
+  const [loadError, setLoadError] = useState(false);
+  const [listError, setListError] = useState(null);
+  const [createError, setCreateError] = useState(null);
+  const [settingsError, setSettingsError] = useState(null);
 
-  useEffect(() => {
+  const loadData = () => {
+    setLoading(true);
+    setLoadError(false);
     Promise.all([
       api.getSaves(),
       api.listCharacters().catch(() => ({ characters: [] })),
@@ -54,9 +64,20 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
         setModules(mods);
         setEnabledModules(new Set(mods.map((m) => m.id))); // all active by default
       })
-      .catch(() => {})
+      .catch(() => setLoadError(true))
       .finally(() => setLoading(false));
-  }, []);
+  };
+  useEffect(loadData, []);
+
+  // Escape closes the settings modal (unless a save is in flight).
+  useEffect(() => {
+    if (!editingSave) return;
+    const onKey = (e) => {
+      if (e.key === 'Escape' && !savingSettings) setEditingSave(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [editingSave, savingSettings]);
 
   const toggleModule = (modId, on) => {
     setEnabledModules((prev) => {
@@ -76,22 +97,24 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
 
   const handleLoad = async (saveId) => {
     setLoadingSave(saveId);
+    setListError(null);
     try {
       await api.loadSave(saveId);
       onLoad(saveId);
     } catch (e) {
-      alert(`Failed to load: ${e.message}`);
+      setListError(`Failed to load "${saveId}": ${e.message}`);
     }
     setLoadingSave(null);
   };
 
   const handleDelete = async (saveId) => {
     if (!window.confirm(`Delete "${saveId}"? This cannot be undone.`)) return;
+    setListError(null);
     try {
       await api.deleteSave(saveId);
       setSaves(prev => prev.filter(s => s.id !== saveId));
     } catch (e) {
-      alert(`Failed to delete: ${e.message}`);
+      setListError(`Failed to delete "${saveId}": ${e.message}`);
     }
   };
 
@@ -99,6 +122,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
     setEditingSave(saveId);
     setSavingSettings(false);
     setBranching(false);
+    setSettingsError(null);
     const save = saves.find((s) => s.id === saveId);
     setEditName(save?.display_name || saveId);
     // Default to "all active" while we fetch, then apply the saved set. A null
@@ -109,13 +133,14 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
       const active = data.active_modules;
       if (Array.isArray(active)) setEditModules(new Set(active));
     } catch (e) {
-      alert(`Failed to load story settings: ${e.message}`);
+      setSettingsError(`Failed to load story settings: ${e.message}`);
     }
   };
 
   const handleSaveSettings = async () => {
     if (!editingSave) return;
     setSavingSettings(true);
+    setSettingsError(null);
     try {
       await api.setSaveActiveModules(
         editingSave,
@@ -129,7 +154,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
       }
       setEditingSave(null);
     } catch (e) {
-      alert(`Failed to save settings: ${e.message}`);
+      setSettingsError(`Failed to save settings: ${e.message}`);
     }
     setSavingSettings(false);
   };
@@ -137,37 +162,46 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
   const handleBranch = async () => {
     if (!editingSave) return;
     setBranching(true);
+    setSettingsError(null);
     try {
       const r = await api.branchSave(editingSave);
       if (Array.isArray(r.saves)) setSaves(r.saves);
       setEditingSave(null);
     } catch (e) {
-      alert(`Failed to branch: ${e.message}`);
+      setSettingsError(`Failed to branch: ${e.message}`);
     }
     setBranching(false);
   };
 
   const handleCreate = async () => {
     const name = newName.trim();
-    if (!name) return;
+    // The guard also covers Enter on the name input, which bypasses the
+    // disabled Create button.
+    if (!name || creatingRef.current) return;
+    creatingRef.current = true;
     setCreating(true);
+    setCreateError(null);
     try {
       const isWorld = storySource?.type === 'world';
-      // A pre-picked start location means we don't re-send a preference.
-      const pref = isWorld
-        ? (storySource.startLocation ? null : (storySource.startPreference?.trim() || null))
+      // A pre-picked start location is sent by node id; only an unpicked
+      // preference is sent as text (the backend then picks via LLM).
+      const pickedNodeId = isWorld ? (storySource.startLocation?.node_id || null) : null;
+      const pref = isWorld && !pickedNodeId
+        ? (storySource.startPreference?.trim() || null)
         : null;
       await api.createSave(name, {
         worldId: isWorld ? storySource.id : null,
         scenarioId: selectedScenario?.id || null,
         startPreference: pref,
+        startLocationNodeId: pickedNodeId,
         scenarioRequest: selectedScenario?.modificationRequest?.trim() || null,
         characterId: selectedCharacter ? selectedCharacter.id : null,
         activeModules: modules.map((m) => m.id).filter((id) => enabledModules.has(id)),
       });
       onLoad(name);
     } catch (e) {
-      alert(`Failed to create save: ${e.message}`);
+      setCreateError(`Failed to create save: ${e.message}`);
+      creatingRef.current = false;
       setCreating(false);
     }
   };
@@ -192,6 +226,16 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
 
             {loading ? (
               <div className="text-gray-500 text-center py-12">Loading stories...</div>
+            ) : loadError ? (
+              <div className="flex items-center justify-between gap-3 p-4 rounded-lg border border-red-800/50 bg-red-900/20">
+                <p className="text-sm text-red-400">Couldn't load your stories. Is the server running?</p>
+                <button
+                  onClick={loadData}
+                  className="shrink-0 px-4 py-2 rounded-lg border border-gray-700 hover:bg-gray-800 text-sm text-gray-300 transition-colors"
+                >
+                  Retry
+                </button>
+              </div>
             ) : (
               <>
                 <button
@@ -203,6 +247,10 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                   </svg>
                   Create New Story
                 </button>
+
+                {listError && (
+                  <p className="text-sm text-red-400 mb-4">{listError}</p>
+                )}
 
                 {saves.length > 0 ? (
                   <div className="space-y-2">
@@ -228,15 +276,16 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                           <button
                             onClick={() => handleLoad(save.id)}
                             disabled={loadingSave === save.id}
-                            className="px-4 py-1.5 rounded-lg bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-sm transition-colors"
+                            className="px-4 py-1.5 min-h-[44px] rounded-lg bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-sm transition-colors"
                           >
                             {loadingSave === save.id ? 'Loading...' : 'Load'}
                           </button>
                           <button
                             onClick={() => openSettings(save.id)}
                             disabled={loadingSave === save.id}
-                            className="p-1.5 rounded-lg bg-gray-700/60 hover:bg-gray-700 border border-gray-600/50 hover:border-gray-500 disabled:opacity-50 text-gray-300 transition-colors"
+                            className="p-1.5 min-h-[44px] min-w-[44px] flex items-center justify-center rounded-lg bg-gray-700/60 hover:bg-gray-700 border border-gray-600/50 hover:border-gray-500 disabled:opacity-50 text-gray-300 transition-colors"
                             title="Story settings"
+                            aria-label="Story settings"
                           >
                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -246,8 +295,9 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                           <button
                             onClick={() => handleDelete(save.id)}
                             disabled={loadingSave === save.id}
-                            className="p-1.5 rounded-lg bg-red-900/50 hover:bg-red-800 border border-red-800/50 hover:border-red-700 disabled:opacity-50 text-red-300 transition-colors"
+                            className="p-1.5 min-h-[44px] min-w-[44px] flex items-center justify-center rounded-lg bg-red-900/50 hover:bg-red-800 border border-red-800/50 hover:border-red-700 disabled:opacity-50 text-red-300 transition-colors"
                             title="Delete save"
+                            aria-label="Delete save"
                           >
                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -281,17 +331,21 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                   onChange={e => setNewName(e.target.value)}
                   placeholder="my_story"
                   onKeyDown={e => { if (e.key === 'Enter') handleCreate(); }}
-                  className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500"
+                  className="flex-1 min-h-[44px] bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500"
                   aria-label="New save name"
                 />
                 <button
                   onClick={handleCreate}
                   disabled={!newName.trim() || creating}
-                  className="px-6 py-2 rounded-lg bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-sm font-medium transition-colors"
+                  aria-busy={creating}
+                  className="px-6 py-2 min-h-[44px] rounded-lg bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-sm font-medium transition-colors"
                 >
                   {creating ? 'Creating...' : 'Create'}
                 </button>
               </div>
+              {createError && (
+                <p className="text-sm text-red-400">{createError}</p>
+              )}
 
               {/* Module-contributed story sources (e.g. wb_worldgen world
                   select). Only shown for enabled modules, so toggling a module
@@ -318,26 +372,28 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button
                       onClick={() => setSelectedScenario(null)}
+                      aria-pressed={!selectedScenario}
                       className={`p-3 rounded-lg border text-sm text-left transition-colors ${
                         !selectedScenario
                           ? 'border-purple-500 bg-purple-900/30 text-purple-200'
                           : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'
                       }`}
                     >
-                      <span className="font-medium">No Scenario</span>
+                      <span className="font-medium">{!selectedScenario && '✓ '}No Scenario</span>
                       <p className="text-xs text-gray-500 mt-0.5">Blank canvas</p>
                     </button>
                     {scenarios.map(s => (
                       <button
                         key={s.id}
-                        onClick={() => setSelectedScenario({ id: s.id })}
+                        onClick={() => setSelectedScenario(prev => (prev?.id === s.id ? prev : { id: s.id }))}
+                        aria-pressed={selectedScenario?.id === s.id}
                         className={`p-3 rounded-lg border text-sm text-left transition-colors ${
                           selectedScenario?.id === s.id
                             ? 'border-purple-500 bg-purple-900/30 text-purple-200'
                             : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'
                         }`}
                       >
-                        <span className="font-medium">{s.name}</span>
+                        <span className="font-medium">{selectedScenario?.id === s.id && '✓ '}{s.name}</span>
                         <p className="text-xs text-gray-500 mt-0.5">
                           {s.has_starting_prompt ? 'Has opening message' : 'AI-generated opening'}
                         </p>
@@ -374,26 +430,28 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button
                       onClick={() => setSelectedCharacter(null)}
+                      aria-pressed={!selectedCharacter}
                       className={`p-3 rounded-lg border text-sm text-left transition-colors ${
                         !selectedCharacter
                           ? 'border-purple-500 bg-purple-900/30 text-purple-200'
                           : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'
                       }`}
                     >
-                      <span className="font-medium">Default Adventurer</span>
+                      <span className="font-medium">{!selectedCharacter && '✓ '}Default Adventurer</span>
                       <p className="text-xs text-gray-500 mt-0.5">Start with basic stats</p>
                     </button>
                     {characters.map(c => (
                       <button
                         key={c.id}
                         onClick={() => setSelectedCharacter(c)}
+                        aria-pressed={selectedCharacter?.id === c.id}
                         className={`p-3 rounded-lg border text-sm text-left transition-colors ${
                           selectedCharacter?.id === c.id
                             ? 'border-purple-500 bg-purple-900/30 text-purple-200'
                             : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'
                         }`}
                       >
-                        <span className="font-medium">{c.name}</span>
+                        <span className="font-medium">{selectedCharacter?.id === c.id && '✓ '}{c.name}</span>
                         <p className="text-xs text-gray-500 mt-0.5">{c.has_context ? 'Themed' : 'Generic'} character</p>
                       </button>
                     ))}
@@ -411,6 +469,9 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
           onClick={() => !savingSettings && setEditingSave(null)}
         >
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Story settings"
             className="w-full max-w-md rounded-xl border border-gray-700 bg-gray-900 shadow-2xl max-h-[85vh] overflow-y-auto book-scroll"
             onClick={(e) => e.stopPropagation()}
           >
@@ -503,6 +564,9 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
               )}
             </div>
 
+            {settingsError && (
+              <p className="text-sm text-red-400 px-4 pt-3">{settingsError}</p>
+            )}
             <div className="flex items-center justify-end gap-2 p-4 border-t border-gray-700">
               <button
                 onClick={() => setEditingSave(null)}

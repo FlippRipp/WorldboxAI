@@ -3,7 +3,7 @@ import os
 import tempfile
 
 from backend.engine.graph import EngineGraph
-from backend.engine.prompt_pipeline import PromptCompiler, PromptPipelineValidationError
+from backend.engine.prompt_pipeline import PromptCompiler, PromptPipelineValidationError, build_auto_player_action_prompt
 from backend.engine.registry import ModuleRegistry
 
 
@@ -238,127 +238,74 @@ async def _graph_prompt_preview_includes_messages_and_module_blocks():
     print("Graph prompt preview test passed.")
 
 
-async def _auto_mode_disables_action_feasibility():
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    registry = ModuleRegistry(os.path.join(base_dir, "modules"))
-    registry.load_all_modules()
-    engine = EngineGraph(registry)
-    await engine.settings.set("storyteller.auto_mode", True)
-
-    preview = await engine.compile_prompt_preview(
-        {
-            "active_save_id": "preview_test",
-            "input_text": "Have her draw the sword.",
-            "module_data": {"wb_core_rpg": {"hp": 42, "action_assessment": {
-                "feasibility": 7,
-                "skill_used": "sword_stance",
-                "difficulty": "moderate",
-                "failure_reason": "",
-            }}},
-            "module_configs": {"wb_core_rpg": {"progression_system": "xp"}},
-            "characters": {},
-            "current_context": [],
-            "history": [],
-            "chat_messages": [],
-            "turn": 0,
-        },
-        None,
-    )
-
-    contents = [message["content"] for message in preview["messages"]]
-    by_id = {entry["id"]: entry for entry in preview["trace"]}
-
-    # Even with a seeded assessment, auto mode must suppress the ruling: the
-    # input is a nudge, not a player action to adjudicate.
-    assert not any("Ruling:" in content for content in contents)
-    assert by_id["wb_core_rpg:action_feasibility"]["skipped"]
-    # The character sheet is unaffected.
-    assert not by_id["wb_core_rpg:character_sheet"]["skipped"]
-    print("Auto mode disables action feasibility test passed.")
 
 
-def test_auto_mode_disables_action_feasibility():
-    asyncio.run(_auto_mode_disables_action_feasibility())
-
-
-def test_storyteller_auto_mode_directive_and_nudges():
-    compiler = PromptCompiler()
+def test_auto_player_action_prompt():
     state = {
-        "input_text": "Have her explore the ruins.",
-        "characters": {"default_player": {"name": "Nyx"}},
-        "chat_messages": [
-            {"role": "user", "content": "Take the mountain path.", "meta": {"ts": "x", "nudge": True}},
-            {"role": "ai", "content": "Nyx crests the ridge at dusk."},
+        "characters": {"default_player": {
+            "name": "Nyx",
+            "race": "Half-elf",
+            "personality": "Reckless, loyal, allergic to authority.",
+        }},
+        "history": [
+            "You crest the ridge at dusk.",
+            "The bandit camp sprawls below, fires guttering in the wind.",
         ],
     }
 
-    compiled = compiler.compile(state, auto_mode=True)
-    messages = compiled["messages"]
+    prompt = build_auto_player_action_prompt(state, nudge="have her sneak toward the camp")
+    assert "Nyx" in prompt
+    assert "Reckless, loyal, allergic to authority." in prompt
+    assert "The bandit camp sprawls below" in prompt
+    assert "have her sneak toward the camp" in prompt
+    assert "first person" in prompt
+    # The generator declares attempts; outcomes belong to the storyteller.
+    assert "never its" in prompt and "outcome" in prompt
 
-    # Directive is the final message, after the player's (wrapped) input.
-    assert messages[-1]["role"] == "system"
-    assert "auto mode is active" in messages[-1]["content"].lower()
-    assert "Nyx" in messages[-1]["content"]
-    # Live input is framed as an out-of-character nudge.
-    assert messages[-2]["role"] == "user"
-    assert messages[-2]["content"].startswith("[Narrative nudge")
-    assert "Have her explore the ruins." in messages[-2]["content"]
-    # A past nudge replays wrapped too, while its stored content stays raw.
-    replayed = [m for m in messages if "Take the mountain path." in m["content"]][0]
-    assert replayed["content"].startswith("[Narrative nudge")
-    assert state["chat_messages"][0]["content"] == "Take the mountain path."
+    # Without a nudge the direction line is absent entirely.
+    no_nudge = build_auto_player_action_prompt(state)
+    assert "Direction from the player" not in no_nudge
 
-    # On veto rewrites the veto must stay the final instruction.
-    with_veto = compiler.compile(state, auto_mode=True, validation_veto="Rejected: rewrite.")["messages"]
-    assert with_veto[-1]["content"] == "Rejected: rewrite."
-    assert "auto mode is active" in with_veto[-2]["content"].lower()
-
-    # The directive can optionally be delivered as a user message.
-    as_user = compiler.compile(state, auto_mode=True, auto_directive_role="user")["messages"]
-    assert as_user[-1]["role"] == "user"
-    assert "auto mode is active" in as_user[-1]["content"].lower()
-    # An invalid role falls back to system.
-    fallback = compiler.compile(state, auto_mode=True, auto_directive_role="narrator")["messages"]
-    assert fallback[-1]["role"] == "system"
-
-    print("Storyteller auto mode directive and nudge test passed.")
+    # Degrades gracefully with no character or story yet.
+    bare = build_auto_player_action_prompt({})
+    assert "the protagonist" in bare
+    print("Auto player action prompt test passed.")
 
 
-def test_storyteller_auto_mode_handback_and_off():
-    compiler = PromptCompiler()
-    state = {
-        "input_text": "I open the iron door.",
-        "characters": {"default_player": {"name": "Nyx"}},
-        "chat_messages": [],
-    }
+def test_auto_player_action_generation_mock():
+    async def run():
+        previous_mode = os.environ.get("LLM_MODE")
+        os.environ["LLM_MODE"] = "mock"
+        try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            registry = ModuleRegistry(os.path.join(base_dir, "modules"))
+            registry.load_all_modules()
+            engine = EngineGraph(registry)
+            action = await engine.generate_auto_player_action(
+                {"characters": {"default_player": {"name": "Nyx"}}, "history": []},
+                nudge="scout ahead",
+            )
+            # Mock bridge answers with a canned string; the engine passes it
+            # through cleaned of stray whitespace.
+            assert action.startswith("[mock llm response")
+        finally:
+            if previous_mode is None:
+                os.environ.pop("LLM_MODE", None)
+            else:
+                os.environ["LLM_MODE"] = previous_mode
 
-    handback = compiler.compile(state, auto_handback=True)["messages"]
-    # Hand-back directive is last; the player's input stays a plain action.
-    assert "control of Nyx" in handback[-1]["content"]
-    assert "returns to the player" in handback[-1]["content"]
-    assert handback[-2] == {"role": "user", "content": "I open the iron door."}
-
-    # auto_mode wins over a (stale) handback flag.
-    both = compiler.compile(state, auto_mode=True, auto_handback=True)["messages"]
-    assert "auto mode is active" in both[-1]["content"].lower()
-
-    # With both flags off, compile is unchanged from today.
-    plain = compiler.compile(state)["messages"]
-    assert plain[-1] == {"role": "user", "content": "I open the iron door."}
-    assert not any("auto mode" in m["content"].lower() for m in plain)
-
-    print("Storyteller auto mode handback/off test passed.")
+    asyncio.run(run())
+    print("Auto player action mock generation test passed.")
 
 
 async def run_all_tests():
     test_default_pipeline_compiles_messages()
     test_chat_injection_depth_and_veto_order()
-    test_storyteller_auto_mode_directive_and_nudges()
-    test_storyteller_auto_mode_handback_and_off()
+    test_auto_player_action_prompt()
+    test_auto_player_action_generation_mock()
     test_invalid_pipeline_rejected()
     await _graph_records_prompt_trace()
     await _graph_prompt_preview_includes_messages_and_module_blocks()
-    await _auto_mode_disables_action_feasibility()
 
 
 def test_graph_prompt_preview_includes_messages_and_module_blocks():

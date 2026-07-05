@@ -4,7 +4,7 @@ from backend.sdk.mock_sdk import WorldBoxSDK, ValidationVeto
 from backend.engine.registry import ModuleRegistry
 from backend.engine.llm import LLMService
 from backend.engine.memory import MemoryManager
-from backend.engine.prompt_pipeline import PromptCompiler
+from backend.engine.prompt_pipeline import PromptCompiler, build_auto_player_action_prompt
 from backend.engine.settings_registry import SettingsRegistry
 from backend.engine.provider_manager import ProviderManager
 from copy import deepcopy
@@ -113,13 +113,7 @@ class EngineGraph:
             "storyteller.auto_mode", "toggle", False,
             label="Storyteller Auto Mode",
             category="Storyteller",
-            description="Let the AI fully control your character. Your typed input becomes a narrative nudge instead of an in-character action.",
-        )
-        self.settings.register(
-            "storyteller.auto_mode_user_role", "toggle", False,
-            label="Auto Mode Directive As User",
-            category="Storyteller",
-            description="Send the auto mode instruction as a user message instead of a system message — some models follow it more strictly that way.",
+            description="Let the AI play your character: a fast model decides their next action from their personality and the story, and anything you type becomes hidden guidance for that decision instead of an in-character action.",
         )
 
     def register_story_source(self, source_type: str, provider):
@@ -261,11 +255,6 @@ class EngineGraph:
         for key in ("active_save_id", "turn"):
             if key in full_state:
                 filtered[key] = full_state[key]
-
-        # Ambient engine fact, always visible (like turn): whether storyteller
-        # auto mode is driving the player character this turn, so modules can
-        # skip mechanics that treat player input as an in-character action.
-        filtered["storyteller_auto_mode"] = bool(self.settings.get("storyteller.auto_mode"))
 
         requested = consumes.get("state", [])
         if requested == "*":
@@ -625,13 +614,6 @@ class EngineGraph:
 
         module_prompt_blocks = await self._module_prompt_blocks(state)
 
-        # Storyteller auto mode: the AI drives the player character and input is
-        # a narrative nudge. The off-edge (last turn auto, now off) injects a
-        # one-round hand-back directive so control returns cleanly to the player.
-        auto_now = bool(self.settings.get("storyteller.auto_mode"))
-        auto_handback = bool(state.get("storyteller_auto_mode_prev", False)) and not auto_now
-        auto_role = "user" if self.settings.get("storyteller.auto_mode_user_role") else "system"
-
         needs_rewrite = state.get("needs_rewrite", False)
         veto_retries = state.get("veto_retries", 0)
 
@@ -646,17 +628,10 @@ class EngineGraph:
             compiled_prompt = self.prompt_compiler.compile(
                 state,
                 module_blocks=module_prompt_blocks,
-                validation_veto=f"PREVIOUS RESPONSE REJECTED by module validation. REASON: {veto_reason}\n\nRewrite your narration. The rejected action must not appear in the new response.",
-                auto_mode=auto_now,
-                auto_handback=auto_handback,
-                auto_directive_role=auto_role,
+                validation_veto=f"PREVIOUS RESPONSE REJECTED by module validation. REASON: {veto_reason}\n\nRewrite your narration. The rejected action must not appear in the new response."
             )
         else:
-            compiled_prompt = self.prompt_compiler.compile(
-                state, module_blocks=module_prompt_blocks,
-                auto_mode=auto_now, auto_handback=auto_handback,
-                auto_directive_role=auto_role,
-            )
+            compiled_prompt = self.prompt_compiler.compile(state, module_blocks=module_prompt_blocks)
 
         # Don't stream on veto rewrites — the first attempt already sent tokens to
         # the client, so streaming again would produce a second visible response.
@@ -677,11 +652,8 @@ class EngineGraph:
 
         new_history = state.get("history", []) + [story_output]
 
-        # Record the mode this turn actually compiled with, so the next turn can
-        # detect the auto-mode off-edge (immune to mid-generation toggles).
         result = {"history": new_history, "last_prompt_trace": compiled_prompt["trace"], "needs_rewrite": False, "veto_reason": None, "last_reasoning": story_reasoning,
-                  "last_model": story_result.get("model", ""), "last_usage": story_result.get("usage", {}),
-                  "storyteller_auto_mode_prev": auto_now}
+                  "last_model": story_result.get("model", ""), "last_usage": story_result.get("usage", {})}
 
         if needs_rewrite:
             result["veto_retries"] = veto_retries + 1
@@ -726,6 +698,23 @@ class EngineGraph:
             await hook_fn(story_output, state, self.sdk)
         finally:
             self.sdk.llm._current_module = ""
+
+    async def generate_auto_player_action(self, state: WorldState, nudge: str = "") -> str:
+        """Storyteller auto mode: have the fast model play the player — decide
+        the character's next action from their personality and the recent story
+        (steered by the hidden ``nudge`` if the player typed one) and phrase it
+        like a normal typed player message. Returns "" on failure so callers
+        can fall back to a normal turn."""
+        await self.sdk.ui.emit_status("auto_player", "Deciding your character's move…")
+        prompt = build_auto_player_action_prompt(state, nudge)
+        try:
+            action = await self.sdk.llm.generate(prompt, model_preference="fastest")
+        except Exception as exc:
+            print(f"[Auto Mode] Player action generation failed: {exc}")
+            return ""
+        action = (action or "").strip().strip('"').strip()
+        # A single short paragraph is expected; collapse any stray newlines.
+        return " ".join(action.split())
 
     async def compile_prompt_preview(self, state: WorldState, prompt_pipeline: list[dict]) -> dict:
         module_prompt_blocks = await self._module_prompt_blocks(state)

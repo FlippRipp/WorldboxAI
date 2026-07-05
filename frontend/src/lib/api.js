@@ -27,6 +27,7 @@ export const api = {
                             world_id: opts.worldId ?? null,
                             scenario_id: opts.scenarioId ?? null,
                             start_preference: opts.startPreference ?? null,
+                            start_location_node_id: opts.startLocationNodeId ?? null,
                             scenario_request: opts.scenarioRequest ?? null,
                             character_id: opts.characterId ?? null,
                             active_modules: opts.activeModules ?? null,
@@ -128,20 +129,6 @@ export const api = {
   saveWorldStep:          (worldId, stepId, data) => request(`/api/world/save-step/${worldId}/${stepId}`, { method: 'POST', body: JSON.stringify({ data }) }),
   getStartLocations:      (worldId) => request(`/api/world/${worldId}/start-locations`),
   pickStartLocation:      (worldId, preference = '') => request(`/api/world/${worldId}/pick-start`, { method: 'POST', body: JSON.stringify({ preference }) }),
-  enrichLabelNext:        (worldId, layerId = null, labeledNodeIds = null, rework = false) => {
-    const body = {};
-    if (layerId) body.layer_id = layerId;
-    if (labeledNodeIds) body.labeled_node_ids = labeledNodeIds;
-    if (rework) body.rework = true;
-    return request(`/api/world/${worldId}/enrich/label-next`, { method: 'POST', body: JSON.stringify(body) });
-  },
-  enrichDescribeNext:     (worldId, layerId = null, labeledNodeIds = null, rework = false) => {
-    const body = {};
-    if (layerId) body.layer_id = layerId;
-    if (labeledNodeIds) body.labeled_node_ids = labeledNodeIds;
-    if (rework) body.rework = true;
-    return request(`/api/world/${worldId}/enrich/describe-next`, { method: 'POST', body: JSON.stringify(body) });
-  },
   enrichProgress:         (worldId, layerId = null) => {
     const qs = layerId ? `?layer_id=${encodeURIComponent(layerId)}` : '';
     return request(`/api/world/${worldId}/enrich/progress${qs}`);

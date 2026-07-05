@@ -16,33 +16,53 @@ DEFAULT_CONTINUE_PROMPT = (
     "events, NPCs, and the world forward without waiting for the player to act."
 )
 
-# Appended as the final directive when storyteller auto mode is on: the AI
-# drives the player character itself and player input becomes a nudge.
-AUTO_MODE_DIRECTIVE = (
-    "Storyteller auto mode is active. The story is narrated in second person: the "
-    "\"you\" in the narration is ${player_name}, the protagonist. Normally the player "
-    "decides what \"you\" do — right now they do not: you, the storyteller, are in "
-    "full control of ${player_name}. Ignore any earlier instruction that says the "
-    "player controls ${player_name} or that you should describe the outcome of the "
-    "player's action — there is no player action this turn. Every response MUST show "
-    "the protagonist taking initiative: decide what ${player_name} does next and "
-    "narrate it in the same second-person voice as the rest of the story (\"You step "
-    "forward...\", \"You say...\"), with concrete actions, choices, and dialogue. "
-    "${player_name} pursues their own goals and the scene moves forward through what "
-    "\"you\" do. Never leave the protagonist passive or merely observing, never stall "
-    "waiting for input, and never end by asking what they will do — you already "
-    "decided. Treat any player message as an out-of-character narrative nudge — steer "
-    "the story toward it, never voice it as the protagonist's own words or action."
-)
+def build_auto_player_action_prompt(state: dict[str, Any], nudge: str = "") -> str:
+    """Prompt for the fast model that plays the player in storyteller auto
+    mode: decide the character's next action from their personality and the
+    recent story, phrased like a message the player would have typed."""
+    characters = state.get("characters") or {}
+    player = characters.get("default_player") or {}
+    name = (player.get("name") or "").strip() or "the protagonist"
 
-# Appended for exactly one turn after auto mode is switched off, so the AI
-# hands the character back instead of acting for the player one last time.
-AUTO_MODE_HANDBACK_DIRECTIVE = (
-    "Storyteller auto mode was just turned off: control of ${player_name} — the \"you\" "
-    "of the second-person narration — returns to the player this turn. Do NOT decide "
-    "${player_name}'s actions, dialogue, or choices — narrate only the world, other "
-    "characters, and the outcome of the player's stated action, then wait for the player."
-)
+    lines = [
+        f"You are playing {name}, the protagonist of an ongoing interactive story. "
+        f"Decide what {name} does next, exactly as this character would.",
+        "",
+    ]
+
+    char_fields = [
+        ("Name", (player.get("name") or "").strip()),
+        ("Race", (player.get("race") or "").strip()),
+        ("Personality", (player.get("personality") or "").strip()),
+        ("Appearance", (player.get("short_appearance") or "").strip()),
+    ]
+    char_lines = [f"{label}: {value}" for label, value in char_fields if value]
+    if char_lines:
+        lines.append("The character:")
+        lines.extend(char_lines)
+        lines.append("")
+
+    recent = [entry[-1500:] for entry in (state.get("history") or [])[-2:]]
+    if recent:
+        lines.append("The story so far (most recent scenes; the \"you\" in the narration is this character):")
+        lines.extend(recent)
+        lines.append("")
+
+    nudge = (nudge or "").strip()
+    if nudge:
+        lines.append(f"Direction from the player (follow its intent when deciding the action): {nudge}")
+        lines.append("")
+
+    lines.append(
+        f"Answer with {name}'s next move as a short player message: 1-3 sentences, "
+        f"first person, present tense (e.g. \"I draw my sword and step between them.\"), "
+        f"stating what {name} does and says. Declare the attempt only — never its "
+        f"outcome, and never other characters' reactions; the storyteller decides "
+        f"those. Stay true to the personality and the current scene, and keep the "
+        f"story moving. Respond with ONLY that message: no quotes around it, no "
+        f"narration, no explanations."
+    )
+    return "\n".join(lines)
 
 AVAILABLE_MACROS = [
     {"key": "${player_name}", "description": "Name of the player character"},
@@ -273,24 +293,11 @@ class PromptCompiler:
         module_blocks: list[dict[str, Any]] | None = None,
         validation_veto: str | None = None,
         generation_type: str | None = None,
-        auto_mode: bool = False,
-        auto_handback: bool = False,
-        auto_directive_role: str = "system",
     ) -> dict[str, Any]:
         blocks = self.normalize_pipeline(pipeline if pipeline is not None else state.get("prompt_pipeline"))
         if module_blocks:
             blocks.extend(self.normalize_pipeline(module_blocks))
             self._validate_unique_block_ids(blocks)
-        # Auto-mode directives go before any veto so on rewrites the veto stays
-        # the final instruction.
-        if auto_mode:
-            blocks.append(self._engine_directive_block(
-                "engine_storyteller_auto_mode", "Storyteller Auto Mode", AUTO_MODE_DIRECTIVE,
-                role_type=auto_directive_role))
-        elif auto_handback:
-            blocks.append(self._engine_directive_block(
-                "engine_storyteller_auto_handback", "Storyteller Auto Mode Hand-back", AUTO_MODE_HANDBACK_DIRECTIVE,
-                role_type=auto_directive_role))
         if validation_veto:
             blocks.append(self._validation_veto_block(validation_veto))
 
@@ -321,7 +328,7 @@ class PromptCompiler:
             else:
                 chat_injections.append((block, message))
 
-        chat_messages = self._chat_messages(state, auto_mode=auto_mode)
+        chat_messages = self._chat_messages(state)
         for block, message in chat_injections:
             insert_index = max(0, len(chat_messages) - block["depth"])
             chat_messages.insert(insert_index, message)
@@ -439,13 +446,7 @@ class PromptCompiler:
         ]
         return "\n".join(lines)
 
-    def _nudge_wrap(self, text: str, state: dict[str, Any]) -> str:
-        """Frame player text as an out-of-character narrative nudge (auto mode)."""
-        characters = state.get("characters") or {}
-        player = (characters.get("default_player") or {}).get("name") or "the player character"
-        return f"[Narrative nudge — out-of-character guidance, not {player}'s action: {text}]"
-
-    def _chat_messages(self, state: dict[str, Any], auto_mode: bool = False) -> list[dict[str, str]]:
+    def _chat_messages(self, state: dict[str, Any]) -> list[dict[str, str]]:
         messages = []
         for message in state.get("chat_messages", []):
             role = message.get("role")
@@ -460,17 +461,10 @@ class PromptCompiler:
             if role == "ai":
                 role = "assistant"
             if role in {"user", "assistant", "system"}:
-                # Inputs sent during auto mode were nudges, not in-character
-                # actions; re-frame them on replay so the model never mistakes
-                # them for player speech. UI/saved history keeps the raw text.
-                if role == "user" and isinstance(meta, dict) and meta.get("nudge"):
-                    content = self._nudge_wrap(content, state)
                 messages.append({"role": role, "content": content})
 
         input_text = (state.get("input_text") or "").strip()
         if input_text:
-            if auto_mode:
-                input_text = self._nudge_wrap(input_text, state)
             messages.append({"role": "user", "content": input_text})
         else:
             # Empty input = a "continue" turn: no player message, just an
@@ -479,18 +473,15 @@ class PromptCompiler:
             messages.append({"role": "user", "content": self.resolve_macros(continue_prompt, state)})
         return messages
 
-    def _engine_directive_block(self, block_id: str, display_name: str, text: str,
-                                role_type: str = "system") -> dict[str, Any]:
-        """An engine-appended directive injected at the very end of the chat
-        (depth 0), after the player's input."""
-        if role_type not in ALLOWED_ROLES:
-            role_type = "system"
+    def _engine_directive_block(self, block_id: str, display_name: str, text: str) -> dict[str, Any]:
+        """An engine-appended system directive injected at the very end of the
+        chat (depth 0), after the player's input."""
         return {
             "id": block_id,
             "type": "static_text",
             "source": "engine",
             "enabled": True,
-            "role_type": role_type,
+            "role_type": "system",
             "placement": "chat_injection",
             "depth": 0,
             "display_name": display_name,

@@ -75,6 +75,7 @@ class CreateSaveRequest(BaseModel):
     world_id: Optional[str] = None
     scenario_id: Optional[str] = None
     start_preference: Optional[str] = None
+    start_location_node_id: Optional[str] = None
     scenario_request: Optional[str] = None
     character_id: Optional[str] = None
     active_modules: Optional[list[str]] = None
@@ -570,6 +571,7 @@ async def create_save(request: CreateSaveRequest):
                 save_id=request.save_id,
                 source_id=request.world_id,
                 start_preference=request.start_preference,
+                start_location_node_id=request.start_location_node_id,
                 session_manager=session_manager,
                 engine=engine,
                 character_module_data=character_module_data,
@@ -1200,7 +1202,19 @@ async def websocket_endpoint(websocket: WebSocket):
 
     async def handle_turn(data):
         # Update state with user input
-        session_manager.set_input(data.get("text", ""))
+        text = data.get("text", "")
+        if engine.settings.get("storyteller.auto_mode"):
+            # Storyteller auto mode: a fast model plays the player. Whatever was
+            # typed stays out of the story and only steers the generated action,
+            # which then runs as a completely normal player turn. On generation
+            # failure fall back to treating the typed text as the action.
+            generated = await engine.generate_auto_player_action(session_manager.state, text)
+            if generated:
+                text = generated
+                # Show the generated action in the client as the user message
+                # (replacing any locally echoed guidance text).
+                await websocket.send_json({"type": "player_action", "content": generated})
+        session_manager.set_input(text)
         engine.set_memory_path(session_manager.get_memory_path())
         _init_world_index_for_save(session_manager.active_save_id)
 

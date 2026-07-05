@@ -82,6 +82,7 @@ def test_create_save_with_world_and_scenario(tmp_path, monkeypatch):
 
     async def fake_world_provider(*, save_id, source_id, start_preference,
                                   session_manager, engine,
+                                  start_location_node_id=None,
                                   character_module_data=None, character_data=None):
         state = session_manager.create_save(save_id)
         session_manager.state["world_data"] = {"id": source_id}
@@ -100,6 +101,35 @@ def test_create_save_with_world_and_scenario(tmp_path, monkeypatch):
     assert scenario_file.exists()
     assert session_manager.state["world_data"]["id"] == "test_world"
     assert session_manager.state["scenario_data"]["starting_prompt"] == "The wagon wheel snaps at dusk."
+
+
+def test_create_save_passes_picked_start_location(tmp_path, monkeypatch):
+    # The start screen's "Pick for me" result is sent as a node id and must
+    # reach the world story-source provider (it used to be dropped, giving
+    # the player a random start instead of the previewed one).
+    client, session_manager = make_client(tmp_path, monkeypatch)
+
+    seen = {}
+
+    async def fake_world_provider(*, save_id, source_id, start_preference,
+                                  session_manager, engine,
+                                  start_location_node_id=None,
+                                  character_module_data=None, character_data=None):
+        seen["start_location_node_id"] = start_location_node_id
+        seen["start_preference"] = start_preference
+        state = session_manager.create_save(save_id)
+        return {"state": state, "start_location": {"node_id": start_location_node_id}}
+
+    monkeypatch.setitem(server.engine.story_sources, "world", fake_world_provider)
+
+    resp = client.post("/api/saves", json={
+        "save_id": "picked_start_save",
+        "world_id": "test_world",
+        "start_location_node_id": "node_42",
+    })
+    assert resp.status_code == 200
+    assert seen["start_location_node_id"] == "node_42"
+    assert resp.json()["start_location"]["node_id"] == "node_42"
 
 
 def test_create_save_with_missing_scenario_returns_404(tmp_path, monkeypatch):
