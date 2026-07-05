@@ -198,9 +198,18 @@ def _tag_mask(tag: str, layers: dict, fields: dict) -> np.ndarray:
 
 
 def place_landmark(tag: str, layers: dict, fields: dict, res: int,
-                   map_width: float, map_height: float, rng, taken: list) -> tuple:
-    """Best free cell matching ``tag``; returns (x, y, r, c) or None."""
+                   map_width: float, map_height: float, rng, taken: list,
+                   region_mask: np.ndarray = None) -> tuple:
+    """Best free cell matching ``tag``; returns (x, y, r, c) or None.
+
+    ``region_mask`` (a bool ``res x res`` array) restricts placement to a
+    region's territory so an authored landmark stays inside its region.
+    """
     mask = _tag_mask(tag or "", layers, fields)
+    if region_mask is not None:
+        # Keep only in-territory cells; a tiny floor lets sampling still find a
+        # spot when no cell matches the tag well inside the territory.
+        mask = np.where(region_mask, np.maximum(mask, 1e-3), 0.0)
     pts = sample_points(mask, 1, res, map_width, map_height, rng,
                         min_sep_cells=max(2.0, res * 0.03), taken=taken)
     return pts[0] if pts else None

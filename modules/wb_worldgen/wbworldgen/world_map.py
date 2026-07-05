@@ -224,11 +224,19 @@ class WorldMapGenerator:
         terrain paths between settlements.
         """
         from wbworldgen.worldgen import terrain_placement as _tp
+        from wbworldgen.worldgen import region_affinity as _ra
         from wbworldgen.worldgen import roads as _roads
 
         res = int(terrain["height"].shape[0])
         fields = _tp.suitability_fields(terrain)
         region_data = compiled_world.get("regions", {}).get("regions", [])
+
+        # Carve contiguous, terrain-matched region territories BEFORE placing any
+        # nodes, so region membership follows geography instead of being grafted
+        # onto scattered authored anchors (the old source of fragmentation).
+        region_of_cell = _ra.partition_regions(
+            region_data, terrain, fields, map_width, map_height, self.np_rng)
+        region_full = _ra.upsample_region_grid(region_of_cell, res)
 
         nodes: list[MapNode] = []
         taken_cells: list[tuple] = []
@@ -241,20 +249,27 @@ class WorldMapGenerator:
             nodes.append(n)
             return n
 
-        # 1) Anchor authored settlements + landmarks on fitting terrain.
-        for region in region_data:
+        # 1) Anchor authored settlements + landmarks on fitting terrain, each
+        #    restricted to its own region's territory so it stays in-region.
+        for ridx, region in enumerate(region_data):
             rname = region.get("name", "")
+            terr_mask = (region_full == ridx)
+            has_territory = bool(terr_mask.any())
             for loc in region.get("named_locations", []):
                 cat = loc.get("category")
                 if cat == "settlement":
+                    city_field = fields["city"]
+                    if has_territory:
+                        city_field = np.where(terr_mask, city_field, -1e9)
                     pt = _tp.sample_points(
-                        fields["city"], 1, res, map_width, map_height, self.np_rng,
+                        city_field, 1, res, map_width, map_height, self.np_rng,
                         min_sep_cells=max(3.0, res * 0.05), taken=taken_cells)
                     node_type, imp = "settlement", 8
                 elif cat == "landmark":
                     pt = [_tp.place_landmark(
                         loc.get("environment", ""), terrain, fields, res,
-                        map_width, map_height, self.np_rng, taken_cells)]
+                        map_width, map_height, self.np_rng, taken_cells,
+                        region_mask=terr_mask if has_territory else None)]
                     pt = [p for p in pt if p]
                     node_type, imp = "landmark", 6
                 else:
@@ -295,7 +310,19 @@ class WorldMapGenerator:
             elif n.type == "landmark":
                 n.importance = max(n.importance, 6)
         self._terrain_assign_types(nodes, edges, terrain, map_width, map_height)
-        self._assign_filler_regions(nodes, edges, region_data)
+
+        # 2b) Filler nodes inherit the region of the territory cell they fall in
+        #     — contiguous by construction. Authored nodes keep their region.
+        if region_data:
+            for node in nodes:
+                if node.region:
+                    continue
+                idx = _ra.region_at(region_of_cell, node.x, node.y,
+                                    map_width, map_height)
+                if idx >= 0:
+                    node.region = region_data[idx].get("name", "")
+            # Cheap safety net; territory assignment is already single-component.
+            self._enforce_region_contiguity(nodes, edges)
 
         # 4) Roads: least-cost terrain paths between settlement-class nodes.
         road_data = _roads.build_roads(nodes, terrain, map_width, map_height)
@@ -346,49 +373,6 @@ class WorldMapGenerator:
                 n.type = "port"
             elif float(height[r, c]) >= hi_ref:
                 n.type = "stronghold"
-
-    def _assign_filler_regions(self, nodes, edges, region_data):
-        """Grow regions outward from authored anchors over the Delaunay
-        adjacency (claim-once multi-source BFS), so each region forms a
-        contiguous band rather than a scatter of nearest-anchor islands, then
-        enforce single-component contiguity."""
-        anchor_idx = [i for i, n in enumerate(nodes) if n.region]
-        if not anchor_idx:
-            # No authored anchors: leave regions empty (handled downstream).
-            return
-
-        n = len(nodes)
-        node_index = {nd.id: i for i, nd in enumerate(nodes)}
-        adj: list[list[int]] = [[] for _ in range(n)]
-        for e in edges:
-            a = node_index[e["from"]]
-            b = node_index[e["to"]]
-            adj[a].append(b)
-            adj[b].append(a)
-
-        region_of = [nd.region for nd in nodes]  # anchors set, "" otherwise
-        queue = deque(anchor_idx)
-        while queue:
-            v = queue.popleft()
-            for nb in adj[v]:
-                if not region_of[nb]:
-                    region_of[nb] = region_of[v]
-                    queue.append(nb)
-
-        # Disconnected leftovers (no edge path to any anchor): nearest anchor.
-        for i in range(n):
-            if not region_of[i]:
-                nearest = min(
-                    anchor_idx,
-                    key=lambda a: (nodes[a].x - nodes[i].x) ** 2
-                    + (nodes[a].y - nodes[i].y) ** 2,
-                )
-                region_of[i] = nodes[nearest].region
-
-        for i in range(n):
-            nodes[i].region = region_of[i]
-
-        self._enforce_region_contiguity(nodes, edges)
 
     def _poisson_disc_sampling(
         self, target_count: int, width: float, height: float
