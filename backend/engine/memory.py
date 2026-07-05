@@ -32,6 +32,7 @@ _WORLD_COLUMNS = {
     "source_type": "TEXT",
     "source_id": "TEXT",
     "region": "TEXT DEFAULT ''",
+    "constant": "INTEGER DEFAULT 0",
 }
 
 
@@ -235,7 +236,9 @@ class MemoryManager:
         if self._world_conn is None:
             raise RuntimeError("World index not initialized. Call init_world_index() first.")
         # Clear existing entries so re-embedding never accumulates duplicates.
-        self._world_conn.execute("DELETE FROM world_entries")
+        # Lorebook rows are managed by embed_lorebooks and must survive a
+        # world re-compile.
+        self._world_conn.execute("DELETE FROM world_entries WHERE source_type != 'lorebook'")
         entries = self._build_world_entries(world_data)
         if not entries:
             self._world_conn.commit()
@@ -252,6 +255,73 @@ class MemoryManager:
             )
         self._world_conn.commit()
         return len(entries)
+
+    async def embed_lorebooks(self, lorebooks: list[dict], llm) -> int:
+        """Replace all lorebook rows in the world index with the enabled entries
+        of the given lorebook records (idempotent — safe to call on every sync)."""
+        if self._world_conn is None:
+            raise RuntimeError("World index not initialized. Call init_world_index() first.")
+        self._world_conn.execute("DELETE FROM world_entries WHERE source_type = 'lorebook'")
+        pending = []  # (text, source_id, constant)
+        for book in lorebooks:
+            book_id = book.get("id", "")
+            for entry in book.get("entries", []):
+                if not entry.get("enabled", True):
+                    continue
+                text = self._lorebook_entry_text(entry)
+                if not text:
+                    continue
+                pending.append((text, f"{book_id}:{entry.get('uid', '')}",
+                                1 if entry.get("constant") else 0))
+        batch_size = 64
+        for start in range(0, len(pending), batch_size):
+            chunk = pending[start:start + batch_size]
+            if hasattr(llm, "get_embeddings"):
+                vectors = await llm.get_embeddings([t for t, _, _ in chunk])
+            else:
+                vectors = [await llm.get_embedding(t) for t, _, _ in chunk]
+            for (text, source_id, constant), vec in zip(chunk, vectors):
+                self._world_conn.execute(
+                    """INSERT INTO world_entries (id, embedding, text, source_type, source_id, region, constant)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (str(uuid.uuid4()), _serialize(vec), text, "lorebook", source_id, "", constant),
+                )
+        self._world_conn.commit()
+        return len(pending)
+
+    @staticmethod
+    def _lorebook_entry_text(entry: dict) -> str:
+        """Fold title and trigger keywords into the stored text so ST keywords
+        still steer semantic similarity and the entry reads well in prompts."""
+        content = (entry.get("content") or "").strip()
+        if not content:
+            return ""
+        title = (entry.get("title") or "").strip()
+        keys = [k for k in (entry.get("keys") or []) + (entry.get("secondary_keys") or []) if k]
+        prefix = "Lore"
+        if title:
+            prefix += f" — {title}"
+        if keys:
+            prefix += f" (keywords: {', '.join(keys)})"
+        return f"{prefix}: {content}"
+
+    def get_constant_lorebook_entries(self) -> list[dict]:
+        """Always-injected lorebook entries (ST 'constant' flag); no vector math."""
+        if self._world_conn is None:
+            return []
+        rows = self._world_conn.execute(
+            """SELECT * FROM world_entries
+               WHERE source_type = 'lorebook' AND COALESCE(constant, 0) = 1
+               ORDER BY source_id""",
+        ).fetchall()
+        return [
+            {
+                "id": row["id"] or "",
+                "text": row["text"] or "",
+                "source_id": row["source_id"] or "",
+            }
+            for row in rows
+        ]
 
     def _build_world_entries(self, world_data: dict) -> list[dict]:
         entries = []
@@ -417,9 +487,12 @@ class MemoryManager:
     def search_world(self, query_vector: List[float], limit: int = 3) -> list[dict]:
         if self._world_conn is None:
             return []
+        # Constant lorebook entries are excluded: they are always injected
+        # separately, so retrieving them here would duplicate context.
         rows = self._world_conn.execute(
             """SELECT *, vec_distance_l2(embedding, ?) AS dist
                FROM world_entries
+               WHERE NOT (source_type = 'lorebook' AND COALESCE(constant, 0) = 1)
                ORDER BY dist
                LIMIT ?""",
             (_serialize(query_vector), limit),

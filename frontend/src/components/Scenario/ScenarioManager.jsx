@@ -10,6 +10,8 @@ export default function ScenarioManager({ onBack }) {
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null); // {id?, name, scenario_description, starting_prompt}
   const [saving, setSaving] = useState(false);
+  const [allLorebooks, setAllLorebooks] = useState([]);
+  const [linkedLorebooks, setLinkedLorebooks] = useState([]);
 
   const refresh = () => {
     setLoading(true);
@@ -17,15 +19,23 @@ export default function ScenarioManager({ onBack }) {
       .then((d) => setScenarios(d.scenarios || []))
       .catch(() => {})
       .finally(() => setLoading(false));
+    api.listLorebooks()
+      .then((d) => setAllLorebooks(d.lorebooks || []))
+      .catch(() => {});
   };
 
   useEffect(refresh, []);
 
-  const startNew = () => setEditing({ name: '', scenario_description: '', starting_prompt: '' });
+  const startNew = () => {
+    setLinkedLorebooks([]);
+    setEditing({ name: '', scenario_description: '', starting_prompt: '' });
+  };
 
   const startEdit = async (id) => {
     try {
       const { scenario } = await api.loadScenario(id);
+      const { lorebook_ids } = await api.getLorebookLinks('scenario', id).catch(() => ({ lorebook_ids: [] }));
+      setLinkedLorebooks(lorebook_ids || []);
       setEditing(scenario);
     } catch (e) {
       alert(`Failed to load scenario: ${e.message}`);
@@ -36,7 +46,10 @@ export default function ScenarioManager({ onBack }) {
     if (!editing?.name.trim()) return;
     setSaving(true);
     try {
-      await api.saveScenario(editing);
+      const { scenario } = await api.saveScenario(editing);
+      // Links live outside the scenario record; a new scenario only gets its
+      // id from the save call, so linking must follow it.
+      await api.setLorebookLinks('scenario', scenario.id, linkedLorebooks);
       setEditing(null);
       refresh();
     } catch (e) {
@@ -157,6 +170,30 @@ export default function ScenarioManager({ onBack }) {
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500 resize-y"
                 />
               </div>
+
+              {allLorebooks.length > 0 && (
+                <div className="space-y-1.5">
+                  {field('Lorebooks', 'stories created from this scenario include the checked lorebooks')}
+                  <div className="space-y-1 p-3 rounded-lg border border-gray-700 bg-gray-800/50">
+                    {allLorebooks.map((b) => (
+                      <label key={b.id} className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={linkedLorebooks.includes(b.id)}
+                          onChange={(e) => setLinkedLorebooks(
+                            e.target.checked
+                              ? [...linkedLorebooks, b.id]
+                              : linkedLorebooks.filter((id) => id !== b.id)
+                          )}
+                          className="accent-purple-600"
+                        />
+                        📚 {b.name}
+                        <span className="text-xs text-gray-500">({b.enabled_count}/{b.entry_count} entries)</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div className="flex gap-2">
                 <button

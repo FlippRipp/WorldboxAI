@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { api } from '../lib/api';
 
-export default function MemoryBrowser({ isOpen, onClose }) {
+export default function MemoryBrowser({ isOpen, onClose, saveId }) {
   const [memories, setMemories] = useState([]);
   const [activeIds, setActiveIds] = useState([]);
   const [contextQuery, setContextQuery] = useState('');
@@ -154,6 +154,8 @@ export default function MemoryBrowser({ isOpen, onClose }) {
               ))}
             </div>
           )}
+
+          {!loading && saveId && <SaveLorebooks saveId={saveId} />}
         </div>
 
         <div className="p-3 border-t border-gray-700 bg-gray-900 rounded-b-lg flex justify-end">
@@ -169,6 +171,62 @@ export default function MemoryBrowser({ isOpen, onClose }) {
           onCancel={() => setDeleteId(null)}
         />
       )}
+    </div>
+  );
+}
+
+// Attach/detach library lorebooks on the current story. Changes to the active
+// save re-embed immediately; the next turn picks them up.
+function SaveLorebooks({ saveId }) {
+  const [library, setLibrary] = useState([]);
+  const [attached, setAttached] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    Promise.all([api.listLorebooks(), api.getSaveLorebooks(saveId)])
+      .then(([lib, save]) => {
+        setLibrary(lib.lorebooks || []);
+        setAttached(save.lorebook_ids || []);
+      })
+      .catch(e => setError(e.message));
+  }, [saveId]);
+
+  if (library.length === 0) return null;
+
+  const toggle = async (id, on) => {
+    const next = on ? [...attached, id] : attached.filter(a => a !== id);
+    setBusy(true);
+    setError('');
+    try {
+      const { lorebook_ids } = await api.setSaveLorebooks(saveId, next);
+      setAttached(lorebook_ids);
+    } catch (e) {
+      setError(e.message);
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div className="mt-4">
+      <div className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-2">Lorebooks</div>
+      <div className="bg-gray-900/60 rounded border border-gray-700 p-3 space-y-1">
+        {library.map(b => (
+          <label key={b.id} className={`flex items-center gap-2 text-sm text-gray-300 ${busy ? 'opacity-50' : 'cursor-pointer'}`}>
+            <input
+              type="checkbox"
+              checked={attached.includes(b.id)}
+              disabled={busy}
+              onChange={e => toggle(b.id, e.target.checked)}
+              className="accent-purple-600"
+            />
+            📚 {b.name}
+            <span className="text-xs text-gray-500">({b.enabled_count}/{b.entry_count} entries)</span>
+          </label>
+        ))}
+        {error && <p className="text-xs text-red-400 mt-1">{error}</p>}
+        <p className="text-[10px] text-gray-600 mt-1">Attached lorebook entries join world knowledge retrieval from the next turn.</p>
+      </div>
     </div>
   );
 }

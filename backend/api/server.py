@@ -9,6 +9,7 @@ from backend.engine.session import GameSessionManager
 from backend.engine.settings_registry import SettingsRegistry
 from backend.engine.character_builder import CharacterBuilder
 from backend.engine.scenario import ScenarioStore
+from backend.engine.lorebook import LorebookStore
 from backend.engine.provider_manager import ProviderManager
 from backend.engine.prompt_library import PromptLibrary, get_default_library_path
 from backend.engine.prompt_pipeline import AVAILABLE_MACROS, default_prompt_pipeline, ALLOWED_ROLES, ALLOWED_PLACEMENTS, ALLOWED_BLOCK_TYPES, DEFAULT_CONTINUE_PROMPT
@@ -64,6 +65,7 @@ engine.set_memory_path(session_manager.get_memory_path())
 prompt_library = PromptLibrary(get_default_library_path())
 st_importer = SillyTavernImporter()
 scenario_store = ScenarioStore(data_dir)
+lorebook_store = LorebookStore(data_dir)
 theme_store = ThemeStore(data_dir)
 
 llm_inspector = LLMInspector()
@@ -531,6 +533,23 @@ async def create_save(request: CreateSaveRequest):
             except FileNotFoundError:
                 pass
 
+        async def _inherit_lorebooks():
+            # A new save inherits the lorebook links of its story source(s):
+            # world links first, then scenario links. Must run after the save
+            # workspace exists (metadata.json lives there).
+            inherited = []
+            if request.world_id:
+                inherited.extend(lorebook_store.get_links("world", request.world_id))
+            if request.scenario_id:
+                for lid in lorebook_store.get_links("scenario", request.scenario_id):
+                    if lid not in inherited:
+                        inherited.append(lid)
+            if inherited:
+                session_manager.save_manager.update_metadata(
+                    request.save_id, {"lorebook_ids": inherited}
+                )
+                await _sync_lorebooks_for_save(request.save_id)
+
         # A scenario can be used alone or alongside a world: the world supplies
         # the setting, the scenario supplies (or rewrites) the opening message.
         # Loaded up front so a missing scenario fails before any save is created.
@@ -579,6 +598,7 @@ async def create_save(request: CreateSaveRequest):
             )
             _persist_scenario()
             _persist_active_modules()
+            await _inherit_lorebooks()
             return {
                 "session": session_manager.get_status(),
                 "state": result.get("state"),
@@ -596,6 +616,7 @@ async def create_save(request: CreateSaveRequest):
             engine.set_memory_path(session_manager.get_memory_path())
             session_manager.state["start_preference"] = request.start_preference
             _persist_active_modules()
+            await _inherit_lorebooks()
             return {"session": session_manager.get_status(), "state": state}
         else:
             state = session_manager.create_save(
@@ -620,6 +641,9 @@ async def load_save(save_id: str):
         state = session_manager.load_save(save_id)
         engine.set_memory_path(session_manager.get_memory_path())
         _init_world_index_for_save(save_id)
+        # Pick up lorebook link/entry changes made while the save was unloaded
+        # (fingerprint short-circuits to a no-op when nothing changed).
+        await _sync_lorebooks_for_save(save_id)
         return {"session": session_manager.get_status(), "state": state}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -868,6 +892,127 @@ def _init_world_index_for_save(save_id: str):
     world_index_path = session_manager.data_dir / "saves" / save_id / "world_index"
     if world_index_path.exists():
         engine.memory.init_world_index(str(world_index_path))
+
+
+async def _sync_lorebooks_for_save(save_id: str):
+    """Embed the save's linked lorebook entries into its world index when the
+    linked set (or any linked book) changed since the last sync. Only valid
+    for the active save — engine.memory is bound to the active save's paths."""
+    meta = session_manager.save_manager.read_core_json(save_id, "metadata.json", {}) or {}
+    lorebook_ids = meta.get("lorebook_ids", []) or []
+    if not lorebook_ids and "lorebook_embed_fingerprint" not in meta:
+        # Never had lorebooks: don't create a world index for nothing.
+        return
+    fingerprint = lorebook_store.embed_fingerprint(lorebook_ids)
+    if meta.get("lorebook_embed_fingerprint") == fingerprint:
+        return
+    engine.set_memory_path(session_manager.get_memory_path())
+    await engine.ensure_memory()
+    world_index_path = session_manager.data_dir / "saves" / save_id / "world_index"
+    engine.memory.init_world_index(str(world_index_path))
+    books = lorebook_store.resolve_save_lorebooks(lorebook_ids)
+    count = await engine.memory.embed_lorebooks(books, engine.llm)
+    session_manager.save_manager.update_metadata(
+        save_id, {"lorebook_embed_fingerprint": fingerprint}
+    )
+    print(f"[Lorebook] Embedded {count} lorebook entries for save '{save_id}'.")
+
+
+# === Lorebook Routes ===
+
+_LOREBOOK_LINK_KINDS = {"scenario", "world"}
+
+
+class LorebookImportRequest(BaseModel):
+    data: dict
+    name: Optional[str] = None
+
+
+class LorebookEntryToggleRequest(BaseModel):
+    enabled: bool
+
+
+class LorebookLinksRequest(BaseModel):
+    lorebook_ids: list[str]
+
+
+@app.post("/api/lorebooks/import")
+async def import_lorebook(request: LorebookImportRequest):
+    try:
+        return lorebook_store.import_lorebook(request.data, name=request.name)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/lorebooks")
+async def list_lorebooks():
+    return {"lorebooks": lorebook_store.list_lorebooks()}
+
+
+@app.get("/api/lorebooks/links/{kind}/{target_id}")
+async def get_lorebook_links(kind: str, target_id: str):
+    if kind not in _LOREBOOK_LINK_KINDS:
+        raise HTTPException(status_code=400, detail=f"Invalid link kind: {kind!r}")
+    return {"lorebook_ids": lorebook_store.get_links(kind, target_id)}
+
+
+@app.put("/api/lorebooks/links/{kind}/{target_id}")
+async def set_lorebook_links(kind: str, target_id: str, request: LorebookLinksRequest):
+    if kind not in _LOREBOOK_LINK_KINDS:
+        raise HTTPException(status_code=400, detail=f"Invalid link kind: {kind!r}")
+    return {"lorebook_ids": lorebook_store.set_links(kind, target_id, request.lorebook_ids)}
+
+
+@app.get("/api/lorebooks/{lorebook_id}")
+async def get_lorebook(lorebook_id: str):
+    try:
+        record = lorebook_store.load_lorebook(lorebook_id)
+        return {"lorebook": record, "links": lorebook_store.get_reverse_links(lorebook_id)}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/api/lorebooks/{lorebook_id}")
+async def delete_lorebook(lorebook_id: str):
+    try:
+        lorebook_store.delete_lorebook(lorebook_id)
+        return {"deleted": True}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.put("/api/lorebooks/{lorebook_id}/entries/{uid}")
+async def set_lorebook_entry_enabled(lorebook_id: str, uid: str, request: LorebookEntryToggleRequest):
+    try:
+        return {"lorebook": lorebook_store.set_entry_enabled(lorebook_id, uid, request.enabled)}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/saves/{save_id}/lorebooks")
+async def get_save_lorebooks(save_id: str):
+    meta = session_manager.save_manager.read_core_json(save_id, "metadata.json", None)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"Save '{save_id}' not found.")
+    return {"lorebook_ids": meta.get("lorebook_ids", [])}
+
+
+@app.put("/api/saves/{save_id}/lorebooks")
+async def set_save_lorebooks(save_id: str, request: LorebookLinksRequest):
+    ids = [lid for lid in dict.fromkeys(request.lorebook_ids) if lorebook_store.exists(lid)]
+    try:
+        session_manager.save_manager.update_metadata(save_id, {"lorebook_ids": ids})
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    # Embedding only works for the active save; inactive saves re-embed on
+    # next load via the fingerprint check.
+    if save_id == session_manager.active_save_id:
+        await _sync_lorebooks_for_save(save_id)
+    return {"lorebook_ids": ids}
 
 
 
@@ -1216,6 +1361,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_json({"type": "player_action", "content": generated})
         session_manager.set_input(text)
         engine.set_memory_path(session_manager.get_memory_path())
+        # ensure_memory first: after a server restart engine.memory is None and
+        # _init_world_index_for_save would silently skip, dropping world RAG and
+        # constant lore for the first turn.
+        if engine.memory_db_path:
+            await engine.ensure_memory()
         _init_world_index_for_save(session_manager.active_save_id)
 
         try:

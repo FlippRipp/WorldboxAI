@@ -291,6 +291,48 @@ class LLMService:
                 await self.inspector.end_call(cid, text, "", error=str(e))
             raise
 
+    async def get_embeddings(self, texts: list[str], inspector_ctx: dict = None) -> list[list[float]]:
+        """Embed several texts in one provider call (litellm's aembedding accepts
+        list input). Falls back to per-text calls if the provider rejects the batch."""
+        if not texts:
+            return []
+        if self.mode == "mock":
+            return [await self.get_embedding(t, inspector_ctx=inspector_ctx) for t in texts]
+
+        ctx = inspector_ctx or {}
+        cid = None
+        if self.inspector:
+            cid = await self.inspector.start_call(
+                call_type=ctx.get("call_type", "embedding"),
+                model=self.embedding_model,
+                step=ctx.get("step", "get_embeddings"),
+                module_source=ctx.get("module_source", ""),
+                input_data=f"[batch of {len(texts)} texts]",
+            )
+        try:
+            emb_kwargs = {"model": self.embedding_model, "input": texts}
+            emb_kwargs.update(self._provider_route_kwargs(self.embedding_model))
+            response = await aembedding(**emb_kwargs)
+            # Providers may return items out of order; sort by index when present.
+            data = sorted(response.data, key=lambda d: d.get("index", 0))
+            embeddings = [d["embedding"] for d in data]
+            if len(embeddings) != len(texts):
+                raise ValueError(f"Embedding batch returned {len(embeddings)} vectors for {len(texts)} texts.")
+            if self.inspector and cid:
+                await self.inspector.end_call(cid, f"[batch of {len(texts)}]",
+                                        f"{len(embeddings)} vectors dim={len(embeddings[0])}",
+                                        tokens_in=0, tokens_out=0)
+            return embeddings
+        except asyncio.CancelledError:
+            if self.inspector and cid:
+                await self.inspector.end_call(cid, f"[batch of {len(texts)}]", cancelled=True)
+            raise
+        except Exception as e:
+            if self.inspector and cid:
+                await self.inspector.end_call(cid, f"[batch of {len(texts)}]", "", error=str(e))
+            print(f"[LLM] Batch embedding failed ({e}); falling back to per-text calls.")
+            return [await self.get_embedding(t, inspector_ctx=inspector_ctx) for t in texts]
+
     async def generate_story(self, prompt: str, streaming_callback=None) -> str:
         messages = [{"role": "system", "content": "You are a creative storyteller in a text-based RPG."},
                     {"role": "user", "content": prompt}]

@@ -113,7 +113,7 @@ class EngineGraph:
             "world.rag_limit", "slider", 2,
             label="World RAG Limit",
             category="World Building",
-            description="Max number of world knowledge entries to retrieve per turn",
+            description="Max number of world + lorebook knowledge entries to retrieve per turn",
             min=0, max=10,
         )
         self.settings.register(
@@ -343,6 +343,17 @@ class EngineGraph:
     async def _ensure_memory(self):
         await self.ensure_memory()
 
+    def _constant_lorebook_block(self) -> str:
+        """Always-on lorebook entries (ST 'constant' flag) as a prompt block,
+        or "" when there are none. Injected every turn, independent of RAG."""
+        if self.memory is None or not self.memory.has_world_index():
+            return ""
+        entries = self.memory.get_constant_lorebook_entries()
+        if not entries:
+            return ""
+        lines = "\n".join(f"- {e['text']}" for e in entries)
+        return f"<lorebook>\n{lines}\n</lorebook>"
+
     async def generate_intro(self, state: dict, streaming_callback=None) -> dict:
         character = state.get("characters", {}).get("default_player", {})
         character_name = character.get("name", "Adventurer")
@@ -430,6 +441,11 @@ class EngineGraph:
                     parts.append(text)
             except Exception as e:
                 print(f"Error in {mod_id} on_intro_context: {e}")
+
+        # Always-on lorebook entries shape the opening scene too.
+        lore_block = self._constant_lorebook_block()
+        if lore_block:
+            parts.append(lore_block)
 
         if scenario_data:
             description = (scenario_data.get("scenario_description") or "").strip()
@@ -546,6 +562,12 @@ class EngineGraph:
         turn = state.get("turn", 0)
         retrieved_ids = []
         last_context_query = ""
+
+        # Constant lore is injected on every turn — even empty-input continue
+        # turns that skip RAG retrieval below.
+        lore_block = self._constant_lorebook_block()
+        if lore_block:
+            gathered_context.append(lore_block)
 
         input_text = state.get("input_text", "")
         if input_text:

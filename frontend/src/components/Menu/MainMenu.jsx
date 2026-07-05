@@ -16,6 +16,12 @@ const CORE_MODES = [
     icon: '🎬',
   },
   {
+    id: 'lorebook-manager',
+    label: 'Lorebooks',
+    description: 'Import SillyTavern World Info as RAG lore for stories',
+    icon: '📚',
+  },
+  {
     id: 'character-creator',
     label: 'Character Creator',
     description: 'Create a new character with AI assistance',

@@ -23,6 +23,7 @@ import CharacterCreator from './components/CharacterBuilder/CharacterCreator';
 import SettingsScreen from './components/Settings/SettingsScreen';
 import ModuleScreen from './components/shared/ModuleScreen';
 import ScenarioManager from './components/Scenario/ScenarioManager';
+import LorebookManager from './components/Lorebook/LorebookManager';
 import { useToasts, ToastStack } from './components/shared/Toasts';
 import { LLMInspectorProvider, useLLMInspector } from './hooks/useLLMInspector';
 import { ThemeProvider, useTheme } from './hooks/useTheme';
@@ -348,6 +349,10 @@ function AppContent() {
     return <ScenarioManager onBack={() => setCurrentMode(null)} />;
   }
 
+  if (currentMode === 'lorebook-manager') {
+    return <LorebookManager onBack={() => setCurrentMode(null)} />;
+  }
+
   if (currentMode === 'character-creator') {
     return (
       <>
@@ -482,6 +487,7 @@ function AppContent() {
         <MemoryBrowser
           isOpen={isMemoryOpen}
           onClose={() => setIsMemoryOpen(false)}
+          saveId={session.sessionState?.active_save_id}
         />
 
         <CharacterView

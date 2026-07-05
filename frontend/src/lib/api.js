@@ -108,6 +108,17 @@ export const api = {
   saveScenario:           (data) => request('/api/scenarios', { method: 'POST', body: JSON.stringify(data) }),
   deleteScenario:         (scenarioId) => request(`/api/scenarios/${scenarioId}`, { method: 'DELETE' }),
 
+  // Lorebooks (SillyTavern World Info imports, RAG-retrieved lore)
+  importLorebook:          (data, name = null) => request('/api/lorebooks/import', { method: 'POST', body: JSON.stringify({ data, name }) }),
+  listLorebooks:           () => request('/api/lorebooks'),
+  getLorebook:             (lorebookId) => request(`/api/lorebooks/${lorebookId}`),
+  deleteLorebook:          (lorebookId) => request(`/api/lorebooks/${lorebookId}`, { method: 'DELETE' }),
+  setLorebookEntryEnabled: (lorebookId, uid, enabled) => request(`/api/lorebooks/${lorebookId}/entries/${encodeURIComponent(uid)}`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
+  getLorebookLinks:        (kind, targetId) => request(`/api/lorebooks/links/${kind}/${targetId}`),
+  setLorebookLinks:        (kind, targetId, lorebookIds) => request(`/api/lorebooks/links/${kind}/${targetId}`, { method: 'PUT', body: JSON.stringify({ lorebook_ids: lorebookIds }) }),
+  getSaveLorebooks:        (saveId) => request(`/api/saves/${saveId}/lorebooks`),
+  setSaveLorebooks:        (saveId, lorebookIds) => request(`/api/saves/${saveId}/lorebooks`, { method: 'PUT', body: JSON.stringify({ lorebook_ids: lorebookIds }) }),
+
   // World Builder
   getWorldPipeline:       () => request('/api/world/pipeline'),
   generateWorld:          (seedPrompt, skipReview = false) => request('/api/world/generate', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, skip_review: skipReview }) }),

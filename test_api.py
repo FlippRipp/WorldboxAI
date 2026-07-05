@@ -258,7 +258,11 @@ def test_websocket_llm_provider_error_returns_structured_error(tmp_path, monkeyp
 
     with client.websocket_connect("/ws/chat") as websocket:
         websocket.send_json({"text": "This should fail before save."})
+        # The turn initializes the memory store first, which can emit inspector
+        # (llm_call) events before the failure surfaces; skip past those.
         message = websocket.receive_json()
+        while message["type"] == "llm_call":
+            message = websocket.receive_json()
 
     assert message["type"] == "error"
     assert message["code"] == "llm_provider_unavailable"

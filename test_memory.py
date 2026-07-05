@@ -106,6 +106,98 @@ def test_memory_default_fields_on_legacy_add(tmp_path):
     assert entry["topics"] == "[]"
 
 
+class _FakeEmbedder:
+    """3-dim embeddings keyed by recognizable words, mirroring the fixed-vector
+    style used above (no get_embeddings attribute → exercises the per-text path)."""
+
+    async def get_embedding(self, text: str, inspector_ctx=None):
+        lowered = text.lower()
+        if "dragon" in lowered:
+            return [1.0, 0.0, 0.0]
+        if "harbor" in lowered:
+            return [0.0, 1.0, 0.0]
+        return [0.0, 0.0, 1.0]
+
+
+def _lorebook_record(book_id="realm_lore"):
+    return {
+        "id": book_id,
+        "entries": [
+            {"uid": "0", "title": "Dragon Peak", "keys": ["dragon"], "secondary_keys": [],
+             "content": "A dragon sleeps beneath the peak.", "constant": False, "enabled": True},
+            {"uid": "1", "title": "World Truth", "keys": [], "secondary_keys": [],
+             "content": "The gods are silent.", "constant": True, "enabled": True},
+            {"uid": "2", "title": "Disabled", "keys": ["secret"], "secondary_keys": [],
+             "content": "Never embedded.", "constant": False, "enabled": False},
+        ],
+    }
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_embed_lorebooks_inserts_enabled_entries_idempotently(tmp_path):
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    manager.init_world_index(str(tmp_path / "world_index"))
+
+    count = _run(manager.embed_lorebooks([_lorebook_record()], _FakeEmbedder()))
+    assert count == 2  # disabled entry skipped
+
+    rows = manager._world_conn.execute(
+        "SELECT source_id, constant, text FROM world_entries WHERE source_type = 'lorebook' ORDER BY source_id"
+    ).fetchall()
+    assert [r["source_id"] for r in rows] == ["realm_lore:0", "realm_lore:1"]
+    assert rows[0]["constant"] == 0
+    assert rows[1]["constant"] == 1
+    assert "Lore — Dragon Peak (keywords: dragon)" in rows[0]["text"]
+
+    # Re-running replaces rather than duplicates.
+    _run(manager.embed_lorebooks([_lorebook_record()], _FakeEmbedder()))
+    total = manager._world_conn.execute(
+        "SELECT COUNT(*) AS n FROM world_entries WHERE source_type = 'lorebook'"
+    ).fetchone()["n"]
+    assert total == 2
+
+
+def test_embed_world_preserves_lorebook_rows(tmp_path):
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    manager.init_world_index(str(tmp_path / "world_index"))
+    _run(manager.embed_lorebooks([_lorebook_record()], _FakeEmbedder()))
+
+    _run(manager.embed_world({"lore": {"premise": "A quiet harbor town."}}, _FakeEmbedder()))
+
+    types = {row["source_type"] for row in manager._world_conn.execute(
+        "SELECT source_type FROM world_entries"
+    )}
+    assert types == {"lore", "lorebook"}
+
+    # A second world embed still doesn't touch lorebook rows.
+    _run(manager.embed_world({"lore": {"premise": "A quiet harbor town."}}, _FakeEmbedder()))
+    lorebook_count = manager._world_conn.execute(
+        "SELECT COUNT(*) AS n FROM world_entries WHERE source_type = 'lorebook'"
+    ).fetchone()["n"]
+    assert lorebook_count == 2
+
+
+def test_lorebook_search_and_constant_injection(tmp_path):
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    manager.init_world_index(str(tmp_path / "world_index"))
+    _run(manager.embed_lorebooks([_lorebook_record()], _FakeEmbedder()))
+
+    constants = manager.get_constant_lorebook_entries()
+    assert len(constants) == 1
+    assert "The gods are silent." in constants[0]["text"]
+
+    # Non-constant entries surface through search_world; constant ones are
+    # excluded (they're always injected separately).
+    results = manager.search_world([1.0, 0.0, 0.0], limit=5)
+    texts = [r["text"] for r in results]
+    assert any("dragon sleeps" in t for t in texts)
+    assert not any("gods are silent" in t for t in texts)
+    assert all(r["source_type"] == "lorebook" for r in results)
+
+
 async def _mock_structured_summary():
     os.environ["LLM_MODE"] = "mock"
     try:
