@@ -107,6 +107,8 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
   const [isFullscreen, setIsFullscreen] = useState(false);
   const mapContainerRef = useRef(null);
   const wrapperRef = useRef(null);
+  // Active touch gesture: {mode:'pan', lastX, lastY} or {mode:'pinch', lastDist}.
+  const touchStateRef = useRef(null);
 
   const hasLayers = layers && layers.length > 0;
   const activeLayer = hasLayers
@@ -415,6 +417,77 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
     });
   }, [clampViewBox, defaultVB]);
 
+  // Touch pan (one finger) + pinch-zoom (two fingers). Mirrors the mouse-drag
+  // and wheel-zoom math but reads the live view from the setViewBox updater's
+  // `prev`, so these can be attached as stable native listeners. We only
+  // preventDefault on move (not start), so a stationary tap still fires the
+  // node's onClick for selection while a drag/pinch is captured for navigation.
+  const handleTouchStart = useCallback((e) => {
+    const rect = mapContainerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    if (e.touches.length === 1) {
+      const t = e.touches[0];
+      touchStateRef.current = { mode: 'pan', lastX: t.clientX, lastY: t.clientY };
+    } else if (e.touches.length === 2) {
+      const [a, b] = [e.touches[0], e.touches[1]];
+      touchStateRef.current = {
+        mode: 'pinch',
+        lastDist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY),
+      };
+    }
+  }, []);
+
+  const handleTouchMove = useCallback((e) => {
+    const st = touchStateRef.current;
+    const rect = mapContainerRef.current?.getBoundingClientRect();
+    if (!st || !rect) return;
+    e.preventDefault();
+
+    if (st.mode === 'pan' && e.touches.length === 1) {
+      const t = e.touches[0];
+      const pxDX = st.lastX - t.clientX;
+      const pxDY = st.lastY - t.clientY;
+      st.lastX = t.clientX;
+      st.lastY = t.clientY;
+      setViewBox((prev) => {
+        const newX = prev.x + pxDX * (prev.w / rect.width);
+        const newY = prev.y + pxDY * (prev.h / rect.height);
+        return {
+          ...prev,
+          x: Math.max(0, Math.min(defaultVB.w - prev.w, newX)),
+          y: Math.max(0, Math.min(defaultVB.h - prev.h, newY)),
+        };
+      });
+    } else if (st.mode === 'pinch' && e.touches.length === 2) {
+      const [a, b] = [e.touches[0], e.touches[1]];
+      const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      const factor = dist > 0 ? st.lastDist / dist : 1;
+      st.lastDist = dist;
+      const mx = (a.clientX + b.clientX) / 2 - rect.left;
+      const my = (a.clientY + b.clientY) / 2 - rect.top;
+      setViewBox((prev) => {
+        const worldX = prev.x + mx * (prev.w / rect.width);
+        const worldY = prev.y + my * (prev.h / rect.height);
+        const newW = prev.w * factor;
+        const newH = newW * (defaultVB.h / defaultVB.w);
+        const newX = worldX - mx * (newW / rect.width);
+        const newY = worldY - my * (newH / rect.height);
+        return clampViewBox({ x: newX, y: newY, w: newW, h: newH });
+      });
+    }
+  }, [clampViewBox, defaultVB]);
+
+  const handleTouchEnd = useCallback((e) => {
+    // Fingers lifted: end the gesture, or fall back to panning with the finger
+    // that's still down after a pinch releases one.
+    if (e.touches.length === 0) {
+      touchStateRef.current = null;
+    } else if (e.touches.length === 1) {
+      const t = e.touches[0];
+      touchStateRef.current = { mode: 'pan', lastX: t.clientX, lastY: t.clientY };
+    }
+  }, []);
+
   const handleMouseDown = useCallback((e) => {
     if (e.button !== 0) return;
     setDragging(true);
@@ -502,6 +575,23 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
     return () => el.removeEventListener('wheel', handleWheel);
   }, [handleWheel]);
 
+  // Touch listeners must be native + non-passive so touchmove can preventDefault
+  // (React attaches these as passive, where preventDefault is a no-op).
+  useEffect(() => {
+    const el = mapContainerRef.current;
+    if (!el) return;
+    el.addEventListener('touchstart', handleTouchStart, { passive: false });
+    el.addEventListener('touchmove', handleTouchMove, { passive: false });
+    el.addEventListener('touchend', handleTouchEnd, { passive: false });
+    el.addEventListener('touchcancel', handleTouchEnd, { passive: false });
+    return () => {
+      el.removeEventListener('touchstart', handleTouchStart);
+      el.removeEventListener('touchmove', handleTouchMove);
+      el.removeEventListener('touchend', handleTouchEnd);
+      el.removeEventListener('touchcancel', handleTouchEnd);
+    };
+  }, [handleTouchStart, handleTouchMove, handleTouchEnd]);
+
   if (!activeNodes || !activeNodes.length) {
     return (
       <div className="text-gray-500 text-sm text-center py-8 border border-gray-700 rounded-lg bg-gray-900/50">
@@ -584,8 +674,8 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
         ref={mapContainerRef}
         className={`relative ${isFullscreen ? 'flex-1 min-h-0' : ''}`}
         style={isFullscreen
-          ? { width: '100%', overflow: 'hidden' }
-          : { width: mapLayout.viewW, height: mapLayout.viewH, overflow: 'hidden' }}
+          ? { width: '100%', overflow: 'hidden', touchAction: 'none' }
+          : { width: mapLayout.viewW, height: mapLayout.viewH, overflow: 'hidden', touchAction: 'none' }}
       >
         <svg
           viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`}

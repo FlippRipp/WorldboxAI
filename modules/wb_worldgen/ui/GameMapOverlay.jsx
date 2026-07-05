@@ -50,7 +50,11 @@ export default function GameMapOverlay({ state = {} }) {
   if (!worldData) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-50">
+    // On mobile the bottom-right corner is occupied by the chat composer's
+    // send button, which hides this control; anchor it under the header
+    // (top-right) on small screens and restore the desktop bottom-right corner
+    // from `sm` up, where the centered composer leaves that gutter empty.
+    <div className="fixed right-4 z-50 top-16 sm:top-auto sm:bottom-4">
       {!open ? (
         <button
           onClick={() => setOpen(true)}
