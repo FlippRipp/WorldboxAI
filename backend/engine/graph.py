@@ -120,7 +120,7 @@ class EngineGraph:
             "storyteller.auto_mode", "toggle", False,
             label="Storyteller Auto Mode",
             category="Storyteller",
-            description="Let the AI play your character: a fast model decides their next action from their personality and the story, and anything you type becomes hidden guidance for that decision instead of an in-character action.",
+            description="Let the AI play your character: the storyteller-grade model decides their next action from their personality and the story, and anything you type becomes hidden guidance for that decision instead of an in-character action.",
         )
 
     def register_story_source(self, source_type: str, provider):
@@ -707,15 +707,17 @@ class EngineGraph:
             self.sdk.llm._current_module = ""
 
     async def generate_auto_player_action(self, state: WorldState, nudge: str = "") -> str:
-        """Storyteller auto mode: have the fast model play the player — decide
-        the character's next action from their personality and the recent story
+        """Storyteller auto mode: have the AI play the player — decide the
+        character's next action from their personality and the recent story
         (steered by the hidden ``nudge`` if the player typed one) and phrase it
-        like a normal typed player message. Returns "" on failure so callers
-        can fall back to a normal turn."""
+        like a normal typed player message. Uses the smartest slot: the player's
+        voice carries the whole story in this mode, so it gets the same grade of
+        model as the storyteller. Returns "" on failure so callers can fall
+        back to a normal turn."""
         await self.sdk.ui.emit_status("auto_player", "Deciding your character's move…")
         prompt = build_auto_player_action_prompt(state, nudge)
         try:
-            action = await self.sdk.llm.generate(prompt, model_preference="fastest")
+            action = await self.sdk.llm.generate(prompt, model_preference="smartest")
         except Exception as exc:
             print(f"[Auto Mode] Player action generation failed: {exc}")
             return ""

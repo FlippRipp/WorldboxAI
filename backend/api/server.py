@@ -1204,7 +1204,7 @@ async def websocket_endpoint(websocket: WebSocket):
         # Update state with user input
         text = data.get("text", "")
         if engine.settings.get("storyteller.auto_mode"):
-            # Storyteller auto mode: a fast model plays the player. Whatever was
+            # Storyteller auto mode: the AI plays the player. Whatever was
             # typed stays out of the story and only steers the generated action,
             # which then runs as a completely normal player turn. On generation
             # failure fall back to treating the typed text as the action.
