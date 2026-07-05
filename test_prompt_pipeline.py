@@ -238,9 +238,71 @@ async def _graph_prompt_preview_includes_messages_and_module_blocks():
     print("Graph prompt preview test passed.")
 
 
+def test_storyteller_auto_mode_directive_and_nudges():
+    compiler = PromptCompiler()
+    state = {
+        "input_text": "Have her explore the ruins.",
+        "characters": {"default_player": {"name": "Nyx"}},
+        "chat_messages": [
+            {"role": "user", "content": "Take the mountain path.", "meta": {"ts": "x", "nudge": True}},
+            {"role": "ai", "content": "Nyx crests the ridge at dusk."},
+        ],
+    }
+
+    compiled = compiler.compile(state, auto_mode=True)
+    messages = compiled["messages"]
+
+    # Directive is the final message, after the player's (wrapped) input.
+    assert messages[-1]["role"] == "system"
+    assert "auto mode is active" in messages[-1]["content"].lower()
+    assert "Nyx" in messages[-1]["content"]
+    # Live input is framed as an out-of-character nudge.
+    assert messages[-2]["role"] == "user"
+    assert messages[-2]["content"].startswith("[Narrative nudge")
+    assert "Have her explore the ruins." in messages[-2]["content"]
+    # A past nudge replays wrapped too, while its stored content stays raw.
+    replayed = [m for m in messages if "Take the mountain path." in m["content"]][0]
+    assert replayed["content"].startswith("[Narrative nudge")
+    assert state["chat_messages"][0]["content"] == "Take the mountain path."
+
+    # On veto rewrites the veto must stay the final instruction.
+    with_veto = compiler.compile(state, auto_mode=True, validation_veto="Rejected: rewrite.")["messages"]
+    assert with_veto[-1]["content"] == "Rejected: rewrite."
+    assert "auto mode is active" in with_veto[-2]["content"].lower()
+
+    print("Storyteller auto mode directive and nudge test passed.")
+
+
+def test_storyteller_auto_mode_handback_and_off():
+    compiler = PromptCompiler()
+    state = {
+        "input_text": "I open the iron door.",
+        "characters": {"default_player": {"name": "Nyx"}},
+        "chat_messages": [],
+    }
+
+    handback = compiler.compile(state, auto_handback=True)["messages"]
+    # Hand-back directive is last; the player's input stays a plain action.
+    assert "control of Nyx returns to the player" in handback[-1]["content"]
+    assert handback[-2] == {"role": "user", "content": "I open the iron door."}
+
+    # auto_mode wins over a (stale) handback flag.
+    both = compiler.compile(state, auto_mode=True, auto_handback=True)["messages"]
+    assert "auto mode is active" in both[-1]["content"].lower()
+
+    # With both flags off, compile is unchanged from today.
+    plain = compiler.compile(state)["messages"]
+    assert plain[-1] == {"role": "user", "content": "I open the iron door."}
+    assert not any("auto mode" in m["content"].lower() for m in plain)
+
+    print("Storyteller auto mode handback/off test passed.")
+
+
 async def run_all_tests():
     test_default_pipeline_compiles_messages()
     test_chat_injection_depth_and_veto_order()
+    test_storyteller_auto_mode_directive_and_nudges()
+    test_storyteller_auto_mode_handback_and_off()
     test_invalid_pipeline_rejected()
     await _graph_records_prompt_trace()
     await _graph_prompt_preview_includes_messages_and_module_blocks()

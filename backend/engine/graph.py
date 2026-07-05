@@ -109,6 +109,12 @@ class EngineGraph:
             description="Max number of world knowledge entries to retrieve per turn",
             min=0, max=10,
         )
+        self.settings.register(
+            "storyteller.auto_mode", "toggle", False,
+            label="Storyteller Auto Mode",
+            category="Storyteller",
+            description="Let the AI fully control your character. Your typed input becomes a narrative nudge instead of an in-character action.",
+        )
 
     def register_story_source(self, source_type: str, provider):
         """Register a story-source provider (e.g. the world module's world source).
@@ -608,6 +614,12 @@ class EngineGraph:
 
         module_prompt_blocks = await self._module_prompt_blocks(state)
 
+        # Storyteller auto mode: the AI drives the player character and input is
+        # a narrative nudge. The off-edge (last turn auto, now off) injects a
+        # one-round hand-back directive so control returns cleanly to the player.
+        auto_now = bool(self.settings.get("storyteller.auto_mode"))
+        auto_handback = bool(state.get("storyteller_auto_mode_prev", False)) and not auto_now
+
         needs_rewrite = state.get("needs_rewrite", False)
         veto_retries = state.get("veto_retries", 0)
 
@@ -622,10 +634,15 @@ class EngineGraph:
             compiled_prompt = self.prompt_compiler.compile(
                 state,
                 module_blocks=module_prompt_blocks,
-                validation_veto=f"PREVIOUS RESPONSE REJECTED by module validation. REASON: {veto_reason}\n\nRewrite your narration. The rejected action must not appear in the new response."
+                validation_veto=f"PREVIOUS RESPONSE REJECTED by module validation. REASON: {veto_reason}\n\nRewrite your narration. The rejected action must not appear in the new response.",
+                auto_mode=auto_now,
+                auto_handback=auto_handback,
             )
         else:
-            compiled_prompt = self.prompt_compiler.compile(state, module_blocks=module_prompt_blocks)
+            compiled_prompt = self.prompt_compiler.compile(
+                state, module_blocks=module_prompt_blocks,
+                auto_mode=auto_now, auto_handback=auto_handback,
+            )
 
         # Don't stream on veto rewrites — the first attempt already sent tokens to
         # the client, so streaming again would produce a second visible response.
@@ -646,8 +663,11 @@ class EngineGraph:
 
         new_history = state.get("history", []) + [story_output]
 
+        # Record the mode this turn actually compiled with, so the next turn can
+        # detect the auto-mode off-edge (immune to mid-generation toggles).
         result = {"history": new_history, "last_prompt_trace": compiled_prompt["trace"], "needs_rewrite": False, "veto_reason": None, "last_reasoning": story_reasoning,
-                  "last_model": story_result.get("model", ""), "last_usage": story_result.get("usage", {})}
+                  "last_model": story_result.get("model", ""), "last_usage": story_result.get("usage", {}),
+                  "storyteller_auto_mode_prev": auto_now}
 
         if needs_rewrite:
             result["veto_retries"] = veto_retries + 1

@@ -22,6 +22,8 @@ class GameSessionManager:
         # when the player makes them — there is no implicit default slot.
         self.active_save_id: Optional[str] = None
         self.state = self._empty_state()
+        # Prev-flag the last completed turn compiled against (see save_completed_turn).
+        self._pre_turn_auto_prev = False
         # Restore the save that was active before the last shutdown, so a server
         # restart lands the session where the player left off. Any problem
         # (deleted save, corrupt marker) leaves the session without a story.
@@ -170,6 +172,10 @@ class GameSessionManager:
         self.active_save_id = save_id
         self.settings.bind_workspace(str(save_workspace))
         self.state = self.load_active_state()
+        # Re-seed the last turn's compile-time prev-flag from the swipe manifest
+        # so edit-triggered swipe resets after a restart don't lose it.
+        manifest = self.save_manager.load_swipe_manifest(save_id)
+        self._pre_turn_auto_prev = bool(manifest.get("auto_mode_prev", False)) if manifest else False
         self._persist_active_save_id(save_id)
         return self.state
 
@@ -213,6 +219,7 @@ class GameSessionManager:
             "player_location_region": metadata.get("player_location_region"),
             "player_location_layer_id": metadata.get("player_location_layer_id"),
             "revealed_node_ids": metadata.get("revealed_node_ids", []),
+            "storyteller_auto_mode_prev": bool(metadata.get("storyteller_auto_mode_prev", False)),
         }
 
         world_data = saved_state.get("world_data")
@@ -262,8 +269,16 @@ class GameSessionManager:
         assistant_text = final_history[-1] if len(final_history) > len(previous_history) and final_history else None
         chat_messages = list(self.state.get("chat_messages", []))
         now = datetime.now(timezone.utc).isoformat()
+        # The prev-flag this turn compiled against, kept so a later regenerate of
+        # this turn can re-seat it (metadata isn't part of turn snapshots).
+        self._pre_turn_auto_prev = bool(self.state.get("storyteller_auto_mode_prev", False))
         if user_text:
-            chat_messages.append({"role": "user", "content": user_text, "meta": {"ts": now}})
+            user_message = {"role": "user", "content": user_text, "meta": {"ts": now}}
+            # Input sent during an auto-mode turn is a narrative nudge, not an
+            # in-character action; stamp it so prompt replay re-frames it.
+            if final_state.get("storyteller_auto_mode_prev"):
+                user_message["meta"]["nudge"] = True
+            chat_messages.append(user_message)
         if assistant_text:
             ai_message = {"role": "ai", "content": assistant_text}
             reasoning = final_state.get("last_reasoning", "")
@@ -376,7 +391,8 @@ class GameSessionManager:
         turn = self.state.get("turn", 0)
         if turn <= 0:
             return  # opening scene is not swipeable
-        self.save_manager.reset_swipes(self.active_save_id, turn, self._last_turn_input())
+        self.save_manager.reset_swipes(self.active_save_id, turn, self._last_turn_input(),
+                                       auto_mode_prev=self._pre_turn_auto_prev)
 
     def prepare_regenerate(self) -> int:
         """Roll the workspace back to before the last turn and re-seat its user
@@ -392,6 +408,10 @@ class GameSessionManager:
         self.save_manager.restore_turn_snapshot(self.active_save_id, turn - 1)
         self.state = self.load_active_state()
         self.set_input(manifest.get("user_input", ""))
+        # Re-seat the auto-mode prev-flag the original turn compiled against, so
+        # e.g. a hand-back turn keeps its hand-back directive when regenerated
+        # (metadata was overwritten by the turn's own save and isn't snapshotted).
+        self.state["storyteller_auto_mode_prev"] = bool(manifest.get("auto_mode_prev", False))
         return turn
 
     def add_regenerated_swipe(self) -> dict[str, Any]:

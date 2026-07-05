@@ -16,6 +16,25 @@ DEFAULT_CONTINUE_PROMPT = (
     "events, NPCs, and the world forward without waiting for the player to act."
 )
 
+# Appended as the final system directive when storyteller auto mode is on: the
+# AI drives the player character itself and player input becomes a nudge.
+AUTO_MODE_DIRECTIVE = (
+    "Storyteller auto mode is active. You now fully control ${player_name} as well as "
+    "every other character — even though earlier context says the player controls them, "
+    "this turn you make ${player_name}'s choices, actions, and dialogue yourself and "
+    "drive the scene forward. Treat any player message as an out-of-character narrative "
+    "nudge — steer the story toward it, never voice it as ${player_name}'s own words or action."
+)
+
+# Appended for exactly one turn after auto mode is switched off, so the AI
+# hands the character back instead of acting for the player one last time.
+AUTO_MODE_HANDBACK_DIRECTIVE = (
+    "Storyteller auto mode was just turned off: control of ${player_name} returns to the "
+    "player this turn. Do NOT decide ${player_name}'s actions, dialogue, or choices — "
+    "narrate only the world, other characters, and the outcome of the player's stated "
+    "action, then wait for the player."
+)
+
 AVAILABLE_MACROS = [
     {"key": "${player_name}", "description": "Name of the player character"},
     {"key": "${world_name}", "description": "Name of the current world"},
@@ -245,11 +264,21 @@ class PromptCompiler:
         module_blocks: list[dict[str, Any]] | None = None,
         validation_veto: str | None = None,
         generation_type: str | None = None,
+        auto_mode: bool = False,
+        auto_handback: bool = False,
     ) -> dict[str, Any]:
         blocks = self.normalize_pipeline(pipeline if pipeline is not None else state.get("prompt_pipeline"))
         if module_blocks:
             blocks.extend(self.normalize_pipeline(module_blocks))
             self._validate_unique_block_ids(blocks)
+        # Auto-mode directives go before any veto so on rewrites the veto stays
+        # the final instruction.
+        if auto_mode:
+            blocks.append(self._engine_directive_block(
+                "engine_storyteller_auto_mode", "Storyteller Auto Mode", AUTO_MODE_DIRECTIVE))
+        elif auto_handback:
+            blocks.append(self._engine_directive_block(
+                "engine_storyteller_auto_handback", "Storyteller Auto Mode Hand-back", AUTO_MODE_HANDBACK_DIRECTIVE))
         if validation_veto:
             blocks.append(self._validation_veto_block(validation_veto))
 
@@ -280,7 +309,7 @@ class PromptCompiler:
             else:
                 chat_injections.append((block, message))
 
-        chat_messages = self._chat_messages(state)
+        chat_messages = self._chat_messages(state, auto_mode=auto_mode)
         for block, message in chat_injections:
             insert_index = max(0, len(chat_messages) - block["depth"])
             chat_messages.insert(insert_index, message)
@@ -398,7 +427,13 @@ class PromptCompiler:
         ]
         return "\n".join(lines)
 
-    def _chat_messages(self, state: dict[str, Any]) -> list[dict[str, str]]:
+    def _nudge_wrap(self, text: str, state: dict[str, Any]) -> str:
+        """Frame player text as an out-of-character narrative nudge (auto mode)."""
+        characters = state.get("characters") or {}
+        player = (characters.get("default_player") or {}).get("name") or "the player character"
+        return f"[Narrative nudge — out-of-character guidance, not {player}'s action: {text}]"
+
+    def _chat_messages(self, state: dict[str, Any], auto_mode: bool = False) -> list[dict[str, str]]:
         messages = []
         for message in state.get("chat_messages", []):
             role = message.get("role")
@@ -413,10 +448,17 @@ class PromptCompiler:
             if role == "ai":
                 role = "assistant"
             if role in {"user", "assistant", "system"}:
+                # Inputs sent during auto mode were nudges, not in-character
+                # actions; re-frame them on replay so the model never mistakes
+                # them for player speech. UI/saved history keeps the raw text.
+                if role == "user" and isinstance(meta, dict) and meta.get("nudge"):
+                    content = self._nudge_wrap(content, state)
                 messages.append({"role": role, "content": content})
 
         input_text = (state.get("input_text") or "").strip()
         if input_text:
+            if auto_mode:
+                input_text = self._nudge_wrap(input_text, state)
             messages.append({"role": "user", "content": input_text})
         else:
             # Empty input = a "continue" turn: no player message, just an
@@ -425,22 +467,27 @@ class PromptCompiler:
             messages.append({"role": "user", "content": self.resolve_macros(continue_prompt, state)})
         return messages
 
-    def _validation_veto_block(self, validation_veto: str) -> dict[str, Any]:
+    def _engine_directive_block(self, block_id: str, display_name: str, text: str) -> dict[str, Any]:
+        """An engine-appended system directive injected at the very end of the
+        chat (depth 0), after the player's input."""
         return {
-            "id": "engine_validation_veto",
+            "id": block_id,
             "type": "static_text",
             "source": "engine",
             "enabled": True,
             "role_type": "system",
             "placement": "chat_injection",
             "depth": 0,
-            "display_name": "Validation Veto",
+            "display_name": display_name,
             "category": "utility",
             "generation_types": None,
             "config": {
-                "text": validation_veto,
+                "text": text,
             },
         }
+
+    def _validation_veto_block(self, validation_veto: str) -> dict[str, Any]:
+        return self._engine_directive_block("engine_validation_veto", "Validation Veto", validation_veto)
 
     def _trace(
         self,
