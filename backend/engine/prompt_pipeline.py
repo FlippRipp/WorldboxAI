@@ -16,14 +16,20 @@ DEFAULT_CONTINUE_PROMPT = (
     "events, NPCs, and the world forward without waiting for the player to act."
 )
 
-# Appended as the final system directive when storyteller auto mode is on: the
-# AI drives the player character itself and player input becomes a nudge.
+# Appended as the final directive when storyteller auto mode is on: the AI
+# drives the player character itself and player input becomes a nudge.
 AUTO_MODE_DIRECTIVE = (
-    "Storyteller auto mode is active. You now fully control ${player_name} as well as "
-    "every other character — even though earlier context says the player controls them, "
-    "this turn you make ${player_name}'s choices, actions, and dialogue yourself and "
-    "drive the scene forward. Treat any player message as an out-of-character narrative "
-    "nudge — steer the story toward it, never voice it as ${player_name}'s own words or action."
+    "Storyteller auto mode is active: you are in full control of ${player_name}. "
+    "Ignore any earlier instruction that says the player controls ${player_name} or "
+    "that you should describe the outcome of the player's action — there is no player "
+    "action this turn. Every response MUST show ${player_name} acting: decide what "
+    "${player_name} does, do it, and write their actions, choices, and dialogue as "
+    "concretely as any other character's. ${player_name} pursues their own goals and "
+    "the scene moves forward through what they do. Never leave ${player_name} passive "
+    "or merely observing, never stall waiting for input, and never end by asking what "
+    "${player_name} will do — you already know, because you decide. Treat any player "
+    "message as an out-of-character narrative nudge — steer the story toward it, never "
+    "voice it as ${player_name}'s own words or action."
 )
 
 # Appended for exactly one turn after auto mode is switched off, so the AI
@@ -266,6 +272,7 @@ class PromptCompiler:
         generation_type: str | None = None,
         auto_mode: bool = False,
         auto_handback: bool = False,
+        auto_directive_role: str = "system",
     ) -> dict[str, Any]:
         blocks = self.normalize_pipeline(pipeline if pipeline is not None else state.get("prompt_pipeline"))
         if module_blocks:
@@ -275,10 +282,12 @@ class PromptCompiler:
         # the final instruction.
         if auto_mode:
             blocks.append(self._engine_directive_block(
-                "engine_storyteller_auto_mode", "Storyteller Auto Mode", AUTO_MODE_DIRECTIVE))
+                "engine_storyteller_auto_mode", "Storyteller Auto Mode", AUTO_MODE_DIRECTIVE,
+                role_type=auto_directive_role))
         elif auto_handback:
             blocks.append(self._engine_directive_block(
-                "engine_storyteller_auto_handback", "Storyteller Auto Mode Hand-back", AUTO_MODE_HANDBACK_DIRECTIVE))
+                "engine_storyteller_auto_handback", "Storyteller Auto Mode Hand-back", AUTO_MODE_HANDBACK_DIRECTIVE,
+                role_type=auto_directive_role))
         if validation_veto:
             blocks.append(self._validation_veto_block(validation_veto))
 
@@ -467,15 +476,18 @@ class PromptCompiler:
             messages.append({"role": "user", "content": self.resolve_macros(continue_prompt, state)})
         return messages
 
-    def _engine_directive_block(self, block_id: str, display_name: str, text: str) -> dict[str, Any]:
-        """An engine-appended system directive injected at the very end of the
-        chat (depth 0), after the player's input."""
+    def _engine_directive_block(self, block_id: str, display_name: str, text: str,
+                                role_type: str = "system") -> dict[str, Any]:
+        """An engine-appended directive injected at the very end of the chat
+        (depth 0), after the player's input."""
+        if role_type not in ALLOWED_ROLES:
+            role_type = "system"
         return {
             "id": block_id,
             "type": "static_text",
             "source": "engine",
             "enabled": True,
-            "role_type": "system",
+            "role_type": role_type,
             "placement": "chat_injection",
             "depth": 0,
             "display_name": display_name,

@@ -115,6 +115,12 @@ class EngineGraph:
             category="Storyteller",
             description="Let the AI fully control your character. Your typed input becomes a narrative nudge instead of an in-character action.",
         )
+        self.settings.register(
+            "storyteller.auto_mode_user_role", "toggle", False,
+            label="Auto Mode Directive As User",
+            category="Storyteller",
+            description="Send the auto mode instruction as a user message instead of a system message — some models follow it more strictly that way.",
+        )
 
     def register_story_source(self, source_type: str, provider):
         """Register a story-source provider (e.g. the world module's world source).
@@ -255,6 +261,11 @@ class EngineGraph:
         for key in ("active_save_id", "turn"):
             if key in full_state:
                 filtered[key] = full_state[key]
+
+        # Ambient engine fact, always visible (like turn): whether storyteller
+        # auto mode is driving the player character this turn, so modules can
+        # skip mechanics that treat player input as an in-character action.
+        filtered["storyteller_auto_mode"] = bool(self.settings.get("storyteller.auto_mode"))
 
         requested = consumes.get("state", [])
         if requested == "*":
@@ -619,6 +630,7 @@ class EngineGraph:
         # one-round hand-back directive so control returns cleanly to the player.
         auto_now = bool(self.settings.get("storyteller.auto_mode"))
         auto_handback = bool(state.get("storyteller_auto_mode_prev", False)) and not auto_now
+        auto_role = "user" if self.settings.get("storyteller.auto_mode_user_role") else "system"
 
         needs_rewrite = state.get("needs_rewrite", False)
         veto_retries = state.get("veto_retries", 0)
@@ -637,11 +649,13 @@ class EngineGraph:
                 validation_veto=f"PREVIOUS RESPONSE REJECTED by module validation. REASON: {veto_reason}\n\nRewrite your narration. The rejected action must not appear in the new response.",
                 auto_mode=auto_now,
                 auto_handback=auto_handback,
+                auto_directive_role=auto_role,
             )
         else:
             compiled_prompt = self.prompt_compiler.compile(
                 state, module_blocks=module_prompt_blocks,
                 auto_mode=auto_now, auto_handback=auto_handback,
+                auto_directive_role=auto_role,
             )
 
         # Don't stream on veto rewrites — the first attempt already sent tokens to

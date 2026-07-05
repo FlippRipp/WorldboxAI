@@ -238,6 +238,49 @@ async def _graph_prompt_preview_includes_messages_and_module_blocks():
     print("Graph prompt preview test passed.")
 
 
+async def _auto_mode_disables_action_feasibility():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    registry = ModuleRegistry(os.path.join(base_dir, "modules"))
+    registry.load_all_modules()
+    engine = EngineGraph(registry)
+    await engine.settings.set("storyteller.auto_mode", True)
+
+    preview = await engine.compile_prompt_preview(
+        {
+            "active_save_id": "preview_test",
+            "input_text": "Have her draw the sword.",
+            "module_data": {"wb_core_rpg": {"hp": 42, "action_assessment": {
+                "feasibility": 7,
+                "skill_used": "sword_stance",
+                "difficulty": "moderate",
+                "failure_reason": "",
+            }}},
+            "module_configs": {"wb_core_rpg": {"progression_system": "xp"}},
+            "characters": {},
+            "current_context": [],
+            "history": [],
+            "chat_messages": [],
+            "turn": 0,
+        },
+        None,
+    )
+
+    contents = [message["content"] for message in preview["messages"]]
+    by_id = {entry["id"]: entry for entry in preview["trace"]}
+
+    # Even with a seeded assessment, auto mode must suppress the ruling: the
+    # input is a nudge, not a player action to adjudicate.
+    assert not any("Ruling:" in content for content in contents)
+    assert by_id["wb_core_rpg:action_feasibility"]["skipped"]
+    # The character sheet is unaffected.
+    assert not by_id["wb_core_rpg:character_sheet"]["skipped"]
+    print("Auto mode disables action feasibility test passed.")
+
+
+def test_auto_mode_disables_action_feasibility():
+    asyncio.run(_auto_mode_disables_action_feasibility())
+
+
 def test_storyteller_auto_mode_directive_and_nudges():
     compiler = PromptCompiler()
     state = {
@@ -269,6 +312,14 @@ def test_storyteller_auto_mode_directive_and_nudges():
     with_veto = compiler.compile(state, auto_mode=True, validation_veto="Rejected: rewrite.")["messages"]
     assert with_veto[-1]["content"] == "Rejected: rewrite."
     assert "auto mode is active" in with_veto[-2]["content"].lower()
+
+    # The directive can optionally be delivered as a user message.
+    as_user = compiler.compile(state, auto_mode=True, auto_directive_role="user")["messages"]
+    assert as_user[-1]["role"] == "user"
+    assert "auto mode is active" in as_user[-1]["content"].lower()
+    # An invalid role falls back to system.
+    fallback = compiler.compile(state, auto_mode=True, auto_directive_role="narrator")["messages"]
+    assert fallback[-1]["role"] == "system"
 
     print("Storyteller auto mode directive and nudge test passed.")
 
@@ -306,6 +357,7 @@ async def run_all_tests():
     test_invalid_pipeline_rejected()
     await _graph_records_prompt_trace()
     await _graph_prompt_preview_includes_messages_and_module_blocks()
+    await _auto_mode_disables_action_feasibility()
 
 
 def test_graph_prompt_preview_includes_messages_and_module_blocks():
