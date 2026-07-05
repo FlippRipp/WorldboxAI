@@ -489,6 +489,8 @@ function AppContent() {
           onClose={() => setIsCharacterOpen(false)}
           modules={gameModules}
           gameState={gameState}
+          onCommand={handleSend}
+          busy={generating}
         />
 
         {(gameModules || [])

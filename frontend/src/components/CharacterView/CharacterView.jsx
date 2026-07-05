@@ -6,7 +6,7 @@ import DynamicWidget from '../shared/DynamicWidget';
 // identity (from state.characters.default_player) plus any additional sections
 // contributed by modules that declare a `character_panel` jsx in their manifest
 // (e.g. wb_core_rpg stats/skills, wb_character_tracker change log).
-export default function CharacterView({ isOpen, onClose, modules, gameState }) {
+export default function CharacterView({ isOpen, onClose, modules, gameState, onCommand, busy }) {
   useEffect(() => {
     if (!isOpen) return;
     function onKey(e) { if (e.key === 'Escape') onClose(); }
@@ -25,6 +25,14 @@ export default function CharacterView({ isOpen, onClose, modules, gameState }) {
   const identity = [race, gender].filter(Boolean).join(' · ');
 
   const panelModules = (modules || []).filter((m) => m.character_panel);
+  // "Update from story" buttons are backed by the Player Character Tracker's
+  // `/character update` command, so they only appear when that module is active.
+  const hasTracker = (modules || []).some((m) => m.id === 'wb_character_tracker');
+
+  const sendUpdate = (target) => {
+    if (!onCommand || busy) return;
+    onCommand(`/character update ${target}`);
+  };
 
   return (
     <div
@@ -72,6 +80,39 @@ export default function CharacterView({ isOpen, onClose, modules, gameState }) {
 
           {!appearance && !personality && (
             <p className="text-sm text-gray-500 italic">No descriptive details recorded for this character yet.</p>
+          )}
+
+          {/* --- Manual "catch the record up with the story" buttons --- */}
+          {hasTracker && onCommand && (
+            <section>
+              <h3 className="text-xs uppercase tracking-wider text-gray-500 mb-2">Update from Story</h3>
+              <div className="bg-gray-800/40 rounded-lg p-3 border border-gray-700/50">
+                <p className="text-xs text-gray-500 mb-2.5">
+                  Ask the AI to rewrite the character record so it reflects everything that has happened so far.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    ['appearance', 'Update Appearance'],
+                    ['personality', 'Update Personality'],
+                    ['both', 'Update Both'],
+                  ].map(([target, label]) => (
+                    <button
+                      key={target}
+                      onClick={() => sendUpdate(target)}
+                      disabled={busy}
+                      className="text-xs px-3 py-1.5 rounded-lg border border-indigo-500/30 bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25 hover:text-indigo-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {busy && (
+                  <p className="text-xs text-indigo-300/80 mt-2.5 animate-pulse">
+                    Updating… the record will refresh when the AI finishes.
+                  </p>
+                )}
+              </div>
+            </section>
           )}
 
           {/* --- Module-contributed panels --- */}

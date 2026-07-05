@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDiscon
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from backend.engine.registry import ModuleRegistry
-from backend.engine.graph import EngineGraph
+from backend.engine.graph import EngineGraph, CHARACTER_UPDATE_FIELDS
 from backend.engine.llm import LLMProviderError
 from backend.engine.llm_inspector import LLMInspector
 from backend.engine.session import GameSessionManager
@@ -1248,6 +1248,30 @@ async def websocket_endpoint(websocket: WebSocket):
                 "state": session_manager.state,
             })
 
+    def apply_command_writebacks(result: dict, mod_id: str, manifest: dict):
+        """Merge a command handler's sanctioned state write-backs.
+
+        Commands may return the same keys the librarian node collects from
+        on_librarian hooks: whitelisted player-identity fields under
+        ``character_update``, and the module's OWN ``module_data`` subtree
+        (gated on the manifest's ``produces.module_data``). Everything else in
+        the result is ignored — commands cannot touch other modules' data.
+        """
+        state = session_manager.state
+        update = result.get("character_update")
+        if isinstance(update, dict):
+            player = state.get("characters", {}).get("default_player")
+            if isinstance(player, dict):
+                applied = {k: update[k] for k in CHARACTER_UPDATE_FIELDS if update.get(k)}
+                if applied:
+                    player.update(applied)
+                    print(f"[Command] {mod_id}: player character updated: {', '.join(applied.keys())}")
+
+        own_data = (result.get("module_data") or {}).get(mod_id)
+        if isinstance(own_data, dict) and manifest.get("produces", {}).get("module_data"):
+            module_data = state.setdefault("module_data", {})
+            module_data[mod_id] = engine._deep_merge(module_data.get(mod_id) or {}, own_data)
+
     async def try_handle_command(data) -> bool:
         """Route ``/command`` inputs to module handlers declared in manifests.
 
@@ -1285,6 +1309,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 engine.sdk.llm._current_module = mod_id
                 result = await handler(args, module_state, engine.sdk)
                 message = result.get("message", "") if isinstance(result, dict) else ""
+                if isinstance(result, dict):
+                    apply_command_writebacks(result, mod_id, manifest)
             except Exception as exc:
                 print(f"Error in {mod_id}.{handler_name}: {exc}")
                 message = f"[{manifest.get('name', mod_id)}] Command failed."

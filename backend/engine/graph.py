@@ -14,6 +14,13 @@ import os
 
 VETO_MAX_RETRIES = 3
 
+# Player-identity fields modules may write back via the sanctioned
+# ``character_update`` result key (collected by the librarian node and the
+# slash-command dispatcher). Stats, skills and HP remain owned by module_data.
+CHARACTER_UPDATE_FIELDS = (
+    "name", "gender", "race", "short_appearance", "full_appearance", "personality",
+)
+
 DEFAULT_STAT_TIERS = [
     {"min": 1, "max": 4, "label": "Severely Impaired"},
     {"min": 5, "max": 8, "label": "Below Average"},
@@ -927,11 +934,7 @@ class EngineGraph:
         
         # Capture sanctioned canonical-character updates a module's on_librarian may
         # return (e.g. wb_character_tracker evolving appearance/identity/personality).
-        # Only these known identity fields are accepted from modules — stats, skills
-        # and HP remain owned by module_data.
-        CHARACTER_UPDATE_FIELDS = (
-            "name", "gender", "race", "short_appearance", "full_appearance", "personality",
-        )
+        # Only the whitelisted identity fields are accepted from modules.
         character_update = {}
 
         def collect_character(mod_id, mod_data, result_, produces):

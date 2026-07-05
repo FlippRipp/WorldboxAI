@@ -16,6 +16,14 @@ import re
 UPDATABLE_FIELDS = ("name", "gender", "race", "full_appearance", "short_appearance", "personality")
 MAX_LOG_ENTRIES = 50
 
+# Manual refresh targets for `/character update <target>` — which record
+# fields each button rewrites from the full story so far.
+UPDATE_TARGETS = {
+    "appearance": ("full_appearance", "short_appearance"),
+    "personality": ("personality",),
+    "both": ("full_appearance", "short_appearance", "personality"),
+}
+
 
 def _config(state: dict) -> dict:
     return state.get("module_configs", {}).get("wb_character_tracker", {})
@@ -166,7 +174,110 @@ Respond with ONLY valid JSON:
     }
 
 
+async def _update_from_story(target: str, state: dict, sdk) -> dict:
+    """Manual, player-requested rewrite of the character record.
+
+    Unlike the per-turn evolution pass (which detects deltas in the latest
+    scene), this rewrites the requested fields from scratch against the whole
+    story so far — the "catch the record up with the story" button.
+    """
+    player = _player(state)
+    if not player:
+        return {"message": "[Character] No player character loaded.", "signal": "end_turn"}
+
+    history = state.get("history", [])
+    if not history:
+        return {"message": "[Character] There is no story yet to update from.", "signal": "end_turn"}
+
+    story = "\n\n".join(str(h) for h in history)[-12000:]
+
+    wants_appearance = "full_appearance" in UPDATE_TARGETS[target]
+    wants_personality = "personality" in UPDATE_TARGETS[target]
+
+    field_specs = []
+    if wants_appearance:
+        field_specs.append(
+            '"full_appearance": a full paragraph describing how the character looks NOW — build on the '
+            "current record but incorporate every lasting physical change the story shows (scars, wounds, "
+            "transformations, aging, altered hair/eyes/skin, signature gear or garb)"
+        )
+        field_specs.append('"short_appearance": the same appearance compressed into one sentence')
+    if wants_personality:
+        field_specs.append(
+            '"personality": a full description of who the character is NOW — temperament, outlook, values '
+            "and defining traits, showing how the story's events have shaped them"
+        )
+    field_specs.append('"change_note": one short sentence summarizing what changed versus the current record')
+
+    prompt = f"""You maintain the character record for the player of a text RPG. The player has asked you to bring their record up to date with the story: rewrite the requested fields so they reflect everything that has happened so far.
+
+CURRENT CHARACTER RECORD:
+  Name: {player.get('name', '')}
+  Gender: {player.get('gender', '') or '(not recorded)'}
+  Race: {player.get('race', '')}
+  Appearance: {player.get('full_appearance') or player.get('short_appearance', '') or '(not yet described)'}
+  Personality: {player.get('personality', '') or '(not yet described)'}
+
+THE STORY SO FAR (oldest to newest):
+{story}
+
+Rewrite the requested fields in full. Stay true to what the story actually establishes — do not invent details it contradicts, and keep anything from the current record the story has not changed. Write in third person, no game mechanics.
+
+Respond with ONLY a valid JSON object containing exactly these keys:
+{{{', '.join(field_specs)}}}"""
+
+    config = _config(state)
+    model_pref = config.get("evolution_ai_model", "balanced")
+    raw = await sdk.llm.generate(prompt, model_preference=model_pref)
+
+    parsed = _parse_json_block(raw)
+    if not isinstance(parsed, dict):
+        return {"message": "[Character] The update pass returned nothing usable — try again.", "signal": "end_turn"}
+
+    character_update = {}
+    for field in UPDATE_TARGETS[target]:
+        val = parsed.get(field)
+        if isinstance(val, str) and val.strip():
+            character_update[field] = val.strip()
+
+    if not character_update:
+        return {"message": "[Character] The update pass returned nothing usable — try again.", "signal": "end_turn"}
+
+    change_note = str(parsed.get("change_note", "")).strip()
+    log = list(_own_data(state).get("evolution_log", []))
+    log.append({
+        "turn": state.get("turn", 0),
+        "note": f"Manual update ({target}): {change_note}" if change_note else f"Manual update: {', '.join(character_update.keys())}",
+        "fields": list(character_update.keys()),
+    })
+    log = log[-MAX_LOG_ENTRIES:]
+
+    lines = [f"[Character] Updated {target} from the story so far."]
+    if change_note:
+        lines.append(change_note)
+    if "full_appearance" in character_update:
+        lines.append(f"\nAppearance: {character_update['full_appearance']}")
+    if "personality" in character_update:
+        lines.append(f"\nPersonality: {character_update['personality']}")
+
+    return {
+        "message": "\n".join(lines),
+        "signal": "end_turn",
+        "character_update": character_update,
+        "module_data": {"wb_character_tracker": {"evolution_log": log}},
+    }
+
+
 async def on_command_character(args: list[str], state: dict, sdk) -> dict:
+    if args and args[0].lower() in ("update", "refresh"):
+        target = args[1].lower() if len(args) > 1 else "both"
+        if target not in UPDATE_TARGETS:
+            return {
+                "message": "[Character] Usage: /character update appearance|personality|both",
+                "signal": "end_turn",
+            }
+        return await _update_from_story(target, state, sdk)
+
     player = _player(state)
     if not player:
         return {"message": "[Character] No player character loaded.", "signal": "end_turn"}
