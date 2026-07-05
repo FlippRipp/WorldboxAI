@@ -10,7 +10,8 @@
     "world_data": true
   },
   "produces": {
-    "context_string": true
+    "context_string": true,
+    "module_data": true
   },
   "modes": [
     {

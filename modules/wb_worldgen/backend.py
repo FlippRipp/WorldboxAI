@@ -185,6 +185,14 @@ def set_services(services: dict):
                 is_global=True,
                 min=1, max=10,
             )
+            settings.register(
+                "world.travel_turns_per_edge", "slider", 2,
+                label="Travel Pace",
+                category="World Building",
+                description="How many story turns it takes to cross one average map route between locations. Journeys to distant places take proportionally longer. 0 = instant travel (the player jumps straight to the destination).",
+                is_global=True,
+                min=0, max=8,
+            )
         except Exception as e:
             print(f"[wb_worldgen] Failed to register enrichment settings: {e}")
     if registry is not None:
@@ -232,7 +240,59 @@ def set_services(services: dict):
 # ---------------------------------------------------------------------------
 
 
+def _build_travel_context(travel: dict, state: dict, world_data: dict) -> str:
+    """<current_location> variant for a player who is on the road between nodes."""
+    nodes_by_id = {n.get("id"): n for n in _all_map_nodes(world_data)}
+    route = travel.get("route", [])
+    leg_index = travel.get("leg_index", 0)
+    if len(route) < 2 or leg_index >= len(route) - 1:
+        return ""
+    from_node = nodes_by_id.get(route[leg_index], {})
+    to_node = nodes_by_id.get(route[leg_index + 1], {})
+    dest_node = nodes_by_id.get(travel.get("destination_node_id"), {})
+
+    def _label(node, fallback):
+        return node.get("name") or node.get("id") or fallback
+
+    from_name = _label(from_node, "the last waypoint")
+    to_name = _label(to_node, "the next waypoint")
+    dest_name = _label(dest_node, "the destination")
+
+    leg_distance = travel.get("leg_distance") or 1.0
+    pct = int(round(100 * min(travel.get("leg_progress", 0.0) / leg_distance, 1.0)))
+    speed = _travel_speed(world_data)
+    turns_left = None
+    if speed:
+        adjacency = _weighted_adjacency(world_data)
+        turns_left = max(1, int(-(-_remaining_travel(travel, adjacency) // speed)))
+
+    parts = ["<current_location>"]
+    parts.append(f"Status: EN ROUTE — the player is traveling from {from_name} toward {to_name}, about {pct}% of the way along this stretch.")
+    if dest_name != to_name:
+        parts.append(f"Final destination: {dest_name}.")
+    if turns_left is not None:
+        parts.append(f"Estimated travel remaining: about {turns_left} turn(s) until arrival at {dest_name}.")
+    if to_node.get("description"):
+        parts.append(f"Ahead lies {to_name} ({to_node.get('type', 'location')}) — {to_node['description'][:300]}")
+    region_name = from_node.get("region") or state.get("player_location_region")
+    if region_name:
+        regions = world_data.get("regions", {}).get("regions", [])
+        current_region = next((r for r in regions if r.get("name") == region_name), None)
+        parts.append(f"Region: {region_name}")
+        if current_region:
+            parts.append(f"Terrain: {current_region.get('terrain', 'N/A')[:400]}")
+            parts.append(f"Climate: {current_region.get('climate', 'N/A')[:200]}")
+    parts.append(f"The player has NOT yet arrived at {dest_name}. Narrate the journey itself — the road, terrain, weather, fellow travelers, or incidents along the way. Do not narrate arrival at {dest_name} this turn; travel completes on its own.")
+    parts.append("</current_location>")
+    return "\n".join(parts)
+
+
 def _build_location_context(state: dict, world_data: dict) -> str:
+    travel = _get_travel(state)
+    if travel:
+        travel_context = _build_travel_context(travel, state, world_data)
+        if travel_context:
+            return travel_context
     node_id = state.get("player_location_node_id")
     region_name = state.get("player_location_region")
     layer_id = state.get("player_location_layer_id")
@@ -335,12 +395,16 @@ def _build_location_mutation_schema(world_data: dict) -> dict:
     if not layer_options:
         layer_options = ["surface"]
     return {
-        "player_location_changed": {"type": "boolean", "label": "Did the player move to a new location?"},
+        "player_location_changed": {"type": "boolean", "label": "Did the player move toward or arrive at a new location?"},
         "player_location_node_id": {
             "type": "select",
-            "label": "New location node ID",
+            "label": "Destination node ID",
             "options": location_options[:30],
-            "description": "The node_id of the location the player moved to. Set only if player_location_changed is true."
+            "description": "The node_id of the location the player moved to or set out toward. Distant destinations are fine — the journey plays out over multiple turns. Set only if player_location_changed is true."
+        },
+        "travel_interrupted": {
+            "type": "boolean",
+            "label": "Did the player pause an ongoing journey this turn (camping, resting, fighting, exploring a stop)?"
         },
         "player_location_region": {
             "type": "select",
@@ -386,6 +450,132 @@ def _reveal_bfs(start_id: str, adjacency: dict, radius: int) -> set:
                     next_frontier.append(nb)
         frontier = next_frontier
     return visited
+
+
+# ---------------------------------------------------------------------------
+# Gradual travel. Instead of teleporting on a Reader move, the player walks the
+# edge graph over multiple turns: a `travel` record in module_data tracks the
+# route (node id path) and the distance covered on the current leg. Pace comes
+# from the `world.travel_turns_per_edge` setting (0 = classic instant moves).
+# ---------------------------------------------------------------------------
+
+
+def _all_map_nodes(world_data: dict) -> list[dict]:
+    map_layers = world_data.get("map_layers", [])
+    if map_layers:
+        nodes = []
+        for layer in map_layers:
+            nodes.extend(layer.get("map", {}).get("nodes", []))
+        return nodes
+    return world_data.get("map", {}).get("nodes", [])
+
+
+def _all_map_edges(world_data: dict) -> list[dict]:
+    map_layers = world_data.get("map_layers", [])
+    if map_layers:
+        edges = []
+        for layer in map_layers:
+            edges.extend(layer.get("map", {}).get("edges", []))
+        return edges
+    return world_data.get("map", {}).get("edges", [])
+
+
+def _weighted_adjacency(world_data: dict) -> dict:
+    """{node_id: [(neighbor_id, distance), ...]} across all layers.
+
+    Edges never cross layers, so a route search naturally stays on the
+    player's layer. Missing distances fall back to node-coordinate length.
+    """
+    coords = {n.get("id"): (n.get("x", 0.0), n.get("y", 0.0)) for n in _all_map_nodes(world_data)}
+    adj: dict[str, list[tuple[str, float]]] = {}
+    for e in _all_map_edges(world_data):
+        fr, to = e.get("from"), e.get("to")
+        if not fr or not to:
+            continue
+        dist = e.get("distance")
+        if not dist:
+            (x1, y1), (x2, y2) = coords.get(fr, (0, 0)), coords.get(to, (0, 0))
+            dist = ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5 or 1.0
+        adj.setdefault(fr, []).append((to, float(dist)))
+        adj.setdefault(to, []).append((fr, float(dist)))
+    return adj
+
+
+def _find_route(adjacency: dict, start: str, goal: str) -> list | None:
+    """Shortest node-id path from start to goal (Dijkstra), or None."""
+    import heapq
+    if start not in adjacency or goal not in adjacency:
+        return None
+    dist = {start: 0.0}
+    prev: dict[str, str] = {}
+    pq = [(0.0, start)]
+    visited = set()
+    while pq:
+        d, nid = heapq.heappop(pq)
+        if nid in visited:
+            continue
+        visited.add(nid)
+        if nid == goal:
+            break
+        for nb, w in adjacency.get(nid, []):
+            nd = d + w
+            if nd < dist.get(nb, float("inf")):
+                dist[nb] = nd
+                prev[nb] = nid
+                heapq.heappush(pq, (nd, nb))
+    if goal not in visited:
+        return None
+    path = [goal]
+    while path[-1] != start:
+        path.append(prev[path[-1]])
+    path.reverse()
+    return path
+
+
+def _edge_length(adjacency: dict, a: str, b: str) -> float:
+    for nb, w in adjacency.get(a, []):
+        if nb == b:
+            return w
+    return 1.0
+
+
+def _travel_speed(world_data: dict) -> float | None:
+    """Map-units covered per turn, or None when travel is instant."""
+    turns_per_edge = 2
+    try:
+        if _services is not None and _services.get("settings") is not None:
+            turns_per_edge = int(_services["settings"].get("world.travel_turns_per_edge"))
+    except Exception:
+        turns_per_edge = 2
+    if turns_per_edge <= 0:
+        return None
+    edges = _all_map_edges(world_data)
+    distances = [e.get("distance") for e in edges if e.get("distance")]
+    if not distances:
+        return None
+    avg = sum(distances) / len(distances)
+    return avg / turns_per_edge
+
+
+def _clean_option(value):
+    """Mutation selects offer 'node_id (Name)' options; keep only the id."""
+    if isinstance(value, str) and " (" in value:
+        return value.split(" (", 1)[0].strip()
+    return value
+
+
+def _get_travel(state: dict):
+    return (state.get("module_data", {}).get("wb_worldgen") or {}).get("travel")
+
+
+def _remaining_travel(travel: dict, adjacency: dict) -> float:
+    """Total map-distance left from the player's position to the destination."""
+    route = travel.get("route", [])
+    leg_index = travel.get("leg_index", 0)
+    remaining = travel.get("leg_distance", 0.0) - travel.get("leg_progress", 0.0)
+    for i in range(leg_index + 1, len(route) - 1):
+        remaining += _edge_length(adjacency, route[i], route[i + 1])
+    return max(remaining, 0.0)
 
 
 async def on_gather_context(state: dict, sdk) -> dict:
@@ -457,30 +647,121 @@ async def on_mutation_schema(state: dict, sdk) -> dict:
 
 
 async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
-    """Apply a player move and reveal newly-adjacent nodes (fog-of-war)."""
-    if not mutation:
-        return {}
+    """Apply player movement.
+
+    With travel enabled (world.travel_turns_per_edge > 0) a Reader-declared
+    destination starts a journey along the edge graph instead of teleporting:
+    the route is stored in module_data and progress advances every turn,
+    revealing fog and updating the player node as each waypoint is reached.
+    Instant mode (setting 0), layer changes, and off-graph destinations keep
+    the classic teleport behavior.
+    """
     world_data = state.get("world_data")
     if not world_data:
         return {}
-    new_node_id = mutation.get("player_location_node_id")
-    new_region = mutation.get("player_location_region")
-    new_layer_id = mutation.get("player_location_layer_id")
-    if not new_node_id or new_node_id == state.get("player_location_node_id"):
-        return {}
+    mutation = mutation or {}
+    travel = _get_travel(state)
+    current_node = state.get("player_location_node_id")
+    speed = _travel_speed(world_data)
+
+    new_node_id = _clean_option(mutation.get("player_location_node_id"))
+    new_region = _clean_option(mutation.get("player_location_region"))
+    new_layer_id = _clean_option(mutation.get("player_location_layer_id"))
+    interrupted = bool(mutation.get("travel_interrupted"))
 
     revealed = list(set(state.get("revealed_node_ids", [])))
-    adjacency = _build_graph_adjacency(world_data)
-    for nid in _reveal_bfs(new_node_id, adjacency, radius=1):
-        if nid not in revealed:
-            revealed.append(nid)
+    revealed_dirty = False
 
-    return {
-        "player_location_node_id": new_node_id,
-        "player_location_region": new_region or state.get("player_location_region"),
-        "player_location_layer_id": new_layer_id or state.get("player_location_layer_id"),
-        "revealed_node_ids": revealed,
-    }
+    def reveal_around(nid):
+        nonlocal revealed_dirty
+        adjacency = _build_graph_adjacency(world_data)
+        for x in _reveal_bfs(nid, adjacency, radius=1):
+            if x not in revealed:
+                revealed.append(x)
+                revealed_dirty = True
+
+    def teleport(node_id):
+        reveal_around(node_id)
+        return {
+            "player_location_node_id": node_id,
+            "player_location_region": new_region or state.get("player_location_region"),
+            "player_location_layer_id": new_layer_id or state.get("player_location_layer_id"),
+            "revealed_node_ids": revealed,
+            "module_data": {"wb_worldgen": {"travel": None}},
+        }
+
+    # --- A Reader-declared destination -----------------------------------
+    wants_move = new_node_id and new_node_id != current_node
+    if wants_move:
+        layer_changed = bool(new_layer_id) and new_layer_id != (state.get("player_location_layer_id") or new_layer_id)
+        if speed is None or layer_changed:
+            # Instant mode, or an inter-layer transition (portals, stairs,
+            # cave mouths) — those are narrative jumps, not overland travel.
+            return teleport(new_node_id)
+        if not travel or travel.get("destination_node_id") != new_node_id:
+            # (Re)route from the last node the player actually reached; any
+            # partial progress on the current leg is abandoned.
+            adjacency = _weighted_adjacency(world_data)
+            route = _find_route(adjacency, current_node, new_node_id) if current_node else None
+            if not route or len(route) < 2:
+                # Unknown or unreachable destination — fall back to teleport
+                # rather than trap the player.
+                return teleport(new_node_id)
+            travel = {
+                "route": route,
+                "leg_index": 0,
+                "leg_progress": 0.0,
+                "leg_distance": _edge_length(adjacency, route[0], route[1]),
+                "destination_node_id": new_node_id,
+                "destination_region": new_region,
+            }
+            interrupted = False  # setting out counts as traveling this turn
+
+    if travel and speed is None:
+        # Travel was switched off mid-journey; the player simply stays at the
+        # last reached node and the journey record is dropped.
+        return {"module_data": {"wb_worldgen": {"travel": None}}}
+
+    if not travel:
+        return {}
+
+    # --- Advance the journey ----------------------------------------------
+    location_update = {}
+    if not interrupted:
+        adjacency = _weighted_adjacency(world_data)
+        route = travel["route"]
+        budget = speed
+        while budget > 0:
+            need = travel["leg_distance"] - travel["leg_progress"]
+            if budget < need:
+                travel["leg_progress"] += budget
+                break
+            budget -= need
+            travel["leg_index"] += 1
+            reached_id = travel["route"][travel["leg_index"]]
+            reveal_around(reached_id)
+            reached_node = next((n for n in _all_map_nodes(world_data) if n.get("id") == reached_id), {})
+            location_update = {
+                "player_location_node_id": reached_id,
+                "player_location_region": reached_node.get("region") or state.get("player_location_region"),
+                "player_location_layer_id": state.get("player_location_layer_id"),
+            }
+            if travel["leg_index"] >= len(route) - 1:
+                # Arrived at the final destination.
+                if travel.get("destination_region"):
+                    location_update["player_location_region"] = travel["destination_region"]
+                travel = None
+                break
+            travel["leg_progress"] = 0.0
+            travel["leg_distance"] = _edge_length(adjacency, route[travel["leg_index"]], route[travel["leg_index"] + 1])
+
+    result = {"module_data": {"wb_worldgen": {"travel": travel}}}
+    if location_update:
+        result.update(location_update)
+        result["revealed_node_ids"] = revealed
+    elif revealed_dirty:
+        result["revealed_node_ids"] = revealed
+    return result
 
 
 def get_router():

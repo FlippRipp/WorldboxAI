@@ -9,6 +9,17 @@ export default function GameMapOverlay({ state = {} }) {
   const playerNodeId = state.player_location_node_id;
   const playerLayerId = state.player_location_layer_id;
   const revealedNodeIds = state.revealed_node_ids || [];
+  // Gradual travel: while the player is between nodes, wb_worldgen keeps a
+  // journey record in its module_data; the renderer shows the marker mid-edge.
+  const travel = state.module_data?.wb_worldgen?.travel;
+  const playerTravel = useMemo(() => {
+    if (!travel?.route || travel.leg_index == null) return null;
+    const from = travel.route[travel.leg_index];
+    const to = travel.route[travel.leg_index + 1];
+    if (!from || !to) return null;
+    const frac = travel.leg_distance ? Math.min(travel.leg_progress / travel.leg_distance, 1) : 0;
+    return { fromNodeId: from, toNodeId: to, frac };
+  }, [travel]);
 
   const [open, setOpen] = useState(false);
   const [activeLayerId, setActiveLayerId] = useState(null);
@@ -82,6 +93,7 @@ export default function GameMapOverlay({ state = {} }) {
                 onLayerChange={setActiveLayerId}
                 navigateToLayer={navigateToLayer}
                 focusNodeId={focusNodeId}
+                playerTravel={playerTravel}
                 fogOfWar={{
                   mode: 'radius',
                   playerNodeId,

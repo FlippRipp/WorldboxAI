@@ -97,7 +97,7 @@ const INTERLAYER_TYPES = new Set([
   'cave_mouth', 'rift', 'staircase', 'bridge',
 ]);
 
-export default function MapRenderer({ nodes, edges, regions, config, layers, connections, activeLayerId, onLayerChange, fogOfWar, navigateToLayer, focusNodeId, worldId, roads }) {
+export default function MapRenderer({ nodes, edges, regions, config, layers, connections, activeLayerId, onLayerChange, fogOfWar, navigateToLayer, focusNodeId, worldId, roads, playerTravel }) {
   const [hoveredNode, setHoveredNode] = useState(null);
   const [hoveredRegion, setHoveredRegion] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null);
@@ -181,6 +181,25 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
     activeNodes.forEach((n, i) => { idx[n.id] = i; });
     return idx;
   }, [activeNodes]);
+
+  // Player marker: at the current node, or interpolated along the current
+  // travel leg while a gradual journey is underway. Null when the player (or
+  // their layer) isn't on this map.
+  const playerMarker = useMemo(() => {
+    const byId = {};
+    activeNodes.forEach((n) => { byId[n.id] = n; });
+    if (playerTravel) {
+      const a = byId[playerTravel.fromNodeId];
+      const b = byId[playerTravel.toNodeId];
+      if (a && b) {
+        const t = Math.max(0, Math.min(playerTravel.frac ?? 0, 1));
+        return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, traveling: true, from: a, to: b };
+      }
+    }
+    const here = fogOfWar?.playerNodeId ? byId[fogOfWar.playerNodeId] : null;
+    if (here) return { x: here.x, y: here.y, traveling: false };
+    return null;
+  }, [activeNodes, playerTravel, fogOfWar]);
 
   // Voronoi region polygons (fill all cells, stroke only outer boundary)
   const voronoiRegions = useMemo(() => {
@@ -901,6 +920,39 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
               mask={`url(#${fogMaskId})`}
               style={{ pointerEvents: 'none' }}
             />
+          )}
+
+          {/* Player marker (drawn above the fog so a mid-edge position stays visible) */}
+          {playerMarker && (
+            <g pointerEvents="none">
+              {playerMarker.traveling && (
+                <line
+                  x1={sx(playerMarker.from.x)}
+                  y1={sy(playerMarker.from.y)}
+                  x2={sx(playerMarker.to.x)}
+                  y2={sy(playerMarker.to.y)}
+                  stroke="rgba(251,191,36,0.65)"
+                  strokeWidth={1.2 * nodeScale}
+                  strokeDasharray="3 2"
+                />
+              )}
+              <circle cx={sx(playerMarker.x)} cy={sy(playerMarker.y)} r={5 * nodeScale} fill="rgba(251,191,36,0.25)">
+                <animate
+                  attributeName="r"
+                  values={`${4 * nodeScale};${8 * nodeScale};${4 * nodeScale}`}
+                  dur="2s"
+                  repeatCount="indefinite"
+                />
+              </circle>
+              <circle
+                cx={sx(playerMarker.x)}
+                cy={sy(playerMarker.y)}
+                r={2.6 * nodeScale}
+                fill="#fbbf24"
+                stroke="#fff"
+                strokeWidth={0.8 * nodeScale}
+              />
+            </g>
           )}
         </svg>
       </div>

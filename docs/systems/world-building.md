@@ -401,6 +401,22 @@ Nearby factions: Children of the Spore
 ### 3. Location Tracking
 The world system tracks the player's current region via a `player_location` field. Moving between regions triggers context refreshes and potential encounters.
 
+### 4. Gradual Travel
+Movement between map nodes is gradual rather than instant. When the Reader detects the player set out toward a destination, `wb_worldgen` computes the shortest route over the edge graph (Dijkstra on edge `distance`) and stores a journey record in `module_data.wb_worldgen.travel`:
+
+```json
+{
+  "route": ["n_12", "n_7", "n_31"],
+  "leg_index": 0,
+  "leg_progress": 12.5,
+  "leg_distance": 38.2,
+  "destination_node_id": "n_31",
+  "destination_region": "The Spore Wastes"
+}
+```
+
+Each turn the journey advances by `avg_edge_distance / world.travel_turns_per_edge` map units (setting under World Building; `0` restores classic instant teleports). Waypoints reached along the way update `player_location_node_id`, reveal fog-of-war, and set the region from the node. While en route, the `<current_location>` context block switches to an EN ROUTE variant telling the storyteller the player has not yet arrived, with a turns-remaining estimate. The Reader can pause a journey (`travel_interrupted`, e.g. camping or a fight) or redirect it mid-way (a new destination reroutes from the last reached node). Inter-layer moves, unreachable destinations, and instant mode keep the old teleport behavior. The in-game map overlay shows the player marker interpolated along the current edge.
+
 ---
 
 ## API Endpoints
