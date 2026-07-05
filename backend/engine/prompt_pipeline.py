@@ -19,26 +19,29 @@ DEFAULT_CONTINUE_PROMPT = (
 # Appended as the final directive when storyteller auto mode is on: the AI
 # drives the player character itself and player input becomes a nudge.
 AUTO_MODE_DIRECTIVE = (
-    "Storyteller auto mode is active: you are in full control of ${player_name}. "
-    "Ignore any earlier instruction that says the player controls ${player_name} or "
-    "that you should describe the outcome of the player's action — there is no player "
-    "action this turn. Every response MUST show ${player_name} acting: decide what "
-    "${player_name} does, do it, and write their actions, choices, and dialogue as "
-    "concretely as any other character's. ${player_name} pursues their own goals and "
-    "the scene moves forward through what they do. Never leave ${player_name} passive "
-    "or merely observing, never stall waiting for input, and never end by asking what "
-    "${player_name} will do — you already know, because you decide. Treat any player "
-    "message as an out-of-character narrative nudge — steer the story toward it, never "
-    "voice it as ${player_name}'s own words or action."
+    "Storyteller auto mode is active. The story is narrated in second person: the "
+    "\"you\" in the narration is ${player_name}, the protagonist. Normally the player "
+    "decides what \"you\" do — right now they do not: you, the storyteller, are in "
+    "full control of ${player_name}. Ignore any earlier instruction that says the "
+    "player controls ${player_name} or that you should describe the outcome of the "
+    "player's action — there is no player action this turn. Every response MUST show "
+    "the protagonist taking initiative: decide what ${player_name} does next and "
+    "narrate it in the same second-person voice as the rest of the story (\"You step "
+    "forward...\", \"You say...\"), with concrete actions, choices, and dialogue. "
+    "${player_name} pursues their own goals and the scene moves forward through what "
+    "\"you\" do. Never leave the protagonist passive or merely observing, never stall "
+    "waiting for input, and never end by asking what they will do — you already "
+    "decided. Treat any player message as an out-of-character narrative nudge — steer "
+    "the story toward it, never voice it as the protagonist's own words or action."
 )
 
 # Appended for exactly one turn after auto mode is switched off, so the AI
 # hands the character back instead of acting for the player one last time.
 AUTO_MODE_HANDBACK_DIRECTIVE = (
-    "Storyteller auto mode was just turned off: control of ${player_name} returns to the "
-    "player this turn. Do NOT decide ${player_name}'s actions, dialogue, or choices — "
-    "narrate only the world, other characters, and the outcome of the player's stated "
-    "action, then wait for the player."
+    "Storyteller auto mode was just turned off: control of ${player_name} — the \"you\" "
+    "of the second-person narration — returns to the player this turn. Do NOT decide "
+    "${player_name}'s actions, dialogue, or choices — narrate only the world, other "
+    "characters, and the outcome of the player's stated action, then wait for the player."
 )
 
 AVAILABLE_MACROS = [

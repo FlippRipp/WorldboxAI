@@ -334,7 +334,8 @@ def test_storyteller_auto_mode_handback_and_off():
 
     handback = compiler.compile(state, auto_handback=True)["messages"]
     # Hand-back directive is last; the player's input stays a plain action.
-    assert "control of Nyx returns to the player" in handback[-1]["content"]
+    assert "control of Nyx" in handback[-1]["content"]
+    assert "returns to the player" in handback[-1]["content"]
     assert handback[-2] == {"role": "user", "content": "I open the iron door."}
 
     # auto_mode wins over a (stale) handback flag.
