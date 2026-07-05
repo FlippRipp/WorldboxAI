@@ -201,18 +201,38 @@ class LorebookStore:
         if pruned != links:
             self._write_links(pruned)
 
-    def set_entry_enabled(self, lorebook_id: str, uid: str, enabled: bool) -> dict:
+    def update_entry(self, lorebook_id: str, uid: str, patch: dict) -> dict:
+        """Patch an entry's editable fields and bump updated_at, which
+        invalidates every linked save's embed fingerprint so the entry is
+        re-embedded on the next sync."""
         record = self.load_lorebook(lorebook_id)
         for entry in record.get("entries", []):
             if entry.get("uid") == uid:
-                entry["enabled"] = bool(enabled)
                 break
         else:
             raise FileNotFoundError(f"Entry '{uid}' not found in lorebook '{lorebook_id}'.")
+        if "content" in patch:
+            content = str(patch["content"] or "").strip()
+            if not content:
+                raise ValueError("Lorebook entry content cannot be empty.")
+            entry["content"] = content
+        if "title" in patch:
+            entry["title"] = str(patch["title"] or "").strip()
+        if "keys" in patch:
+            entry["keys"] = _as_key_list(patch["keys"])
+        if "secondary_keys" in patch:
+            entry["secondary_keys"] = _as_key_list(patch["secondary_keys"])
+        if "enabled" in patch:
+            entry["enabled"] = bool(patch["enabled"])
+        if "constant" in patch:
+            entry["constant"] = bool(patch["constant"])
         record["updated_at"] = datetime.now(timezone.utc).isoformat()
         with open(self._path(lorebook_id), "w", encoding="utf-8") as f:
             json.dump(record, f, indent=2, ensure_ascii=False)
         return record
+
+    def set_entry_enabled(self, lorebook_id: str, uid: str, enabled: bool) -> dict:
+        return self.update_entry(lorebook_id, uid, {"enabled": enabled})
 
     # ── links (scenario/world → lorebook ids) ───────────────────────────────
 

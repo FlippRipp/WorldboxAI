@@ -13,6 +13,10 @@ class WorldState(TypedDict):
     prompt_pipeline: list[dict[str, Any]] # Configurable prompt block array
     last_prompt_trace: list[dict[str, Any]] # Debug trace from the latest prompt compile
     last_reasoning: Optional[str] # Model chain-of-thought for the latest storyteller output
+    last_retrieved_memory_ids: list[str] # Memory rows retrieved for the last turn's context
+    last_retrieved_world_ids: list[str]  # world_entries rows retrieved for the last turn's context
+    last_context_query: Optional[str]    # Query text used for the last RAG retrieval
+    last_stored_memory_id: Optional[str] # Librarian's most recently stored memory
     last_model: Optional[str]    # Model that produced the latest storyteller output
     last_usage: Optional[dict[str, Any]] # Token usage of the latest storyteller call, when the provider reported it
     continue_prompt: Optional[str] # Instruction injected as the user turn on an empty ("continue") send

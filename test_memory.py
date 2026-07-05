@@ -269,6 +269,78 @@ def test_lorebook_search_and_constant_injection(tmp_path):
     assert all(r["source_type"] == "lorebook" for r in results)
 
 
+def test_list_world_entries_includes_constant_rows_without_embedding(tmp_path):
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    assert manager.list_world_entries() == []  # no world index yet
+
+    manager.init_world_index(str(tmp_path / "world_index"))
+    _run(manager.embed_lorebooks([_lorebook_record()], _FakeEmbedder()))
+    _run(manager.embed_world({"lore": {"premise": "A quiet harbor town."}}, _FakeEmbedder()))
+
+    entries = manager.list_world_entries()
+    assert len(entries) == 3  # 1 lore + 2 enabled lorebook entries
+    assert all("embedding" not in e for e in entries)
+    by_source = {e["source_id"]: e for e in entries}
+    assert by_source["realm_lore:1"]["constant"] is True
+    assert by_source["realm_lore:0"]["constant"] is False
+    assert by_source["premise"]["source_type"] == "lore"
+
+
+def test_update_world_entry_replaces_text_and_vector(tmp_path):
+    from backend.engine.memory import _serialize
+
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    manager.init_world_index(str(tmp_path / "world_index"))
+    _run(manager.embed_world({"lore": {"premise": "A quiet harbor town."}}, _FakeEmbedder()))
+
+    entry = manager.list_world_entries()[0]
+    updated = manager.update_world_entry(entry["id"], "A dragon rules the town.", [1.0, 0.0, 0.0])
+    assert updated["text"] == "A dragon rules the town."
+    assert updated["id"] == entry["id"]
+
+    row = manager._world_conn.execute(
+        "SELECT text, embedding FROM world_entries WHERE id = ?", (entry["id"],)
+    ).fetchone()
+    assert row["text"] == "A dragon rules the town."
+    assert row["embedding"] == _serialize([1.0, 0.0, 0.0])
+
+    assert manager.update_world_entry("no-such-id", "x", [0.0, 0.0, 1.0]) is None
+    assert manager.get_world_entry(entry["id"])["text"] == "A dragon rules the town."
+    assert manager.get_world_entry("no-such-id") is None
+
+
+def test_update_memory_fields_and_reembed(tmp_path):
+    from backend.engine.memory import _serialize
+
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    memory_id = manager.add_memory([1.0, 0.0, 0.0], "Original text", turn=1, importance=5)
+
+    # Field-only patch leaves the embedding untouched.
+    updated = manager.update_memory(memory_id, {
+        "summary": "New summary", "importance": 9, "permanent": True,
+        "entities": ["Hero"], "topics": ["quest"],
+    })
+    assert updated["summary"] == "New summary"
+    assert updated["importance"] == 9
+    assert updated["permanent"] is True
+    assert updated["entities"] == ["Hero"]
+    assert updated["topics"] == ["quest"]
+    row = manager.conn.execute(
+        "SELECT embedding FROM memories WHERE id = ?", (memory_id,)
+    ).fetchone()
+    assert row["embedding"] == _serialize([1.0, 0.0, 0.0])
+
+    # Text patch with a vector replaces the embedding.
+    updated = manager.update_memory(memory_id, {"text": "Rewritten text"}, vector=[0.0, 1.0, 0.0])
+    assert updated["text"] == "Rewritten text"
+    row = manager.conn.execute(
+        "SELECT embedding FROM memories WHERE id = ?", (memory_id,)
+    ).fetchone()
+    assert row["embedding"] == _serialize([0.0, 1.0, 0.0])
+
+    assert manager.update_memory("no-such-id", {"importance": 3}) is None
+
+
 async def _mock_structured_summary():
     os.environ["LLM_MODE"] = "mock"
     try:

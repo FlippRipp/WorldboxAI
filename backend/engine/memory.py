@@ -168,6 +168,46 @@ class MemoryManager:
     def get_vector_dimension(self) -> Optional[int]:
         return self._embedding_dim
 
+    def update_memory(self, memory_id: str, fields: dict,
+                      vector: Optional[List[float]] = None) -> Optional[dict]:
+        """Patch editable columns on a memory; callers pass a fresh embedding
+        vector whenever they changed the text. Returns the updated formatted
+        row, or None when the id doesn't exist."""
+        sets, params = [], []
+        if "text" in fields:
+            sets.append("text = ?")
+            params.append(fields["text"])
+        if "summary" in fields:
+            sets.append("summary = ?")
+            params.append(fields["summary"])
+        if "importance" in fields:
+            sets.append("importance = ?")
+            params.append(int(fields["importance"]))
+        if "permanent" in fields:
+            sets.append("permanent = ?")
+            params.append(1 if fields["permanent"] else 0)
+        if "entities" in fields:
+            sets.append("entities = ?")
+            params.append(json.dumps(fields["entities"] or [], ensure_ascii=False))
+        if "topics" in fields:
+            sets.append("topics = ?")
+            params.append(json.dumps(fields["topics"] or [], ensure_ascii=False))
+        if vector is not None:
+            sets.append("embedding = ?")
+            params.append(_serialize(vector))
+        if not sets:
+            rows = self.get_memories_by_ids([memory_id])
+            return rows[0] if rows else None
+        cursor = self.conn.execute(
+            f"UPDATE memories SET {', '.join(sets)} WHERE id = ?",
+            (*params, memory_id),
+        )
+        self.conn.commit()
+        if cursor.rowcount == 0:
+            return None
+        rows = self.get_memories_by_ids([memory_id])
+        return rows[0] if rows else None
+
     def get_memories_by_ids(self, memory_ids: list[str]) -> list[dict]:
         if not memory_ids:
             return []
@@ -530,6 +570,58 @@ class MemoryManager:
             }
             for row in rows
         ]
+
+    @staticmethod
+    def _format_world_row(row) -> dict:
+        return {
+            "id": row["id"] or "",
+            "text": row["text"] or "",
+            "source_type": row["source_type"] or "",
+            "source_id": row["source_id"] or "",
+            "region": row["region"] or "",
+            "constant": bool(row["constant"]),
+        }
+
+    def list_world_entries(self, limit: int = 1000) -> list[dict]:
+        """All world-index rows (including constant lorebook entries) without
+        the embedding blob, for browsing/editing in the UI."""
+        if self._world_conn is None:
+            return []
+        rows = self._world_conn.execute(
+            """SELECT id, text, source_type, source_id, region, COALESCE(constant, 0) AS constant
+               FROM world_entries
+               ORDER BY source_type, source_id
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [self._format_world_row(row) for row in rows]
+
+    def get_world_entry(self, entry_id: str) -> Optional[dict]:
+        if self._world_conn is None:
+            return None
+        row = self._world_conn.execute(
+            """SELECT id, text, source_type, source_id, region, COALESCE(constant, 0) AS constant
+               FROM world_entries WHERE id = ?""",
+            (entry_id,),
+        ).fetchone()
+        return self._format_world_row(row) if row is not None else None
+
+    def update_world_entry(self, entry_id: str, text: str,
+                           vector: List[float]) -> Optional[dict]:
+        """Replace a world entry's text and embedding in place. Safe for
+        world-derived rows (embedded once at story creation); lorebook rows
+        are re-synced from their JSON source, so callers must not edit those
+        here. Returns the updated row, or None when the id doesn't exist."""
+        if self._world_conn is None:
+            return None
+        cursor = self._world_conn.execute(
+            "UPDATE world_entries SET text = ?, embedding = ? WHERE id = ?",
+            (text, _serialize(vector), entry_id),
+        )
+        self._world_conn.commit()
+        if cursor.rowcount == 0:
+            return None
+        return self.get_world_entry(entry_id)
 
     def get_node_by_id(self, node_id: str) -> Optional[dict]:
         if self._world_conn is None:

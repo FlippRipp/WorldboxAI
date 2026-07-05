@@ -248,6 +248,106 @@ def test_save_undo_endpoint_restores_prior_turn(tmp_path, monkeypatch):
     assert "second action" not in "\n".join(message["content"] for message in undo_data["state"]["chat_messages"])
 
 
+def test_world_entries_endpoint_and_edits(tmp_path, monkeypatch):
+    import asyncio
+
+    client, session_manager = make_client(tmp_path, monkeypatch)
+
+    # No world index yet: graceful empty shape.
+    empty = client.get("/api/session/world-entries").json()
+    assert empty == {"entries": [], "count": 0, "active_ids": [], "context_query": ""}
+
+    asyncio.run(server.engine.ensure_memory())
+    server.engine.memory.init_world_index(
+        str(tmp_path / "data" / "saves" / "autosave" / "world_index"))
+    asyncio.run(server.engine.memory.embed_world(
+        {"lore": {"premise": "A quiet harbor town."}}, server.engine.llm))
+    asyncio.run(server.engine.memory.embed_lorebooks([{
+        "id": "realm_lore",
+        "entries": [{"uid": "0", "title": "Dragon Peak", "keys": ["dragon"],
+                     "secondary_keys": [], "content": "A dragon sleeps beneath the peak.",
+                     "constant": False, "enabled": True}],
+    }], server.engine.llm))
+
+    listed = client.get("/api/session/world-entries").json()
+    assert listed["count"] == 2
+    by_type = {e["source_type"]: e for e in listed["entries"]}
+    assert set(by_type) == {"lore", "lorebook"}
+
+    # Retrieval tracking surfaces as active_ids.
+    lore_id = by_type["lore"]["id"]
+    session_manager.state["last_retrieved_world_ids"] = [lore_id]
+    session_manager.state["last_context_query"] = "I sail into the harbor"
+    tracked = client.get("/api/session/world-entries").json()
+    assert tracked["active_ids"] == [lore_id]
+    assert tracked["context_query"] == "I sail into the harbor"
+
+    # World-derived rows are editable in place (re-embedded via mock provider).
+    updated = client.put(f"/api/session/world-entries/{lore_id}",
+                         json={"text": "A bustling harbor town at war."})
+    assert updated.status_code == 200
+    assert updated.json()["entry"]["text"] == "A bustling harbor town at war."
+    refetched = client.get("/api/session/world-entries").json()
+    assert any(e["text"] == "A bustling harbor town at war." for e in refetched["entries"])
+
+    # Lorebook rows are rejected (edited through the lorebook instead).
+    lorebook_id = by_type["lorebook"]["id"]
+    resp = client.put(f"/api/session/world-entries/{lorebook_id}", json={"text": "hijack"})
+    assert resp.status_code == 400
+    assert client.put("/api/session/world-entries/no-such-id",
+                      json={"text": "x"}).status_code == 404
+    assert client.put(f"/api/session/world-entries/{lore_id}",
+                      json={"text": "  "}).status_code == 400
+
+
+def test_memory_update_endpoint(tmp_path, monkeypatch):
+    import asyncio
+
+    client, _ = make_client(tmp_path, monkeypatch)
+
+    asyncio.run(server.engine.ensure_memory())
+    vector = asyncio.run(server.engine.llm.get_embedding("Original memory"))
+    memory_id = server.engine.memory.add_memory(vector, "Original memory", turn=1, importance=5)
+
+    resp = client.put(f"/api/session/memories/{memory_id}", json={
+        "summary": "Concise version", "importance": 12, "permanent": True,
+    })
+    assert resp.status_code == 200
+    memory = resp.json()["memory"]
+    assert memory["summary"] == "Concise version"
+    assert memory["importance"] == 10  # clamped
+    assert memory["permanent"] is True
+    assert memory["text"] == "Original memory"
+
+    # Text edit re-embeds with the mock provider.
+    resp = client.put(f"/api/session/memories/{memory_id}", json={"text": "Rewritten memory"})
+    assert resp.status_code == 200
+    assert resp.json()["memory"]["text"] == "Rewritten memory"
+
+    assert client.put("/api/session/memories/no-such-id",
+                      json={"importance": 3}).status_code == 404
+    assert client.put(f"/api/session/memories/{memory_id}",
+                      json={"text": "   "}).status_code == 400
+
+
+def test_memory_browser_works_before_first_turn(tmp_path, monkeypatch):
+    # Loading a save resets engine.memory to None; the browser endpoints must
+    # re-bind the store themselves instead of showing an empty library until
+    # the first generation initializes it.
+    import asyncio
+
+    client, _ = make_client(tmp_path, monkeypatch)
+
+    asyncio.run(server.engine.ensure_memory())
+    vector = asyncio.run(server.engine.llm.get_embedding("A stored event"))
+    server.engine.memory.add_memory(vector, "A stored event", turn=1, importance=5)
+
+    server.engine.close_memory()  # simulate save load / server restart
+    resp = client.get("/api/session/memories").json()
+    assert resp["count"] == 1
+    assert resp["memories"][0]["text"] == "A stored event"
+
+
 def test_websocket_llm_provider_error_returns_structured_error(tmp_path, monkeypatch):
     client, session_manager = make_client(tmp_path, monkeypatch)
 

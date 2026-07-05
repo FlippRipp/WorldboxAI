@@ -58,6 +58,56 @@ def test_mock_engine_turn():
     asyncio.run(_mock_engine_turn())
 
 
+async def _turn_output_carries_retrieval_tracking():
+    # LangGraph drops node-returned keys that aren't declared in the WorldState
+    # schema, which silently killed retrieval tracking once before. Pin that
+    # the tracking keys survive ainvoke into the final state.
+    previous_mode = os.getenv("LLM_MODE")
+    os.environ["LLM_MODE"] = "mock"
+
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        registry = ModuleRegistry(os.path.join(base_dir, "modules"))
+        registry.load_all_modules()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = EngineGraph(registry)
+            engine.set_memory_path(os.path.join(temp_dir, "vector_index"))
+
+            try:
+                await engine.ensure_memory()
+                vector = await engine.llm.get_embedding("An earlier event")
+                engine.memory.add_memory(vector, "An earlier event", turn=0, importance=5)
+                engine.memory.init_world_index(os.path.join(temp_dir, "world_index"))
+                await engine.memory.embed_world(
+                    {"lore": {"premise": "A quiet harbor town."}}, engine.llm)
+
+                state = {
+                    "active_save_id": "mock_test",
+                    "input_text": "I inspect the room.",
+                    "module_data": {},
+                    "module_configs": {},
+                    "characters": {},
+                    "current_context": [],
+                    "history": [],
+                    "chat_messages": [],
+                    "turn": 1,
+                }
+                result = await engine.app.ainvoke(state)
+
+                assert result["last_context_query"] == "I inspect the room."
+                assert len(result["last_retrieved_memory_ids"]) > 0
+                assert len(result["last_retrieved_world_ids"]) > 0
+            finally:
+                engine.close_memory()
+    finally:
+        set_env("LLM_MODE", previous_mode)
+
+
+def test_turn_output_carries_retrieval_tracking():
+    asyncio.run(_turn_output_carries_retrieval_tracking())
+
+
 async def _reader_fallback_on_malformed_json():
     previous_mode = os.getenv("LLM_MODE")
     original_acompletion = llm_module.acompletion

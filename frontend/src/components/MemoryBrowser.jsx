@@ -1,34 +1,234 @@
 import { useState, useEffect, useMemo } from 'react';
 import { api } from '../lib/api';
 
+const TABS = [
+  { id: 'memories', label: 'Memories' },
+  { id: 'world', label: 'World' },
+  { id: 'lorebooks', label: 'Lorebooks' },
+];
+
+// Badge colors per world-entry source type; unknown types fall back to gray.
+const TYPE_COLORS = {
+  lore: 'bg-purple-900/40 text-purple-300 border-purple-800/50',
+  era: 'bg-indigo-900/40 text-indigo-300 border-indigo-800/50',
+  region: 'bg-green-900/40 text-green-300 border-green-800/50',
+  landmark: 'bg-teal-900/40 text-teal-300 border-teal-800/50',
+  faction: 'bg-red-900/40 text-red-300 border-red-800/50',
+  node: 'bg-sky-900/40 text-sky-300 border-sky-800/50',
+  layer: 'bg-amber-900/40 text-amber-300 border-amber-800/50',
+  connection: 'bg-gray-800 text-gray-300 border-gray-600',
+  lorebook: 'bg-yellow-900/40 text-yellow-300 border-yellow-800/50',
+};
+
+const ACTIVE_CARD = 'border-purple-500/50 ring-1 ring-purple-500/20';
+
 export default function MemoryBrowser({ isOpen, onClose, saveId }) {
+  const [tab, setTab] = useState('memories');
+  const [search, setSearch] = useState('');
+
   const [memories, setMemories] = useState([]);
   const [activeIds, setActiveIds] = useState([]);
   const [contextQuery, setContextQuery] = useState('');
+  const [worldEntries, setWorldEntries] = useState([]);
+  const [worldActiveIds, setWorldActiveIds] = useState([]);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [deleteId, setDeleteId] = useState(null);
+  const [editing, setEditing] = useState(null); // {title, fields, initialValues, onSave}
 
-  const [filterEntity, setFilterEntity] = useState('');
-  const [filterTopic, setFilterTopic] = useState('');
-  const [sortBy, setSortBy] = useState('newest');
-
-  const fetchMemories = () => {
+  const fetchAll = () => {
     setLoading(true);
     setError('');
-    api.getMemories()
-      .then(data => {
-        setMemories(data.memories || []);
-        setActiveIds(data.active_ids || []);
-        setContextQuery(data.context_query || '');
+    Promise.all([api.getMemories(), api.getWorldEntries()])
+      .then(([mem, world]) => {
+        setMemories(mem.memories || []);
+        setActiveIds(mem.active_ids || []);
+        setContextQuery(mem.context_query || world.context_query || '');
+        setWorldEntries(world.entries || []);
+        setWorldActiveIds(world.active_ids || []);
       })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
   };
 
   useEffect(() => {
-    if (isOpen) fetchMemories();
+    if (isOpen) fetchAll();
   }, [isOpen]);
+
+  const refetchWorldEntries = () => {
+    api.getWorldEntries()
+      .then(world => {
+        setWorldEntries(world.entries || []);
+        setWorldActiveIds(world.active_ids || []);
+      })
+      .catch(e => setError(e.message));
+  };
+
+  const handleDelete = async (id) => {
+    try {
+      await api.deleteMemory(id);
+      setMemories(prev => prev.filter(m => m.id !== id));
+      setActiveIds(prev => prev.filter(aid => aid !== id));
+      setDeleteId(null);
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const editMemory = (memory) => setEditing({
+    title: 'Edit Memory',
+    fields: [
+      { key: 'summary', label: 'Summary', type: 'textarea' },
+      { key: 'text', label: 'Full text (changing it re-embeds the memory)', type: 'textarea' },
+      { key: 'importance', label: 'Importance (1-10)', type: 'number', min: 1, max: 10 },
+      { key: 'permanent', label: 'Permanent (never decays)', type: 'checkbox' },
+    ],
+    initialValues: {
+      summary: memory.summary || '',
+      text: memory.text || '',
+      importance: memory.importance || 5,
+      permanent: !!memory.permanent,
+    },
+    onSave: async (values, changed) => {
+      if (Object.keys(changed).length === 0) return;
+      const { memory: updated } = await api.updateMemory(memory.id, changed);
+      setMemories(prev => prev.map(m => (m.id === memory.id ? updated : m)));
+    },
+  });
+
+  const editWorldEntry = (entry) => setEditing({
+    title: `Edit World Entry — ${entry.source_id || entry.source_type}`,
+    fields: [
+      { key: 'text', label: 'Entry text (saving re-embeds it)', type: 'textarea', rows: 6 },
+    ],
+    initialValues: { text: entry.text || '' },
+    onSave: async (values, changed) => {
+      if (!('text' in changed)) return;
+      const { entry: updated } = await api.updateWorldEntry(entry.id, values.text);
+      setWorldEntries(prev => prev.map(e => (e.id === entry.id ? updated : e)));
+    },
+  });
+
+  if (!isOpen) return null;
+
+  const counts = {
+    memories: memories.length,
+    world: worldEntries.filter(e => e.source_type !== 'lorebook').length,
+    lorebooks: worldEntries.filter(e => e.source_type === 'lorebook').length,
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" role="dialog" aria-modal="true" aria-label="Memory browser">
+      <div className="bg-gray-800 w-full max-w-3xl rounded-lg shadow-2xl border border-gray-700 flex flex-col max-h-[90vh]">
+        <div className="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900 rounded-t-lg">
+          <div>
+            <h2 className="text-xl font-bold text-gray-100">Memory Browser</h2>
+            <p className="text-xs text-gray-500 mt-1">
+              {counts.memories} memories · {counts.world} world entries · {counts.lorebooks} lorebook entries
+            </p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-white text-2xl leading-none" aria-label="Close">&times;</button>
+        </div>
+
+        <div className="px-4 pt-3 border-b border-gray-700 bg-gray-850 flex items-center gap-1">
+          {TABS.map(t => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`px-4 py-2 text-sm font-medium rounded-t border-b-2 transition-colors ${
+                tab === t.id
+                  ? 'text-purple-300 border-purple-500 bg-gray-800'
+                  : 'text-gray-400 border-transparent hover:text-gray-200'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+          <div className="ml-auto flex items-center gap-2 pb-2">
+            <input
+              type="text"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Search..."
+              className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200 w-40"
+              aria-label="Search entries"
+            />
+            <button
+              onClick={fetchAll}
+              className="text-sm text-purple-400 hover:text-purple-300 px-2 py-1"
+              aria-label="Refresh entries"
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          {loading && <div className="text-center text-gray-400 py-8">Loading...</div>}
+          {error && <div className="bg-red-900/40 border border-red-700/50 rounded p-3 text-red-200 text-sm">{error}</div>}
+
+          {!loading && tab === 'memories' && (
+            <MemoriesTab
+              memories={memories}
+              activeIds={activeIds}
+              contextQuery={contextQuery}
+              search={search}
+              onDelete={setDeleteId}
+              onEdit={editMemory}
+            />
+          )}
+          {!loading && tab === 'world' && (
+            <WorldTab
+              entries={worldEntries.filter(e => e.source_type !== 'lorebook')}
+              activeIds={worldActiveIds}
+              contextQuery={contextQuery}
+              search={search}
+              onEdit={editWorldEntry}
+            />
+          )}
+          {!loading && tab === 'lorebooks' && (
+            <LorebooksTab
+              saveId={saveId}
+              worldEntries={worldEntries}
+              worldActiveIds={worldActiveIds}
+              search={search}
+              setEditing={setEditing}
+              onEntriesChanged={refetchWorldEntries}
+            />
+          )}
+        </div>
+
+        <div className="p-3 border-t border-gray-700 bg-gray-900 rounded-b-lg flex justify-end">
+          <button onClick={onClose} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded font-medium transition-colors text-sm">
+            Close
+          </button>
+        </div>
+      </div>
+
+      {deleteId && (
+        <DeleteConfirm
+          onConfirm={() => handleDelete(deleteId)}
+          onCancel={() => setDeleteId(null)}
+        />
+      )}
+      {editing && (
+        <EditEntryModal
+          {...editing}
+          onCancel={() => setEditing(null)}
+          onDone={() => setEditing(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Memories tab ─────────────────────────────────────────────────────────────
+
+function MemoriesTab({ memories, activeIds, contextQuery, search, onDelete, onEdit }) {
+  const [filterEntity, setFilterEntity] = useState('');
+  const [filterTopic, setFilterTopic] = useState('');
+  const [sortBy, setSortBy] = useState('newest');
 
   const allEntities = useMemo(() => {
     const s = new Set();
@@ -46,197 +246,95 @@ export default function MemoryBrowser({ isOpen, onClose, saveId }) {
     let list = [...memories];
     if (filterEntity) list = list.filter(m => (m.entities || []).includes(filterEntity));
     if (filterTopic) list = list.filter(m => (m.topics || []).includes(filterTopic));
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter(m =>
+        (m.summary || '').toLowerCase().includes(q) ||
+        (m.text || '').toLowerCase().includes(q) ||
+        (m.entities || []).some(e => e.toLowerCase().includes(q)) ||
+        (m.topics || []).some(t => t.toLowerCase().includes(q))
+      );
+    }
     if (sortBy === 'newest') list.sort((a, b) => (b.turn_generated || 0) - (a.turn_generated || 0));
     else if (sortBy === 'importance') list.sort((a, b) => (b.importance || 0) - (a.importance || 0));
     else if (sortBy === 'oldest') list.sort((a, b) => (a.turn_generated || 0) - (b.turn_generated || 0));
     return list;
-  }, [memories, filterEntity, filterTopic, sortBy]);
+  }, [memories, filterEntity, filterTopic, sortBy, search]);
 
   const activeMemories = filtered.filter(m => activeIds.includes(m.id));
   const inactiveMemories = filtered.filter(m => !activeIds.includes(m.id));
-  const permanentCount = memories.filter(m => m.permanent).length;
-  const activeCount = activeIds.length;
-
-  const handleDelete = async (id) => {
-    try {
-      await api.deleteMemory(id);
-      setMemories(prev => prev.filter(m => m.id !== id));
-      setActiveIds(prev => prev.filter(aid => aid !== id));
-      setDeleteId(null);
-    } catch (e) {
-      setError(e.message);
-    }
-  };
-
-  if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" role="dialog" aria-modal="true" aria-label="Memory browser">
-      <div className="bg-gray-800 w-full max-w-2xl rounded-lg shadow-2xl border border-gray-700 flex flex-col max-h-[90vh]">
-        <div className="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900 rounded-t-lg">
-          <div>
-            <h2 className="text-xl font-bold text-gray-100">Memory Browser</h2>
-            <p className="text-xs text-gray-500 mt-1">
-              {memories.length} memories{activeCount > 0 && ` · ${activeCount} active this turn`}{permanentCount > 0 && ` · ${permanentCount} permanent`}
-            </p>
-          </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-white text-2xl leading-none" aria-label="Close">&times;</button>
-        </div>
-
-        <div className="p-4 border-b border-gray-700 bg-gray-850 flex flex-wrap gap-2 items-center">
-          <select
-            value={filterEntity}
-            onChange={e => setFilterEntity(e.target.value)}
-            className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200"
-            aria-label="Filter by entity"
-          >
-            <option value="">All entities</option>
-            {allEntities.map(e => <option key={e} value={e}>{e}</option>)}
-          </select>
-          <select
-            value={filterTopic}
-            onChange={e => setFilterTopic(e.target.value)}
-            className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200"
-            aria-label="Filter by topic"
-          >
-            <option value="">All topics</option>
-            {allTopics.map(t => <option key={t} value={t}>{t}</option>)}
-          </select>
-          <select
-            value={sortBy}
-            onChange={e => setSortBy(e.target.value)}
-            className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200"
-            aria-label="Sort memories"
-          >
-            <option value="newest">Newest first</option>
-            <option value="oldest">Oldest first</option>
-            <option value="importance">Highest importance</option>
-          </select>
-          <button
-            onClick={fetchMemories}
-            className="ml-auto text-sm text-purple-400 hover:text-purple-300 px-2 py-1"
-            aria-label="Refresh memories"
-          >
-            Refresh
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
-          {loading && <div className="text-center text-gray-400 py-8">Loading memories...</div>}
-          {error && <div className="bg-red-900/40 border border-red-700/50 rounded p-3 text-red-200 text-sm">{error}</div>}
-
-          {!loading && !error && filtered.length === 0 && (
-            <div className="text-center text-gray-500 py-12">
-              <div className="text-4xl mb-3">&#129504;</div>
-              <p>No memories yet</p>
-              <p className="text-sm mt-1">Play a few turns with LLM_MODE=live to generate memories, or use mock mode for test entries.</p>
-            </div>
-          )}
-
-          {contextQuery && activeMemories.length > 0 && (
-            <div className="mb-4">
-              <div className="text-xs text-purple-400 font-semibold uppercase tracking-wide mb-2">
-                Active This Turn · triggered by "{contextQuery.length > 60 ? contextQuery.slice(0, 60) + '...' : contextQuery}"
-              </div>
-              {activeMemories.map(m => (
-                <MemoryCard key={m.id} memory={m} isActive onDelete={setDeleteId} />
-              ))}
-            </div>
-          )}
-
-          {inactiveMemories.length > 0 && (
-            <div>
-              {activeMemories.length > 0 && (
-                <div className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-2">All Memories</div>
-              )}
-              {inactiveMemories.map(m => (
-                <MemoryCard key={m.id} memory={m} onDelete={setDeleteId} />
-              ))}
-            </div>
-          )}
-
-          {!loading && saveId && <SaveLorebooks saveId={saveId} />}
-        </div>
-
-        <div className="p-3 border-t border-gray-700 bg-gray-900 rounded-b-lg flex justify-end">
-          <button onClick={onClose} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded font-medium transition-colors text-sm">
-            Close
-          </button>
-        </div>
+    <div>
+      <div className="flex flex-wrap gap-2 items-center mb-3">
+        <select
+          value={filterEntity}
+          onChange={e => setFilterEntity(e.target.value)}
+          className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200"
+          aria-label="Filter by entity"
+        >
+          <option value="">All entities</option>
+          {allEntities.map(e => <option key={e} value={e}>{e}</option>)}
+        </select>
+        <select
+          value={filterTopic}
+          onChange={e => setFilterTopic(e.target.value)}
+          className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200"
+          aria-label="Filter by topic"
+        >
+          <option value="">All topics</option>
+          {allTopics.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <select
+          value={sortBy}
+          onChange={e => setSortBy(e.target.value)}
+          className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200"
+          aria-label="Sort memories"
+        >
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="importance">Highest importance</option>
+        </select>
       </div>
 
-      {deleteId && (
-        <DeleteConfirm
-          onConfirm={() => handleDelete(deleteId)}
-          onCancel={() => setDeleteId(null)}
-        />
+      {filtered.length === 0 && (
+        <div className="text-center text-gray-500 py-12">
+          <div className="text-4xl mb-3">&#129504;</div>
+          <p>No memories{memories.length > 0 ? ' match the filters' : ' yet'}</p>
+          {memories.length === 0 && (
+            <p className="text-sm mt-1">Play a few turns with LLM_MODE=live to generate memories, or use mock mode for test entries.</p>
+          )}
+        </div>
+      )}
+
+      {activeMemories.length > 0 && (
+        <div className="mb-4">
+          <TriggeredHeading contextQuery={contextQuery} />
+          {activeMemories.map(m => (
+            <MemoryCard key={m.id} memory={m} isActive onDelete={onDelete} onEdit={onEdit} />
+          ))}
+        </div>
+      )}
+
+      {inactiveMemories.length > 0 && (
+        <div>
+          {activeMemories.length > 0 && (
+            <div className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-2">All Memories</div>
+          )}
+          {inactiveMemories.map(m => (
+            <MemoryCard key={m.id} memory={m} onDelete={onDelete} onEdit={onEdit} />
+          ))}
+        </div>
       )}
     </div>
   );
 }
 
-// Attach/detach library lorebooks on the current story. Changes to the active
-// save re-embed immediately; the next turn picks them up.
-function SaveLorebooks({ saveId }) {
-  const [library, setLibrary] = useState([]);
-  const [attached, setAttached] = useState([]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    Promise.all([api.listLorebooks(), api.getSaveLorebooks(saveId)])
-      .then(([lib, save]) => {
-        setLibrary(lib.lorebooks || []);
-        setAttached(save.lorebook_ids || []);
-      })
-      .catch(e => setError(e.message));
-  }, [saveId]);
-
-  if (library.length === 0) return null;
-
-  const toggle = async (id, on) => {
-    const next = on ? [...attached, id] : attached.filter(a => a !== id);
-    setBusy(true);
-    setError('');
-    try {
-      const { lorebook_ids } = await api.setSaveLorebooks(saveId, next);
-      setAttached(lorebook_ids);
-    } catch (e) {
-      setError(e.message);
-    }
-    setBusy(false);
-  };
-
-  return (
-    <div className="mt-4">
-      <div className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-2">Lorebooks</div>
-      <div className="bg-gray-900/60 rounded border border-gray-700 p-3 space-y-1">
-        {library.map(b => (
-          <label key={b.id} className={`flex items-center gap-2 text-sm text-gray-300 ${busy ? 'opacity-50' : 'cursor-pointer'}`}>
-            <input
-              type="checkbox"
-              checked={attached.includes(b.id)}
-              disabled={busy}
-              onChange={e => toggle(b.id, e.target.checked)}
-              className="accent-purple-600"
-            />
-            📚 {b.name}
-            <span className="text-xs text-gray-500">({b.enabled_count}/{b.entry_count} entries)</span>
-          </label>
-        ))}
-        {error && <p className="text-xs text-red-400 mt-1">{error}</p>}
-        <p className="text-[10px] text-gray-600 mt-1">Attached lorebook entries join world knowledge retrieval from the next turn.</p>
-      </div>
-    </div>
-  );
-}
-
-function MemoryCard({ memory, isActive, onDelete }) {
+function MemoryCard({ memory, isActive, onDelete, onEdit }) {
   const [expanded, setExpanded] = useState(false);
-  const importancePct = ((memory.importance || 5) / 10) * 100;
 
   return (
-    <div className={`bg-gray-900/60 rounded border p-3 mb-2 transition-colors ${isActive ? 'border-purple-500/50 ring-1 ring-purple-500/20' : 'border-gray-700 hover:border-gray-600'}`}>
+    <div className={`bg-gray-900/60 rounded border p-3 mb-2 transition-colors ${isActive ? ACTIVE_CARD : 'border-gray-700 hover:border-gray-600'}`}>
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap mb-1">
@@ -267,6 +365,7 @@ function MemoryCard({ memory, isActive, onDelete }) {
           )}
         </div>
 
+        <EditButton onClick={() => onEdit(memory)} label={`Edit memory ${memory.id}`} />
         <button
           onClick={(e) => { e.stopPropagation(); onDelete(memory.id); }}
           className="text-gray-600 hover:text-red-400 text-sm shrink-0 px-1"
@@ -291,6 +390,462 @@ function MemoryCard({ memory, isActive, onDelete }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── World tab ────────────────────────────────────────────────────────────────
+
+function WorldTab({ entries, activeIds, contextQuery, search, onEdit }) {
+  const [filterType, setFilterType] = useState('');
+  const [filterRegion, setFilterRegion] = useState('');
+
+  const allTypes = useMemo(() => [...new Set(entries.map(e => e.source_type))].sort(), [entries]);
+  const allRegions = useMemo(
+    () => [...new Set(entries.map(e => e.region).filter(Boolean))].sort(),
+    [entries]
+  );
+
+  const filtered = useMemo(() => {
+    let list = entries;
+    if (filterType) list = list.filter(e => e.source_type === filterType);
+    if (filterRegion) list = list.filter(e => e.region === filterRegion);
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter(e =>
+        (e.text || '').toLowerCase().includes(q) ||
+        (e.source_id || '').toLowerCase().includes(q) ||
+        (e.region || '').toLowerCase().includes(q)
+      );
+    }
+    return list;
+  }, [entries, filterType, filterRegion, search]);
+
+  const active = filtered.filter(e => activeIds.includes(e.id));
+  const inactive = filtered.filter(e => !activeIds.includes(e.id));
+
+  return (
+    <div>
+      <div className="flex flex-wrap gap-2 items-center mb-3">
+        <select
+          value={filterType}
+          onChange={e => setFilterType(e.target.value)}
+          className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200"
+          aria-label="Filter by type"
+        >
+          <option value="">All types</option>
+          {allTypes.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+        {allRegions.length > 0 && (
+          <select
+            value={filterRegion}
+            onChange={e => setFilterRegion(e.target.value)}
+            className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200"
+            aria-label="Filter by region"
+          >
+            <option value="">All regions</option>
+            {allRegions.map(r => <option key={r} value={r}>{r}</option>)}
+          </select>
+        )}
+        <span className="text-xs text-gray-500 ml-auto">{filtered.length} entries</span>
+      </div>
+
+      {filtered.length === 0 && (
+        <div className="text-center text-gray-500 py-12">
+          <div className="text-4xl mb-3">&#127757;</div>
+          <p>No world knowledge{entries.length > 0 ? ' matches the filters' : ''}</p>
+          {entries.length === 0 && (
+            <p className="text-sm mt-1">World entries are created when a story starts from a compiled world.</p>
+          )}
+        </div>
+      )}
+
+      {active.length > 0 && (
+        <div className="mb-4">
+          <TriggeredHeading contextQuery={contextQuery} />
+          {active.map(e => (
+            <WorldEntryCard key={e.id} entry={e} isActive onEdit={onEdit} />
+          ))}
+        </div>
+      )}
+
+      {inactive.length > 0 && (
+        <div>
+          {active.length > 0 && (
+            <div className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-2">All World Knowledge</div>
+          )}
+          {inactive.map(e => (
+            <WorldEntryCard key={e.id} entry={e} onEdit={onEdit} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WorldEntryCard({ entry, isActive, onEdit }) {
+  const [expanded, setExpanded] = useState(false);
+  const text = entry.text || '';
+  const badge = TYPE_COLORS[entry.source_type] || TYPE_COLORS.connection;
+
+  return (
+    <div className={`bg-gray-900/60 rounded border p-3 mb-2 transition-colors ${isActive ? ACTIVE_CARD : 'border-gray-700 hover:border-gray-600'}`}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap mb-1">
+            <span className={`text-[10px] px-1.5 py-0.5 rounded border uppercase tracking-wide ${badge}`}>
+              {entry.source_type}
+            </span>
+            {entry.region && (
+              <span className="text-xs text-gray-500">{entry.region}</span>
+            )}
+          </div>
+          <p
+            className="text-sm text-gray-200 leading-relaxed cursor-pointer whitespace-pre-wrap"
+            onClick={() => setExpanded(!expanded)}
+          >
+            {expanded ? text : text.slice(0, 160) + (text.length > 160 ? '...' : '')}
+          </p>
+        </div>
+        <EditButton onClick={() => onEdit(entry)} label={`Edit world entry ${entry.source_id || entry.id}`} />
+      </div>
+    </div>
+  );
+}
+
+// ── Lorebooks tab ────────────────────────────────────────────────────────────
+
+function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing, onEntriesChanged }) {
+  const [library, setLibrary] = useState([]);
+  const [attached, setAttached] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [books, setBooks] = useState({});      // id -> full record
+  const [openBooks, setOpenBooks] = useState({}); // id -> bool
+  const [enabledOnly, setEnabledOnly] = useState(false);
+  const [constantOnly, setConstantOnly] = useState(false);
+
+  useEffect(() => {
+    if (!saveId) return;
+    Promise.all([api.listLorebooks(), api.getSaveLorebooks(saveId)])
+      .then(([lib, save]) => {
+        setLibrary(lib.lorebooks || []);
+        setAttached(save.lorebook_ids || []);
+      })
+      .catch(e => setError(e.message));
+  }, [saveId]);
+
+  // Which lorebook entries fired last turn, keyed by their stable
+  // "bookId:uid" source id (row ids change on every re-embed).
+  const activeSourceIds = useMemo(() => new Set(
+    worldEntries
+      .filter(e => e.source_type === 'lorebook' && worldActiveIds.includes(e.id))
+      .map(e => e.source_id)
+  ), [worldEntries, worldActiveIds]);
+
+  const toggleAttach = async (id, on) => {
+    const next = on ? [...attached, id] : attached.filter(a => a !== id);
+    setBusy(true);
+    setError('');
+    try {
+      const { lorebook_ids } = await api.setSaveLorebooks(saveId, next);
+      setAttached(lorebook_ids);
+      onEntriesChanged();
+    } catch (e) {
+      setError(e.message);
+    }
+    setBusy(false);
+  };
+
+  const toggleOpen = async (id) => {
+    const willOpen = !openBooks[id];
+    setOpenBooks(prev => ({ ...prev, [id]: willOpen }));
+    if (willOpen && !books[id]) {
+      try {
+        const { lorebook } = await api.getLorebook(id);
+        setBooks(prev => ({ ...prev, [id]: lorebook }));
+      } catch (e) {
+        setError(e.message);
+      }
+    }
+  };
+
+  const toggleEnabled = async (bookId, uid, enabled) => {
+    try {
+      const { lorebook } = await api.updateLorebookEntry(bookId, uid, { enabled });
+      setBooks(prev => ({ ...prev, [bookId]: lorebook }));
+      onEntriesChanged();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const editEntry = (bookId, entry) => setEditing({
+    title: `Edit Lorebook Entry — ${entry.title || `Entry ${entry.uid}`}`,
+    fields: [
+      { key: 'title', label: 'Title', type: 'text' },
+      { key: 'keys', label: 'Keywords (comma-separated)', type: 'text' },
+      { key: 'content', label: 'Content', type: 'textarea', rows: 6 },
+      { key: 'enabled', label: 'Enabled', type: 'checkbox' },
+      { key: 'constant', label: 'Constant (always in context)', type: 'checkbox' },
+    ],
+    initialValues: {
+      title: entry.title || '',
+      keys: (entry.keys || []).join(', '),
+      content: entry.content || '',
+      enabled: !!entry.enabled,
+      constant: !!entry.constant,
+    },
+    onSave: async (values, changed) => {
+      if (Object.keys(changed).length === 0) return;
+      const patch = { ...changed };
+      if ('keys' in patch) patch.keys = patch.keys.split(',').map(k => k.trim()).filter(Boolean);
+      const { lorebook } = await api.updateLorebookEntry(bookId, entry.uid, patch);
+      setBooks(prev => ({ ...prev, [bookId]: lorebook }));
+      onEntriesChanged();
+    },
+  });
+
+  const attachedBooks = library.filter(b => attached.includes(b.id));
+
+  const filterEntries = (entries) => {
+    let list = entries;
+    if (enabledOnly) list = list.filter(e => e.enabled);
+    if (constantOnly) list = list.filter(e => e.constant);
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter(e =>
+        (e.title || '').toLowerCase().includes(q) ||
+        (e.content || '').toLowerCase().includes(q) ||
+        (e.keys || []).some(k => k.toLowerCase().includes(q))
+      );
+    }
+    return list;
+  };
+
+  return (
+    <div className="space-y-4">
+      {error && <div className="bg-red-900/40 border border-red-700/50 rounded p-3 text-red-200 text-sm">{error}</div>}
+
+      <div>
+        <div className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-2">Attached Lorebooks</div>
+        <div className="bg-gray-900/60 rounded border border-gray-700 p-3 space-y-1">
+          {library.length === 0 && <p className="text-sm text-gray-500">No lorebooks in the library. Import one from the main menu.</p>}
+          {library.map(b => (
+            <label key={b.id} className={`flex items-center gap-2 text-sm text-gray-300 ${busy ? 'opacity-50' : 'cursor-pointer'}`}>
+              <input
+                type="checkbox"
+                checked={attached.includes(b.id)}
+                disabled={busy}
+                onChange={e => toggleAttach(b.id, e.target.checked)}
+                className="accent-purple-600"
+              />
+              📚 {b.name}
+              <span className="text-xs text-gray-500">({b.enabled_count}/{b.entry_count} entries)</span>
+            </label>
+          ))}
+          <p className="text-[10px] text-gray-600 mt-1">Attached lorebook entries join world knowledge retrieval from the next turn. Edits re-embed and apply from the next turn.</p>
+        </div>
+      </div>
+
+      {attachedBooks.length > 0 && (
+        <div className="flex items-center gap-4">
+          <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+            <input type="checkbox" checked={enabledOnly} onChange={e => setEnabledOnly(e.target.checked)} className="accent-purple-600" />
+            Enabled only
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+            <input type="checkbox" checked={constantOnly} onChange={e => setConstantOnly(e.target.checked)} className="accent-purple-600" />
+            Constant only
+          </label>
+        </div>
+      )}
+
+      {attachedBooks.map(b => {
+        const record = books[b.id];
+        const entries = record ? filterEntries(record.entries || []) : [];
+        return (
+          <div key={b.id} className="bg-gray-900/40 rounded border border-gray-700">
+            <button
+              onClick={() => toggleOpen(b.id)}
+              className="w-full flex items-center justify-between p-3 text-left text-sm font-medium text-gray-200 hover:bg-gray-800/50 rounded"
+            >
+              <span>📚 {b.name}</span>
+              <span className="text-gray-500 text-xs">{openBooks[b.id] ? '▾' : '▸'}</span>
+            </button>
+            {openBooks[b.id] && (
+              <div className="p-3 pt-0 space-y-2">
+                {!record && <p className="text-sm text-gray-500">Loading...</p>}
+                {record && entries.length === 0 && <p className="text-sm text-gray-500">No entries match.</p>}
+                {entries.map(entry => (
+                  <LorebookEntryCard
+                    key={entry.uid}
+                    entry={entry}
+                    isActive={activeSourceIds.has(`${b.id}:${entry.uid}`)}
+                    onToggle={(enabled) => toggleEnabled(b.id, entry.uid, enabled)}
+                    onEdit={() => editEntry(b.id, entry)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function LorebookEntryCard({ entry, isActive, onToggle, onEdit }) {
+  const [expanded, setExpanded] = useState(false);
+  const content = entry.content || '';
+
+  return (
+    <div className={`p-3 rounded border transition-colors ${
+      isActive ? `bg-gray-900/60 ${ACTIVE_CARD}` : entry.enabled ? 'border-gray-700 bg-gray-900/60' : 'border-gray-800 bg-gray-900/40 opacity-60'
+    }`}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-medium text-gray-200 text-sm">{entry.title || entry.keys?.[0] || `Entry ${entry.uid}`}</span>
+            {entry.constant && (
+              <span className="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide bg-amber-900/60 text-amber-300 border border-amber-800/50" title="Injected into every turn, independent of retrieval">
+                always in context
+              </span>
+            )}
+            {isActive && (
+              <span className="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide bg-purple-900/60 text-purple-300 border border-purple-800/50">
+                triggered last turn
+              </span>
+            )}
+          </div>
+          {entry.keys?.length > 0 && (
+            <p className="text-xs text-gray-500 truncate">🔑 {entry.keys.join(', ')}</p>
+          )}
+        </div>
+        <EditButton onClick={onEdit} label={`Edit lorebook entry ${entry.uid}`} />
+        <label className="flex items-center gap-1.5 text-xs text-gray-400 shrink-0 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={!!entry.enabled}
+            onChange={e => onToggle(e.target.checked)}
+            className="accent-purple-600"
+          />
+          Enabled
+        </label>
+      </div>
+      <p
+        className={`text-xs text-gray-400 mt-2 whitespace-pre-wrap cursor-pointer ${expanded ? '' : 'line-clamp-3'}`}
+        onClick={() => setExpanded(!expanded)}
+      >
+        {content}
+      </p>
+    </div>
+  );
+}
+
+// ── shared bits ──────────────────────────────────────────────────────────────
+
+function TriggeredHeading({ contextQuery }) {
+  return (
+    <div className="text-xs text-purple-400 font-semibold uppercase tracking-wide mb-2">
+      Active This Turn{contextQuery && ` · triggered by "${contextQuery.length > 60 ? contextQuery.slice(0, 60) + '...' : contextQuery}"`}
+    </div>
+  );
+}
+
+function EditButton({ onClick, label }) {
+  return (
+    <button
+      onClick={(e) => { e.stopPropagation(); onClick(); }}
+      className="text-gray-600 hover:text-purple-300 text-sm shrink-0 px-1"
+      title="Edit"
+      aria-label={label}
+    >
+      &#9998;
+    </button>
+  );
+}
+
+function EditEntryModal({ title, fields, initialValues, onSave, onCancel, onDone }) {
+  const [values, setValues] = useState(initialValues);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const setValue = (key, value) => setValues(prev => ({ ...prev, [key]: value }));
+
+  const handleSave = async () => {
+    setBusy(true);
+    setError('');
+    // Only send fields the user actually changed, so the backend re-embeds
+    // only when the embedded text itself changed.
+    const changed = {};
+    for (const f of fields) {
+      if (values[f.key] !== initialValues[f.key]) changed[f.key] = values[f.key];
+    }
+    try {
+      await onSave(values, changed);
+      onDone();
+    } catch (e) {
+      setError(e.message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="absolute inset-0 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-label={title}>
+      <div className="bg-gray-800 border border-gray-600 rounded-lg p-5 shadow-xl w-full max-w-lg max-h-[80vh] overflow-y-auto">
+        <h3 className="text-gray-100 font-semibold mb-4">{title}</h3>
+        <div className="space-y-3">
+          {fields.map(f => (
+            <div key={f.key}>
+              {f.type === 'checkbox' ? (
+                <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!!values[f.key]}
+                    onChange={e => setValue(f.key, e.target.checked)}
+                    className="accent-purple-600"
+                    disabled={busy}
+                  />
+                  {f.label}
+                </label>
+              ) : (
+                <>
+                  <label className="block text-xs text-gray-400 mb-1">{f.label}</label>
+                  {f.type === 'textarea' ? (
+                    <textarea
+                      value={values[f.key]}
+                      onChange={e => setValue(f.key, e.target.value)}
+                      rows={f.rows || 4}
+                      className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1.5 text-sm text-gray-200"
+                      disabled={busy}
+                    />
+                  ) : (
+                    <input
+                      type={f.type === 'number' ? 'number' : 'text'}
+                      value={values[f.key]}
+                      min={f.min}
+                      max={f.max}
+                      onChange={e => setValue(f.key, f.type === 'number' ? Number(e.target.value) : e.target.value)}
+                      className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1.5 text-sm text-gray-200"
+                      disabled={busy}
+                    />
+                  )}
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+        {error && <p className="text-xs text-red-400 mt-3">{error}</p>}
+        <div className="flex justify-end gap-2 mt-4">
+          <button onClick={onCancel} disabled={busy} className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-white rounded text-sm transition-colors">
+            Cancel
+          </button>
+          <button onClick={handleSave} disabled={busy} className="px-3 py-1.5 bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white rounded text-sm transition-colors">
+            {busy ? 'Saving...' : 'Save'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -561,6 +561,7 @@ class EngineGraph:
 
         turn = state.get("turn", 0)
         retrieved_ids = []
+        retrieved_world_ids = []
         last_context_query = ""
 
         # Constant lore is injected on every turn — even empty-input continue
@@ -606,6 +607,7 @@ class EngineGraph:
                         world_block = "<world_knowledge>\n"
                         for we in world_entries:
                             world_block += f"- [{we['source_type']}] {we['text']}\n"
+                            retrieved_world_ids.append(we.get("id", ""))
                         world_block += "</world_knowledge>"
                         gathered_context.append(world_block)
             except Exception as e:
@@ -632,6 +634,7 @@ class EngineGraph:
         return_val = {
             "current_context": gathered_context,
             "last_retrieved_memory_ids": retrieved_ids,
+            "last_retrieved_world_ids": retrieved_world_ids,
             "last_context_query": last_context_query,
             "module_data": accumulated.get("module_data", dict(state.get("module_data", {}))),
         }

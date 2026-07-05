@@ -438,11 +438,45 @@ async def import_sillytavern_preset(body: dict):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+async def _ensure_browsing_memory() -> bool:
+    """Bind the memory store and world index to the active save so the memory
+    browser works right after a save loads — the turn pipeline otherwise
+    initializes them lazily on the first generation. False when no save is
+    loaded; 503 when the embedding probe fails (provider unreachable)."""
+    if engine.memory is not None:
+        return True
+    if not engine.memory_db_path:
+        return False
+    try:
+        await engine.ensure_memory()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Memory system unavailable: {exc}")
+    _init_world_index_for_save(session_manager.active_save_id)
+    return True
+
+
+async def _embedding_for_edit(text: str, step: str) -> list[float]:
+    """Embed edited entry text, guarding against a vector that no longer
+    matches the store's dimension (provider/mode changed since the save was
+    created) — a mismatched row would silently break similarity search."""
+    vector = await engine.llm.get_embedding(
+        text, inspector_ctx={"call_type": "embedding", "step": step})
+    expected = engine.memory.get_vector_dimension()
+    if expected and len(vector) != expected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Embedding dimension mismatch: store expects {expected}, "
+                   f"current provider returned {len(vector)}. "
+                   "Text edits need the same embedding model the save was created with.",
+        )
+    return vector
+
+
 @app.get("/api/session/memories")
 async def get_memories():
-    if engine.memory is None:
+    if not await _ensure_browsing_memory():
         return {"memories": [], "count": 0, "active_ids": [], "context_query": ""}
-    memories = engine.memory.list_all_memories(limit=50)
+    memories = engine.memory.list_all_memories(limit=500)
     active_ids = session_manager.state.get("last_retrieved_memory_ids", [])
     return {
         "memories": memories,
@@ -472,6 +506,71 @@ async def delete_memory(memory_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found.")
     return {"deleted": memory_id}
+
+
+class MemoryUpdateRequest(BaseModel):
+    text: Optional[str] = None
+    summary: Optional[str] = None
+    importance: Optional[int] = None
+    permanent: Optional[bool] = None
+    entities: Optional[list[str]] = None
+    topics: Optional[list[str]] = None
+
+
+@app.put("/api/session/memories/{memory_id}")
+async def update_memory(memory_id: str, request: MemoryUpdateRequest):
+    if not await _ensure_browsing_memory():
+        raise HTTPException(status_code=503, detail="Memory system not initialized.")
+    fields = {k: v for k, v in request.model_dump().items() if v is not None}
+    if "importance" in fields:
+        fields["importance"] = max(1, min(10, fields["importance"]))
+    vector = None
+    if fields.get("text", "").strip():
+        fields["text"] = fields["text"].strip()
+        vector = await _embedding_for_edit(fields["text"], "memory_edit")
+    elif "text" in fields:
+        raise HTTPException(status_code=400, detail="Memory text cannot be empty.")
+    memory = engine.memory.update_memory(memory_id, fields, vector=vector)
+    if memory is None:
+        raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found.")
+    return {"memory": memory}
+
+
+@app.get("/api/session/world-entries")
+async def get_world_entries():
+    if not await _ensure_browsing_memory() or not engine.memory.has_world_index():
+        return {"entries": [], "count": 0, "active_ids": [], "context_query": ""}
+    entries = engine.memory.list_world_entries()
+    return {
+        "entries": entries,
+        "count": len(entries),
+        "active_ids": session_manager.state.get("last_retrieved_world_ids", []),
+        "context_query": session_manager.state.get("last_context_query", ""),
+    }
+
+
+class WorldEntryUpdateRequest(BaseModel):
+    text: str
+
+
+@app.put("/api/session/world-entries/{entry_id}")
+async def update_world_entry(entry_id: str, request: WorldEntryUpdateRequest):
+    if not await _ensure_browsing_memory() or not engine.memory.has_world_index():
+        raise HTTPException(status_code=503, detail="World index not initialized.")
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Entry text cannot be empty.")
+    existing = engine.memory.get_world_entry(entry_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"World entry {entry_id} not found.")
+    if existing["source_type"] == "lorebook":
+        # Lorebook rows are re-synced from their JSON source; a direct edit
+        # would be silently wiped. Edit via the lorebook entry endpoint instead.
+        raise HTTPException(status_code=400,
+                            detail="Lorebook entries must be edited through the lorebook.")
+    vector = await _embedding_for_edit(text, "world_entry_edit")
+    entry = engine.memory.update_world_entry(entry_id, text, vector)
+    return {"entry": entry}
 
 
 @app.get("/api/llm-inspector/calls")
@@ -928,8 +1027,13 @@ class LorebookImportRequest(BaseModel):
     name: Optional[str] = None
 
 
-class LorebookEntryToggleRequest(BaseModel):
-    enabled: bool
+class LorebookEntryUpdateRequest(BaseModel):
+    enabled: Optional[bool] = None
+    title: Optional[str] = None
+    keys: Optional[list[str]] = None
+    secondary_keys: Optional[list[str]] = None
+    content: Optional[str] = None
+    constant: Optional[bool] = None
 
 
 class LorebookLinksRequest(BaseModel):
@@ -984,13 +1088,24 @@ async def delete_lorebook(lorebook_id: str):
 
 
 @app.put("/api/lorebooks/{lorebook_id}/entries/{uid}")
-async def set_lorebook_entry_enabled(lorebook_id: str, uid: str, request: LorebookEntryToggleRequest):
+async def update_lorebook_entry(lorebook_id: str, uid: str, request: LorebookEntryUpdateRequest):
+    patch = {k: v for k, v in request.model_dump().items() if v is not None}
     try:
-        return {"lorebook": lorebook_store.set_entry_enabled(lorebook_id, uid, request.enabled)}
+        record = lorebook_store.update_entry(lorebook_id, uid, patch)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    # If the active save uses this book, re-embed now so the edit applies from
+    # the next turn; other saves pick it up on load via the fingerprint check.
+    synced = False
+    if session_manager.active_save_id:
+        meta = session_manager.save_manager.read_core_json(
+            session_manager.active_save_id, "metadata.json", {}) or {}
+        if lorebook_id in (meta.get("lorebook_ids", []) or []):
+            await _sync_lorebooks_for_save(session_manager.active_save_id)
+            synced = True
+    return {"lorebook": record, "synced": synced}
 
 
 @app.get("/api/saves/{save_id}/lorebooks")

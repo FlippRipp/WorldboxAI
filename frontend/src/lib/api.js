@@ -82,6 +82,9 @@ export const api = {
   getMemories:            () => request('/api/session/memories'),
   getMemoryContext:       () => request('/api/session/memories/context'),
   deleteMemory:           (id) => request(`/api/session/memories/${id}`, { method: 'DELETE' }),
+  updateMemory:           (id, patch) => request(`/api/session/memories/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  getWorldEntries:        () => request('/api/session/world-entries'),
+  updateWorldEntry:       (id, text) => request(`/api/session/world-entries/${id}`, { method: 'PUT', body: JSON.stringify({ text }) }),
   getLLMInspectorCalls:   (sinceId = '', limit = 50) => {
     const qs = sinceId ? `?since_id=${encodeURIComponent(sinceId)}&limit=${limit}` : `?limit=${limit}`;
     return request(`/api/llm-inspector/calls${qs}`);
@@ -114,6 +117,7 @@ export const api = {
   getLorebook:             (lorebookId) => request(`/api/lorebooks/${lorebookId}`),
   deleteLorebook:          (lorebookId) => request(`/api/lorebooks/${lorebookId}`, { method: 'DELETE' }),
   setLorebookEntryEnabled: (lorebookId, uid, enabled) => request(`/api/lorebooks/${lorebookId}/entries/${encodeURIComponent(uid)}`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
+  updateLorebookEntry:     (lorebookId, uid, patch) => request(`/api/lorebooks/${lorebookId}/entries/${encodeURIComponent(uid)}`, { method: 'PUT', body: JSON.stringify(patch) }),
   getLorebookLinks:        (kind, targetId) => request(`/api/lorebooks/links/${kind}/${targetId}`),
   setLorebookLinks:        (kind, targetId, lorebookIds) => request(`/api/lorebooks/links/${kind}/${targetId}`, { method: 'PUT', body: JSON.stringify({ lorebook_ids: lorebookIds }) }),
   getSaveLorebooks:        (saveId) => request(`/api/saves/${saveId}/lorebooks`),

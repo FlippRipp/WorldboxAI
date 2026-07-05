@@ -171,6 +171,36 @@ def test_store_toggle_bumps_updated_at_and_fingerprint(tmp_path):
     assert store.embed_fingerprint([]) != fingerprint
 
 
+def test_store_update_entry_patches_fields(tmp_path):
+    store = LorebookStore(str(tmp_path / "data"))
+    book_id = store.import_lorebook(V2_LOREBOOK, name="Realm Lore")["lorebook"]["id"]
+    before = store.load_lorebook(book_id)["updated_at"]
+
+    record = store.update_entry(book_id, "0", {
+        "title": "Grand Capital",
+        "keys": ["Eldoria", "capital city"],
+        "content": "Eldoria gleams atop the white cliffs.",
+        "constant": True,
+    })
+    entry = next(e for e in record["entries"] if e["uid"] == "0")
+    assert entry["title"] == "Grand Capital"
+    assert entry["keys"] == ["Eldoria", "capital city"]
+    assert entry["content"] == "Eldoria gleams atop the white cliffs."
+    assert entry["constant"] is True
+    assert entry["enabled"] is True  # untouched fields preserved
+    assert record["updated_at"] >= before
+
+    # Comma-separated key strings are accepted like hand-edited files.
+    record = store.update_entry(book_id, "0", {"keys": "one, two"})
+    entry = next(e for e in record["entries"] if e["uid"] == "0")
+    assert entry["keys"] == ["one", "two"]
+
+    with pytest.raises(FileNotFoundError):
+        store.update_entry(book_id, "nope", {"title": "x"})
+    with pytest.raises(ValueError):
+        store.update_entry(book_id, "0", {"content": "   "})
+
+
 def test_store_links_roundtrip(tmp_path):
     store = LorebookStore(str(tmp_path / "data"))
     a = store.import_lorebook(V2_LOREBOOK, name="Book A")["lorebook"]["id"]
@@ -286,6 +316,42 @@ def test_save_inherits_scenario_lorebooks_and_embeds(tmp_path, monkeypatch):
     assert client.post("/api/saves/lore_save/load").status_code == 200
     rows_after = _world_db_lorebook_rows(tmp_path, "lore_save")
     assert [r[0] for r in rows_after] == [f"{book_id}:1"]
+
+
+def test_lorebook_entry_edit_resyncs_active_save(tmp_path, monkeypatch):
+    client, _, _, _ = make_client(tmp_path, monkeypatch)
+
+    book_id = client.post(
+        "/api/lorebooks/import", json={"data": V2_LOREBOOK, "name": "Realm Lore"}
+    ).json()["lorebook"]["id"]
+    client.put("/api/saves/autosave/lorebooks", json={"lorebook_ids": [book_id]})
+
+    # Content edit through the entry PUT re-embeds the active save's rows.
+    resp = client.put(f"/api/lorebooks/{book_id}/entries/0",
+                      json={"content": "Eldoria fell to the bandit kings."})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["synced"] is True
+    entry = next(e for e in body["lorebook"]["entries"] if e["uid"] == "0")
+    assert entry["content"] == "Eldoria fell to the bandit kings."
+
+    rows = _world_db_lorebook_rows(tmp_path, "autosave")
+    by_source = {r[0]: r for r in rows}
+    assert "Eldoria fell to the bandit kings." in by_source[f"{book_id}:0"][2]
+
+    # Empty content is rejected; enabled-only payloads still work (back-compat).
+    assert client.put(f"/api/lorebooks/{book_id}/entries/0",
+                      json={"content": "  "}).status_code == 400
+    toggled = client.put(f"/api/lorebooks/{book_id}/entries/0", json={"enabled": False})
+    assert toggled.status_code == 200
+    assert [r[0] for r in _world_db_lorebook_rows(tmp_path, "autosave")] == [f"{book_id}:1"]
+
+    # Books not attached to the active save don't trigger a sync.
+    other_id = client.post(
+        "/api/lorebooks/import", json={"data": CHARACTER_BOOK, "name": "Vale Book"}
+    ).json()["lorebook"]["id"]
+    resp = client.put(f"/api/lorebooks/{other_id}/entries/0", json={"enabled": False})
+    assert resp.json()["synced"] is False
 
 
 def test_attach_detach_lorebooks_on_save(tmp_path, monkeypatch):
