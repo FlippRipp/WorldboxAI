@@ -633,7 +633,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
             onClick={() => handleZoomButton(-1)}
             className="text-gray-400 hover:text-gray-200 text-sm px-1"
           >
-            \u2212
+            {'\u2212'}
           </button>
           <span className="text-xs text-gray-500">
             {Math.round((defaultVB.w / Math.max(0.1, viewBox.w)) * 100)}%
@@ -649,7 +649,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
             className="text-gray-500 hover:text-gray-300 text-[10px] px-1 ml-1"
             title="Reset view"
           >
-            \u21BA
+            {'\u21BA'}
           </button>
           <button
             onClick={toggleFullscreen}
