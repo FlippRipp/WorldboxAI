@@ -92,12 +92,20 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
   }, [saveId, lastTrigger, state?.turn, rerender]);
 
   if (slotName !== 'slot_message_footer') return null;
-  if (!saveId || messageTurn == null) return null;
+  if (!saveId) return null;
   if (!message || message.role !== 'assistant' || message.error) return null;
 
-  const records = store.records.filter(
-    (r) => r.save_id === saveId && r.turn === messageTurn
-  );
+  // Match by content, not turn: every record stores the exact start of the
+  // narration it illustrates, and message text is that narration verbatim.
+  // Turn numbers get reused (reswipe, undo) and drift while a turn is still
+  // post-processing, so they only serve as a fallback for excerpt-less
+  // records (e.g. studio prompts fired into a save).
+  const records = store.records.filter((r) => {
+    if (r.save_id !== saveId) return false;
+    const excerpt = r.narration_excerpt || '';
+    if (excerpt) return (message.content || '').startsWith(excerpt);
+    return messageTurn != null && r.turn === messageTurn;
+  });
   if (records.length === 0) return null;
 
   const retry = async (recordId) => {

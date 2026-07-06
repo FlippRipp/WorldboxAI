@@ -1941,6 +1941,15 @@ def get_router():
         )
         if record_id is None:
             raise HTTPException(status_code=409, detail="A generation is already running")
+        if req.retry_record_id:
+            # The replacement record carries the same excerpt/turn; leaving the
+            # failed one behind would render an error row next to the retried
+            # image forever.
+            async with _get_index_lock():
+                records = _read_index()
+                old = next((r for r in records if r.get("id") == req.retry_record_id), None)
+                if old is not None and old.get("status") == "error":
+                    _write_index([r for r in records if r.get("id") != req.retry_record_id])
         return {"record_id": record_id}
 
     @router.delete("/images/{record_id}")

@@ -1315,6 +1315,39 @@ def test_generate_endpoint_studio_override_and_busy(tmp_path):
     assert record["image_prompt"] == "a red door"
 
 
+def test_generate_retry_replaces_failed_record(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend)
+    _fake_novita(backend)
+    client = _client(backend)
+
+    asyncio.run(backend._append_record({
+        "id": "mystory_3_deadbeef", "save_id": "mystory", "turn": 3,
+        "status": "error", "error": "Novita generation failed",
+        "narration_excerpt": "A merchant waves you over.",
+        "image_prompt": "a smiling merchant", "filename": None,
+    }))
+
+    resp = client.post("/generate", json={"retry_record_id": "mystory_3_deadbeef"})
+    assert resp.status_code == 200
+    record_id = resp.json()["record_id"]
+
+    for _ in range(100):
+        record = next((r for r in backend._read_index() if r["id"] == record_id), None)
+        if record and record["status"] in ("done", "error"):
+            break
+        import time as _t
+        _t.sleep(0.02)
+    assert record["status"] == "done"
+    # The replacement keeps the failed record's message anchor and prompt...
+    assert record["save_id"] == "mystory"
+    assert record["turn"] == 3
+    assert record["narration_excerpt"] == "A merchant waves you over."
+    assert record["image_prompt"] == "a smiling merchant"
+    # ...and the failed record is gone, so the footer never shows both.
+    assert all(r["id"] != "mystory_3_deadbeef" for r in backend._read_index())
+
+
 def test_generate_endpoint_refine_runs_prompt_writer(tmp_path):
     backend = _load_backend(tmp_path)
     _enable(backend)
