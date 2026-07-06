@@ -1,12 +1,14 @@
-"""Image Generation -- illustrates the story with Black Forest Labs FLUX.2.
+"""Image Generation -- illustrates the story with Novita AI text-to-image.
 
 Every N storyteller generations (or on demand via /image) the latest narration
 is condensed into an image prompt by the smartest LLM slot, then submitted to
-the BFL API. The whole pipeline runs as a fire-and-forget background task so
-the player keeps playing while the image renders; the chat-feed footer widget
-polls the module's index and shows the image under the turn it illustrates.
+Novita's async txt2img API. The whole pipeline runs as a fire-and-forget
+background task so the player keeps playing while the image renders; the
+chat-feed footer widget polls the module's index and shows the image under the
+turn it illustrates. Novita hosts thousands of community checkpoints, so the
+model is picked via a searchable dropdown backed by the /models proxy below.
 
-Config is global (one BFL key for all stories), owned by this module and
+Config is global (one Novita key for all stories), owned by this module and
 edited in the Image Studio main-menu screen -- not in per-save settings.
 """
 import asyncio
@@ -20,16 +22,21 @@ from pathlib import Path
 
 MODULE_ID = "wb_image_gen"
 
-BFL_BASE = "https://api.bfl.ai/v1"
-ENDPOINTS = [
-    "flux-2-pro",
-    "flux-2-pro-preview",
-    "flux-2-flex",
-    "flux-2-klein-9b",
-    "flux-2-klein-9b-preview",
+NOVITA_BASE = "https://api.novita.ai"
+SAMPLERS = [
+    "DPM++ 2M Karras",
+    "DPM++ SDE Karras",
+    "DPM++ 2S a Karras",
+    "Euler a",
+    "Euler",
+    "DDIM",
+    "UniPC",
+    "LMS",
 ]
-ASPECT_RATIOS = ["21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16"]
 KEY_MASK_PREFIX = "****"
+
+# Novita rejects prompts over 1024 characters.
+MAX_PROMPT_CHARS = 1024
 
 POLL_INTERVAL_S = 2.0
 POLL_MAX_ITERATIONS = 240          # ~8 minutes
@@ -49,6 +56,21 @@ EARLIER CONTEXT (for continuity only):
 
 LATEST SCENE (illustrate this):
 {narration}"""
+
+DEFAULT_PROMPT_TEMPLATE_TAGS = """You write prompts for an AI image generator that expects DANBOORU-STYLE TAGS. Turn the scene below into ONE comma-separated tag list depicting a single striking moment from the latest scene.
+
+Rules:
+- Output comma-separated booru tags, most important first: subject count (1girl, 1boy, 2girls, no humans...), then appearance (hair, eyes, clothing, species), action/pose, expression, setting, lighting, mood, composition (close-up, from above, wide shot...).
+- Lowercase danbooru conventions. Concrete visual tags only -- no story summary, no proper-noun lore the image model cannot know; describe what things LOOK like instead.
+- Output ONLY the tag list, no quotes, no preamble, 20-40 tags.
+
+EARLIER CONTEXT (for continuity only):
+{history}
+
+LATEST SCENE (illustrate this):
+{narration}"""
+
+DEFAULT_PONY_QUALITY_TAGS = "score_9, score_8_up, score_7_up"
 
 _services: dict = {}
 _tasks: set = set()
@@ -74,14 +96,19 @@ def _default_config() -> dict:
     return {
         "enabled": False,
         "api_key": "",
-        "endpoint": "flux-2-pro",
-        "size_mode": "aspect",          # "aspect" | "explicit"
-        "aspect_ratio": "16:9",
+        "model_name": "",               # a Novita checkpoint sd_name, picked via search
+        "model_base": "",               # the picked model's base_model metadata (drives prompt style)
         "width": 1024,
-        "height": 768,
+        "height": 1024,
+        "steps": 28,
+        "guidance_scale": 7.0,
+        "sampler_name": "DPM++ 2M Karras",
+        "negative_prompt": "blurry, low quality, watermark, text, deformed",
         "interval": 3,
         "prompt_model_preference": "smartest",
         "prompt_template": DEFAULT_PROMPT_TEMPLATE,
+        "prompt_template_tags": DEFAULT_PROMPT_TEMPLATE_TAGS,
+        "pony_quality_tags": DEFAULT_PONY_QUALITY_TAGS,
         "style_suffix": "",
     }
 
@@ -188,6 +215,25 @@ def set_services(services: dict) -> None:
 # Prompt writing (LLM slot, never a concrete model)
 # --------------------------------------------------------------------------
 
+def _model_ident(cfg: dict) -> str:
+    """Base-model metadata plus sd_name, for prompt-style detection. The name is
+    included as a fallback for configs saved before model_base was stored."""
+    return f"{cfg.get('model_base', '')} {cfg.get('model_name', '')}".lower()
+
+
+def _prompt_style(cfg: dict) -> str:
+    """"tags" (danbooru) for Pony/Illustrious bases, "natural" for Flux and
+    everything else."""
+    ident = _model_ident(cfg)
+    if "pony" in ident or "illustrious" in ident:
+        return "tags"
+    return "natural"
+
+
+def _is_pony(cfg: dict) -> bool:
+    return "pony" in _model_ident(cfg)
+
+
 def _render_template(template: str, narration: str, history: str) -> str:
     # Sequential replace instead of str.format: narration prose routinely
     # contains braces that would blow up format().
@@ -206,12 +252,16 @@ def _clean_image_prompt(raw: str) -> str:
             text = rest
     text = text.strip().strip('"').strip()
     text = re.sub(r"\s+", " ", text)
-    return text[:1500]
+    return text[:MAX_PROMPT_CHARS]
 
 
 async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk) -> str:
-    prompt = _render_template(cfg.get("prompt_template") or DEFAULT_PROMPT_TEMPLATE,
-                              narration[-4000:], history[-3000:])
+    style = _prompt_style(cfg)
+    if style == "tags":
+        template = cfg.get("prompt_template_tags") or DEFAULT_PROMPT_TEMPLATE_TAGS
+    else:
+        template = cfg.get("prompt_template") or DEFAULT_PROMPT_TEMPLATE
+    prompt = _render_template(template, narration[-4000:], history[-3000:])
     try:
         sdk.llm._current_module = MODULE_ID
         raw = await sdk.llm.generate(
@@ -221,105 +271,131 @@ async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk) -> s
     image_prompt = _clean_image_prompt(raw)
     if not image_prompt:
         raise RuntimeError("prompt writer returned an empty prompt")
+
+    # Pony checkpoints are trained to expect score_* quality tags up front.
+    prefix = str(cfg.get("pony_quality_tags") or "").strip() if _is_pony(cfg) else ""
     suffix = str(cfg.get("style_suffix") or "").strip()
-    if suffix:
-        image_prompt = f"{image_prompt} {suffix}"
-    return image_prompt
+
+    # Trim the scene text, never the prefix/suffix, to fit Novita's cap.
+    reserved = (len(prefix) + 2 if prefix else 0) + (len(suffix) + 2 if suffix else 0)
+    image_prompt = image_prompt[:max(0, MAX_PROMPT_CHARS - reserved)].rstrip(", ")
+    pieces = [p for p in (prefix, image_prompt, suffix) if p]
+    return ", ".join(pieces)[:MAX_PROMPT_CHARS]
 
 
 # --------------------------------------------------------------------------
-# BFL client
+# Novita client
 # --------------------------------------------------------------------------
 
-def _bfl_payload(cfg: dict, image_prompt: str) -> dict:
-    payload = {"prompt": image_prompt}
-    if cfg.get("size_mode") == "explicit":
-        payload["width"] = int(cfg.get("width", 1024))
-        payload["height"] = int(cfg.get("height", 768))
-    else:
-        payload["aspect_ratio"] = str(cfg.get("aspect_ratio", "16:9"))
+def _novita_headers(cfg: dict) -> dict:
+    return {"Authorization": f"Bearer {cfg['api_key']}", "accept": "application/json"}
+
+
+def _novita_payload(cfg: dict, image_prompt: str) -> dict:
+    payload = {
+        "extra": {"response_image_type": "jpeg"},
+        "request": {
+            "model_name": str(cfg.get("model_name", "")),
+            "prompt": image_prompt[:MAX_PROMPT_CHARS],
+            "width": int(cfg.get("width", 1024)),
+            "height": int(cfg.get("height", 1024)),
+            "image_num": 1,
+            "steps": int(cfg.get("steps", 28)),
+            "guidance_scale": float(cfg.get("guidance_scale", 7.0)),
+            "sampler_name": str(cfg.get("sampler_name", "DPM++ 2M Karras")),
+            "seed": -1,
+        },
+    }
+    negative = str(cfg.get("negative_prompt") or "").strip()
+    if negative:
+        payload["request"]["negative_prompt"] = negative[:MAX_PROMPT_CHARS]
     return payload
 
 
-async def _bfl_submit(cfg: dict, image_prompt: str) -> tuple[str, str]:
+def _novita_error_detail(resp) -> str:
+    try:
+        body = resp.json()
+        return str(body.get("message") or body.get("reason") or body)[:300]
+    except Exception:
+        return resp.text[:300]
+
+
+async def _novita_submit(cfg: dict, image_prompt: str) -> str:
+    """Submit an async txt2img task; return the task id."""
     import httpx
-    url = f"{BFL_BASE}/{cfg['endpoint']}"
-    headers = {"x-key": cfg["api_key"], "accept": "application/json"}
-    payload = _bfl_payload(cfg, image_prompt)
+    url = f"{NOVITA_BASE}/v3/async/txt2img"
+    payload = _novita_payload(cfg, image_prompt)
     last_error: Exception | None = None
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
         for attempt in range(SUBMIT_RETRIES + 1):
             try:
-                resp = await client.post(url, headers=headers, json=payload)
-                if resp.status_code in (401, 402, 403):
+                resp = await client.post(url, headers=_novita_headers(cfg), json=payload)
+                if resp.status_code in (401, 403):
                     raise RuntimeError(
-                        f"BFL rejected the request ({resp.status_code}): invalid API key or out of credits")
-                if resp.status_code == 422:
-                    detail = ""
-                    try:
-                        detail = json.dumps(resp.json().get("detail", ""))[:300]
-                    except Exception:
-                        pass
-                    raise RuntimeError(f"BFL rejected the request parameters (422): {detail}")
+                        f"Novita rejected the request ({resp.status_code}): invalid API key")
+                if resp.status_code in (400, 402, 422, 429):
+                    raise RuntimeError(
+                        f"Novita rejected the request ({resp.status_code}): {_novita_error_detail(resp)}")
                 if resp.status_code >= 500:
                     raise httpx.HTTPStatusError(
-                        f"BFL server error {resp.status_code}", request=resp.request, response=resp)
+                        f"Novita server error {resp.status_code}", request=resp.request, response=resp)
                 resp.raise_for_status()
-                body = resp.json()
-                request_id = body.get("id")
-                polling_url = body.get("polling_url")
-                if not polling_url:
-                    raise RuntimeError(f"BFL response missing polling_url: {str(body)[:300]}")
-                return request_id, polling_url
+                task_id = (resp.json() or {}).get("task_id")
+                if not task_id:
+                    raise RuntimeError(f"Novita response missing task_id: {resp.text[:300]}")
+                return task_id
             except (httpx.TransportError, httpx.HTTPStatusError) as e:
                 last_error = e
                 if attempt < SUBMIT_RETRIES:
                     await asyncio.sleep(2 + attempt * 3)
-    raise RuntimeError(f"BFL submit failed after {SUBMIT_RETRIES + 1} attempts: {last_error}")
+    raise RuntimeError(f"Novita submit failed after {SUBMIT_RETRIES + 1} attempts: {last_error}")
 
 
-async def _bfl_poll(cfg: dict, polling_url: str) -> str:
-    """Poll the request until Ready; return the signed sample URL."""
+async def _novita_poll(cfg: dict, task_id: str) -> str:
+    """Poll the task until it succeeds; return the presigned image URL."""
     import httpx
-    headers = {"x-key": cfg["api_key"], "accept": "application/json"}
+    url = f"{NOVITA_BASE}/v3/async/task-result"
     transient_failures = 0
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
         for _ in range(POLL_MAX_ITERATIONS):
             await asyncio.sleep(POLL_INTERVAL_S)
             try:
-                resp = await client.get(polling_url, headers=headers)
+                resp = await client.get(url, headers=_novita_headers(cfg),
+                                        params={"task_id": task_id})
                 resp.raise_for_status()
                 body = resp.json()
                 transient_failures = 0
             except (httpx.TransportError, httpx.HTTPStatusError) as e:
                 transient_failures += 1
                 if transient_failures > POLL_MAX_TRANSIENT_FAILURES:
-                    raise RuntimeError(f"BFL polling kept failing: {e}")
+                    raise RuntimeError(f"Novita polling kept failing: {e}")
                 continue
 
-            status = str(body.get("status", ""))
-            if status == "Ready":
-                sample = (body.get("result") or {}).get("sample")
-                if not sample:
-                    raise RuntimeError("BFL result is Ready but has no sample URL")
-                return sample
-            if status in ("Error", "Failed", "Content Moderated", "Request Moderated"):
-                detail = str(body.get("details") or body.get("result") or "")[:300]
-                raise RuntimeError(f"BFL generation failed ({status}): {detail}")
-            # Pending / Queued / etc: keep polling.
-    raise RuntimeError("BFL generation timed out")
+            task = body.get("task") or {}
+            status = str(task.get("status", ""))
+            if status == "TASK_STATUS_SUCCEED":
+                images = body.get("images") or []
+                image_url = images[0].get("image_url") if images else None
+                if not image_url:
+                    raise RuntimeError("Novita task succeeded but returned no image URL")
+                return image_url
+            if status == "TASK_STATUS_FAILED":
+                reason = str(task.get("reason") or "no reason given")[:300]
+                raise RuntimeError(f"Novita generation failed: {reason}")
+            # TASK_STATUS_QUEUED / TASK_STATUS_PROCESSING: keep polling.
+    raise RuntimeError("Novita generation timed out")
 
 
-async def _bfl_download(sample_url: str) -> tuple[bytes, str]:
-    """Download the signed result immediately (URL expires in 10 minutes)."""
+async def _download(image_url: str) -> tuple[bytes, str]:
+    """Download the presigned result immediately (the URL expires)."""
     import httpx
     last_error: Exception | None = None
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
         for attempt in range(2):
             try:
-                resp = await client.get(sample_url)
+                resp = await client.get(image_url)
                 resp.raise_for_status()
                 content_type = resp.headers.get("content-type", "")
                 ext = {"image/png": "png", "image/webp": "webp"}.get(
@@ -330,6 +406,29 @@ async def _bfl_download(sample_url: str) -> tuple[bytes, str]:
                 if attempt == 0:
                     await asyncio.sleep(2)
     raise RuntimeError(f"Image download failed: {last_error}")
+
+
+async def _novita_list_models(cfg: dict, query: str, cursor: str, limit: int) -> dict:
+    """Search Novita's checkpoint catalog (thousands of models)."""
+    import httpx
+    params = {
+        "filter.types": "checkpoint",
+        "pagination.limit": max(1, min(100, limit)),
+    }
+    if query:
+        params["filter.query"] = query
+    if cursor:
+        params["pagination.cursor"] = cursor
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        resp = await client.get(f"{NOVITA_BASE}/v3/model",
+                                headers=_novita_headers(cfg), params=params)
+        if resp.status_code in (401, 403):
+            raise RuntimeError("Novita rejected the model search: invalid API key")
+        if resp.status_code != 200:
+            raise RuntimeError(f"Novita model search failed ({resp.status_code}): "
+                               f"{_novita_error_detail(resp)}")
+        return resp.json()
 
 
 # --------------------------------------------------------------------------
@@ -371,7 +470,7 @@ def _spawn_generation(*, save_id: str, turn: int, narration: str, history: str,
         "filename": None,
         "image_prompt": prompt_override or "",
         "narration_excerpt": (narration or "")[:200],
-        "endpoint": cfg.get("endpoint", ""),
+        "model_name": cfg.get("model_name", ""),
         "width": cfg.get("width"),
         "height": cfg.get("height"),
         "error": None,
@@ -406,9 +505,9 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                 image_prompt = await _write_image_prompt(cfg, narration, history, sdk)
 
             await _patch_record(record_id, status="generating", image_prompt=image_prompt)
-            _, polling_url = await _bfl_submit(cfg, image_prompt)
-            sample_url = await _bfl_poll(cfg, polling_url)
-            data, ext = await _bfl_download(sample_url)
+            task_id = await _novita_submit(cfg, image_prompt)
+            image_url = await _novita_poll(cfg, task_id)
+            data, ext = await _download(image_url)
 
             filename = f"{record_id}.{ext}"
             path = _data_dir() / "images" / filename
@@ -449,7 +548,7 @@ async def on_gather_context(state: dict, sdk) -> dict:
 
 async def on_librarian(state: dict, sdk) -> dict | None:
     cfg = _load_config()
-    if not cfg.get("enabled") or not cfg.get("api_key"):
+    if not cfg.get("enabled") or not cfg.get("api_key") or not cfg.get("model_name"):
         return None
     history = state.get("history", [])
     if not history:
@@ -486,6 +585,9 @@ async def on_command_image(args: list[str], state: dict, sdk) -> dict:
     cfg = _load_config()
     if not cfg.get("api_key"):
         return {"message": "[Image Gen] No API key configured. Add one in Image Studio (main menu).",
+                "signal": "end_turn"}
+    if not cfg.get("model_name"):
+        return {"message": "[Image Gen] No model selected. Pick one in Image Studio (main menu).",
                 "signal": "end_turn"}
 
     narration = _latest_narration(state)
@@ -529,14 +631,19 @@ def get_router():
     class ConfigUpdate(BaseModel):
         enabled: bool | None = None
         api_key: str | None = None
-        endpoint: str | None = None
-        size_mode: str | None = None
-        aspect_ratio: str | None = None
+        model_name: str | None = None
+        model_base: str | None = None
         width: int | None = None
         height: int | None = None
+        steps: int | None = None
+        guidance_scale: float | None = None
+        sampler_name: str | None = None
+        negative_prompt: str | None = None
         interval: int | None = None
         prompt_model_preference: str | None = None
         prompt_template: str | None = None
+        prompt_template_tags: str | None = None
+        pony_quality_tags: str | None = None
         style_suffix: str | None = None
 
     class GenerateRequest(BaseModel):
@@ -548,9 +655,11 @@ def get_router():
         out = dict(cfg)
         out["api_key"] = _mask_key(cfg.get("api_key", ""))
         out["has_key"] = bool(cfg.get("api_key"))
-        out["endpoints"] = ENDPOINTS
-        out["aspect_ratios"] = ASPECT_RATIOS
+        out["samplers"] = SAMPLERS
         out["default_prompt_template"] = DEFAULT_PROMPT_TEMPLATE
+        out["default_prompt_template_tags"] = DEFAULT_PROMPT_TEMPLATE_TAGS
+        out["default_pony_quality_tags"] = DEFAULT_PONY_QUALITY_TAGS
+        out["prompt_style"] = _prompt_style(cfg)
         return out
 
     @router.get("/config")
@@ -566,15 +675,15 @@ def get_router():
         if key is not None and not key.startswith(KEY_MASK_PREFIX):
             cfg["api_key"] = key.strip()
 
-        if "endpoint" in incoming and incoming["endpoint"] not in ENDPOINTS:
-            raise HTTPException(status_code=400, detail=f"Unknown endpoint. Allowed: {ENDPOINTS}")
-        if "size_mode" in incoming and incoming["size_mode"] not in ("aspect", "explicit"):
-            raise HTTPException(status_code=400, detail="size_mode must be 'aspect' or 'explicit'")
-        if "aspect_ratio" in incoming and incoming["aspect_ratio"] not in ASPECT_RATIOS:
-            raise HTTPException(status_code=400, detail=f"Unknown aspect ratio. Allowed: {ASPECT_RATIOS}")
+        if "sampler_name" in incoming and incoming["sampler_name"] not in SAMPLERS:
+            raise HTTPException(status_code=400, detail=f"Unknown sampler. Allowed: {SAMPLERS}")
         for side in ("width", "height"):
             if side in incoming:
-                incoming[side] = max(256, min(2048, (int(incoming[side]) // 32) * 32))
+                incoming[side] = max(128, min(2048, (int(incoming[side]) // 8) * 8))
+        if "steps" in incoming:
+            incoming["steps"] = max(1, min(100, int(incoming["steps"])))
+        if "guidance_scale" in incoming:
+            incoming["guidance_scale"] = max(1.0, min(30.0, float(incoming["guidance_scale"])))
         if "interval" in incoming:
             incoming["interval"] = max(1, min(50, int(incoming["interval"])))
         if ("prompt_model_preference" in incoming
@@ -606,11 +715,36 @@ def get_router():
         # Filenames are immutable (uuid-suffixed), so long caching is safe.
         return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
+    @router.get("/models")
+    async def search_models(query: str = "", cursor: str = "", limit: int = 48):
+        cfg = _load_config()
+        if not cfg.get("api_key"):
+            raise HTTPException(status_code=400, detail="No API key configured")
+        try:
+            body = await _novita_list_models(cfg, query.strip(), cursor.strip(), limit)
+        except RuntimeError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        models = [
+            {
+                "sd_name": m.get("sd_name_in_api") or m.get("sd_name"),
+                "name": m.get("name"),
+                "is_sdxl": bool(m.get("is_sdxl")),
+                "base_model": m.get("base_model"),
+                "cover_url": m.get("cover_url"),
+            }
+            for m in (body.get("models") or [])
+            if m.get("status") == 1 and (m.get("sd_name_in_api") or m.get("sd_name"))
+        ]
+        next_cursor = (body.get("pagination") or {}).get("next_cursor") or ""
+        return {"models": models, "next_cursor": next_cursor}
+
     @router.post("/generate")
     async def generate(req: GenerateRequest):
         cfg = _load_config()
         if not cfg.get("api_key"):
             raise HTTPException(status_code=400, detail="No API key configured")
+        if not cfg.get("model_name"):
+            raise HTTPException(status_code=400, detail="No model selected — search and pick one first")
 
         save_id = req.save_id
         turn = 0

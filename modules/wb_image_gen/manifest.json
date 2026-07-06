@@ -3,7 +3,7 @@
   "name": "Image Generation",
   "version": "1.0.0",
   "icon": "🎨",
-  "description": "Illustrates the story with Black Forest Labs FLUX.2 images. Auto-generates every N turns, or on demand with /image. Configure API key, model, and prompts in the Image Studio main-menu entry.",
+  "description": "Illustrates the story with Novita AI images. Auto-generates every N turns, or on demand with /image. Configure API key, model, and prompts in the Image Studio main-menu entry.",
   "dependencies": [],
   "consumes": {
     "state": ["turn", "history", "chat_messages", "world_id", "last_input_text", "active_save_id"],
@@ -24,7 +24,7 @@
     {
       "id": "image-studio",
       "label": "Image Studio",
-      "description": "Configure FLUX image generation and browse the gallery",
+      "description": "Configure Novita AI image generation and browse the gallery",
       "icon": "🎨",
       "screen": "ui/ImageStudio.jsx"
     }
