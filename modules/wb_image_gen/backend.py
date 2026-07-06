@@ -34,6 +34,9 @@ CIVITAI_SORTS = ["Most Downloaded", "Newest", "Highest Rated"]
 CIVITAI_LORA_TYPES = ["LORA", "LoCon", "DoRA"]
 # Civitai's nsfw param: false = SFW only, true = mixed. "only" post-filters.
 CIVITAI_NSFW_MODES = ["off", "include", "only"]
+# Queried searches (Meilisearch, relevance-ordered) are deep-fetched this many
+# 100-item pages per request so the proxy-side sort covers a wide net.
+CIVITAI_SEARCH_PAGES = 3
 CIVITAI_BASE_MODELS = [
     "SD 1.5", "SDXL 1.0", "Pony", "Illustrious", "NoobAI", "Flux.1 D", "Flux.2 D",
 ]
@@ -651,7 +654,8 @@ async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
         nsfw_mode = "off"
     sort = sort if sort in CIVITAI_SORTS else CIVITAI_SORTS[0]
     # With a `query`, Civitai routes to Meilisearch which ignores `sort` and
-    # returns relevance order — so fetch a full page and sort proxy-side below.
+    # returns relevance order — so pull several full pages and sort proxy-side.
+    pages = CIVITAI_SEARCH_PAGES if query else 1
     fetch_limit = 100 if query else max(1, min(100, limit))
     params = [
         ("types", lora_type if lora_type in CIVITAI_LORA_TYPES else "LORA"),
@@ -663,23 +667,40 @@ async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
         params.append(("query", query))
     if base_model:
         params.append(("baseModels", base_model))
-    if cursor:
-        params.append(("cursor", cursor))
 
+    raw_items: list[dict] = []
+    page_cursor = cursor
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
-        resp = await client.get(f"{CIVITAI_BASE}/models",
-                                headers=_civitai_headers(cfg), params=params)
-        if resp.status_code == 401:
-            raise RuntimeError("Civitai rejected the request: invalid API key")
-        if resp.status_code != 200:
-            raise RuntimeError(f"Civitai search failed ({resp.status_code}): "
-                               f"{resp.text[:300]}")
-        body = resp.json()
+        for _ in range(pages):
+            page_params = params + ([("cursor", page_cursor)] if page_cursor else [])
+            try:
+                resp = await client.get(f"{CIVITAI_BASE}/models",
+                                        headers=_civitai_headers(cfg), params=page_params)
+            except httpx.TransportError as e:
+                if raw_items:
+                    break  # keep what earlier pages returned
+                raise RuntimeError(f"Civitai search failed: {e}")
+            if resp.status_code == 401:
+                raise RuntimeError("Civitai rejected the request: invalid API key")
+            if resp.status_code != 200:
+                if raw_items:
+                    break
+                raise RuntimeError(f"Civitai search failed ({resp.status_code}): "
+                                   f"{resp.text[:300]}")
+            body = resp.json()
+            raw_items.extend(body.get("items") or [])
+            page_cursor = str((body.get("metadata") or {}).get("nextCursor") or "")
+            if not page_cursor:
+                break
 
-    items = [
-        flat for flat in (_flatten_civitai_model(m) for m in (body.get("items") or []))
-        if flat is not None
-    ]
+    seen_ids: set = set()
+    items = []
+    for model in raw_items:
+        flat = _flatten_civitai_model(model)
+        if flat is None or flat["id"] in seen_ids:
+            continue
+        seen_ids.add(flat["id"])
+        items.append(flat)
     if nsfw_mode == "only":
         items = [i for i in items if i["nsfw"]]
     if query:
@@ -689,8 +710,7 @@ async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
             "Newest": lambda i: i.get("published_at") or "",
         }
         items.sort(key=sort_keys[sort], reverse=True)
-    next_cursor = str((body.get("metadata") or {}).get("nextCursor") or "")
-    return {"items": items, "next_cursor": next_cursor}
+    return {"items": items, "next_cursor": page_cursor}
 
 
 async def _novita_match_lora(cfg: dict, entry: dict) -> dict | None:

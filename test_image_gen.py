@@ -839,6 +839,56 @@ def test_civitai_search_with_query_sorts_proxy_side(tmp_path):
         httpx.AsyncClient = original
 
 
+def test_civitai_search_with_query_chains_pages_and_dedupes(tmp_path):
+    backend = _load_backend(tmp_path)
+    requested = []
+
+    def _model(mid, downloads):
+        return {"id": mid, "name": f"m{mid}", "nsfw": False,
+                "stats": {"downloadCount": downloads, "thumbsUpCount": 0},
+                "modelVersions": [{"id": mid, "name": "v", "files": [], "images": []}]}
+
+    pages = {
+        "": {"items": [_model(1, 10), _model(2, 500)], "metadata": {"nextCursor": "c2"}},
+        "c2": {"items": [_model(2, 500), _model(3, 90)], "metadata": {"nextCursor": "c3"}},
+        "c3": {"items": [_model(4, 999)], "metadata": {"nextCursor": "c4"}},
+    }
+
+    class FakeResponse:
+        status_code = 200
+        def __init__(self, body):
+            self._body = body
+        def json(self):
+            return self._body
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def get(self, url, headers=None, params=None):
+            cursor = dict(params).get("cursor", "")
+            requested.append(cursor)
+            return FakeResponse(pages[cursor])
+
+    import httpx
+    original = httpx.AsyncClient
+    httpx.AsyncClient = FakeClient
+    try:
+        result = asyncio.run(backend._civitai_search_loras(
+            backend._default_config(), query="style", base_model="", lora_type="LORA",
+            sort="Most Downloaded", nsfw_mode="off", cursor="", limit=24))
+    finally:
+        httpx.AsyncClient = original
+
+    assert requested == ["", "c2", "c3"]                # CIVITAI_SEARCH_PAGES chained
+    assert result["next_cursor"] == "c4"                # load-more continues from there
+    ids = [i["id"] for i in result["items"]]
+    assert ids == ["4", "2", "3", "1"]                  # merged, deduped, sorted by downloads
+
+
 def test_civitai_nsfw_bool_config_migrates(tmp_path):
     backend = _load_backend(tmp_path)
     cfg = backend._default_config()
