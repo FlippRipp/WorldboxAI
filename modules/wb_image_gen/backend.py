@@ -76,6 +76,18 @@ KEY_MASK_PREFIX = "****"
 # Novita rejects prompts over 1024 characters.
 MAX_PROMPT_CHARS = 1024
 
+LORA_CONDITION_MAX_CHARS = 300
+
+LORA_CONDITION_PROMPT = """You gate style adapters (LoRAs) for an AI image generator. For each numbered condition below, decide whether it applies to the scene being illustrated. Be literal: a condition applies only when the scene actually shows or strongly implies it.
+
+SCENE:
+{narration}
+
+CONDITIONS:
+{conditions}
+
+Output ONLY a JSON array with the numbers of the conditions that apply, e.g. [1, 3]. Output [] if none apply."""
+
 POLL_INTERVAL_S = 2.0
 POLL_MAX_ITERATIONS = 240          # ~8 minutes
 POLL_MAX_TRANSIENT_FAILURES = 5
@@ -417,6 +429,57 @@ def _clean_image_prompt(raw: str) -> str:
     text = text.strip().strip('"').strip()
     text = re.sub(r"\s+", " ", text)
     return text[:MAX_PROMPT_CHARS]
+
+
+def _parse_condition_numbers(raw: str) -> set[int] | None:
+    """The JSON array of condition numbers from an LLM reply, or None when no
+    array can be found (callers fail open)."""
+    m = re.search(r"\[[\d,\s]*\]", raw or "")
+    if not m:
+        return None
+    try:
+        return {int(n) for n in json.loads(m.group(0))}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+async def _apply_lora_conditions(cfg: dict, narration: str, sdk) -> dict:
+    """A cfg copy whose lora_library drops active conditional LoRAs that the
+    fastest LLM slot judges irrelevant to this scene. Any failure (no LLM,
+    LLM error, unparseable reply) fails open: every active LoRA stays, same
+    as before conditions existed."""
+    conditional = [
+        e for e in _active_loras(cfg)
+        if str(e.get("condition") or "").strip()
+    ]
+    if not conditional or sdk is None:
+        return cfg
+    lines = "\n".join(
+        f"{i + 1}. {str(e['condition']).strip()[:LORA_CONDITION_MAX_CHARS]}"
+        for i, e in enumerate(conditional))
+    prompt = LORA_CONDITION_PROMPT.replace(
+        "{narration}", (narration or "")[-3000:]).replace("{conditions}", lines)
+    try:
+        sdk.llm._current_module = MODULE_ID
+        raw = await sdk.llm.generate(prompt, model_preference="fastest")
+    except Exception as e:
+        print(f"[Image Gen] LoRA condition check failed (keeping all): {e}")
+        return cfg
+    finally:
+        sdk.llm._current_module = ""
+    applies = _parse_condition_numbers(raw)
+    if applies is None:
+        print(f"[Image Gen] Unparseable LoRA condition reply (keeping all): {raw[:200]!r}")
+        return cfg
+    rejected = [e for i, e in enumerate(conditional) if (i + 1) not in applies]
+    if not rejected:
+        return cfg
+    rejected_ids = {e.get("id") for e in rejected}
+    library = [e for e in cfg.get("lora_library") or []
+               if not (isinstance(e, dict) and e.get("id") in rejected_ids)]
+    skipped = ", ".join(str(e.get("name") or e.get("id")) for e in rejected)
+    print(f"[Image Gen] Conditions skipped LoRAs for this scene: {skipped}")
+    return {**cfg, "lora_library": library}
 
 
 async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk) -> str:
@@ -889,6 +952,7 @@ def _normalize_lora_entry(item: dict) -> dict:
         "active": False,
         "strength": 0.7,
         "sd_name_override": "",
+        "condition": "",     # free-text situation gate; empty = always apply
         "novita": None,
         "novita_checked_at": None,
     })
@@ -961,6 +1025,13 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
     lock = _get_gen_lock()
     try:
         async with lock:
+            # Conditional LoRAs are gated first so both the trigger words fed
+            # to the prompt writer and the submit payload see the final set.
+            gated = await _apply_lora_conditions(cfg, narration, sdk)
+            if gated is not cfg:
+                cfg = gated
+                await _patch_record(record_id, loras=_applied_lora_names(cfg))
+
             if prompt_override:
                 image_prompt = _clean_image_prompt(prompt_override)
             else:
@@ -1140,6 +1211,7 @@ def get_router():
         active: bool | None = None
         strength: float | None = None
         sd_name_override: str | None = None
+        condition: str | None = None
 
     class KeySubmit(BaseModel):
         api_key: str
@@ -1434,6 +1506,8 @@ def get_router():
             entry["strength"] = max(0.0, min(1.0, float(patch.strength)))
         if patch.sd_name_override is not None:
             entry["sd_name_override"] = patch.sd_name_override.strip()
+        if patch.condition is not None:
+            entry["condition"] = patch.condition.strip()[:LORA_CONDITION_MAX_CHARS]
         _save_config(cfg)
         return {"entry": entry, "lora_library": cfg["lora_library"]}
 

@@ -520,6 +520,73 @@ def test_sd_payload_override_beats_missing_match_and_clamps(tmp_path):
     assert len(backend._novita_payload(cfg, "x")["request"]["loras"]) == backend.SD_LORAS_MAX
 
 
+def test_parse_condition_numbers(tmp_path):
+    backend = _load_backend(tmp_path)
+    assert backend._parse_condition_numbers("[1, 3]") == {1, 3}
+    assert backend._parse_condition_numbers("The answer is [2].") == {2}
+    assert backend._parse_condition_numbers("[]") == set()
+    assert backend._parse_condition_numbers("none of them") is None
+    assert backend._parse_condition_numbers("") is None
+
+
+def test_lora_condition_gate(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _lora_cfg(backend, lora_library=[
+        _lora(id="1", condition="a battle is happening"),
+        _lora(id="2", condition="the scene is set at night"),
+        _lora(id="3"),                                    # no condition: untouched
+        _lora(id="4", active=False, condition="ignored"), # inactive: not asked
+    ])
+
+    captured = {}
+    sdk = _make_sdk(reply="[2]", captured=captured)
+    gated = asyncio.run(backend._apply_lora_conditions(cfg, "Moonlit rooftops.", sdk))
+    assert [e["id"] for e in gated["lora_library"]] == ["2", "3", "4"]
+    assert cfg["lora_library"] != gated["lora_library"]  # original untouched
+    assert captured["preferences"] == ["fastest"]
+    prompt = captured["prompts"][0]
+    assert "Moonlit rooftops." in prompt
+    assert "1. a battle is happening" in prompt
+    assert "2. the scene is set at night" in prompt
+    assert "ignored" not in prompt
+
+    # Fail open: LLM error, unparseable reply, or no sdk keep everything.
+    async def boom(prompt, model_preference="balanced", max_tokens=None):
+        raise RuntimeError("llm down")
+    broken = SimpleNamespace(llm=SimpleNamespace(generate=boom, _current_module=""))
+    assert asyncio.run(backend._apply_lora_conditions(cfg, "x", broken)) is cfg
+    assert asyncio.run(backend._apply_lora_conditions(
+        cfg, "x", _make_sdk(reply="both feel right"))) is cfg
+    assert asyncio.run(backend._apply_lora_conditions(cfg, "x", None)) is cfg
+
+    # No conditional loras: the LLM is never called.
+    captured2 = {}
+    plain = _lora_cfg(backend, lora_library=[_lora(id="3")])
+    assert asyncio.run(backend._apply_lora_conditions(
+        plain, "x", _make_sdk(captured=captured2))) is plain
+    assert "prompts" not in captured2
+
+
+def test_lora_condition_patch_roundtrip(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend)
+    cfg = backend._load_config()
+    cfg["lora_library"] = [_lora(id="1")]
+    backend._save_config(cfg)
+
+    client = _client(backend)
+    body = client.patch("/loras/1", json={"condition": "  during storms  "}).json()
+    assert body["entry"]["condition"] == "during storms"
+    assert backend._load_config()["lora_library"][0]["condition"] == "during storms"
+
+    # Overlong conditions are capped, clearing works.
+    long = "x" * 1000
+    body = client.patch("/loras/1", json={"condition": long}).json()
+    assert len(body["entry"]["condition"]) == backend.LORA_CONDITION_MAX_CHARS
+    body = client.patch("/loras/1", json={"condition": ""}).json()
+    assert body["entry"]["condition"] == ""
+
+
 def test_flux2_payload_uses_download_links_with_token(tmp_path):
     backend = _load_backend(tmp_path)
     cfg = _lora_cfg(backend, model_name=backend.FLUX2_MODEL_NAME, model_base="",

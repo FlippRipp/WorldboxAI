@@ -310,8 +310,16 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
   const [override, setOverride] = useState(entry.sd_name_override || '');
   const [busy, setBusy] = useState(false);
   const [detected, setDetected] = useState(null); // new upload seen but still processing
+  const [condition, setCondition] = useState(entry.condition || '');
 
   useEffect(() => { setStrength(entry.strength ?? 0.7); }, [entry.strength]);
+  useEffect(() => { setCondition(entry.condition || ''); }, [entry.condition]);
+
+  const commitCondition = () => {
+    if ((entry.condition || '') !== condition.trim()) {
+      onPatch(entry.id, { condition: condition.trim() });
+    }
+  };
 
   // While the upload helper is open, watch the account's private uploads:
   // anything that appears after opening is assumed to be the file the user
@@ -414,6 +422,27 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
             onTouchEnd={() => onPatch(entry.id, { strength })}
             onKeyUp={() => onPatch(entry.id, { strength })}
             className="w-full accent-purple-500"
+          />
+        </div>
+      )}
+
+      {entry.active && (
+        <div className="flex items-center gap-2">
+          <label
+            className={`text-[10px] uppercase tracking-wider shrink-0 ${condition.trim() ? 'text-purple-400' : 'text-gray-500'}`}
+            title="Describe when this LoRA should be used; before each image an AI reads the scene and decides. Leave empty to always use it."
+          >
+            {condition.trim() ? 'AI-gated' : 'Condition'}
+          </label>
+          <input
+            type="text"
+            value={condition}
+            onChange={(e) => setCondition(e.target.value)}
+            onBlur={commitCondition}
+            onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+            placeholder="always on — describe a situation (e.g. battle scenes, at night) and an AI decides per image"
+            className={`${inputCls} text-xs`}
+            maxLength={300}
           />
         </div>
       )}
