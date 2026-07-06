@@ -373,6 +373,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   const [query, setQuery] = useState('');
   const [baseModel, setBaseModel] = useState('');
   const [loraType, setLoraType] = useState('LORA');
+  const [category, setCategory] = useState('');
   const [sort, setSort] = useState('Most Downloaded');
   const [items, setItems] = useState([]);
   const [nextCursor, setNextCursor] = useState('');
@@ -392,6 +393,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
     try {
       const params = new URLSearchParams({ query, lora_type: loraType, sort, nsfw: nsfwMode });
       if (baseModel) params.set('base_model', baseModel);
+      if (category) params.set('category', category);
       if (cursor) params.set('cursor', cursor);
       const res = await fetch(`${API_BASE}/civitai/loras?${params}`);
       if (!res.ok) {
@@ -407,7 +409,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
     } finally {
       if (seq === seqRef.current) setLoading(false);
     }
-  }, [query, baseModel, loraType, sort, nsfwMode]);
+  }, [query, baseModel, loraType, category, sort, nsfwMode]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -485,6 +487,12 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
             </select>
             <select value={loraType} onChange={(e) => setLoraType(e.target.value)} className={inputCls}>
               {(config.civitai_lora_types || ['LORA']).map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <select value={category} onChange={(e) => setCategory(e.target.value)} className={inputCls}>
+              <option value="">All categories</option>
+              {(config.civitai_categories || []).map((c) => (
+                <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>
+              ))}
             </select>
             <select value={sort} onChange={(e) => setSort(e.target.value)} className={inputCls}>
               {(config.civitai_sorts || []).map((s) => <option key={s} value={s}>{s}</option>)}

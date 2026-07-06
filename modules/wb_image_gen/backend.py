@@ -37,6 +37,13 @@ CIVITAI_NSFW_MODES = ["off", "include", "only"]
 # Queried searches (Meilisearch, relevance-ordered) are deep-fetched this many
 # 100-item pages per request so the proxy-side sort covers a wide net.
 CIVITAI_SEARCH_PAGES = 3
+# Civitai's category tags. The API's `tag=` filter does not compose with
+# `query=` (empty result), so queried searches post-filter on model tags.
+CIVITAI_CATEGORIES = [
+    "character", "style", "concept", "clothing", "poses", "action",
+    "background", "celebrity", "animal", "objects", "vehicle", "buildings",
+    "assets", "tool",
+]
 CIVITAI_BASE_MODELS = [
     "SD 1.5", "SDXL 1.0", "Pony", "Illustrious", "NoobAI", "Flux.1 D", "Flux.2 D",
 ]
@@ -638,6 +645,7 @@ def _flatten_civitai_model(model: dict) -> dict | None:
         "thumb_url": str(thumb or ""),
         "civitai_url": f"https://civitai.com/models/{model.get('id')}",
         "published_at": str(version.get("publishedAt") or ""),
+        "tags": [str(t).lower() for t in (model.get("tags") or [])[:30]],
         "nsfw": bool(model.get("nsfw")),
         "stats": {
             "downloads": int(stats.get("downloadCount") or 0),
@@ -648,7 +656,8 @@ def _flatten_civitai_model(model: dict) -> dict | None:
 
 async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
                                 lora_type: str, sort: str, nsfw_mode: str,
-                                cursor: str, limit: int) -> dict:
+                                cursor: str, limit: int,
+                                category: str = "") -> dict:
     import httpx
     if nsfw_mode not in CIVITAI_NSFW_MODES:
         nsfw_mode = "off"
@@ -663,8 +672,13 @@ async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
         ("limit", str(fetch_limit)),
         ("nsfw", "false" if nsfw_mode == "off" else "true"),
     ]
+    if category not in CIVITAI_CATEGORIES:
+        category = ""
     if query:
         params.append(("query", query))
+    elif category:
+        # tag= only works without query; queried searches post-filter below.
+        params.append(("tag", category))
     if base_model:
         params.append(("baseModels", base_model))
 
@@ -703,6 +717,8 @@ async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
         items.append(flat)
     if nsfw_mode == "only":
         items = [i for i in items if i["nsfw"]]
+    if query and category:
+        items = [i for i in items if category in i["tags"]]
     if query:
         sort_keys = {
             "Most Downloaded": lambda i: i["stats"]["downloads"],
@@ -1010,6 +1026,7 @@ def get_router():
         out["civitai_sorts"] = CIVITAI_SORTS
         out["civitai_lora_types"] = CIVITAI_LORA_TYPES
         out["civitai_nsfw_modes"] = CIVITAI_NSFW_MODES
+        out["civitai_categories"] = CIVITAI_CATEGORIES
         out["civitai_base_models"] = CIVITAI_BASE_MODELS
         out["flux2_model_name"] = FLUX2_MODEL_NAME
         out["checkpoint_family"] = _checkpoint_family(cfg)
@@ -1110,7 +1127,7 @@ def get_router():
     @router.get("/civitai/loras")
     async def civitai_loras(query: str = "", base_model: str = "", lora_type: str = "LORA",
                             sort: str = "Most Downloaded", nsfw: str = "off",
-                            cursor: str = "", limit: int = 24):
+                            category: str = "", cursor: str = "", limit: int = 24):
         cfg = _load_config()
         if nsfw not in CIVITAI_NSFW_MODES:
             nsfw = "off"
@@ -1121,6 +1138,7 @@ def get_router():
             return await _civitai_search_loras(
                 cfg, query=query.strip(), base_model=base_model.strip(),
                 lora_type=lora_type, sort=sort, nsfw_mode=nsfw,
+                category=category.strip().lower(),
                 cursor=cursor.strip(), limit=limit)
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))

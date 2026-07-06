@@ -636,6 +636,7 @@ def test_flatten_civitai_model(tmp_path):
     assert flat["civitai_url"] == "https://civitai.com/models/42"
     assert flat["trained_words"] == ["cool style"]
     assert flat["published_at"] == ""  # absent in fixture, defaults empty
+    assert flat["tags"] == []
 
     assert backend._flatten_civitai_model({"id": 1, "modelVersions": []}) is None
 
@@ -723,7 +724,8 @@ def test_civitai_loras_endpoint_gates_nsfw(tmp_path):
     resp = client.get("/civitai/loras?query=style&base_model=Pony&sort=Newest&lora_type=LoCon")
     assert resp.status_code == 200
     assert captured == {"query": "style", "base_model": "Pony", "lora_type": "LoCon",
-                        "sort": "Newest", "nsfw_mode": "off", "cursor": "", "limit": 24}
+                        "sort": "Newest", "nsfw_mode": "off", "category": "",
+                        "cursor": "", "limit": 24}
 
     # Unknown mode values degrade to off instead of erroring (or bypassing the gate).
     assert client.get("/civitai/loras?nsfw=true").status_code == 200
@@ -835,6 +837,60 @@ def test_civitai_search_with_query_sorts_proxy_side(tmp_path):
         # Without a query Civitai's own order is kept (and correct).
         assert run("Most Downloaded", query="") == ["mid", "big", "new"]
         assert seen["params"]["limit"] == "24"
+    finally:
+        httpx.AsyncClient = original
+
+
+def test_civitai_category_filter(tmp_path):
+    # Without a query the category rides the API's tag= param; with a query
+    # (where Civitai ignores tag=) items are post-filtered on their tags.
+    backend = _load_backend(tmp_path)
+    seen = {}
+
+    def _model(mid, tags):
+        return {"id": mid, "name": f"m{mid}", "nsfw": False, "tags": tags,
+                "stats": {"downloadCount": mid, "thumbsUpCount": 0},
+                "modelVersions": [{"id": mid, "name": "v", "files": [], "images": []}]}
+
+    class FakeResponse:
+        status_code = 200
+        def json(self):
+            return {"items": [
+                _model(1, ["Character", "anime"]),
+                _model(2, ["style"]),
+            ], "metadata": {}}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def get(self, url, headers=None, params=None):
+            seen["params"] = dict(params)
+            return FakeResponse()
+
+    import httpx
+    original = httpx.AsyncClient
+    httpx.AsyncClient = FakeClient
+    try:
+        def run(query, category):
+            return asyncio.run(backend._civitai_search_loras(
+                backend._default_config(), query=query, base_model="",
+                lora_type="LORA", sort="Most Downloaded", nsfw_mode="off",
+                cursor="", limit=24, category=category))
+
+        result = run("", "character")
+        assert seen["params"]["tag"] == "character"
+        assert len(result["items"]) == 2  # API already filtered; no post-filter
+
+        result = run("frieren", "character")
+        assert "tag" not in seen["params"]
+        assert [i["id"] for i in result["items"]] == ["1"]  # tag post-filter (case-folded)
+
+        result = run("", "not-a-category")
+        assert "tag" not in seen["params"]  # unknown category ignored
     finally:
         httpx.AsyncClient = original
 
