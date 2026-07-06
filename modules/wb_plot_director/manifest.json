@@ -74,6 +74,9 @@
   "commands": {
     "/plot": "on_command_plot"
   },
+  "command_help": {
+    "/plot": "Show the current story direction and plot threads"
+  },
   "prompt_blocks": [
     {
       "id": "plot_nudge",

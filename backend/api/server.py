@@ -227,6 +227,9 @@ async def get_modules():
         modules.append({
             "id": mod_id,
             "name": manifest.get("name", mod_id),
+            "icon": manifest.get("icon"),
+            "commands": manifest.get("commands", {}),
+            "command_help": manifest.get("command_help", {}),
             "ui_slots": manifest.get("ui_slots", []),
             "settings_schema": manifest.get("settings_schema", {}),
             "prompt_blocks": manifest.get("prompt_blocks", []),
@@ -1540,11 +1543,12 @@ async def websocket_endpoint(websocket: WebSocket):
     async def try_handle_command(data) -> bool:
         """Route ``/command`` inputs to module handlers declared in manifests.
 
-        Command turns bypass the story pipeline entirely: the exchange is
-        appended to the transcript (tagged ``meta.command`` so the prompt
-        compiler keeps it away from the LLM), persisted into the current turn,
-        and replayed with the same state_load + done pair the client already
-        handles for sync. Unknown commands fall through to a normal turn.
+        Command turns bypass the story pipeline entirely. Their output is
+        ephemeral: it is surfaced to the client as a ``command_result`` popup
+        rather than written into the transcript, so status readouts don't clutter
+        the story. Any state the handler wrote back (module_data, player fields)
+        is persisted and pushed to the client via ``state_update`` so widgets
+        refresh. Unknown commands fall through to a normal turn.
         """
         text = (data.get("text") or "").strip()
         if not text.startswith("/"):
@@ -1582,19 +1586,20 @@ async def websocket_endpoint(websocket: WebSocket):
             finally:
                 engine.sdk.llm._current_module = ""
 
-            meta = session_manager.build_message_meta()
-            meta["command"] = True
-            chat_messages = state.setdefault("chat_messages", [])
-            chat_messages.append({"role": "user", "content": text, "meta": dict(meta)})
-            chat_messages.append({"role": "system", "content": message or "(no output)", "meta": dict(meta)})
+            # Command output is ephemeral — it goes to a popup, not the
+            # transcript. Persist any writebacks the handler made and push the
+            # refreshed state so widgets (inventory, image trigger…) update.
             session_manager.save_manager.save_turn(
                 session_manager.active_save_id, state, state.get("turn", 0)
             )
-
-            out_state = dict(state)
-            out_state["swipes"] = session_manager.swipes_meta()
-            await websocket.send_json({"type": "state_load", "chat_messages": chat_messages})
-            await websocket.send_json({"type": "done", "state": out_state})
+            await websocket.send_json({
+                "type": "command_result",
+                "command": text,
+                "name": manifest.get("name", mod_id),
+                "icon": manifest.get("icon"),
+                "message": message or "(no output)",
+            })
+            await websocket.send_json({"type": "state_update", "state": dict(state)})
             return True
 
         return False

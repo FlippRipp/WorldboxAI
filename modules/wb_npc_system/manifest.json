@@ -82,5 +82,9 @@
   "commands": {
     "/npcs": "on_command_npcs",
     "/npclist": "on_command_npclist"
+  },
+  "command_help": {
+    "/npcs": "Show details on known NPCs",
+    "/npclist": "List all NPCs you've met"
   }
 }

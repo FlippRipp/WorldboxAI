@@ -54,6 +54,11 @@
     "/skills": "on_command_skills",
     "/level": "on_command_level"
   },
+  "command_help": {
+    "/stats": "Show your character's stats and HP",
+    "/skills": "Show your character's skills",
+    "/level": "Show your level and XP progress"
+  },
   "mutation_schema": {
     "hp_change": "integer, HP gained or lost by the player in the story. Use 0 if no player HP changed.",
     "stat_changes": "object mapping stat name (power/agility/vitality/intelligence/spirit/charm) to integer change. Empty object if none.",

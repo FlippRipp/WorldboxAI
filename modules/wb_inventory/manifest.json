@@ -54,6 +54,10 @@
     "/inventory": "on_command_inventory",
     "/inv": "on_command_inventory"
   },
+  "command_help": {
+    "/inventory": "Show your items and currency",
+    "/inv": "Show your items and currency (alias)"
+  },
   "mutation_schema": {
     "items_gained": "array of {name: str, qty: int, description: str (short, optional), tags: [str] (optional)} — items the PLAYER acquired in the narration (picked up, bought, was given, crafted, looted). Empty array if none.",
     "items_lost": "array of {name: str, qty: int} — items the player lost, consumed, sold, gave away, or had destroyed. Empty array if none.",

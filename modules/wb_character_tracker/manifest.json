@@ -44,5 +44,8 @@
   "character_panel": "character_panel.jsx",
   "commands": {
     "/character": "on_command_character"
+  },
+  "command_help": {
+    "/character": "Show your character sheet"
   }
 }

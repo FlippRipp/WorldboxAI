@@ -20,6 +20,9 @@
   "commands": {
     "/image": "on_command_image"
   },
+  "command_help": {
+    "/image": "Generate an illustration of the current scene"
+  },
   "modes": [
     {
       "id": "image-studio",

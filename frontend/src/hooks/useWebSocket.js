@@ -29,6 +29,8 @@ export function useWebSocket(onStateChange, onLLMCall) {
   const [pipelineStatus, setPipelineStatus] = useState(null);
   const [messages, setMessages] = useState([]);
   const [swipes, setSwipes] = useState(null);
+  // Latest slash-command output, shown in a popup instead of the story feed.
+  const [commandResult, setCommandResult] = useState(null);
   // Set when the user stops a turn: the discarded input, so the composer can
   // restore it. `at` makes consecutive stops with the same text distinct.
   const [restoredInput, setRestoredInput] = useState(null);
@@ -192,6 +194,15 @@ export function useWebSocket(onStateChange, onLLMCall) {
         if (chatMessages.length > 0) {
           setMessages(mapServerMessages(chatMessages, null));
         }
+      } else if (data.type === 'command_result') {
+        // Slash-command output: surface it in a popup, never the transcript.
+        setCommandResult({
+          command: data.command,
+          name: data.name,
+          icon: data.icon,
+          message: data.message,
+          at: Date.now(),
+        });
       } else if (data.type === 'state_update') {
         if (data.state && onStateChangeRef.current) onStateChangeRef.current(data.state);
       } else if (data.type === 'llm_call') {
@@ -231,6 +242,16 @@ export function useWebSocket(onStateChange, onLLMCall) {
       wsRef.current.send(JSON.stringify({ action: 'turn', text }));
     }
   }, [resetStream]);
+
+  // A slash command: no user bubble, no stream — the server answers with a
+  // `command_result` popup and a `state_update`, leaving the transcript alone.
+  const sendCommand = useCallback((text) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ action: 'turn', text }));
+    }
+  }, []);
+
+  const clearCommandResult = useCallback(() => setCommandResult(null), []);
 
   const sendRegenerate = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -291,6 +312,7 @@ export function useWebSocket(onStateChange, onLLMCall) {
 
   return {
     isConnected, isReconnecting, messages, currentStream, currentReasoning, swipes, postProcessing, pipelineStatus, restoredInput,
-    sendMessage, sendRegenerate, sendContinue, sendIntro, sendStop, setMessages, setSwipes, applyServerState,
+    commandResult, clearCommandResult,
+    sendMessage, sendCommand, sendRegenerate, sendContinue, sendIntro, sendStop, setMessages, setSwipes, applyServerState,
   };
 }

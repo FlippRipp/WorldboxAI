@@ -86,5 +86,8 @@
   ],
   "commands": {
     "/time": "on_command_time"
+  },
+  "command_help": {
+    "/time": "Show the current in-game date and time"
   }
 }

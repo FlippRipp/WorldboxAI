@@ -7,6 +7,7 @@ import Header from './components/Header/Header';
 import Sidebar from './components/Sidebar/Sidebar';
 import { ChatFeed } from './components/Chat/ChatFeed';
 import ChatInput from './components/Chat/ChatInput';
+import CommandResultModal from './components/Chat/CommandResultModal';
 import SlotRenderer from './components/Slots/SlotRenderer';
 import SettingsModal from './SettingsModal';
 import PromptStudio from './PromptStudio';
@@ -131,8 +132,19 @@ function AppContent() {
   }, []);
 
   const handleSend = useCallback((text) => {
-    ws.sendMessage(text);
-  }, [ws]);
+    // A recognized slash command (active module + declared command) is dispatched
+    // as a command — its result pops up instead of entering the story feed.
+    // Unrecognized "/…" text falls through as a normal turn.
+    const first = text.trim().split(/\s+/)[0]?.toLowerCase();
+    const active = session.moduleConfigs?.__active_modules__;
+    const activeSet = Array.isArray(active) ? new Set(active) : null;
+    const isCommand = !!first && first.startsWith('/') && (modules || []).some(
+      (m) => (!activeSet || activeSet.has(m.id))
+        && Object.prototype.hasOwnProperty.call(m.commands || {}, first)
+    );
+    if (isCommand) ws.sendCommand(text);
+    else ws.sendMessage(text);
+  }, [ws, modules, session.moduleConfigs]);
 
   const handleContinue = useCallback(() => {
     ws.sendContinue();
@@ -400,6 +412,17 @@ function AppContent() {
     const gameModules = Array.isArray(activeModuleIds)
       ? (modules || []).filter((m) => activeModuleIds.includes(m.id))
       : modules;
+    // Flatten the active modules' declared slash commands for composer autocomplete.
+    const slashCommands = (gameModules || [])
+      .flatMap((m) =>
+        Object.keys(m.commands || {}).map((cmd) => ({
+          command: cmd,
+          icon: m.icon,
+          module: m.name,
+          description: (m.command_help || {})[cmd] || m.name,
+        }))
+      )
+      .sort((a, b) => a.command.localeCompare(b.command));
     return (
     <ModuleEventProvider>
       <div className="flex h-dvh bg-gray-900 text-gray-100 font-sans overflow-hidden">
@@ -461,6 +484,7 @@ function AppContent() {
           )}
 
           <ChatInput
+            commands={slashCommands}
             onSend={handleSend}
             onContinue={handleContinue}
             onStop={handleStop}
@@ -473,6 +497,8 @@ function AppContent() {
             disabled={!ws.isConnected || ws.isReconnecting}
           />
         </div>
+
+        <CommandResultModal result={ws.commandResult} onClose={ws.clearCommandResult} />
 
         <SettingsModal
           isOpen={isSettingsOpen}
