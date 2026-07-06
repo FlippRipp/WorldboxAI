@@ -862,6 +862,7 @@ export default function ImageStudio({ onBack }) {
   const [lightbox, setLightbox] = useState(null);
 
   const [testPrompt, setTestPrompt] = useState('');
+  const [testRefine, setTestRefine] = useState(true);
   const [testError, setTestError] = useState('');
   const pollRef = useRef(null);
 
@@ -985,7 +986,7 @@ export default function ImageStudio({ onBack }) {
       const res = await fetch(`${API_BASE}/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt_override: testPrompt.trim(), save_id: '__studio__' }),
+        body: JSON.stringify({ prompt_override: testPrompt.trim(), save_id: '__studio__', refine: testRefine }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -1369,7 +1370,10 @@ export default function ImageStudio({ onBack }) {
         <section className={sectionCls}>
           <h2 className="text-sm font-semibold text-gray-300">Test Generate</h2>
           <p className="text-xs text-gray-600">
-            Sends your text straight to the image model (skips the prompt-writer LLM). Uses saved settings — save changes first.
+            {testRefine
+              ? 'Your text is treated as a scene: the prompt-writer LLM refines it with your templates, trigger words and style — exactly like a story illustration.'
+              : 'Sends your text straight to the image model, word for word (skips the prompt-writer LLM).'}
+            {' '}Uses saved settings — save changes first.
           </p>
           <div className="flex gap-2">
             <input
@@ -1377,7 +1381,9 @@ export default function ImageStudio({ onBack }) {
               value={testPrompt}
               onChange={(e) => setTestPrompt(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && testPrompt.trim()) testGenerate(); }}
-              placeholder="A moonlit castle above a stormy sea, oil painting"
+              placeholder={testRefine
+                ? 'The knight faces the dragon on the crumbling bridge at dawn'
+                : 'A moonlit castle above a stormy sea, oil painting'}
               className={inputCls}
             />
             <button
@@ -1388,6 +1394,15 @@ export default function ImageStudio({ onBack }) {
               Generate
             </button>
           </div>
+          <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={testRefine}
+              onChange={(e) => setTestRefine(e.target.checked)}
+              className="accent-purple-500"
+            />
+            Refine with the prompt-writer LLM (uncheck to send the text as-is)
+          </label>
           {!config.has_key && (
             <p className="text-xs text-yellow-500">Save a Novita API key in the Setup tab first.</p>
           )}

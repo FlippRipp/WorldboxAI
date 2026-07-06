@@ -1188,6 +1188,9 @@ def get_router():
         prompt_override: str | None = None
         save_id: str | None = None
         retry_record_id: str | None = None
+        # Treat prompt_override as a scene and run it through the
+        # prompt-writer LLM instead of sending it to Novita verbatim.
+        refine: bool = False
 
     class LoraSave(BaseModel):
         id: str
@@ -1556,6 +1559,12 @@ def get_router():
             save_id = save_id or getattr(session_manager, "active_save_id", None) or "unknown"
         else:
             save_id = save_id or "__studio__"
+            if req.refine:
+                # The typed text becomes the scene; the pipeline's prompt
+                # writer refines it exactly like a story illustration (trigger
+                # words, quality tags, style suffix, conditional LoRAs).
+                narration = prompt_override
+                prompt_override = None
 
         record_id = _spawn_generation(
             save_id=save_id, turn=turn, narration=narration, history=history_text,

@@ -1313,3 +1313,32 @@ def test_generate_endpoint_studio_override_and_busy(tmp_path):
     assert record["status"] == "done"
     assert record["save_id"] == "__studio__"
     assert record["image_prompt"] == "a red door"
+
+
+def test_generate_endpoint_refine_runs_prompt_writer(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend)
+    _fake_novita(backend)
+    captured = {}
+    sdk = _make_sdk(reply="a refined moonlit castle", captured=captured)
+    backend.set_services({"data_dir": str(tmp_path),
+                          "engine": SimpleNamespace(sdk=sdk)})
+    client = _client(backend)
+
+    resp = client.post("/generate", json={"prompt_override": "castle by the sea",
+                                          "refine": True})
+    assert resp.status_code == 200
+    record_id = resp.json()["record_id"]
+
+    for _ in range(100):
+        record = next((r for r in backend._read_index() if r["id"] == record_id), None)
+        if record and record["status"] in ("done", "error"):
+            break
+        import time as _t
+        _t.sleep(0.02)
+    assert record["status"] == "done"
+    # The typed text became the scene; the LLM's output became the prompt.
+    assert record["narration_excerpt"] == "castle by the sea"
+    assert record["image_prompt"] == "a refined moonlit castle"
+    assert "castle by the sea" in captured["prompts"][0]
+    assert captured["preferences"] == ["smartest"]
