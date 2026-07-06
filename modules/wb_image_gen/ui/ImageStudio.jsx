@@ -380,7 +380,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   const debounceRef = useRef(null);
   const seqRef = useRef(0);
 
-  const nsfw = !!draft.civitai_nsfw;
+  const nsfwMode = config.has_civitai_key ? (draft.civitai_nsfw || 'off') : 'off';
   const savedIds = new Set(library.map((e) => e.id));
 
   const search = useCallback(async (cursor = '') => {
@@ -388,7 +388,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
     setLoading(true);
     setError('');
     try {
-      const params = new URLSearchParams({ query, lora_type: loraType, sort, nsfw: String(nsfw) });
+      const params = new URLSearchParams({ query, lora_type: loraType, sort, nsfw: nsfwMode });
       if (baseModel) params.set('base_model', baseModel);
       if (cursor) params.set('cursor', cursor);
       const res = await fetch(`${API_BASE}/civitai/loras?${params}`);
@@ -405,7 +405,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
     } finally {
       if (seq === seqRef.current) setLoading(false);
     }
-  }, [query, baseModel, loraType, sort, nsfw]);
+  }, [query, baseModel, loraType, sort, nsfwMode]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -489,14 +489,16 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
             </select>
           </div>
           <div className="flex items-center gap-4">
-            <Toggle
-              checked={nsfw}
-              onChange={(v) => {
-                if (v && !config.has_civitai_key) return;
-                set('civitai_nsfw', v);
-              }}
-              label={<span className={config.has_civitai_key ? '' : 'opacity-50'}>Include NSFW</span>}
-            />
+            <select
+              value={nsfwMode}
+              onChange={(e) => set('civitai_nsfw', e.target.value)}
+              disabled={!config.has_civitai_key}
+              className={`${inputCls} max-w-[160px] disabled:opacity-50`}
+            >
+              <option value="off">No NSFW</option>
+              <option value="include">NSFW</option>
+              <option value="only">NSFW only</option>
+            </select>
             {!config.has_civitai_key && (
               <span className="text-[11px] text-yellow-600">Save a Civitai API key to browse NSFW LoRAs.</span>
             )}
@@ -662,7 +664,7 @@ export default function ImageStudio({ onBack }) {
         prompt_template_tags: draft.prompt_template_tags,
         pony_quality_tags: draft.pony_quality_tags,
         style_suffix: draft.style_suffix,
-        civitai_nsfw: !!draft.civitai_nsfw,
+        civitai_nsfw: draft.civitai_nsfw || 'off',
       };
       if (keyInput.trim()) payload.api_key = keyInput.trim();
       if (civitaiKeyInput.trim()) payload.civitai_api_key = civitaiKeyInput.trim();

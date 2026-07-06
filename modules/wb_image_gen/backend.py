@@ -32,6 +32,8 @@ FLUX2_SIZE_MIN, FLUX2_SIZE_MAX = 256, 1536
 
 CIVITAI_SORTS = ["Most Downloaded", "Newest", "Highest Rated"]
 CIVITAI_LORA_TYPES = ["LORA", "LoCon", "DoRA"]
+# Civitai's nsfw param: false = SFW only, true = mixed. "only" post-filters.
+CIVITAI_NSFW_MODES = ["off", "include", "only"]
 CIVITAI_BASE_MODELS = [
     "SD 1.5", "SDXL 1.0", "Pony", "Illustrious", "NoobAI", "Flux.1 D", "Flux.2 D",
 ]
@@ -128,7 +130,7 @@ def _default_config() -> dict:
         "pony_quality_tags": DEFAULT_PONY_QUALITY_TAGS,
         "style_suffix": "",
         "civitai_api_key": "",
-        "civitai_nsfw": False,
+        "civitai_nsfw": "off",          # one of CIVITAI_NSFW_MODES
         "lora_library": [],             # saved Civitai LoRAs; see _normalize_lora_entry
     }
 
@@ -151,6 +153,9 @@ def _load_config() -> dict:
                 cfg.update({k: v for k, v in stored.items() if k in cfg})
         except (json.JSONDecodeError, OSError) as e:
             print(f"[Image Gen] Failed to read config.json: {e}")
+    # civitai_nsfw was a bool before it became a mode string.
+    if cfg.get("civitai_nsfw") not in CIVITAI_NSFW_MODES:
+        cfg["civitai_nsfw"] = "include" if cfg.get("civitai_nsfw") is True else "off"
     return cfg
 
 
@@ -638,14 +643,16 @@ def _flatten_civitai_model(model: dict) -> dict | None:
 
 
 async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
-                                lora_type: str, sort: str, nsfw: bool,
+                                lora_type: str, sort: str, nsfw_mode: str,
                                 cursor: str, limit: int) -> dict:
     import httpx
+    if nsfw_mode not in CIVITAI_NSFW_MODES:
+        nsfw_mode = "off"
     params = [
         ("types", lora_type if lora_type in CIVITAI_LORA_TYPES else "LORA"),
         ("sort", sort if sort in CIVITAI_SORTS else CIVITAI_SORTS[0]),
         ("limit", str(max(1, min(100, limit)))),
-        ("nsfw", "true" if nsfw else "false"),
+        ("nsfw", "false" if nsfw_mode == "off" else "true"),
     ]
     if query:
         params.append(("query", query))
@@ -668,6 +675,8 @@ async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
         flat for flat in (_flatten_civitai_model(m) for m in (body.get("items") or []))
         if flat is not None
     ]
+    if nsfw_mode == "only":
+        items = [i for i in items if i["nsfw"]]
     next_cursor = str((body.get("metadata") or {}).get("nextCursor") or "")
     return {"items": items, "next_cursor": next_cursor}
 
@@ -926,7 +935,7 @@ def get_router():
         pony_quality_tags: str | None = None
         style_suffix: str | None = None
         civitai_api_key: str | None = None
-        civitai_nsfw: bool | None = None
+        civitai_nsfw: str | None = None
 
     class GenerateRequest(BaseModel):
         prompt_override: str | None = None
@@ -968,6 +977,7 @@ def get_router():
         out["prompt_style"] = _prompt_style(cfg)
         out["civitai_sorts"] = CIVITAI_SORTS
         out["civitai_lora_types"] = CIVITAI_LORA_TYPES
+        out["civitai_nsfw_modes"] = CIVITAI_NSFW_MODES
         out["civitai_base_models"] = CIVITAI_BASE_MODELS
         out["flux2_model_name"] = FLUX2_MODEL_NAME
         out["checkpoint_family"] = _checkpoint_family(cfg)
@@ -1003,6 +1013,9 @@ def get_router():
         if ("prompt_model_preference" in incoming
                 and incoming["prompt_model_preference"] not in ("fastest", "balanced", "smartest")):
             raise HTTPException(status_code=400, detail="prompt_model_preference must be a model slot")
+        if "civitai_nsfw" in incoming and incoming["civitai_nsfw"] not in CIVITAI_NSFW_MODES:
+            raise HTTPException(status_code=400,
+                                detail=f"civitai_nsfw must be one of {CIVITAI_NSFW_MODES}")
 
         cfg.update(incoming)
         _save_config(cfg)
@@ -1064,16 +1077,18 @@ def get_router():
 
     @router.get("/civitai/loras")
     async def civitai_loras(query: str = "", base_model: str = "", lora_type: str = "LORA",
-                            sort: str = "Most Downloaded", nsfw: bool = False,
+                            sort: str = "Most Downloaded", nsfw: str = "off",
                             cursor: str = "", limit: int = 24):
         cfg = _load_config()
-        if nsfw and not cfg.get("civitai_api_key"):
+        if nsfw not in CIVITAI_NSFW_MODES:
+            nsfw = "off"
+        if nsfw != "off" and not cfg.get("civitai_api_key"):
             raise HTTPException(status_code=400,
                                 detail="NSFW browsing needs a Civitai API key")
         try:
             return await _civitai_search_loras(
                 cfg, query=query.strip(), base_model=base_model.strip(),
-                lora_type=lora_type, sort=sort, nsfw=nsfw,
+                lora_type=lora_type, sort=sort, nsfw_mode=nsfw,
                 cursor=cursor.strip(), limit=limit)
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))

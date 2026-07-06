@@ -707,9 +707,10 @@ def test_civitai_loras_endpoint_gates_nsfw(tmp_path):
     backend = _load_backend(tmp_path)
     client = _client(backend)
 
-    resp = client.get("/civitai/loras?nsfw=true")
-    assert resp.status_code == 400
-    assert "Civitai API key" in resp.json()["detail"]
+    for mode in ("include", "only"):
+        resp = client.get(f"/civitai/loras?nsfw={mode}")
+        assert resp.status_code == 400
+        assert "Civitai API key" in resp.json()["detail"]
 
     captured = {}
 
@@ -721,7 +722,75 @@ def test_civitai_loras_endpoint_gates_nsfw(tmp_path):
     resp = client.get("/civitai/loras?query=style&base_model=Pony&sort=Newest&lora_type=LoCon")
     assert resp.status_code == 200
     assert captured == {"query": "style", "base_model": "Pony", "lora_type": "LoCon",
-                        "sort": "Newest", "nsfw": False, "cursor": "", "limit": 24}
+                        "sort": "Newest", "nsfw_mode": "off", "cursor": "", "limit": 24}
+
+    # Unknown mode values degrade to off instead of erroring (or bypassing the gate).
+    assert client.get("/civitai/loras?nsfw=true").status_code == 200
+    assert captured["nsfw_mode"] == "off"
+
+
+def test_civitai_search_nsfw_modes(tmp_path):
+    backend = _load_backend(tmp_path)
+    seen = {}
+
+    def _mixed_body():
+        version = {"id": 1, "name": "v1", "files": [], "images": []}
+        return {"items": [
+            {"id": 1, "nsfw": False, "name": "safe", "modelVersions": [dict(version, id=1)]},
+            {"id": 2, "nsfw": True, "name": "spicy", "modelVersions": [dict(version, id=2)]},
+        ], "metadata": {"nextCursor": ""}}
+
+    class FakeResponse:
+        status_code = 200
+        def json(self):
+            return _mixed_body()
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def get(self, url, headers=None, params=None):
+            seen["params"] = dict(params)
+            return FakeResponse()
+
+    import httpx
+    original = httpx.AsyncClient
+    httpx.AsyncClient = FakeClient
+    try:
+        def run(mode):
+            return asyncio.run(backend._civitai_search_loras(
+                backend._default_config(), query="", base_model="", lora_type="LORA",
+                sort="Most Downloaded", nsfw_mode=mode, cursor="", limit=24))
+
+        assert seen == {}
+        result = run("off")
+        assert seen["params"]["nsfw"] == "false"
+        assert [i["nsfw"] for i in result["items"]] == [False, True]  # no post-filter
+
+        result = run("include")
+        assert seen["params"]["nsfw"] == "true"
+        assert len(result["items"]) == 2
+
+        result = run("only")
+        assert seen["params"]["nsfw"] == "true"
+        assert [i["name"] for i in result["items"]] == ["spicy"]
+    finally:
+        httpx.AsyncClient = original
+
+
+def test_civitai_nsfw_bool_config_migrates(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = backend._default_config()
+    cfg["civitai_nsfw"] = True  # pre-dropdown config file
+    backend._save_config(cfg)
+    assert backend._load_config()["civitai_nsfw"] == "include"
+
+    cfg["civitai_nsfw"] = False
+    backend._save_config(cfg)
+    assert backend._load_config()["civitai_nsfw"] == "off"
 
 
 def test_models_endpoint_pins_flux2(tmp_path):
@@ -746,12 +815,13 @@ def test_civitai_key_masked_in_config(tmp_path):
     backend = _load_backend(tmp_path)
     client = _client(backend)
 
-    resp = client.put("/config", json={"civitai_api_key": "civsecret99", "civitai_nsfw": True})
+    resp = client.put("/config", json={"civitai_api_key": "civsecret99", "civitai_nsfw": "only"})
     body = resp.json()
     assert body["civitai_api_key"] == "****t99" or body["civitai_api_key"].endswith("t99")
     assert body["has_civitai_key"] is True
-    assert body["civitai_nsfw"] is True
+    assert body["civitai_nsfw"] == "only"
     assert "civsecret99" not in resp.text
+    assert client.put("/config", json={"civitai_nsfw": "everything"}).status_code == 400
 
     # Masked round-trip keeps the stored key.
     client.put("/config", json={"civitai_api_key": body["civitai_api_key"]})
