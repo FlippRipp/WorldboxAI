@@ -255,7 +255,9 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch }) {
     <div className={`bg-gray-950/60 border border-gray-800 rounded-lg p-3 space-y-2 ${!compatible ? 'opacity-60' : ''}`}>
       <div className="flex items-center gap-3">
         {entry.thumb_url ? (
-          <img src={entry.thumb_url} alt="" loading="lazy" className="w-10 h-10 rounded object-cover shrink-0 bg-gray-800" />
+          <a href={entry.civitai_url} target="_blank" rel="noreferrer" className="shrink-0" title="Open on Civitai">
+            <img src={entry.thumb_url} alt="" loading="lazy" className="w-10 h-10 rounded object-cover bg-gray-800" />
+          </a>
         ) : (
           <div className="w-10 h-10 rounded bg-gray-800 shrink-0" />
         )}
@@ -510,7 +512,9 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
             {items.map((item) => (
               <div key={item.id} className="bg-gray-950/60 border border-gray-800 rounded-lg overflow-hidden">
                 {item.thumb_url ? (
-                  <img src={item.thumb_url} alt="" loading="lazy" className="w-full h-28 object-cover bg-gray-800" />
+                  <a href={item.civitai_url} target="_blank" rel="noreferrer" title="Open on Civitai">
+                    <img src={item.thumb_url} alt="" loading="lazy" className="w-full h-28 object-cover bg-gray-800" />
+                  </a>
                 ) : (
                   <div className="w-full h-28 bg-gray-800" />
                 )}
