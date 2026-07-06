@@ -210,6 +210,64 @@ function ModelPicker({ value, valueBase, hasKey, onSelect }) {
   );
 }
 
+// API-key input with its own submit: the key is validated against the
+// provider before it is stored, independent of the main Save button.
+function KeyField({ provider, label, placeholder, saved, savedMask, onSaved, children }) {
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState(null); // { ok, msg }
+
+  const submit = async () => {
+    if (!value.trim() || busy) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      const res = await fetch(`${API_BASE}/keys/${provider}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: value.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      onSaved(data);
+      setValue('');
+      setStatus({ ok: true, msg: 'Key is valid — saved ✓' });
+    } catch (e) {
+      setStatus({ ok: false, msg: String(e.message || e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <label className={labelCls}>{label}</label>
+      <div className="flex gap-2">
+        <input
+          type="password"
+          value={value}
+          onChange={(e) => { setValue(e.target.value); setStatus(null); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+          placeholder={saved ? `Saved (${savedMask}) — type to replace` : placeholder}
+          className={inputCls}
+          autoComplete="off"
+        />
+        <button
+          onClick={submit}
+          disabled={busy || !value.trim()}
+          className="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+        >
+          {busy ? 'Checking…' : 'Submit'}
+        </button>
+      </div>
+      {status && (
+        <p className={`text-xs mt-1 ${status.ok ? 'text-green-400' : 'text-red-400'}`}>{status.msg}</p>
+      )}
+      {children}
+    </div>
+  );
+}
+
 // Mirror of the backend's _base_family heuristic.
 function baseFamily(base) {
   const ident = String(base || '').toLowerCase();
@@ -685,8 +743,6 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
 export default function ImageStudio({ onBack }) {
   const [config, setConfig] = useState(null);
   const [draft, setDraft] = useState({});
-  const [keyInput, setKeyInput] = useState('');
-  const [civitaiKeyInput, setCivitaiKeyInput] = useState('');
   const [library, setLibrary] = useState([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
@@ -752,12 +808,12 @@ export default function ImageStudio({ onBack }) {
     };
   }, [pendingCount, loadImages]);
 
+  // Keys are submitted (and validated) through their own KeyField buttons, so
+  // they never count towards the draft's dirtiness.
   const dirty =
     config &&
-    (keyInput.trim() !== '' ||
-      civitaiKeyInput.trim() !== '' ||
-      JSON.stringify({ ...draft, api_key: '', civitai_api_key: '', lora_library: [] }) !==
-        JSON.stringify({ ...config, api_key: '', civitai_api_key: '', lora_library: [] }));
+    JSON.stringify({ ...draft, api_key: '', civitai_api_key: '', lora_library: [] }) !==
+      JSON.stringify({ ...config, api_key: '', civitai_api_key: '', lora_library: [] });
 
   // Mirror of the backend's _prompt_style heuristic, live against the draft.
   const modelIdent = `${draft.model_base || ''} ${draft.model_name || ''}`.toLowerCase();
@@ -792,8 +848,6 @@ export default function ImageStudio({ onBack }) {
         style_suffix: draft.style_suffix,
         civitai_nsfw: draft.civitai_nsfw || 'off',
       };
-      if (keyInput.trim()) payload.api_key = keyInput.trim();
-      if (civitaiKeyInput.trim()) payload.civitai_api_key = civitaiKeyInput.trim();
       const res = await fetch(`${API_BASE}/config`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -807,8 +861,6 @@ export default function ImageStudio({ onBack }) {
       setConfig(data);
       setDraft(data);
       setLibrary(data.lora_library || []);
-      setKeyInput('');
-      setCivitaiKeyInput('');
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 2000);
     } catch (e) {
@@ -929,18 +981,16 @@ export default function ImageStudio({ onBack }) {
         {/* Setup: keys + model */}
         {tab === 'setup' && (
         <section className={sectionCls}>
-          <div>
-            <label className={labelCls}>Novita API Key</label>
-            <input
-              type="password"
-              value={keyInput}
-              onChange={(e) => setKeyInput(e.target.value)}
-              placeholder={config.has_key ? `Saved (${config.api_key}) — type to replace` : 'Paste your novita.ai key'}
-              className={inputCls}
-              autoComplete="off"
-            />
+          <KeyField
+            provider="novita"
+            label="Novita API Key"
+            placeholder="Paste your novita.ai key"
+            saved={!!config.has_key}
+            savedMask={config.api_key}
+            onSaved={(data) => { setConfig(data); setLibrary(data.lora_library || []); }}
+          >
             <p className="text-xs text-gray-600 mt-1">
-              Stored locally on this machine only.{' '}
+              Checked against Novita on submit; stored locally on this machine only.{' '}
               <button
                 onClick={() => setShowKeyGuide((s) => !s)}
                 className="text-purple-400 hover:underline"
@@ -981,17 +1031,15 @@ export default function ImageStudio({ onBack }) {
                 </li>
               </ol>
             )}
-          </div>
-          <div>
-            <label className={labelCls}>Civitai API Key (optional)</label>
-            <input
-              type="password"
-              value={civitaiKeyInput}
-              onChange={(e) => setCivitaiKeyInput(e.target.value)}
-              placeholder={config.has_civitai_key ? `Saved (${config.civitai_api_key}) — type to replace` : 'Paste your civitai.com key'}
-              className={inputCls}
-              autoComplete="off"
-            />
+          </KeyField>
+          <KeyField
+            provider="civitai"
+            label="Civitai API Key (optional)"
+            placeholder="Paste your civitai.com key"
+            saved={!!config.has_civitai_key}
+            savedMask={config.civitai_api_key}
+            onSaved={(data) => { setConfig(data); setLibrary(data.lora_library || []); }}
+          >
             <p className="text-xs text-gray-600 mt-1">
               Needed for NSFW LoRA browsing and for FLUX.2 LoRA download links (Civitai requires auth on
               downloads). Create one under{' '}
@@ -1000,7 +1048,7 @@ export default function ImageStudio({ onBack }) {
               </a>
               . Stored locally on this machine only.
             </p>
-          </div>
+          </KeyField>
           <ModelPicker
             value={draft.model_name}
             valueBase={draft.model_base}

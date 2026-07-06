@@ -767,6 +767,42 @@ async def _novita_match_lora(cfg: dict, entry: dict) -> dict | None:
     return None
 
 
+async def _validate_novita_key(key: str) -> bool:
+    """True/False for accepted/rejected; raises RuntimeError when Novita is
+    unreachable (so the caller can distinguish 'bad key' from 'no answer')."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=10.0)) as client:
+            resp = await client.get(
+                f"{NOVITA_BASE}/v3/model",
+                headers={"Authorization": f"Bearer {key}", "accept": "application/json"},
+                params={"pagination.limit": 1})
+    except httpx.TransportError as e:
+        raise RuntimeError(f"Could not reach Novita: {e}")
+    if resp.status_code in (401, 403):
+        return False
+    if resp.status_code == 200:
+        return True
+    raise RuntimeError(f"Novita answered with HTTP {resp.status_code} — try again later")
+
+
+async def _validate_civitai_key(key: str) -> bool:
+    """Civitai's /models ignores bad tokens, but /me 401s on them."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=10.0)) as client:
+            resp = await client.get(
+                f"{CIVITAI_BASE}/me",
+                headers={"Authorization": f"Bearer {key}", "accept": "application/json"})
+    except httpx.TransportError as e:
+        raise RuntimeError(f"Could not reach Civitai: {e}")
+    if resp.status_code in (401, 403):
+        return False
+    if resp.status_code == 200:
+        return True
+    raise RuntimeError(f"Civitai answered with HTTP {resp.status_code} — try again later")
+
+
 def _normalize_lora_entry(item: dict) -> dict:
     """Library entry from a browser selection, with activation defaults."""
     entry = {k: item.get(k) for k in (
@@ -1033,6 +1069,9 @@ def get_router():
         strength: float | None = None
         sd_name_override: str | None = None
 
+    class KeySubmit(BaseModel):
+        api_key: str
+
     def _public_config(cfg: dict) -> dict:
         out = dict(cfg)
         out["api_key"] = _mask_key(cfg.get("api_key", ""))
@@ -1088,6 +1127,31 @@ def get_router():
                                 detail=f"civitai_nsfw must be one of {CIVITAI_NSFW_MODES}")
 
         cfg.update(incoming)
+        _save_config(cfg)
+        return _public_config(cfg)
+
+    @router.post("/keys/{provider}")
+    async def submit_key(provider: str, body: KeySubmit):
+        """Validate a key against its provider before storing it."""
+        if provider not in ("novita", "civitai"):
+            raise HTTPException(status_code=404, detail="Unknown provider")
+        key = body.api_key.strip()
+        if not key or key.startswith(KEY_MASK_PREFIX):
+            raise HTTPException(status_code=400, detail="Paste a key first")
+        try:
+            if provider == "novita":
+                valid = await _validate_novita_key(key)
+            else:
+                valid = await _validate_civitai_key(key)
+        except RuntimeError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        if not valid:
+            name = "Novita" if provider == "novita" else "Civitai"
+            raise HTTPException(
+                status_code=400,
+                detail=f"{name} rejected this key — check for typos and make sure the whole key was copied")
+        cfg = _load_config()
+        cfg["api_key" if provider == "novita" else "civitai_api_key"] = key
         _save_config(cfg)
         return _public_config(cfg)
 

@@ -1084,6 +1084,45 @@ def test_models_endpoint_pins_flux2(tmp_path):
     assert client.get("/models?cursor=abc").json()["models"] == []        # not on later pages
 
 
+def test_submit_key_endpoint_validates_before_saving(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    async def ok(key):
+        return True
+
+    async def bad(key):
+        return False
+
+    backend._validate_novita_key = ok
+    backend._validate_civitai_key = bad
+
+    resp = client.post("/keys/novita", json={"api_key": " goodkey123 "})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_key"] is True
+    assert "goodkey123" not in resp.text  # masked in the response
+    assert backend._load_config()["api_key"] == "goodkey123"
+
+    resp = client.post("/keys/civitai", json={"api_key": "wrongkey"})
+    assert resp.status_code == 400
+    assert "rejected" in resp.json()["detail"]
+    assert backend._load_config()["civitai_api_key"] == ""  # not stored
+
+    assert client.post("/keys/novita", json={"api_key": "   "}).status_code == 400
+    assert client.post("/keys/novita", json={"api_key": "****t123"}).status_code == 400
+    assert client.post("/keys/other", json={"api_key": "x"}).status_code == 404
+
+    async def down(key):
+        raise RuntimeError("Could not reach Novita: timeout")
+
+    backend._validate_novita_key = down
+    resp = client.post("/keys/novita", json={"api_key": "whatever"})
+    assert resp.status_code == 502
+    assert "Could not reach" in resp.json()["detail"]
+    assert backend._load_config()["api_key"] == "goodkey123"  # unchanged
+
+
 def test_civitai_key_masked_in_config(tmp_path):
     backend = _load_backend(tmp_path)
     client = _client(backend)
