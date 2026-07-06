@@ -97,6 +97,10 @@ function AppContent() {
   const [isMemoryOpen, setIsMemoryOpen] = useState(false);
   const [isCharacterOpen, setIsCharacterOpen] = useState(false);
   const sentIntroRef = useRef(false);
+  // The full engine state returned by the load/branch REST call, stashed so the
+  // intro effect can paint the transcript instantly instead of waiting for the
+  // server's (slow) intro round-trip. Consumed once, then cleared.
+  const pendingSeedRef = useRef(null);
 
   // Mobile-only chrome behavior: the sidebar drawer trigger lives in the
   // header, and the header hides on scroll-down / reveals on scroll-up.
@@ -176,8 +180,14 @@ function AppContent() {
     if (!saveId) return;
     try {
       const r = await api.branchSave(saveId, { targetTurn: turn });
-      await session.loadSave(r.branch.id);
-      ws.sendIntro();
+      const data = await session.loadSave(r.branch.id);
+      // Paint the branched transcript immediately; the quiet intro reconciles.
+      if (Array.isArray(data?.state?.chat_messages) && data.state.chat_messages.length > 0) {
+        ws.applyServerState(data.state);
+        ws.sendIntro({ quiet: true });
+      } else {
+        ws.sendIntro();
+      }
       showToast(`Branched into "${r.branch.display_name || r.branch.id}"`, 'info');
     } catch (e) {
       showToast(`Failed to branch: ${e.message}`);
@@ -227,7 +237,8 @@ function AppContent() {
     setGameState(prev => ({ ...prev, module_configs: nextConfigs }));
   }, [session]);
 
-  const handleEnterGame = useCallback(async (saveId) => {
+  const handleEnterGame = useCallback(async (saveId, seedState = null) => {
+    pendingSeedRef.current = seedState;
     await session.refreshSession();
     setHeaderHidden(false);
     setCurrentMode('storyteller-game');
@@ -291,11 +302,24 @@ function AppContent() {
       !sentIntroRef.current
     ) {
       sentIntroRef.current = true;
-      // Clear any messages left over from a previously opened story before the
-      // intro arrives. Existing stories get replaced via `state_load`, but a new
-      // story streams its opening and would otherwise append to the stale list.
-      ws.setMessages([]);
-      ws.sendIntro();
+      // Existing stories: paint the transcript immediately from the state the
+      // load call already returned, instead of sitting on an empty feed (with a
+      // misleading "AI is writing…") while the server's intro round-trip runs
+      // on_gather_context — that can take several seconds on a big story. The
+      // intro still runs (quietly) to initialize module_data/swipes, and the
+      // later `done` reconciles turn numbers and swipes in place.
+      const seed = pendingSeedRef.current;
+      pendingSeedRef.current = null;
+      const existing = Array.isArray(seed?.chat_messages) && seed.chat_messages.length > 0;
+      if (existing) {
+        ws.applyServerState(seed);
+        ws.sendIntro({ quiet: true });
+      } else {
+        // New story: clear any stale transcript so the streamed opening doesn't
+        // append to a previous story's messages.
+        ws.setMessages([]);
+        ws.sendIntro();
+      }
     }
   }, [currentMode, ws.isConnected]);
 

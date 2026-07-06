@@ -4,6 +4,7 @@ from backend.engine.schemas import MemorySummary, MemoryImportance
 import asyncio
 import os
 import tempfile
+from types import SimpleNamespace
 
 
 def test_memory_add_search_filters_future_turns_and_rolls_back(tmp_path):
@@ -339,6 +340,32 @@ def test_update_memory_fields_and_reembed(tmp_path):
     assert row["embedding"] == _serialize([0.0, 1.0, 0.0])
 
     assert manager.update_memory("no-such-id", {"importance": 3}) is None
+
+
+def test_memory_bridge_remember_permanent_profile(tmp_path):
+    # A profile stored through the bridge with permanent=True must survive purge
+    # and stay retrievable both semantically and by its npc entity tag.
+    from backend.sdk.memory_bridge import MemoryBridge
+
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    engine = SimpleNamespace(memory=manager, llm=_FakeEmbedder())
+    bridge = MemoryBridge()
+    bridge._set_engine(engine)
+
+    mem_id = _run(bridge.remember(
+        "npc_1", "A dragon-blooded knight in crimson.", turn=1,
+        importance=3, permanent=True, tags=["profile"],
+    ))
+    assert mem_id
+
+    manager.purge_decayed_memories(current_turn=100)
+
+    by_entity = manager.get_memories_by_entity("npc:npc_1")
+    assert [m["text"] for m in by_entity] == ["A dragon-blooded knight in crimson."]
+    assert "profile" in by_entity[0]["entities"]
+
+    semantic = manager.search_memories([1.0, 0.0, 0.0], current_turn=100, limit=3)
+    assert any(m["text"] == "A dragon-blooded knight in crimson." for m in semantic)
 
 
 async def _mock_structured_summary():

@@ -271,12 +271,22 @@ export function useWebSocket(onStateChange, onLLMCall) {
     }
   }, [resetStream]);
 
-  const sendIntro = useCallback(() => {
+  // `quiet` re-opens an existing story: the transcript is already painted from
+  // cached state, so we don't want the "AI is writing…" placeholder while the
+  // server runs on_gather_context (which can take seconds). A new story omits
+  // it and streams its opening as usual.
+  const sendIntro = useCallback(({ quiet = false } = {}) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      resetStream();
+      if (quiet) {
+        cancelFlush();
+        streamRef.current = '';
+        reasoningRef.current = '';
+      } else {
+        resetStream();
+      }
       wsRef.current.send(JSON.stringify({ action: 'intro' }));
     }
-  }, [resetStream]);
+  }, [resetStream, cancelFlush]);
 
   // Interrupt the running turn. The server answers with `turn_stopped`, which
   // clears the stream and restores the input — no local state change here.

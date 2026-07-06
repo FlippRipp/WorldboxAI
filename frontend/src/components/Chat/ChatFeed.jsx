@@ -1,7 +1,14 @@
-import { useRef, useEffect, useCallback, useState } from 'react';
+import { useRef, useEffect, useLayoutEffect, useCallback, useState } from 'react';
 import MarkdownRenderer from '../shared/MarkdownRenderer';
 import SlotRenderer from '../Slots/SlotRenderer';
 import { useStickToBottom } from '../../hooks/useStickToBottom';
+
+// Windowed rendering: only the most recent messages are mounted on load, and
+// older ones are revealed in batches as the reader scrolls up. Rendering every
+// message at once is what made long stories slow to open — each MessageBlock
+// parses markdown, sanitises, and mounts per-message module widgets.
+const INITIAL_WINDOW = 10;
+const WINDOW_STEP = 15;
 
 const MESSAGE_STYLES = {
   assistant: { bg: 'bg-gray-850/80', text: 'text-gray-200' },
@@ -381,6 +388,49 @@ export function ChatFeed({ messages, currentStream, currentReasoning, swipes, bu
 
   const isEmpty = messages.length === 0 && currentStream == null;
 
+  // Only render the tail `visibleCount` messages; scrolling up reveals more.
+  const [visibleCount, setVisibleCount] = useState(INITIAL_WINDOW);
+  const start = Math.max(0, messages.length - visibleCount);
+  const hasOlder = start > 0;
+
+  // Reset the window to the tail when the story changes, so switching from a
+  // long, expanded story to another doesn't render a huge tail. Appends during
+  // normal play need no reset — the tail slice already includes new turns.
+  const saveId = slotState?.active_save_id;
+  useEffect(() => { setVisibleCount(INITIAL_WINDOW); }, [saveId]);
+
+  // Reveal older messages when the reader scrolls near the top. Before growing
+  // the window, stash the current scrollHeight so the layout effect below can
+  // hold the reader's position as content prepends upward. A ref mirrors
+  // `hasOlder` so the scroll listener stays subscribed across renders.
+  const anchorRef = useRef(null);
+  const hasOlderRef = useRef(hasOlder);
+  hasOlderRef.current = hasOlder;
+  useEffect(() => {
+    const root = feed.ref.current;
+    if (!root) return undefined;
+    const onScroll = () => {
+      // One step per approach to the top: the anchor adjustment below pushes
+      // scrollTop back down past the threshold, so this won't loop.
+      if (root.scrollTop < 400 && hasOlderRef.current && anchorRef.current == null) {
+        anchorRef.current = root.scrollHeight;
+        setVisibleCount((c) => c + WINDOW_STEP);
+      }
+    };
+    root.addEventListener('scroll', onScroll, { passive: true });
+    return () => root.removeEventListener('scroll', onScroll);
+  }, [feed.ref]);
+
+  // After older messages prepend, offset scrollTop by the height added above so
+  // the viewport stays anchored on the message the reader was looking at.
+  useLayoutEffect(() => {
+    const el = feed.ref.current;
+    if (el && anchorRef.current != null) {
+      el.scrollTop += el.scrollHeight - anchorRef.current;
+      anchorRef.current = null;
+    }
+  }, [visibleCount, feed.ref]);
+
   // The last assistant message is the swipeable/regeneratable one.
   let lastAssistantIdx = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -410,6 +460,10 @@ export function ChatFeed({ messages, currentStream, currentReasoning, swipes, bu
         ref={feed.ref}
         onScroll={feed.onScroll}
         className="h-full overflow-y-auto book-scroll"
+        // Disable native scroll anchoring: when we reveal older messages above
+        // the viewport we adjust scrollTop ourselves. Left on, the browser would
+        // also compensate, double-scrolling the reader to the bottom.
+        style={{ overflowAnchor: 'none' }}
         role="log"
         aria-live="polite"
       >
@@ -421,7 +475,15 @@ export function ChatFeed({ messages, currentStream, currentReasoning, swipes, bu
           </div>
         )}
 
-        {messages.map((msg, idx) => (
+        {hasOlder && (
+          <div className="max-w-[720px] mx-auto px-8 py-3 text-center text-xs text-gray-600">
+            Loading earlier messages…
+          </div>
+        )}
+
+        {messages.slice(start).map((msg, i) => {
+          const idx = start + i;
+          return (
           <MessageBlock
             key={idx}
             message={msg}
@@ -440,7 +502,8 @@ export function ChatFeed({ messages, currentStream, currentReasoning, swipes, bu
             slotState={slotState}
             moduleConfigs={moduleConfigs}
           />
-        ))}
+          );
+        })}
 
         <StreamingBlock content={currentStream} reasoning={currentReasoning} status={pipelineStatus} />
 

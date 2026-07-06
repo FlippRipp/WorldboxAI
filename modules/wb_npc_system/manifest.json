@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "dependencies": ["wb_time_tracker"],
   "consumes": {
-    "state": ["input_text", "turn", "history", "player_location_node_id", "player_location_region", "player_location_layer_id"],
+    "state": ["input_text", "turn", "history", "player_location_node_id", "player_location_region", "player_location_layer_id", "characters"],
     "module_data": ["wb_time_tracker"],
     "module_configs": [],
     "world_data": true
@@ -62,6 +62,20 @@
       "label": "LLM-Based Travel Motivation",
       "category": "NPC System",
       "description": "Use an LLM to decide which NPCs are motivated to travel toward the player (richer but slower/costlier). When off, a fast rule-based heuristic is used."
+    },
+    "embed_profiles": {
+      "type": "toggle",
+      "default": true,
+      "label": "Store Character Profiles in RAG",
+      "category": "NPC System",
+      "description": "When a character is introduced, embed their full profile (appearance, personality, role) into memory so it stays retrievable throughout the story."
+    },
+    "capture_story_characters": {
+      "type": "toggle",
+      "default": true,
+      "label": "Capture Story-Introduced Characters",
+      "category": "NPC System",
+      "description": "Detect significant named characters the storyteller introduces on its own, generate full profiles for them, and track them as known NPCs."
     }
   },
   "mutation_schema": {

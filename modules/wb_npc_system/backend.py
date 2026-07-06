@@ -20,6 +20,109 @@ def _config(state: dict) -> dict:
     return state.get("module_configs", {}).get("wb_npc_system", {})
 
 
+def _parse_json_block(raw: str):
+    """Strip Markdown code fences and parse a JSON value from an LLM reply."""
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        text = parts[1] if len(parts) > 1 else text
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def _profile_text(npc: dict) -> str:
+    """A compact, self-contained description of a character for RAG storage."""
+    parts = [f"Character: {npc.get('name', 'Unknown')}"]
+    ident = " / ".join(p for p in (npc.get("race", ""), npc.get("gender", "")) if p)
+    if ident:
+        parts.append(ident)
+    if npc.get("archetype"):
+        parts.append(f"Archetype: {npc['archetype']}")
+    parts.append(f"Role: {npc.get('role', 'neutral')}")
+    if npc.get("appearance"):
+        parts.append(f"Appearance: {npc['appearance']}")
+    personality = ", ".join(npc.get("personality", []))
+    if personality:
+        parts.append(f"Personality: {personality}")
+    if npc.get("pitch"):
+        parts.append(f"Background: {npc['pitch']}")
+    return ". ".join(parts)
+
+
+async def _embed_profile(npc: dict, turn: int, sdk) -> None:
+    """Embed a character's full profile into RAG as a permanent memory so it
+    stays retrievable for the rest of the story. Idempotent per NPC."""
+    if npc.get("profile_embedded"):
+        return
+    npc_id = npc.get("id")
+    if not npc_id:
+        return
+    await sdk.memory.remember(
+        npc_id, _profile_text(npc), turn,
+        importance=8, permanent=True, tags=["profile"],
+    )
+    npc["profile_embedded"] = True
+
+
+def _build_npc_record(npc_data: dict, turn: int, bank: dict, *, introduced: bool = False,
+                      source: str = "generated", location: tuple = (None, None, None)) -> dict:
+    """Build a bank record from raw generated/captured character fields, keeping
+    the schema in one place. ``location`` is (node_id, region, layer_id)."""
+    npc_id = f"npc_{uuid.uuid4().hex[:8]}"
+
+    role = npc_data.get("role", "neutral")
+    if role not in NPC_ROLES:
+        role = "neutral"
+
+    relationships = []
+    raw_rels = npc_data.get("relationships", [])
+    if isinstance(raw_rels, list):
+        for r in raw_rels:
+            if not isinstance(r, dict):
+                continue
+            rid = r.get("npc_id")
+            if rid and rid in bank:
+                relationships.append({
+                    "npc_id": rid,
+                    "type": str(r.get("type", "neutral")),
+                    "description": str(r.get("description", "")),
+                })
+
+    node_id, region, layer_id = location
+    return npc_id, {
+        "id": npc_id,
+        "name": npc_data.get("name", "Unknown"),
+        "race": npc_data.get("race", ""),
+        "gender": npc_data.get("gender", ""),
+        "appearance": npc_data.get("appearance", ""),
+        "archetype": npc_data.get("archetype", ""),
+        "pitch": npc_data.get("pitch", ""),
+        "personality": npc_data.get("personality", []),
+        "role": role,
+        "encounter_type": "location_bound" if introduced else npc_data.get("encounter_type", "encounter"),
+        "location_node_id": node_id if introduced else npc_data.get("location_node_id"),
+        "location_region": region if introduced else npc_data.get("location_region"),
+        "location_layer_id": layer_id if introduced else npc_data.get("location_layer_id"),
+        "introduced": introduced,
+        "met_turn": turn if introduced else None,
+        "status": "active" if introduced else "unintroduced",
+        "notes": "",
+        "created_turn": turn,
+        "source": source,
+        "relationships": relationships,
+        "traveling_with_player": False,
+        "last_interaction_turn": turn,
+        "last_travel_check_minutes": 0,
+    }
+
+
 def _get_bank(state: dict) -> dict[str, dict]:
     return state.get("module_data", {}).get("wb_npc_system", {}).get("characters", {})
 
@@ -317,6 +420,145 @@ def _npc_effective_location(npc: dict, state: dict) -> tuple:
     return (npc.get("location_node_id"), npc.get("location_region"), npc.get("location_layer_id"))
 
 
+def _player_name(state: dict) -> str:
+    player = state.get("characters", {}).get("default_player")
+    if isinstance(player, dict):
+        return str(player.get("name", "") or "").strip()
+    return ""
+
+
+def _known_names(bank: dict, state: dict) -> set[str]:
+    names = {str(n.get("name", "")).strip().lower() for n in bank.values() if n.get("name")}
+    player = _player_name(state)
+    if player:
+        names.add(player.lower())
+    return names
+
+
+async def on_mutation_schema(state: dict, sdk) -> dict | None:
+    """Ask the reader to flag significant named characters the storyteller
+    introduced on its own, excluding everyone we already know. Reuses the
+    reader pass so no extra per-turn LLM call is spent."""
+    if not _config(state).get("capture_story_characters", True):
+        return None
+
+    known = sorted(n for n in _known_names(_get_bank(state), state) if n)
+    known_list = ", ".join(known) if known else "(none yet)"
+    return {
+        "story_characters": (
+            "array of objects: {name: string, descriptor: string (who they are / what "
+            "they did this scene), evidence: string (brief quote or action from the scene)} "
+            "for NAMED characters who materially speak or act in this scene and are NOT already "
+            f"known. Already-known characters (exclude these, case-insensitive): {known_list}. "
+            "Omit nameless extras (a guard, the crowd), the player, and anyone already known."
+        )
+    }
+
+
+async def _capture_story_characters(mutation: dict, state: dict, bank: dict, sdk) -> bool:
+    """Generate full profiles for significant characters the story introduced on
+    its own, add them to the bank as introduced NPCs, and embed them into RAG."""
+    if not _config(state).get("capture_story_characters", True):
+        return False
+
+    reported = mutation.get("story_characters")
+    if isinstance(reported, dict):
+        reported = [reported]
+    if not isinstance(reported, list) or not reported:
+        return False
+
+    known = _known_names(bank, state)
+    pending = []
+    seen = set()
+    for entry in reported:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "")).strip()
+        key = name.lower()
+        if not name or key in known or key in seen:
+            continue
+        seen.add(key)
+        pending.append({
+            "name": name,
+            "descriptor": str(entry.get("descriptor", "")).strip(),
+            "evidence": str(entry.get("evidence", "")).strip(),
+        })
+
+    if not pending:
+        return False
+
+    turn = state.get("turn", 0)
+    scene = "\n".join(str(h) for h in state.get("history", [])[-3:])[-2500:]
+    listing = "\n".join(
+        f"- {p['name']}: {p['descriptor']}" + (f" (in the scene: {p['evidence']})" if p["evidence"] else "")
+        for p in pending
+    )
+
+    prompt = f"""You are a character designer for a text RPG. The story just introduced the following named characters on its own. Build a full character record for EACH one, staying faithful to how they appear in the scene — do not contradict it, and infer sensible details where the scene is silent.
+
+SCENE:
+{scene}
+
+CHARACTERS TO PROFILE (use these exact names):
+{listing}
+
+For each character return:
+- name (exactly as given above)
+- race, gender (infer from the scene; use "unknown" if truly unclear)
+- appearance: 1-2 sentence physical description grounded in the scene
+- archetype: short label
+- pitch: 2-3 sentence concept with a story hook
+- personality: exactly 3 trait keywords
+- role: one of quest_giver|antagonist|ally|informant|rival|neutral|wildcard
+
+Respond with ONLY valid JSON:
+{{"npcs": [{{"name": "string", "race": "string", "gender": "male|female|nonbinary|unknown", "appearance": "string", "archetype": "string", "pitch": "string", "personality": ["trait1", "trait2", "trait3"], "role": "string"}}]}}"""
+
+    try:
+        result = await sdk.llm.generate(prompt, model_preference="balanced")
+        parsed = _parse_json_block(result)
+    except Exception as e:
+        print(f"[NPC System] Story-character capture failed: {e}")
+        return False
+
+    if not isinstance(parsed, dict):
+        return False
+    new_npcs = parsed.get("npcs", [])
+    if not isinstance(new_npcs, list) or not new_npcs:
+        return False
+
+    location = (
+        state.get("player_location_node_id"),
+        state.get("player_location_region"),
+        state.get("player_location_layer_id"),
+    )
+
+    added = False
+    for npc_data in new_npcs:
+        if not isinstance(npc_data, dict):
+            continue
+        name = str(npc_data.get("name", "")).strip()
+        if not name or name.lower() in known:
+            continue
+        known.add(name.lower())
+
+        npc_id, record = _build_npc_record(
+            npc_data, turn, bank, introduced=True, source="story", location=location,
+        )
+        record["last_interaction_turn"] = turn
+        bank[npc_id] = record
+
+        descriptor = next((p["descriptor"] for p in pending if p["name"].lower() == name.lower()), "")
+        await sdk.memory.remember(npc_id, descriptor or f"Encountered {name}.", turn, importance=6)
+        if _config(state).get("embed_profiles", True):
+            await _embed_profile(record, turn, sdk)
+
+        added = True
+        print(f"[NPC System] Captured story character {name} ({npc_id}) at turn {turn}")
+
+    return added
+
+
 async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict | None:
     bank = _get_bank(state)
     turn = state.get("turn", 0)
@@ -358,8 +600,14 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict | None:
         memory_text = impression or notes or f"Met {npc['name']}."
         await sdk.memory.remember(npc_id, memory_text, turn, importance=6)
 
+        if _config(state).get("embed_profiles", True):
+            await _embed_profile(npc, turn, sdk)
+
         updated = True
         print(f"[NPC System] {npc['name']} ({npc_id}) introduced at turn {turn}")
+
+    if await _capture_story_characters(mutation, state, bank, sdk):
+        updated = True
 
     party_travel = mutation.get("npc_party_travel")
     if not isinstance(party_travel, list):
@@ -739,50 +987,8 @@ Respond with ONLY valid JSON:
         return _set_bank({"story_threads": threads}, bank) if (threads or traveled) else None
 
     for npc_data in new_npcs:
-        npc_id = f"npc_{uuid.uuid4().hex[:8]}"
-
-        role = npc_data.get("role", "neutral")
-        if role not in NPC_ROLES:
-            role = "neutral"
-
-        raw_rels = npc_data.get("relationships", [])
-        relationships = []
-        if isinstance(raw_rels, list):
-            for r in raw_rels:
-                if not isinstance(r, dict):
-                    continue
-                rid = r.get("npc_id")
-                if rid and rid in bank:
-                    relationships.append({
-                        "npc_id": rid,
-                        "type": str(r.get("type", "neutral")),
-                        "description": str(r.get("description", "")),
-                    })
-
-        bank[npc_id] = {
-            "id": npc_id,
-            "name": npc_data.get("name", "Unknown"),
-            "race": npc_data.get("race", ""),
-            "gender": npc_data.get("gender", ""),
-            "appearance": npc_data.get("appearance", ""),
-            "archetype": npc_data.get("archetype", ""),
-            "pitch": npc_data.get("pitch", ""),
-            "personality": npc_data.get("personality", []),
-            "role": role,
-            "encounter_type": npc_data.get("encounter_type", "encounter"),
-            "location_node_id": npc_data.get("location_node_id"),
-            "location_region": npc_data.get("location_region"),
-            "location_layer_id": npc_data.get("location_layer_id"),
-            "introduced": False,
-            "met_turn": None,
-            "status": "unintroduced",
-            "notes": "",
-            "created_turn": turn,
-            "relationships": relationships,
-            "traveling_with_player": False,
-            "last_interaction_turn": turn,
-            "last_travel_check_minutes": 0,
-        }
+        npc_id, record = _build_npc_record(npc_data, turn, bank, source="generated")
+        bank[npc_id] = record
 
     print(f"[NPC System] Generated {len(new_npcs)} new NPCs (bank size: {len(bank)})")
     return _set_bank({"story_threads": threads}, bank)

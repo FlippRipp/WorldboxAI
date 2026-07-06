@@ -99,8 +99,10 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
     setLoadingSave(saveId);
     setListError(null);
     try {
-      await api.loadSave(saveId);
-      onLoad(saveId);
+      // Pass the loaded engine state through so the game can paint the
+      // transcript immediately instead of waiting on the intro round-trip.
+      const data = await api.loadSave(saveId);
+      onLoad(saveId, data?.state);
     } catch (e) {
       setListError(`Failed to load "${saveId}": ${e.message}`);
     }
