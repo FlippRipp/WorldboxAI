@@ -1,0 +1,36 @@
+{
+  "id": "wb_image_gen",
+  "name": "Image Generation",
+  "version": "1.0.0",
+  "icon": "🎨",
+  "description": "Illustrates the story with Black Forest Labs FLUX.2 images. Auto-generates every N turns, or on demand with /image. Configure API key, model, and prompts in the Image Studio main-menu entry.",
+  "dependencies": [],
+  "consumes": {
+    "state": ["turn", "history", "chat_messages", "world_id", "last_input_text", "active_save_id"],
+    "module_data": [],
+    "module_configs": [],
+    "world_data": false
+  },
+  "produces": {
+    "module_data": true,
+    "context_string": false,
+    "messages": false
+  },
+  "ui_slots": ["slot_message_footer"],
+  "commands": {
+    "/image": "on_command_image"
+  },
+  "modes": [
+    {
+      "id": "image-studio",
+      "label": "Image Studio",
+      "description": "Configure FLUX image generation and browse the gallery",
+      "icon": "🎨",
+      "screen": "ui/ImageStudio.jsx"
+    }
+  ],
+  "mutation_schema": {
+    "turns_since_image": "integer — storyteller generations since the last auto image",
+    "last_trigger": "string — id of the most recently started generation record"
+  }
+}

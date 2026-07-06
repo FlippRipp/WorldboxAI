@@ -1,5 +1,6 @@
 import { useRef, useEffect, useCallback, useState } from 'react';
 import MarkdownRenderer from '../shared/MarkdownRenderer';
+import SlotRenderer from '../Slots/SlotRenderer';
 import { useStickToBottom } from '../../hooks/useStickToBottom';
 
 const MESSAGE_STYLES = {
@@ -182,7 +183,7 @@ function SwipeControls({ swipes, busy, onPrev, onNext, onRegenerate }) {
   );
 }
 
-function MessageBlock({ message, index, isLastAssistant, swipes, busy, editRequest, branchTurn, onBranchMessage, onRegenerate, onSwipe, onEditMessage, onDeleteMessage }) {
+function MessageBlock({ message, index, isLastAssistant, swipes, busy, editRequest, messageTurn, onBranchMessage, onRegenerate, onSwipe, onEditMessage, onDeleteMessage, modules, slotState, moduleConfigs }) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system' || message.error;
   const styleKey = isSystem ? 'system' : isUser ? 'user' : 'assistant';
@@ -241,7 +242,7 @@ function MessageBlock({ message, index, isLastAssistant, swipes, busy, editReque
               disabled={busy || editing}
               onEdit={() => { setDraft(message.content); setEditing(true); }}
               onDelete={() => onDeleteMessage(index)}
-              onBranch={branchTurn != null && onBranchMessage ? () => onBranchMessage(branchTurn) : null}
+              onBranch={messageTurn != null && onBranchMessage ? () => onBranchMessage(messageTurn) : null}
             />
           </div>
         )}
@@ -293,6 +294,18 @@ function MessageBlock({ message, index, isLastAssistant, swipes, busy, editReque
             <MessageMeta meta={message.meta} turn={message.turn} />
           </div>
         )}
+
+        {/* Module-contributed per-message content (e.g. story illustrations). */}
+        {!isUser && !isSystem && !editing && modules?.length > 0 && (
+          <SlotRenderer
+            slotName="slot_message_footer"
+            modules={modules}
+            state={slotState}
+            config={moduleConfigs}
+            slotProps={{ message, messageTurn }}
+            skeleton={false}
+          />
+        )}
       </div>
     </div>
   );
@@ -335,7 +348,7 @@ function PostProcessingLine({ status }) {
   );
 }
 
-export function ChatFeed({ messages, currentStream, currentReasoning, swipes, busy, postProcessing, pipelineStatus, editRequest, currentTurn, density = 'comfortable', scrollControlRef, onUserScroll, onBranchMessage, onRegenerate, onSwipe, onEditMessage, onDeleteMessage }) {
+export function ChatFeed({ messages, currentStream, currentReasoning, swipes, busy, postProcessing, pipelineStatus, editRequest, currentTurn, density = 'comfortable', scrollControlRef, onUserScroll, onBranchMessage, onRegenerate, onSwipe, onEditMessage, onDeleteMessage, modules, slotState, moduleConfigs }) {
   // Auto-scroll the feed as messages/tokens grow, but only while the user is at
   // the bottom; scrolling up cancels it until they return to the bottom.
   const feed = useStickToBottom([messages, currentStream, currentReasoning], { onUserScroll });
@@ -378,13 +391,14 @@ export function ChatFeed({ messages, currentStream, currentReasoning, swipes, bu
   // Map each AI message to the turn it ended, anchored at the end: the last AI
   // message is `currentTurn`, walking backwards one turn per AI message. Older
   // messages resolve to negative turns after transcript edits — those (and
-  // anything without a known current turn) simply don't offer branching.
-  const branchTurns = new Array(messages.length).fill(null);
-  if (currentTurn != null && onBranchMessage) {
+  // anything without a known current turn) get no turn. Used for branching and
+  // for module slot widgets that attach per-turn content to messages.
+  const messageTurns = new Array(messages.length).fill(null);
+  if (currentTurn != null) {
     let turn = currentTurn;
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === 'assistant' && !messages[i].error) {
-        branchTurns[i] = turn >= 0 ? turn : null;
+        messageTurns[i] = turn >= 0 ? turn : null;
         turn -= 1;
       }
     }
@@ -416,12 +430,15 @@ export function ChatFeed({ messages, currentStream, currentReasoning, swipes, bu
             swipes={swipes}
             busy={busy}
             editRequest={editRequest}
-            branchTurn={branchTurns[idx]}
+            messageTurn={messageTurns[idx]}
             onBranchMessage={onBranchMessage}
             onRegenerate={onRegenerate}
             onSwipe={onSwipe}
             onEditMessage={onEditMessage}
             onDeleteMessage={onDeleteMessage}
+            modules={modules}
+            slotState={slotState}
+            moduleConfigs={moduleConfigs}
           />
         ))}
 

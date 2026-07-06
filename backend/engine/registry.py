@@ -13,6 +13,7 @@ ALLOWED_UI_SLOTS = {
     "slot_chat_feed",
     "slot_modal",
     "slot_tab",
+    "slot_message_footer",
 }
 
 ALLOWED_SETTING_TYPES = {"slider", "toggle", "select", "text"}

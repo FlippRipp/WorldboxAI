@@ -38,6 +38,9 @@ data/worlds/
 data/scenarios/
 data/theme.json
 
+# Image generation runtime data (API key, image index, downloaded images)
+data/wb_image_gen/
+
 # Experimental terrain visualization outputs (generated artifacts)
 data/terrain_experiments/
 _scratch/

@@ -6,7 +6,7 @@ import { loadModuleComponent } from './moduleLoader';
 // Renders a module's slot widget (default entry: widget.jsx). Loading,
 // dependency resolution, and multi-file support are handled by the shared
 // module loader; this component just wires the result into a slot.
-export default function DynamicWidget({ modId, entryFile = 'widget.jsx', state, config, slotName, assetsBaseUrl, eventBus }) {
+export default function DynamicWidget({ modId, entryFile = 'widget.jsx', state, config, slotName, assetsBaseUrl, eventBus, slotProps, skeleton = true }) {
   const [Comp, setComp] = useState(null);
   const [resolved, setResolved] = useState(false);
   const mountedRef = useRef(true);
@@ -27,12 +27,12 @@ export default function DynamicWidget({ modId, entryFile = 'widget.jsx', state, 
     return () => { mountedRef.current = false; };
   }, [modId, entryFile]);
 
-  if (!resolved) return <SkeletonLoader />;
+  if (!resolved) return skeleton ? <SkeletonLoader /> : null;
   if (!Comp) return null;
 
   return (
     <WidgetErrorBoundary modId={modId}>
-      <Comp state={state} config={config} slotName={slotName} assetsBaseUrl={assetsBaseUrl} eventBus={eventBus} />
+      <Comp state={state} config={config} slotName={slotName} assetsBaseUrl={assetsBaseUrl} eventBus={eventBus} {...slotProps} />
     </WidgetErrorBoundary>
   );
 }

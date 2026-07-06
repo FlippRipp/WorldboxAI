@@ -74,6 +74,7 @@ function AppContent() {
       module_data: state.module_data || prev.module_data || {},
       module_configs: state.module_configs || prev.module_configs || {},
       characters: state.characters || prev.characters || {},
+      active_save_id: state.active_save_id ?? prev.active_save_id,
       turn: state.turn,
       world_data: state.world_data,
       player_location_node_id: state.player_location_node_id ?? prev.player_location_node_id,
@@ -447,6 +448,9 @@ function AppContent() {
             onSwipe={handleSwipe}
             onEditMessage={handleEditMessage}
             onDeleteMessage={handleDeleteMessage}
+            modules={gameModules}
+            slotState={gameState}
+            moduleConfigs={gameState?.module_configs}
           />
 
           {(!ws.isConnected || ws.isReconnecting) && (
