@@ -581,13 +581,17 @@ async def _download(image_url: str) -> tuple[bytes, str]:
 
 
 async def _novita_list_models(cfg: dict, query: str, cursor: str, limit: int,
-                              types: str = "checkpoint") -> dict:
-    """Search Novita's model catalog (thousands of Civitai-mirrored models)."""
+                              types: str = "checkpoint",
+                              visibility: str = "") -> dict:
+    """Search Novita's model catalog (thousands of Civitai-mirrored models).
+    visibility="private" lists the account's own console-uploaded models."""
     import httpx
     params = {
         "filter.types": types,
         "pagination.limit": max(1, min(100, limit)),
     }
+    if visibility:
+        params["filter.visibility"] = visibility
     if query:
         params["filter.query"] = query
     if cursor:
@@ -625,6 +629,15 @@ def _flatten_civitai_model(model: dict) -> dict | None:
         return None
     files = version.get("files") or []
     file = next((f for f in files if f.get("primary")), files[0] if files else {})
+    # Novita may mirror an older version, so keep every version's file hash
+    # for availability matching (latest first, like modelVersions).
+    all_hashes: list[str] = []
+    for v in versions[:10]:
+        vfiles = v.get("files") or []
+        vfile = next((f for f in vfiles if f.get("primary")), vfiles[0] if vfiles else {})
+        vhash = str((vfile.get("hashes") or {}).get("SHA256") or "").lower()
+        if vhash and vhash not in all_hashes:
+            all_hashes.append(vhash)
     thumb = next(
         (i.get("url") for i in (version.get("images") or [])
          if i.get("url") and i.get("type") != "video"),
@@ -639,6 +652,7 @@ def _flatten_civitai_model(model: dict) -> dict | None:
         "type": str(model.get("type") or "LORA"),
         "base_model": str(version.get("baseModel") or ""),
         "sha256": str((file.get("hashes") or {}).get("SHA256") or "").lower(),
+        "all_hashes": all_hashes,
         "download_url": str(file.get("downloadUrl") or version.get("downloadUrl") or ""),
         "size_kb": file.get("sizeKB"),
         "trained_words": [str(w) for w in (version.get("trainedWords") or [])],
@@ -731,16 +745,21 @@ async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
 
 async def _novita_match_lora(cfg: dict, entry: dict) -> dict | None:
     """Find the saved Civitai LoRA in Novita's Civitai-mirrored catalog by
-    SHA256. Novita sd_names usually embed the Civitai version id, so that is
-    the first search key; the model name is the fallback."""
-    sha = str(entry.get("sha256") or "").lower()
-    if not sha:
+    SHA256 (any version's hash — Novita may mirror an older one). Novita
+    sd_names usually embed the Civitai version id, so that is the first
+    search key; the model id and name are fallbacks."""
+    hashes = {str(h).lower() for h in (entry.get("all_hashes") or []) if h}
+    if entry.get("sha256"):
+        hashes.add(str(entry["sha256"]).lower())
+    if not hashes:
         return None
-    queries = [str(entry.get("id") or ""), str(entry.get("name") or "")[:60]]
+    queries = [str(entry.get("id") or ""),
+               str(entry.get("model_id") or ""),
+               str(entry.get("name") or "")[:60]]
     for query in filter(None, queries):
         body = await _novita_list_models(cfg, query, "", 100, types="lora")
         for model in body.get("models") or []:
-            if str(model.get("hash_sha256") or "").lower() != sha:
+            if str(model.get("hash_sha256") or "").lower() not in hashes:
                 continue
             sd_name = model.get("sd_name_in_api") or model.get("sd_name")
             if sd_name and model.get("status") == 1:
@@ -752,9 +771,10 @@ def _normalize_lora_entry(item: dict) -> dict:
     """Library entry from a browser selection, with activation defaults."""
     entry = {k: item.get(k) for k in (
         "id", "model_id", "name", "version_name", "creator", "type", "base_model",
-        "sha256", "download_url", "size_kb", "trained_words", "thumb_url",
-        "civitai_url", "nsfw", "stats")}
+        "sha256", "all_hashes", "download_url", "size_kb", "trained_words",
+        "thumb_url", "civitai_url", "nsfw", "stats")}
     entry["id"] = str(entry.get("id") or "")
+    entry["all_hashes"] = [str(h).lower() for h in (entry.get("all_hashes") or [])][:10]
     entry["trained_words"] = [str(w) for w in (entry.get("trained_words") or [])][:20]
     entry.update({
         "saved_at": _now(),
@@ -999,6 +1019,7 @@ def get_router():
         type: str = "LORA"
         base_model: str = ""
         sha256: str = ""
+        all_hashes: list[str] = []
         download_url: str = ""
         size_kb: float | None = None
         trained_words: list[str] = []
@@ -1178,6 +1199,62 @@ def get_router():
         cfg["lora_library"] = library
         _save_config(cfg)
         return {"entry": entry, "lora_library": library}
+
+    @router.post("/loras/match_all")
+    async def rematch_all_loras():
+        cfg = _load_config()
+        if not cfg.get("api_key"):
+            raise HTTPException(status_code=400, detail="No Novita API key configured")
+        pending = [
+            dict(e) for e in cfg.get("lora_library") or []
+            if isinstance(e, dict)
+            and _base_family(e.get("base_model")) != "flux"
+            and not e.get("novita")
+            and not str(e.get("sd_name_override") or "").strip()
+        ]
+        results: dict = {}
+        for entry in pending:
+            try:
+                results[entry["id"]] = await _novita_match_lora(cfg, entry)
+            except RuntimeError as e:
+                print(f"[Image Gen] Recheck failed for {entry.get('id')}: {e}")
+
+        cfg = _load_config()  # matches awaited; re-load before mutating
+        now = _now()
+        matched = 0
+        for entry in cfg.get("lora_library") or []:
+            if isinstance(entry, dict) and entry.get("id") in results:
+                entry["novita"] = results[entry["id"]]
+                entry["novita_checked_at"] = now
+                if results[entry["id"]]:
+                    matched += 1
+        _save_config(cfg)
+        return {"lora_library": cfg["lora_library"], "matched": matched,
+                "checked": len(results)}
+
+    @router.get("/novita/my-loras")
+    async def my_novita_loras():
+        """The account's own console-uploaded LoRAs, for linking to library
+        entries that are not in Novita's public mirror."""
+        cfg = _load_config()
+        if not cfg.get("api_key"):
+            raise HTTPException(status_code=400, detail="No API key configured")
+        try:
+            body = await _novita_list_models(cfg, "", "", 100,
+                                             types="lora", visibility="private")
+        except RuntimeError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        loras = [
+            {
+                "sd_name": m.get("sd_name_in_api") or m.get("sd_name"),
+                "name": m.get("name") or m.get("sd_name") or "",
+                "base_model": m.get("base_model") or "",
+                "ready": m.get("status") == 1,
+            }
+            for m in (body.get("models") or [])
+            if m.get("sd_name_in_api") or m.get("sd_name")
+        ]
+        return {"loras": loras}
 
     @router.post("/loras/{lora_id}/match")
     async def rematch_lora(lora_id: str):

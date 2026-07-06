@@ -238,7 +238,7 @@ function loraAvailability(entry) {
   return { ok: false, label: 'not on Novita', cls: 'bg-red-900/50 text-red-300 border-red-800' };
 }
 
-function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch }) {
+function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLoras, loadMyUploads }) {
   const [strength, setStrength] = useState(entry.strength ?? 0.7);
   const [showOverride, setShowOverride] = useState(false);
   const [override, setOverride] = useState(entry.sd_name_override || '');
@@ -332,8 +332,11 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch }) {
             >
               {busy ? 'Checking…' : 'Recheck Novita'}
             </button>
-            <button onClick={() => setShowOverride((s) => !s)} className="text-gray-500 hover:text-gray-300">
-              {showOverride ? 'Hide manual name' : 'Enter name manually'}
+            <button
+              onClick={() => { setShowOverride((s) => !s); loadMyUploads(); }}
+              className="text-gray-500 hover:text-gray-300"
+            >
+              {showOverride ? 'Hide' : 'Link Novita upload'}
             </button>
             <a
               href="https://novita.ai/models-console/model-management"
@@ -344,20 +347,48 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch }) {
             </a>
           </div>
           {showOverride && (
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={override}
-                onChange={(e) => setOverride(e.target.value)}
-                placeholder="MODEL NAME IN API from your Novita private model list"
-                className={`${inputCls} text-xs`}
-              />
-              <button
-                onClick={() => onPatch(entry.id, { sd_name_override: override })}
-                className="px-3 py-1 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs shrink-0"
-              >
-                Set
-              </button>
+            <div className="space-y-1.5">
+              {myLoras === null ? (
+                <p className="text-[11px] text-gray-500 animate-pulse">Loading your Novita uploads…</p>
+              ) : myLoras.length === 0 ? (
+                <p className="text-[11px] text-gray-500 italic">
+                  No uploads on your Novita account yet — use the console link above, then recheck here.
+                </p>
+              ) : (
+                <div className="space-y-1">
+                  {myLoras.map((m) => (
+                    <div key={m.sd_name} className="flex items-center gap-2 text-[11px]">
+                      <span className="text-gray-300 truncate flex-1" title={m.sd_name}>
+                        {m.name}
+                        {m.base_model && <span className="text-gray-600"> · {m.base_model}</span>}
+                        {!m.ready && <span className="text-yellow-600"> · processing</span>}
+                      </span>
+                      <button
+                        onClick={() => onPatch(entry.id, { sd_name_override: m.sd_name })}
+                        disabled={!m.ready}
+                        className="px-2 py-0.5 rounded bg-purple-600 hover:bg-purple-500 text-white disabled:opacity-40 shrink-0"
+                      >
+                        Use
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={override}
+                  onChange={(e) => setOverride(e.target.value)}
+                  placeholder="…or type the MODEL NAME IN API by hand"
+                  className={`${inputCls} text-xs`}
+                />
+                <button
+                  onClick={() => onPatch(entry.id, { sd_name_override: override })}
+                  className="px-3 py-1 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs shrink-0"
+                >
+                  Set
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -380,11 +411,20 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [open, setOpen] = useState(false);
+  const [recheckBusy, setRecheckBusy] = useState(false);
+  const [myLoras, setMyLoras] = useState(null); // null = not fetched yet
   const debounceRef = useRef(null);
   const seqRef = useRef(0);
+  const myLorasRef = useRef(false);
+  const autoRecheckRef = useRef(false);
 
   const nsfwMode = config.has_civitai_key ? (draft.civitai_nsfw || 'off') : 'off';
   const savedIds = new Set(library.map((e) => e.id));
+  const isUnmatched = (e) =>
+    baseFamily(e.base_model) !== 'flux' &&
+    !(e.novita && e.novita.sd_name_in_api) &&
+    !e.sd_name_override;
+  const unmatchedCount = library.filter(isUnmatched).length;
 
   const search = useCallback(async (cursor = '') => {
     const seq = ++seqRef.current;
@@ -435,6 +475,43 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
     }
   };
 
+  // The account's own Novita console uploads, fetched once on demand and
+  // shared by every row's "Link Novita upload" panel.
+  const loadMyUploads = useCallback(async () => {
+    if (myLorasRef.current) return;
+    myLorasRef.current = true;
+    try {
+      const res = await fetch(`${API_BASE}/novita/my-loras`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setMyLoras(data.loras || []);
+    } catch (e) {
+      setMyLoras([]);
+    }
+  }, []);
+
+  const recheckAll = async () => {
+    setRecheckBusy(true);
+    try {
+      await callLibrary('/loras/match_all', { method: 'POST' });
+    } finally {
+      setRecheckBusy(false);
+    }
+  };
+
+  // Novita's mirror grows over time — silently recheck unmatched entries
+  // once per studio visit when the last check is a week old or older.
+  useEffect(() => {
+    if (autoRecheckRef.current || !config.has_key) return;
+    const weekAgo = Date.now() - 7 * 24 * 3600 * 1000;
+    const stale = library.some(
+      (e) => isUnmatched(e) &&
+        (!e.novita_checked_at || new Date(e.novita_checked_at).getTime() < weekAgo));
+    if (!stale) return;
+    autoRecheckRef.current = true;
+    callLibrary('/loras/match_all', { method: 'POST' });
+  }, [library, config.has_key]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const saveLora = (item) =>
     callLibrary('/loras', {
       method: 'POST',
@@ -458,12 +535,24 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
         <h2 className="text-sm font-semibold text-gray-300">
           LoRAs {library.length > 0 && <span className="text-gray-600">({library.length} saved{activeCount > 0 ? `, ${activeCount} active` : ''})</span>}
         </h2>
-        <button
-          onClick={() => setOpen((o) => !o)}
-          className="text-xs text-purple-400 hover:text-purple-300"
-        >
-          {open ? 'Close browser' : 'Browse Civitai…'}
-        </button>
+        <div className="flex items-center gap-3">
+          {unmatchedCount > 0 && config.has_key && (
+            <button
+              onClick={recheckAll}
+              disabled={recheckBusy}
+              className="text-xs text-gray-500 hover:text-gray-300 disabled:opacity-40"
+              title="Re-search Novita's catalog for library LoRAs marked 'not on Novita'"
+            >
+              {recheckBusy ? 'Rechecking…' : `Recheck all (${unmatchedCount})`}
+            </button>
+          )}
+          <button
+            onClick={() => setOpen((o) => !o)}
+            className="text-xs text-purple-400 hover:text-purple-300"
+          >
+            {open ? 'Close browser' : 'Browse Civitai…'}
+          </button>
+        </div>
       </div>
       <p className="text-xs text-gray-600">
         Save LoRAs you like from Civitai, then activate them. SD-family LoRAs are applied through Novita's
@@ -575,6 +664,8 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
               onPatch={patchLora}
               onDelete={deleteLora}
               onRematch={rematchLora}
+              myLoras={myLoras}
+              loadMyUploads={loadMyUploads}
             />
           ))}
         </div>

@@ -641,6 +641,115 @@ def test_flatten_civitai_model(tmp_path):
     assert backend._flatten_civitai_model({"id": 1, "modelVersions": []}) is None
 
 
+def test_flatten_collects_all_version_hashes(tmp_path):
+    backend = _load_backend(tmp_path)
+    raw = {
+        "id": 7, "name": "Multi", "type": "LORA",
+        "stats": {}, "creator": {},
+        "modelVersions": [
+            {"id": 30, "name": "v3", "files": [
+                {"primary": True, "hashes": {"SHA256": "CCC"}}], "images": []},
+            {"id": 20, "name": "v2", "files": [
+                {"primary": True, "hashes": {"SHA256": "BBB"}}], "images": []},
+            {"id": 10, "name": "v1", "files": [
+                {"primary": True, "hashes": {"SHA256": "ccc"}}], "images": []},  # dupe of v3
+        ],
+    }
+    flat = backend._flatten_civitai_model(raw)
+    assert flat["sha256"] == "ccc"                 # latest version stays primary
+    assert flat["all_hashes"] == ["ccc", "bbb"]    # every version, deduped/lowercased
+
+
+def test_novita_match_lora_via_older_version_hash(tmp_path):
+    backend = _load_backend(tmp_path)
+    queries = []
+
+    async def fake_list(cfg, query, cursor, limit, types="checkpoint", visibility=""):
+        queries.append(query)
+        return {"models": [
+            {"hash_sha256": "BBB", "sd_name_in_api": "old_ver.safetensors", "status": 1}]}
+
+    backend._novita_list_models = fake_list
+    entry = _lora(sha256="ccc", all_hashes=["ccc", "bbb"], model_id=777)
+    match = asyncio.run(backend._novita_match_lora(_lora_cfg(backend, api_key="k"), entry))
+    assert match == {"sd_name_in_api": "old_ver.safetensors"}
+
+    # No hit anywhere: version id, then model id, then name are all searched.
+    async def no_hit(cfg, query, cursor, limit, types="checkpoint", visibility=""):
+        queries.append(query)
+        return {"models": []}
+
+    queries.clear()
+    backend._novita_list_models = no_hit
+    assert asyncio.run(backend._novita_match_lora(
+        _lora_cfg(backend), _lora(model_id=777))) is None
+    assert queries == ["123456", "777", "Detail Tweaker"]
+
+
+def test_match_all_endpoint_rechecks_unmatched_only(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend)
+    cfg = backend._load_config()
+    cfg["lora_library"] = [
+        _lora(id="1", novita=None),                                   # should recheck → match
+        _lora(id="2"),                                                # already matched
+        _lora(id="3", novita=None, sd_name_override="manual.st"),     # override set
+        _lora(id="4", novita=None, base_model="Flux.2 D"),            # flux: link-based
+        _lora(id="5", novita=None, sha256="unknown", all_hashes=[]),  # rechecks, stays None
+    ]
+    backend._save_config(cfg)
+
+    async def fake_list(cfg, query, cursor, limit, types="checkpoint", visibility=""):
+        return {"models": [
+            {"hash_sha256": "ABC123", "sd_name_in_api": "found.safetensors", "status": 1}]}
+
+    backend._novita_list_models = fake_list
+    client = _client(backend)
+    body = client.post("/loras/match_all").json()
+    assert body["checked"] == 2
+    assert body["matched"] == 1
+
+    entries = {e["id"]: e for e in backend._load_config()["lora_library"]}
+    assert entries["1"]["novita"] == {"sd_name_in_api": "found.safetensors"}
+    assert entries["1"]["novita_checked_at"]
+    assert entries["5"]["novita"] is None
+    assert entries["5"]["novita_checked_at"]
+    assert entries["3"]["novita"] is None and not entries["3"].get("novita_checked_at")
+    assert entries["4"]["novita"] is None and not entries["4"].get("novita_checked_at")
+
+    # Keyless: refused.
+    backend2 = _load_backend(tmp_path / "nokey")
+    assert _client(backend2).post("/loras/match_all").status_code == 400
+
+
+def test_my_novita_loras_endpoint(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+    assert client.get("/novita/my-loras").status_code == 400  # no key
+
+    _enable(backend)
+    captured = {}
+
+    async def fake_list(cfg, query, cursor, limit, types="checkpoint", visibility=""):
+        captured.update({"types": types, "visibility": visibility})
+        return {"models": [
+            {"sd_name_in_api": "mine_1.safetensors", "name": "My Style",
+             "base_model": "SDXL 1.0", "status": 1},
+            {"sd_name": "processing.safetensors", "name": "Uploading", "status": 2},
+            {"name": "nameless", "status": 1},  # unusable, dropped
+        ]}
+
+    backend._novita_list_models = fake_list
+    body = client.get("/novita/my-loras").json()
+    assert captured == {"types": "lora", "visibility": "private"}
+    assert body["loras"] == [
+        {"sd_name": "mine_1.safetensors", "name": "My Style",
+         "base_model": "SDXL 1.0", "ready": True},
+        {"sd_name": "processing.safetensors", "name": "Uploading",
+         "base_model": "", "ready": False},
+    ]
+
+
 def test_novita_match_lora_by_hash(tmp_path):
     backend = _load_backend(tmp_path)
     calls = []
