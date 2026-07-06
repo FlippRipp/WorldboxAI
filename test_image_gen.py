@@ -635,6 +635,7 @@ def test_flatten_civitai_model(tmp_path):
     assert flat["stats"] == {"downloads": 1000, "likes": 55}
     assert flat["civitai_url"] == "https://civitai.com/models/42"
     assert flat["trained_words"] == ["cool style"]
+    assert flat["published_at"] == ""  # absent in fixture, defaults empty
 
     assert backend._flatten_civitai_model({"id": 1, "modelVersions": []}) is None
 
@@ -777,6 +778,63 @@ def test_civitai_search_nsfw_modes(tmp_path):
         result = run("only")
         assert seen["params"]["nsfw"] == "true"
         assert [i["name"] for i in result["items"]] == ["spicy"]
+    finally:
+        httpx.AsyncClient = original
+
+
+def test_civitai_search_with_query_sorts_proxy_side(tmp_path):
+    # Civitai's Meilisearch path (query set) ignores `sort` and returns
+    # relevance order; the proxy must re-sort and fetch a full page.
+    backend = _load_backend(tmp_path)
+    seen = {}
+
+    def _version(vid, published):
+        return {"id": vid, "name": "v1", "files": [], "images": [],
+                "publishedAt": published}
+
+    class FakeResponse:
+        status_code = 200
+        def json(self):
+            return {"items": [
+                {"id": 1, "name": "mid", "nsfw": False,
+                 "stats": {"downloadCount": 50, "thumbsUpCount": 500},
+                 "modelVersions": [_version(1, "2024-01-01T00:00:00Z")]},
+                {"id": 2, "name": "big", "nsfw": False,
+                 "stats": {"downloadCount": 900, "thumbsUpCount": 10},
+                 "modelVersions": [_version(2, "2023-01-01T00:00:00Z")]},
+                {"id": 3, "name": "new", "nsfw": False,
+                 "stats": {"downloadCount": 1, "thumbsUpCount": 2},
+                 "modelVersions": [_version(3, "2025-06-01T00:00:00Z")]},
+            ], "metadata": {}}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def get(self, url, headers=None, params=None):
+            seen["params"] = dict(params)
+            return FakeResponse()
+
+    import httpx
+    original = httpx.AsyncClient
+    httpx.AsyncClient = FakeClient
+    try:
+        def run(sort, query="style"):
+            result = asyncio.run(backend._civitai_search_loras(
+                backend._default_config(), query=query, base_model="",
+                lora_type="LORA", sort=sort, nsfw_mode="off", cursor="", limit=24))
+            return [i["name"] for i in result["items"]]
+
+        assert run("Most Downloaded") == ["big", "mid", "new"]
+        assert seen["params"]["limit"] == "100"  # full page fetched for re-sort
+        assert run("Highest Rated") == ["mid", "big", "new"]
+        assert run("Newest") == ["new", "mid", "big"]
+        # Without a query Civitai's own order is kept (and correct).
+        assert run("Most Downloaded", query="") == ["mid", "big", "new"]
+        assert seen["params"]["limit"] == "24"
     finally:
         httpx.AsyncClient = original
 

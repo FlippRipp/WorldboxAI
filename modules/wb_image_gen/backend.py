@@ -634,6 +634,7 @@ def _flatten_civitai_model(model: dict) -> dict | None:
         "trained_words": [str(w) for w in (version.get("trainedWords") or [])],
         "thumb_url": str(thumb or ""),
         "civitai_url": f"https://civitai.com/models/{model.get('id')}",
+        "published_at": str(version.get("publishedAt") or ""),
         "nsfw": bool(model.get("nsfw")),
         "stats": {
             "downloads": int(stats.get("downloadCount") or 0),
@@ -648,10 +649,14 @@ async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
     import httpx
     if nsfw_mode not in CIVITAI_NSFW_MODES:
         nsfw_mode = "off"
+    sort = sort if sort in CIVITAI_SORTS else CIVITAI_SORTS[0]
+    # With a `query`, Civitai routes to Meilisearch which ignores `sort` and
+    # returns relevance order — so fetch a full page and sort proxy-side below.
+    fetch_limit = 100 if query else max(1, min(100, limit))
     params = [
         ("types", lora_type if lora_type in CIVITAI_LORA_TYPES else "LORA"),
-        ("sort", sort if sort in CIVITAI_SORTS else CIVITAI_SORTS[0]),
-        ("limit", str(max(1, min(100, limit)))),
+        ("sort", sort),
+        ("limit", str(fetch_limit)),
         ("nsfw", "false" if nsfw_mode == "off" else "true"),
     ]
     if query:
@@ -677,6 +682,13 @@ async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
     ]
     if nsfw_mode == "only":
         items = [i for i in items if i["nsfw"]]
+    if query:
+        sort_keys = {
+            "Most Downloaded": lambda i: i["stats"]["downloads"],
+            "Highest Rated": lambda i: i["stats"]["likes"],
+            "Newest": lambda i: i.get("published_at") or "",
+        }
+        items.sort(key=sort_keys[sort], reverse=True)
     next_cursor = str((body.get("metadata") or {}).get("nextCursor") or "")
     return {"items": items, "next_cursor": next_cursor}
 
