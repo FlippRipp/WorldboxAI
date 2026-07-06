@@ -304,6 +304,39 @@ function loraAvailability(entry) {
   return { ok: false, label: 'not on Novita', cls: 'bg-red-900/50 text-red-300 border-red-800' };
 }
 
+// Availability badge for a browse result (not yet saved). The backend checks
+// each result's hashes against Novita's mirrored catalog; flux LoRAs travel
+// as download links so the mirror doesn't matter for them.
+function browseAvailability(item) {
+  if (item.gated) {
+    return {
+      label: 'gated', cls: 'bg-yellow-900/40 text-yellow-400 border-yellow-800',
+      title: 'Gated Hugging Face repo — Novita cannot download it, so it cannot be used',
+    };
+  }
+  if (baseFamily(item.base_model) === 'flux') {
+    return item.download_url
+      ? { label: 'via link', cls: 'bg-purple-900/40 text-purple-300 border-purple-800', title: 'Sent to FLUX.2 as a download link — no mirror needed' }
+      : null;
+  }
+  if (item.novita_available === true) {
+    return {
+      label: 'on Novita', cls: 'bg-green-900/50 text-green-300 border-green-800',
+      title: item.novita_sd_name ? `In Novita's catalog as ${item.novita_sd_name}` : "In Novita's catalog",
+    };
+  }
+  if (item.novita_available === false) {
+    return {
+      label: 'not on Novita', cls: 'bg-gray-800/80 text-gray-400 border-gray-700',
+      title: "Not in Novita's mirrored catalog — you can still save it and upload it to your own Novita account",
+    };
+  }
+  return {
+    label: 'Novita: ?', cls: 'bg-gray-900/40 text-gray-600 border-gray-800',
+    title: 'Novita availability unknown (catalog index not built yet)',
+  };
+}
+
 function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLoras, maxSlots, loadMyUploads, fetchMyUploads }) {
   const [strength, setStrength] = useState(entry.strength ?? 0.7);
   const [showOverride, setShowOverride] = useState(false);
@@ -354,12 +387,14 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
   const availability = loraAvailability(entry);
   const compatible = fam && checkpointFamily && fam === checkpointFamily;
   const dimmed = entry.active && !compatible;
+  const pageUrl = entry.page_url || entry.civitai_url;
+  const sourceName = entry.source === 'hf' ? 'Hugging Face' : 'Civitai';
 
   return (
     <div className={`bg-gray-950/60 border border-gray-800 rounded-lg p-3 space-y-2 ${!compatible ? 'opacity-60' : ''}`}>
       <div className="flex items-center gap-3">
         {entry.thumb_url ? (
-          <a href={entry.civitai_url} target="_blank" rel="noreferrer" className="shrink-0" title="Open on Civitai">
+          <a href={pageUrl} target="_blank" rel="noreferrer" className="shrink-0" title={`Open on ${sourceName}`}>
             <img src={entry.thumb_url} alt="" loading="lazy" className="w-10 h-10 rounded object-cover bg-gray-800" />
           </a>
         ) : (
@@ -367,7 +402,7 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
         )}
         <div className="min-w-0 flex-1">
           <a
-            href={entry.civitai_url}
+            href={pageUrl}
             target="_blank"
             rel="noreferrer"
             className="text-sm text-gray-200 hover:text-purple-300 truncate block"
@@ -486,7 +521,7 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
                     Download the file
                     {entry.size_kb ? ` (${(entry.size_kb / 1024).toFixed(0)} MB)` : ''}
                   </a>
-                  <span className="text-gray-600">— uses your Civitai key</span>
+                  {entry.source !== 'hf' && <span className="text-gray-600">— uses your Civitai key</span>}
                 </li>
                 <li className="flex items-center gap-2">
                   <span className="text-gray-600 shrink-0">2.</span>
@@ -560,10 +595,11 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
   );
 }
 
-// Civitai LoRA browser + local library. Browsing is proxied through the module
-// backend (which injects the Civitai key for NSFW); saving stores metadata only
-// — no file ever touches this device.
+// LoRA browser (Civitai + Hugging Face) + local library. Browsing is proxied
+// through the module backend (which injects the Civitai key for NSFW); saving
+// stores metadata only — no file ever touches this device.
 function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily }) {
+  const [source, setSource] = useState('civitai');
   const [query, setQuery] = useState('');
   const [baseModel, setBaseModel] = useState('');
   const [loraType, setLoraType] = useState('LORA');
@@ -582,7 +618,9 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   const myLorasRef = useRef(false);
   const autoRecheckRef = useRef(false);
 
-  const nsfwMode = config.has_civitai_key ? (draft.civitai_nsfw || 'off') : 'off';
+  // Hugging Face browsing is public, so the NSFW filter needs no key there;
+  // Civitai requires its key for anything beyond SFW.
+  const nsfwMode = (source === 'hf' || config.has_civitai_key) ? (draft.civitai_nsfw || 'off') : 'off';
   const savedIds = new Set(library.map((e) => e.id));
   const isUnmatched = (e) =>
     baseFamily(e.base_model) !== 'flux' &&
@@ -595,11 +633,14 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
     setLoading(true);
     setError('');
     try {
-      const params = new URLSearchParams({ query, lora_type: loraType, sort, nsfw: nsfwMode });
+      const params = new URLSearchParams({ query, sort, nsfw: nsfwMode });
+      if (source === 'civitai') {
+        params.set('lora_type', loraType);
+        if (category) params.set('category', category);
+      }
       if (baseModel) params.set('base_model', baseModel);
-      if (category) params.set('category', category);
       if (cursor) params.set('cursor', cursor);
-      const res = await fetch(`${API_BASE}/civitai/loras?${params}`);
+      const res = await fetch(`${API_BASE}/${source === 'hf' ? 'hf' : 'civitai'}/loras?${params}`);
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${res.status}`);
@@ -613,7 +654,18 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
     } finally {
       if (seq === seqRef.current) setLoading(false);
     }
-  }, [query, baseModel, loraType, category, sort, nsfwMode]);
+  }, [source, query, baseModel, loraType, category, sort, nsfwMode]);
+
+  // Sort options and base-model lists differ per source, so switching resets
+  // the filters that don't carry over; the effect below re-searches.
+  const switchSource = (s) => {
+    if (s === source) return;
+    setSource(s);
+    setSort('Most Downloaded');
+    setBaseModel('');
+    setItems([]);
+    setNextCursor('');
+  };
 
   useEffect(() => {
     if (!open) return undefined;
@@ -723,18 +775,33 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
             onClick={() => setOpen((o) => !o)}
             className="text-xs text-purple-400 hover:text-purple-300"
           >
-            {open ? 'Close browser' : 'Browse Civitai…'}
+            {open ? 'Close browser' : 'Browse LoRAs…'}
           </button>
         </div>
       </div>
       <p className="text-xs text-gray-600">
-        Save LoRAs you like from Civitai, then activate them. SD-family LoRAs are applied through Novita's
-        mirrored catalog; Flux LoRAs are sent as download links (FLUX.2 model only). Active LoRAs that do not
-        match the selected checkpoint are skipped.
+        Save LoRAs you like from Civitai or Hugging Face, then activate them. SD-family LoRAs are applied
+        through Novita's mirrored catalog; Flux LoRAs are sent as download links (FLUX.2 model only). Active
+        LoRAs that do not match the selected checkpoint are skipped.
       </p>
 
       {open && (
         <div className="space-y-3">
+          <div className="flex gap-1">
+            {[['civitai', 'Civitai'], ['hf', 'Hugging Face']].map(([id, label]) => (
+              <button
+                key={id}
+                onClick={() => switchSource(id)}
+                className={`px-3 py-1 rounded-full text-xs whitespace-nowrap transition-colors ${
+                  source === id
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-gray-900 border border-gray-800 text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <input
               type="text"
@@ -745,33 +812,39 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
             />
             <select value={baseModel} onChange={(e) => setBaseModel(e.target.value)} className={inputCls}>
               <option value="">All base models</option>
-              {(config.civitai_base_models || []).map((b) => <option key={b} value={b}>{b}</option>)}
+              {((source === 'hf' ? config.hf_base_models : config.civitai_base_models) || []).map(
+                (b) => <option key={b} value={b}>{b}</option>)}
             </select>
-            <select value={loraType} onChange={(e) => setLoraType(e.target.value)} className={inputCls}>
-              {(config.civitai_lora_types || ['LORA']).map((t) => <option key={t} value={t}>{t}</option>)}
-            </select>
-            <select value={category} onChange={(e) => setCategory(e.target.value)} className={inputCls}>
-              <option value="">All categories</option>
-              {(config.civitai_categories || []).map((c) => (
-                <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>
-              ))}
-            </select>
+            {source === 'civitai' && (
+              <select value={loraType} onChange={(e) => setLoraType(e.target.value)} className={inputCls}>
+                {(config.civitai_lora_types || ['LORA']).map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            )}
+            {source === 'civitai' && (
+              <select value={category} onChange={(e) => setCategory(e.target.value)} className={inputCls}>
+                <option value="">All categories</option>
+                {(config.civitai_categories || []).map((c) => (
+                  <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>
+                ))}
+              </select>
+            )}
             <select value={sort} onChange={(e) => setSort(e.target.value)} className={inputCls}>
-              {(config.civitai_sorts || []).map((s) => <option key={s} value={s}>{s}</option>)}
+              {((source === 'hf' ? config.hf_sorts : config.civitai_sorts) || []).map(
+                (s) => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
           <div className="flex items-center gap-4">
             <select
               value={nsfwMode}
               onChange={(e) => set('civitai_nsfw', e.target.value)}
-              disabled={!config.has_civitai_key}
+              disabled={source === 'civitai' && !config.has_civitai_key}
               className={`${inputCls} max-w-[160px] disabled:opacity-50`}
             >
               <option value="off">No NSFW</option>
               <option value="include">NSFW</option>
               <option value="only">NSFW only</option>
             </select>
-            {!config.has_civitai_key && (
+            {source === 'civitai' && !config.has_civitai_key && (
               <span className="text-[11px] text-yellow-600">Save a Civitai API key (Setup tab) to browse NSFW LoRAs.</span>
             )}
           </div>
@@ -779,39 +852,59 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
           {error && <p className="text-xs text-red-400">{error}</p>}
 
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-96 overflow-y-auto pr-1">
-            {items.map((item) => (
-              <div key={item.id} className="bg-gray-950/60 border border-gray-800 rounded-lg overflow-hidden">
-                {item.thumb_url ? (
-                  <a href={item.civitai_url} target="_blank" rel="noreferrer" title="Open on Civitai">
-                    <img src={item.thumb_url} alt="" loading="lazy" className="w-full h-28 object-cover bg-gray-800" />
-                  </a>
-                ) : (
-                  <div className="w-full h-28 bg-gray-800" />
-                )}
-                <div className="p-2 space-y-1">
-                  <a
-                    href={item.civitai_url} target="_blank" rel="noreferrer"
-                    className="text-xs text-gray-200 hover:text-purple-300 line-clamp-2 leading-snug"
-                    title={item.name}
-                  >
-                    {item.name}
-                  </a>
-                  <div className="flex items-center justify-between text-[10px] text-gray-500">
-                    <span className="truncate">{item.base_model}</span>
-                    <span className="shrink-0">⬇ {fmtCount(item.stats?.downloads)} · 👍 {fmtCount(item.stats?.likes)}</span>
+            {items.map((item) => {
+              const pageUrl = item.page_url || item.civitai_url;
+              const badge = browseAvailability(item);
+              return (
+                <div key={item.id} className="bg-gray-950/60 border border-gray-800 rounded-lg overflow-hidden">
+                  {item.thumb_url ? (
+                    <a href={pageUrl} target="_blank" rel="noreferrer" title={`Open on ${item.source === 'hf' ? 'Hugging Face' : 'Civitai'}`}>
+                      <img src={item.thumb_url} alt="" loading="lazy" className="w-full h-28 object-cover bg-gray-800" />
+                    </a>
+                  ) : (
+                    <div className="w-full h-28 bg-gray-800" />
+                  )}
+                  <div className="p-2 space-y-1">
+                    <a
+                      href={pageUrl} target="_blank" rel="noreferrer"
+                      className="text-xs text-gray-200 hover:text-purple-300 line-clamp-2 leading-snug"
+                      title={item.name}
+                    >
+                      {item.name}
+                    </a>
+                    <div className="flex items-center justify-between text-[10px] text-gray-500">
+                      <span className="truncate">{item.base_model}</span>
+                      <span className="shrink-0">⬇ {fmtCount(item.stats?.downloads)} · 👍 {fmtCount(item.stats?.likes)}</span>
+                    </div>
+                    {badge && (
+                      <div className="flex items-center gap-1">
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider border ${badge.cls}`}
+                          title={badge.title}
+                        >
+                          {badge.label}
+                        </span>
+                        {item.file_count > 1 && (
+                          <span className="text-[9px] text-gray-600" title="This repo holds several .safetensors files; the largest one is used">
+                            {item.file_count} files
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    <button
+                      onClick={() => saveLora(item)}
+                      disabled={savedIds.has(item.id) || item.gated}
+                      title={item.gated ? 'Gated repos cannot be fetched by Novita' : undefined}
+                      className="w-full px-2 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {savedIds.has(item.id) ? 'Saved ✓' : item.gated ? 'Gated' : 'Save to library'}
+                    </button>
                   </div>
-                  <button
-                    onClick={() => saveLora(item)}
-                    disabled={savedIds.has(item.id)}
-                    className="w-full px-2 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    {savedIds.has(item.id) ? 'Saved ✓' : 'Save to library'}
-                  </button>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
-          {loading && <p className="text-xs text-gray-500 animate-pulse">Searching Civitai…</p>}
+          {loading && <p className="text-xs text-gray-500 animate-pulse">Searching {source === 'hf' ? 'Hugging Face' : 'Civitai'}…</p>}
           {!loading && items.length === 0 && !error && (
             <p className="text-xs text-gray-600 italic">No LoRAs found.</p>
           )}
@@ -826,7 +919,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
       {!open && error && <p className="text-xs text-red-400">{error}</p>}
 
       {library.length === 0 ? (
-        <p className="text-sm text-gray-600 italic">No saved LoRAs yet — browse Civitai to add some.</p>
+        <p className="text-sm text-gray-600 italic">No saved LoRAs yet — browse Civitai or Hugging Face to add some.</p>
       ) : (
         <div className="space-y-2">
           {library.map((entry) => (
@@ -1155,6 +1248,23 @@ export default function ImageStudio({ onBack }) {
               downloads). Create one under{' '}
               <a href="https://civitai.com/user/account" target="_blank" rel="noreferrer" className="text-purple-400 hover:underline">
                 civitai.com account settings
+              </a>
+              . Stored locally on this machine only.
+            </p>
+          </KeyField>
+          <KeyField
+            provider="hf"
+            label="Hugging Face Token (optional)"
+            placeholder="Paste your huggingface.co token"
+            saved={!!config.has_hf_key}
+            savedMask={config.hf_api_key}
+            onSaved={(data) => { setConfig(data); setLibrary(data.lora_library || []); }}
+          >
+            <p className="text-xs text-gray-600 mt-1">
+              Optional — raises rate limits when browsing Hugging Face LoRAs; not needed for normal use.
+              Create one under{' '}
+              <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer" className="text-purple-400 hover:underline">
+                huggingface.co token settings
               </a>
               . Stored locally on this machine only.
             </p>

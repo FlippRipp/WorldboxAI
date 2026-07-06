@@ -3,7 +3,7 @@
   "name": "Image Generation",
   "version": "1.0.0",
   "icon": "🎨",
-  "description": "Illustrates the story with Novita AI images. Auto-generates every N turns, or on demand with /image. Configure API key, model, prompts, and Civitai LoRAs in the Image Studio main-menu entry.",
+  "description": "Illustrates the story with Novita AI images. Auto-generates every N turns, or on demand with /image. Configure API key, model, prompts, and LoRAs (Civitai + Hugging Face) in the Image Studio main-menu entry.",
   "dependencies": [],
   "consumes": {
     "state": ["turn", "history", "chat_messages", "world_id", "last_input_text", "active_save_id"],

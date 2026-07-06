@@ -1342,3 +1342,340 @@ def test_generate_endpoint_refine_runs_prompt_writer(tmp_path):
     assert record["image_prompt"] == "a refined moonlit castle"
     assert "castle by the sea" in captured["prompts"][0]
     assert captured["preferences"] == ["smartest"]
+
+
+# ---------------------------------------------------------------------------
+# Hugging Face LoRA source + Novita-availability browse badges
+# ---------------------------------------------------------------------------
+
+def test_flatten_hf_model(tmp_path):
+    backend = _load_backend(tmp_path)
+    raw = {
+        "id": "XLabs-AI/flux-RealismLora",
+        "downloads": 1200, "likes": 34,
+        "lastModified": "2026-01-01T00:00:00.000Z",
+        "tags": ["lora", "base_model:black-forest-labs/FLUX.1-dev",
+                 "not-for-all-audiences"],
+        "cardData": {"instance_prompt": "realism"},
+        "siblings": [
+            {"rfilename": "preview.png"},
+            {"rfilename": "lora.safetensors",
+             "lfs": {"sha256": "ABCDEF123", "size": 2048000}},
+        ],
+        "gated": False,
+    }
+    flat = backend._flatten_hf_model(raw)
+    assert flat["id"] == "hf:XLabs-AI__flux-RealismLora"
+    assert flat["source"] == "hf"
+    assert flat["repo_id"] == "XLabs-AI/flux-RealismLora"
+    assert flat["name"] == "flux-RealismLora"
+    assert flat["creator"] == "XLabs-AI"
+    assert flat["base_model"] == "Flux.1 D"
+    assert flat["sha256"] == "abcdef123"       # lowercased for the hash index
+    assert flat["all_hashes"] == ["abcdef123"]
+    assert flat["download_url"] == (
+        "https://huggingface.co/XLabs-AI/flux-RealismLora/resolve/main/lora.safetensors")
+    assert flat["page_url"] == "https://huggingface.co/XLabs-AI/flux-RealismLora"
+    assert flat["civitai_url"] == ""
+    assert flat["thumb_url"].endswith("/resolve/main/preview.png")
+    assert flat["nsfw"] is True
+    assert flat["gated"] is False
+    assert flat["trained_words"] == ["realism"]
+    assert flat["size_kb"] == 2000.0
+    assert flat["stats"] == {"downloads": 1200, "likes": 34}
+
+    # Repos without a .safetensors file are not LoRAs we can use.
+    assert backend._flatten_hf_model(
+        {"id": "a/b", "siblings": [{"rfilename": "weights.bin"}]}) is None
+    # HF's gated field is False or "auto"/"manual"; private counts too.
+    assert backend._flatten_hf_model({**raw, "gated": "auto"})["gated"] is True
+    assert backend._flatten_hf_model({**raw, "private": True})["gated"] is True
+
+
+def test_hf_pick_safetensors_multiple_files(tmp_path):
+    backend = _load_backend(tmp_path)
+    primary, hashes, count = backend._hf_pick_safetensors([
+        {"rfilename": "small.safetensors", "lfs": {"sha256": "AAA", "size": 10}},
+        {"rfilename": "big.safetensors", "lfs": {"sha256": "BBB", "size": 100}},
+        {"rfilename": "readme.md"},
+    ])
+    assert primary["rfilename"] == "big.safetensors"   # largest wins
+    assert hashes == ["aaa", "bbb"]                    # but every hash is kept
+    assert count == 2
+
+    # Listing responses carry no lfs info: first file, no hashes yet.
+    primary, hashes, count = backend._hf_pick_safetensors(
+        [{"rfilename": "a.safetensors"}, {"rfilename": "b.safetensors"}])
+    assert primary["rfilename"] == "a.safetensors"
+    assert hashes == []
+    assert count == 2
+
+    assert backend._hf_pick_safetensors([]) == (None, [], 0)
+
+
+def test_hf_base_model_mapping(tmp_path):
+    backend = _load_backend(tmp_path)
+    cases = {
+        "base_model:black-forest-labs/FLUX.1-dev": "Flux.1 D",
+        "base_model:black-forest-labs/FLUX.2-dev": "Flux.2 D",
+        "base_model:stabilityai/stable-diffusion-xl-base-1.0": "SDXL 1.0",
+        "base_model:runwayml/stable-diffusion-v1-5": "SD 1.5",
+        "base_model:AstraliteHeart/pony-diffusion-v6": "Pony",
+        "base_model:OnomaAIResearch/Illustrious-xl-early-release-v0": "Illustrious",
+        "base_model:Laxhar/noobai-XL-1.0": "NoobAI",
+    }
+    for tag, expected in cases.items():
+        assert backend._hf_base_model_name([tag]) == expected
+        # Every mapped name must land in a family the downstream logic knows.
+        assert backend._base_family(expected) != ""
+    # Every family offered as a search filter must map back to itself.
+    for name in backend.HF_BASE_MODELS:
+        assert backend._hf_base_model_name([backend.HF_BASE_MODELS[name]]) == name
+    assert backend._hf_base_model_name(["lora", "text-to-image"]) == ""
+    # Unknown bases pass through raw (family "" -> never usable, same as
+    # unknown Civitai bases).
+    assert backend._hf_base_model_name(["base_model:foo/bar"]) == "foo/bar"
+
+
+class _FakeHfResponse:
+    def __init__(self, body, links=None, status_code=200):
+        self.status_code = status_code
+        self._body = body
+        self.links = links or {}
+        self.text = ""
+
+    def json(self):
+        return self._body
+
+
+def test_hf_loras_endpoint(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+    seen = {}
+
+    listing = [
+        {"id": "artist/style-lora", "downloads": 10, "likes": 2,
+         "tags": ["lora", "base_model:stabilityai/stable-diffusion-xl-base-1.0"],
+         "siblings": [{"rfilename": "style.safetensors"}]},
+        {"id": "artist/spicy-lora", "downloads": 5, "likes": 1,
+         "tags": ["lora", "not-for-all-audiences",
+                  "base_model:stabilityai/stable-diffusion-xl-base-1.0"],
+         "siblings": [{"rfilename": "spicy.safetensors"}]},
+        {"id": "artist/no-files", "tags": ["lora"],
+         "siblings": [{"rfilename": "README.md"}]},
+    ]
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def get(self, url, headers=None, params=None):
+            if url.endswith("/api/models"):
+                seen["params"] = list(params)
+                return _FakeHfResponse(
+                    listing,
+                    links={"next": {"url": backend.HF_API_BASE + "/models?cursor=abc"}})
+            repo = url.split("/api/models/")[1]
+            seen.setdefault("details", []).append(repo)
+            return _FakeHfResponse({
+                "id": repo, "downloads": 10, "likes": 2,
+                "tags": ["lora", "base_model:stabilityai/stable-diffusion-xl-base-1.0"],
+                "siblings": [{"rfilename": "style.safetensors",
+                              "lfs": {"sha256": FULL_HASH, "size": 4096}}],
+            })
+
+    import httpx
+    original = httpx.AsyncClient
+    httpx.AsyncClient = FakeClient
+    try:
+        resp = client.get("/hf/loras", params={
+            "query": "style", "base_model": "SDXL 1.0", "sort": "Most Liked"})
+        assert resp.status_code == 200
+        body = resp.json()
+        params = seen["params"]
+        assert ("filter", "lora") in params
+        assert ("filter", backend.HF_BASE_MODELS["SDXL 1.0"]) in params
+        assert ("sort", "likes") in params and ("direction", "-1") in params
+        assert ("full", "true") in params and ("search", "style") in params
+        assert body["next_cursor"] == backend.HF_API_BASE + "/models?cursor=abc"
+
+        # nsfw defaults to off (dropping the tagged repo, no key needed) and
+        # the fileless repo never shows; the survivor is hash-enriched.
+        assert [i["id"] for i in body["items"]] == ["hf:artist__style-lora"]
+        item = body["items"][0]
+        assert item["sha256"] == FULL_HASH
+        assert seen["details"] == ["artist/style-lora"]
+        # No Novita index on disk: availability is unknown, not wrong.
+        assert item["novita_available"] is None
+
+        resp = client.get("/hf/loras", params={"nsfw": "only"})
+        assert [i["id"] for i in resp.json()["items"]] == ["hf:artist__spicy-lora"]
+
+        # Pagination cursors are full Hub URLs; anything else is refused.
+        resp = client.get("/hf/loras", params={"cursor": "https://evil.example/x"})
+        assert resp.status_code == 502
+        assert "cursor" in resp.json()["detail"].lower()
+    finally:
+        httpx.AsyncClient = original
+
+
+def test_hf_save_roundtrip_and_novita_match(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend)
+    client = _client(backend)
+
+    async def fake_list(cfg, query, cursor, limit, types="checkpoint", visibility=""):
+        return {"models": [
+            {"hash_sha256": NOVITA_HASH, "sd_name_in_api": "mirrored_style.safetensors",
+             "status": 1}], "pagination": {}}
+
+    backend._novita_list_models = fake_list
+
+    item = {"id": "hf:artist__style-lora", "source": "hf",
+            "repo_id": "artist/style-lora", "name": "style-lora",
+            "base_model": "SDXL 1.0", "sha256": FULL_HASH,
+            "download_url": "https://huggingface.co/artist/style-lora/resolve/main/style.safetensors",
+            "page_url": "https://huggingface.co/artist/style-lora"}
+    resp = client.post("/loras", json=item)
+    assert resp.status_code == 200
+    entry = resp.json()["entry"]
+    assert entry["source"] == "hf"
+    assert entry["page_url"] == "https://huggingface.co/artist/style-lora"
+    assert entry["novita"] == {"sd_name_in_api": "mirrored_style.safetensors"}
+
+    # The hf: id survives the path routes, and the entry feeds the SD payload.
+    assert client.patch(f"/loras/{item['id']}",
+                        json={"active": True}).status_code == 200
+    cfg = backend._load_config()
+    cfg.update({"model_name": "sd_xl_base_1.0.safetensors", "model_base": "SDXL 1.0"})
+    assert backend._novita_payload(cfg, "x")["request"]["loras"] == [
+        {"model_name": "mirrored_style.safetensors", "strength": 0.7}]
+    assert client.delete(f"/loras/{item['id']}").status_code == 200
+
+
+def test_hf_flux_download_link_gets_no_civitai_token(tmp_path):
+    backend = _load_backend(tmp_path)
+    hf_url = "https://huggingface.co/a/b/resolve/main/l.safetensors"
+    cfg = _lora_cfg(backend, model_name=backend.FLUX2_MODEL_NAME, model_base="",
+                    civitai_api_key="civkey",
+                    lora_library=[
+                        _lora(id="hf1", source="hf", base_model="Flux.1 D",
+                              novita=None, download_url=hf_url),
+                        # Legacy entry without a source field: still Civitai.
+                        _lora(id="civ", base_model="Flux.2 D", novita=None),
+                    ])
+    urls = backend._flux2_payload(cfg, "x")["loras"]
+    assert hf_url in urls  # untouched — no Civitai token leaked to HF
+    assert "https://civitai.com/api/download/models/123456?token=civkey" in urls
+
+
+def test_save_rejects_gated_hf(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+    resp = client.post("/loras", json={
+        "id": "hf:a__b", "source": "hf", "repo_id": "a/b", "name": "b",
+        "base_model": "Flux.1 D", "gated": True,
+        "download_url": "https://huggingface.co/a/b/resolve/main/l.safetensors"})
+    assert resp.status_code == 400
+    assert "ated" in resp.json()["detail"]
+    assert backend._load_config()["lora_library"] == []
+
+
+def test_browse_annotates_novita_availability(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    async def fake_search(cfg, **kwargs):
+        return {"items": [
+            {"id": "1", "base_model": "SDXL 1.0", "sha256": FULL_HASH, "all_hashes": []},
+            {"id": "2", "base_model": "SDXL 1.0", "sha256": "9" * 64, "all_hashes": []},
+            {"id": "3", "base_model": "Flux.1 D", "sha256": "", "all_hashes": []},
+            {"id": "4", "base_model": "SDXL 1.0", "sha256": "", "all_hashes": []},
+        ], "next_cursor": ""}
+
+    backend._civitai_search_loras = fake_search
+
+    # Fresh index on disk: definite yes/no per hash, straight from the cache.
+    backend._atomic_write_json(backend._lora_index_path(), {
+        "fetched_at": time.time(),
+        "hashes": {NOVITA_HASH: "mirrored.safetensors"}})
+    by_id = {i["id"]: i for i in client.get("/civitai/loras").json()["items"]}
+    assert by_id["1"]["novita_available"] is True
+    assert by_id["1"]["novita_sd_name"] == "mirrored.safetensors"
+    assert by_id["2"]["novita_available"] is False
+    assert "novita_available" not in by_id["3"]      # flux: UI shows "via link"
+    assert by_id["4"]["novita_available"] is None    # no hashes to match
+
+    # An expired index still answers badges (allow_stale).
+    stale = json.loads(backend._lora_index_path().read_text(encoding="utf-8"))
+    stale["fetched_at"] = time.time() - backend.NOVITA_LORA_INDEX_TTL_S - 1
+    backend._lora_index_path().write_text(json.dumps(stale), encoding="utf-8")
+    by_id = {i["id"]: i for i in client.get("/civitai/loras").json()["items"]}
+    assert by_id["1"]["novita_available"] is True
+
+    # No index at all (and no Novita key -> no background build): unknown,
+    # and the browse response never waits on a catalog sync.
+    backend._lora_index_path().unlink()
+    by_id = {i["id"]: i for i in client.get("/civitai/loras").json()["items"]}
+    assert by_id["1"]["novita_available"] is None
+    assert by_id["2"]["novita_available"] is None
+
+
+def test_keys_hf_provider(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    async def ok(key):
+        return True
+
+    backend._validate_hf_key = ok
+    resp = client.post("/keys/hf", json={"api_key": " hftok99 "})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_hf_key"] is True
+    assert "hftok99" not in resp.text  # masked in the response
+    assert backend._load_config()["hf_api_key"] == "hftok99"
+
+    async def bad(key):
+        return False
+
+    backend._validate_hf_key = bad
+    resp = client.post("/keys/hf", json={"api_key": "nope"})
+    assert resp.status_code == 400
+    assert "Hugging Face" in resp.json()["detail"]
+    assert backend._load_config()["hf_api_key"] == "hftok99"  # unchanged
+
+    async def down(key):
+        raise RuntimeError("Could not reach Hugging Face: timeout")
+
+    backend._validate_hf_key = down
+    assert client.post("/keys/hf", json={"api_key": "x"}).status_code == 502
+
+    # Masked round-trip through PUT /config keeps the stored key.
+    masked = client.get("/config").json()["hf_api_key"]
+    assert masked.startswith(backend.KEY_MASK_PREFIX)
+    client.put("/config", json={"hf_api_key": masked})
+    assert backend._load_config()["hf_api_key"] == "hftok99"
+
+
+def test_download_endpoint_redirects_hf_without_token(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend, civitai_api_key="civkey")
+    hf_url = "https://huggingface.co/a/b/resolve/main/l.safetensors"
+    cfg = backend._load_config()
+    cfg["lora_library"] = [
+        _lora(id="hf1", source="hf", download_url=hf_url),
+        _lora(id="123456"),  # legacy civitai entry
+    ]
+    backend._save_config(cfg)
+
+    client = _client(backend)
+    resp = client.get("/loras/hf1/download", follow_redirects=False)
+    assert resp.status_code == 307
+    assert resp.headers["location"] == hf_url  # no token appended
+
+    resp = client.get("/loras/123456/download", follow_redirects=False)
+    assert resp.headers["location"].endswith("?token=civkey")

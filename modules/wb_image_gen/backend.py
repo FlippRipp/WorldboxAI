@@ -19,6 +19,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 MODULE_ID = "wb_image_gen"
 
@@ -47,6 +48,31 @@ CIVITAI_CATEGORIES = [
 CIVITAI_BASE_MODELS = [
     "SD 1.5", "SDXL 1.0", "Pony", "Illustrious", "NoobAI", "Flux.1 D", "Flux.2 D",
 ]
+
+HF_API_BASE = "https://huggingface.co/api"
+HF_PAGE_BASE = "https://huggingface.co"
+HF_SORTS = ["Most Downloaded", "Most Liked", "Recently Updated"]
+HF_SORT_PARAMS = {
+    "Most Downloaded": "downloads",
+    "Most Liked": "likes",
+    "Recently Updated": "lastModified",
+}
+# Civitai-style family name -> the canonical base_model tag used to filter the
+# Hub search. The reverse mapping (_hf_base_model_name) is substring-based and
+# forgiving, since repos tag many spellings of the same base.
+HF_BASE_MODELS = {
+    "SD 1.5": "base_model:runwayml/stable-diffusion-v1-5",
+    "SDXL 1.0": "base_model:stabilityai/stable-diffusion-xl-base-1.0",
+    "Pony": "base_model:AstraliteHeart/pony-diffusion-v6",
+    "Illustrious": "base_model:OnomaAIResearch/Illustrious-xl-early-release-v0",
+    "Flux.1 D": "base_model:black-forest-labs/FLUX.1-dev",
+    "Flux.2 D": "base_model:black-forest-labs/FLUX.2-dev",
+}
+HF_NSFW_TAG = "not-for-all-audiences"
+# The Hub's listing endpoint has no file hashes; each result needs one
+# /api/models/{repo}?blobs=true call to learn its safetensors SHA256s.
+HF_DETAIL_CONCURRENCY = 8
+HF_DETAIL_CACHE_TTL_S = 3600
 
 LORA_LIBRARY_MAX = 200
 SD_LORAS_MAX = 5        # per txt2img request
@@ -124,6 +150,7 @@ DEFAULT_PONY_QUALITY_TAGS = "score_9, score_8_up, score_7_up"
 
 _services: dict = {}
 _tasks: set = set()
+_hf_detail_cache: dict = {}   # repo_id -> (fetched_at, detail json)
 _gen_lock: asyncio.Lock | None = None
 _index_lock: asyncio.Lock | None = None
 _lora_index_lock: asyncio.Lock | None = None
@@ -163,7 +190,8 @@ def _default_config() -> dict:
         "style_suffix": "",
         "civitai_api_key": "",
         "civitai_nsfw": "off",          # one of CIVITAI_NSFW_MODES
-        "lora_library": [],             # saved Civitai LoRAs; see _normalize_lora_entry
+        "hf_api_key": "",               # optional; raises Hub rate limits
+        "lora_library": [],             # saved LoRAs; see _normalize_lora_entry
     }
 
 
@@ -363,10 +391,13 @@ def _sd_payload_loras(cfg: dict) -> list[dict]:
     return out[:SD_LORAS_MAX]
 
 
-def _civitai_download_link(entry: dict, cfg: dict) -> str:
-    """Civitai download URL with the user's token appended — Civitai requires
-    auth on downloads, and Novita fetches the file server-side."""
+def _lora_download_link(entry: dict, cfg: dict) -> str:
+    """Download URL ready for a server-side fetch. Civitai requires the user's
+    token appended (Novita downloads the file itself); other sources' URLs are
+    used as-is — appending the token there would leak it to that host."""
     url = str(entry.get("download_url") or "").strip()
+    if (entry.get("source") or "civitai") != "civitai" or "civitai.com" not in url:
+        return url
     key = str(cfg.get("civitai_api_key") or "").strip()
     if url and key:
         url += ("&" if "?" in url else "?") + "token=" + key
@@ -377,7 +408,7 @@ def _flux_payload_loras(cfg: dict) -> list[str]:
     if _checkpoint_family(cfg) != "flux":
         return []
     urls = [
-        _civitai_download_link(entry, cfg)
+        _lora_download_link(entry, cfg)
         for entry in _active_loras(cfg)
         if _entry_usable(entry, "flux")
     ]
@@ -827,8 +858,9 @@ def _lora_index_path() -> Path:
     return _data_dir() / "novita_lora_index.json"
 
 
-def _read_lora_index_cache() -> dict | None:
-    """The cached hash-prefix index, or None when missing/expired/corrupt."""
+def _read_lora_index_cache(allow_stale: bool = False) -> dict | None:
+    """The cached hash-prefix index, or None when missing/expired/corrupt.
+    allow_stale serves an expired index too (good enough for browse badges)."""
     path = _lora_index_path()
     if not path.exists():
         return None
@@ -839,7 +871,8 @@ def _read_lora_index_cache() -> dict | None:
         return None
     if not isinstance(cached, dict) or not isinstance(cached.get("hashes"), dict):
         return None
-    if time.time() - float(cached.get("fetched_at") or 0) > NOVITA_LORA_INDEX_TTL_S:
+    if not allow_stale and \
+            time.time() - float(cached.get("fetched_at") or 0) > NOVITA_LORA_INDEX_TTL_S:
         return None
     return cached["hashes"]
 
@@ -880,26 +913,69 @@ async def _novita_lora_index(cfg: dict, force: bool = False) -> dict:
         return hashes
 
 
-async def _novita_match_lora(cfg: dict, entry: dict,
-                             index: dict | None = None) -> dict | None:
-    """Find the saved Civitai LoRA in Novita's Civitai-mirrored catalog by
-    SHA256 prefix. Hashes are checked newest-version-first (all_hashes keeps
-    Civitai's ordering), so when Novita mirrors several versions the most
-    recent one wins. Callers doing bulk work should build the index once and
-    pass it in."""
+def _entry_hashes(entry: dict) -> list[str]:
+    """The entry's SHA256s, newest-version-first (all_hashes keeps the source's
+    version ordering), deduped."""
     ordered = [str(entry.get("sha256") or "").lower()]
     ordered += [str(h).lower() for h in (entry.get("all_hashes") or []) if h]
     seen: set = set()
-    hashes = [h for h in ordered if h and not (h in seen or seen.add(h))]
-    if not hashes:
+    return [h for h in ordered if h and not (h in seen or seen.add(h))]
+
+
+def _match_hashes(index: dict, entry: dict) -> str | None:
+    """First hash-prefix hit in the Novita index, so when Novita mirrors
+    several versions the most recent one wins."""
+    for h in _entry_hashes(entry):
+        sd_name = index.get(h[:NOVITA_HASH_PREFIX_LEN].upper())
+        if sd_name:
+            return sd_name
+    return None
+
+
+async def _novita_match_lora(cfg: dict, entry: dict,
+                             index: dict | None = None) -> dict | None:
+    """Find the saved LoRA in Novita's Civitai-mirrored catalog by SHA256
+    prefix. Callers doing bulk work should build the index once and pass it
+    in."""
+    if not _entry_hashes(entry):
         return None
     if index is None:
         index = await _novita_lora_index(cfg)
-    for h in hashes:
-        sd_name = index.get(h[:NOVITA_HASH_PREFIX_LEN].upper())
+    sd_name = _match_hashes(index, entry)
+    return {"sd_name_in_api": sd_name} if sd_name else None
+
+
+def _spawn_lora_index_refresh(cfg: dict) -> None:
+    """Fire-and-forget index build, so browse endpoints never wait on the
+    ~26-page Novita sync. _lora_index_lock dedupes concurrent builds."""
+    async def _run():
+        try:
+            await _novita_lora_index(cfg)
+        except RuntimeError as e:
+            print(f"[Image Gen] Background LoRA index build failed: {e}")
+    task = asyncio.get_running_loop().create_task(_run())
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+
+def _annotate_novita_availability(cfg: dict, items: list[dict]) -> None:
+    """Badge browse results with whether Novita already mirrors them, so the
+    user knows availability before saving. Never blocks: a stale index still
+    answers (novita_available true/false), no index at all degrades to None
+    ("unknown") while a rebuild runs in the background."""
+    index = _read_lora_index_cache(allow_stale=True)
+    if cfg.get("api_key") and _read_lora_index_cache() is None:
+        _spawn_lora_index_refresh(cfg)
+    for item in items:
+        if _base_family(item.get("base_model")) == "flux":
+            continue  # flux rides download URLs; the UI shows "via link"
+        if index is None or not _entry_hashes(item):
+            item["novita_available"] = None
+            continue
+        sd_name = _match_hashes(index, item)
+        item["novita_available"] = bool(sd_name)
         if sd_name:
-            return {"sd_name_in_api": sd_name}
-    return None
+            item["novita_sd_name"] = sd_name
 
 
 async def _validate_novita_key(key: str) -> bool:
@@ -938,13 +1014,265 @@ async def _validate_civitai_key(key: str) -> bool:
     raise RuntimeError(f"Civitai answered with HTTP {resp.status_code} — try again later")
 
 
+# --------------------------------------------------------------------------
+# Hugging Face Hub client (LoRA browsing)
+# --------------------------------------------------------------------------
+
+def _hf_headers(cfg: dict) -> dict:
+    headers = {"accept": "application/json"}
+    key = str(cfg.get("hf_api_key") or "").strip()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+def _hf_entry_id(repo_id: str) -> str:
+    """Library-entry id for a Hub repo. Slash-free so the /loras/{lora_id}
+    path routes work; the prefix keeps it clear of numeric Civitai ids."""
+    return "hf:" + repo_id.replace("/", "__")
+
+
+def _hf_base_model_name(tags: list) -> str:
+    """Civitai-style family name from the repo's base_model tags, so all the
+    downstream family logic (_base_family, checkpoint matching) reads HF
+    entries exactly like Civitai ones."""
+    bases = [str(t)[len("base_model:"):].lower() for t in tags or []
+             if str(t).startswith("base_model:")]
+    for base in bases:
+        if "flux.2" in base or "flux-2" in base:
+            return "Flux.2 D"
+        if "flux" in base:
+            return "Flux.1 D"
+        if "xl-base" in base or "sdxl" in base:
+            return "SDXL 1.0"
+        if "stable-diffusion-v1-5" in base or "sd-v1-5" in base or "sd1.5" in base:
+            return "SD 1.5"
+        if "pony" in base:
+            return "Pony"
+        if "illustrious" in base:
+            return "Illustrious"
+        if "noob" in base:
+            return "NoobAI"
+    # Unknown bases pass through raw: _base_family may still classify them
+    # (e.g. a plain "...FLUX..." repo id), otherwise the entry is never
+    # usable — same as an unknown Civitai base today.
+    return bases[0] if bases else ""
+
+
+def _hf_pick_safetensors(siblings: list) -> tuple[dict | None, list[str], int]:
+    """(primary file, every file's SHA256, safetensors count) for a repo's
+    sibling list. Primary = largest by LFS size (LoRA repos almost always have
+    exactly one); all hashes are kept so Novita's mirror matches whichever
+    file it picked up. Listing responses carry no lfs info — then the first
+    file wins and the hash list is empty until the detail fetch."""
+    files = [s for s in siblings or []
+             if str(s.get("rfilename") or "").lower().endswith(".safetensors")]
+    if not files:
+        return None, [], 0
+    primary = max(files, key=lambda s: (s.get("lfs") or {}).get("size") or 0)
+    hashes = []
+    for s in files:
+        h = str((s.get("lfs") or {}).get("sha256") or "").lower()
+        if h and h not in hashes:
+            hashes.append(h)
+    return primary, hashes, len(files)
+
+
+def _flatten_hf_model(model: dict) -> dict | None:
+    """Reduce a Hub model (listing hit or ?blobs=true detail — same shape,
+    details just carry lfs hashes and cardData) to the library-entry shape.
+    Returns None for repos without a .safetensors file."""
+    repo_id = str(model.get("id") or model.get("modelId") or "")
+    if not repo_id:
+        return None
+    siblings = model.get("siblings") or []
+    primary, all_hashes, file_count = _hf_pick_safetensors(siblings)
+    if primary is None:
+        return None
+    filename = str(primary.get("rfilename") or "")
+    tags = [str(t) for t in (model.get("tags") or [])]
+    owner, _, name = repo_id.rpartition("/")
+    card = model.get("cardData") or {}
+    trigger = str(card.get("instance_prompt") or "").strip()
+    lfs = primary.get("lfs") or {}
+    thumb = next(
+        (str(s.get("rfilename")) for s in siblings
+         if str(s.get("rfilename") or "").lower().endswith(
+             (".png", ".jpg", ".jpeg", ".webp"))),
+        "")
+    return {
+        "id": _hf_entry_id(repo_id),
+        "model_id": None,
+        "source": "hf",
+        "repo_id": repo_id,
+        "name": name or repo_id,
+        "version_name": filename,
+        "creator": owner,
+        "type": "LORA",
+        "base_model": _hf_base_model_name(tags),
+        "sha256": str(lfs.get("sha256") or "").lower(),
+        "all_hashes": all_hashes,
+        "download_url": f"{HF_PAGE_BASE}/{repo_id}/resolve/main/{quote(filename)}",
+        "size_kb": (lfs.get("size") or 0) / 1024 or None,
+        "trained_words": [trigger] if trigger else [],
+        "thumb_url": f"{HF_PAGE_BASE}/{repo_id}/resolve/main/{quote(thumb)}" if thumb else "",
+        "civitai_url": "",
+        "page_url": f"{HF_PAGE_BASE}/{repo_id}",
+        "published_at": str(model.get("lastModified") or ""),
+        "tags": [t.lower() for t in tags[:30]],
+        "nsfw": HF_NSFW_TAG in tags,
+        # Gated/private downloads need an auth header Novita's server-side
+        # fetch cannot send, so these can be browsed but not saved.
+        "gated": bool(model.get("gated")) or bool(model.get("private")),
+        "file_count": file_count,
+        "stats": {
+            "downloads": int(model.get("downloads") or 0),
+            "likes": int(model.get("likes") or 0),
+        },
+    }
+
+
+async def _hf_model_detail(client, cfg: dict, repo_id: str) -> dict | None:
+    """?blobs=true detail for one repo (adds lfs sha256/size + cardData), None
+    on any failure. In-process TTL cache: pagination and re-searches keep
+    hitting the same repos."""
+    import httpx
+    cached = _hf_detail_cache.get(repo_id)
+    if cached and time.time() - cached[0] < HF_DETAIL_CACHE_TTL_S:
+        return cached[1]
+    try:
+        resp = await client.get(f"{HF_API_BASE}/models/{repo_id}",
+                                headers=_hf_headers(cfg), params={"blobs": "true"})
+    except httpx.TransportError:
+        return None
+    if resp.status_code != 200:
+        return None
+    detail = resp.json()
+    if not isinstance(detail, dict):
+        return None
+    _hf_detail_cache[repo_id] = (time.time(), detail)
+    return detail
+
+
+async def _hf_enrich_items(cfg: dict, items: list[dict]) -> None:
+    """Fill each browse item's hashes/size from its repo detail, concurrently
+    and failure-tolerantly — an item that cannot be enriched just keeps its
+    listing-level data (no hashes -> availability unknown)."""
+    if not items:
+        return
+    import httpx
+    sem = asyncio.Semaphore(HF_DETAIL_CONCURRENCY)
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        async def enrich(item: dict) -> None:
+            async with sem:
+                detail = await _hf_model_detail(client, cfg, item["repo_id"])
+            if detail:
+                flat = _flatten_hf_model(detail)
+                if flat:
+                    item.update(flat)
+
+        await asyncio.gather(*(enrich(i) for i in items))
+
+
+async def _hf_search_loras(cfg: dict, *, query: str, base_model: str,
+                           sort: str, nsfw_mode: str, cursor: str,
+                           limit: int) -> dict:
+    import httpx
+    if nsfw_mode not in CIVITAI_NSFW_MODES:
+        nsfw_mode = "off"
+    sort = sort if sort in HF_SORTS else HF_SORTS[0]
+    if cursor:
+        # The Hub paginates via the Link response header, so the cursor is a
+        # full URL. Only follow it back to the Hub itself (SSRF guard).
+        if not cursor.startswith(f"{HF_API_BASE}/models"):
+            raise RuntimeError("Bad pagination cursor")
+        url: str = cursor
+        params = None
+    else:
+        url = f"{HF_API_BASE}/models"
+        params = [("filter", "lora"),
+                  ("sort", HF_SORT_PARAMS[sort]),
+                  ("direction", "-1"),
+                  ("limit", str(max(1, min(100, limit)))),
+                  ("full", "true"),
+                  ("cardData", "true")]
+        if query:
+            params.append(("search", query))
+        if base_model in HF_BASE_MODELS:
+            params.append(("filter", HF_BASE_MODELS[base_model]))
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        try:
+            resp = await client.get(url, headers=_hf_headers(cfg), params=params)
+        except httpx.TransportError as e:
+            raise RuntimeError(f"Hugging Face search failed: {e}")
+    if resp.status_code == 401:
+        raise RuntimeError("Hugging Face rejected the request: invalid token")
+    if resp.status_code != 200:
+        raise RuntimeError(f"Hugging Face search failed ({resp.status_code}): "
+                           f"{resp.text[:300]}")
+    body = resp.json()
+    next_cursor = str((resp.links.get("next") or {}).get("url") or "")
+
+    items = []
+    for model in body if isinstance(body, list) else []:
+        flat = _flatten_hf_model(model)
+        if flat is None:
+            continue
+        if nsfw_mode == "off" and flat["nsfw"]:
+            continue
+        if nsfw_mode == "only" and not flat["nsfw"]:
+            continue
+        items.append(flat)
+    return {"items": items, "next_cursor": next_cursor}
+
+
+async def _hf_refresh_entry_hashes(cfg: dict, entry: dict) -> None:
+    """Second chance for an HF entry saved without hashes (browse-time
+    enrichment can fail): one detail fetch before Novita matching."""
+    import httpx
+    repo_id = str(entry.get("repo_id") or "")
+    if not repo_id:
+        return
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        detail = await _hf_model_detail(client, cfg, repo_id)
+    if not detail:
+        return
+    flat = _flatten_hf_model(detail)
+    if flat:
+        for k in ("sha256", "all_hashes", "download_url", "size_kb", "version_name"):
+            entry[k] = flat[k]
+
+
+async def _validate_hf_key(key: str) -> bool:
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=10.0)) as client:
+            resp = await client.get(
+                f"{HF_API_BASE}/whoami-v2",
+                headers={"Authorization": f"Bearer {key}", "accept": "application/json"})
+    except httpx.TransportError as e:
+        raise RuntimeError(f"Could not reach Hugging Face: {e}")
+    if resp.status_code in (401, 403):
+        return False
+    if resp.status_code == 200:
+        return True
+    raise RuntimeError(f"Hugging Face answered with HTTP {resp.status_code} — try again later")
+
+
 def _normalize_lora_entry(item: dict) -> dict:
     """Library entry from a browser selection, with activation defaults."""
     entry = {k: item.get(k) for k in (
         "id", "model_id", "name", "version_name", "creator", "type", "base_model",
         "sha256", "all_hashes", "download_url", "size_kb", "trained_words",
-        "thumb_url", "civitai_url", "nsfw", "stats")}
+        "thumb_url", "civitai_url", "nsfw", "stats", "source", "repo_id",
+        "page_url")}
     entry["id"] = str(entry.get("id") or "")
+    # Entries saved before multi-source support have no source field.
+    entry["source"] = str(entry.get("source") or "civitai")
+    entry["repo_id"] = str(entry.get("repo_id") or "")
+    entry["page_url"] = str(entry.get("page_url") or "")
     entry["all_hashes"] = [str(h).lower() for h in (entry.get("all_hashes") or [])][:10]
     entry["trained_words"] = [str(w) for w in (entry.get("trained_words") or [])][:20]
     entry.update({
@@ -1183,6 +1511,7 @@ def get_router():
         style_suffix: str | None = None
         civitai_api_key: str | None = None
         civitai_nsfw: str | None = None
+        hf_api_key: str | None = None
 
     class GenerateRequest(BaseModel):
         prompt_override: str | None = None
@@ -1209,6 +1538,10 @@ def get_router():
         civitai_url: str = ""
         nsfw: bool = False
         stats: dict = {}
+        source: str = "civitai"
+        repo_id: str = ""
+        page_url: str = ""
+        gated: bool = False
 
     class LoraPatch(BaseModel):
         active: bool | None = None
@@ -1225,6 +1558,8 @@ def get_router():
         out["has_key"] = bool(cfg.get("api_key"))
         out["civitai_api_key"] = _mask_key(cfg.get("civitai_api_key", ""))
         out["has_civitai_key"] = bool(cfg.get("civitai_api_key"))
+        out["hf_api_key"] = _mask_key(cfg.get("hf_api_key", ""))
+        out["has_hf_key"] = bool(cfg.get("hf_api_key"))
         out["samplers"] = SAMPLERS
         out["default_prompt_template"] = DEFAULT_PROMPT_TEMPLATE
         out["default_prompt_template_tags"] = DEFAULT_PROMPT_TEMPLATE_TAGS
@@ -1235,6 +1570,8 @@ def get_router():
         out["civitai_nsfw_modes"] = CIVITAI_NSFW_MODES
         out["civitai_categories"] = CIVITAI_CATEGORIES
         out["civitai_base_models"] = CIVITAI_BASE_MODELS
+        out["hf_sorts"] = HF_SORTS
+        out["hf_base_models"] = list(HF_BASE_MODELS)
         out["flux2_model_name"] = FLUX2_MODEL_NAME
         out["checkpoint_family"] = _checkpoint_family(cfg)
         return out
@@ -1254,6 +1591,9 @@ def get_router():
         civitai_key = incoming.pop("civitai_api_key", None)
         if civitai_key is not None and not civitai_key.startswith(KEY_MASK_PREFIX):
             cfg["civitai_api_key"] = civitai_key.strip()
+        hf_key = incoming.pop("hf_api_key", None)
+        if hf_key is not None and not hf_key.startswith(KEY_MASK_PREFIX):
+            cfg["hf_api_key"] = hf_key.strip()
 
         if "sampler_name" in incoming and incoming["sampler_name"] not in SAMPLERS:
             raise HTTPException(status_code=400, detail=f"Unknown sampler. Allowed: {SAMPLERS}")
@@ -1280,25 +1620,27 @@ def get_router():
     @router.post("/keys/{provider}")
     async def submit_key(provider: str, body: KeySubmit):
         """Validate a key against its provider before storing it."""
-        if provider not in ("novita", "civitai"):
+        providers = {
+            "novita": ("Novita", "api_key", _validate_novita_key),
+            "civitai": ("Civitai", "civitai_api_key", _validate_civitai_key),
+            "hf": ("Hugging Face", "hf_api_key", _validate_hf_key),
+        }
+        if provider not in providers:
             raise HTTPException(status_code=404, detail="Unknown provider")
+        name, cfg_key, validate = providers[provider]
         key = body.api_key.strip()
         if not key or key.startswith(KEY_MASK_PREFIX):
             raise HTTPException(status_code=400, detail="Paste a key first")
         try:
-            if provider == "novita":
-                valid = await _validate_novita_key(key)
-            else:
-                valid = await _validate_civitai_key(key)
+            valid = await validate(key)
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))
         if not valid:
-            name = "Novita" if provider == "novita" else "Civitai"
             raise HTTPException(
                 status_code=400,
                 detail=f"{name} rejected this key — check for typos and make sure the whole key was copied")
         cfg = _load_config()
-        cfg["api_key" if provider == "novita" else "civitai_api_key"] = key
+        cfg[cfg_key] = key
         _save_config(cfg)
         return _public_config(cfg)
 
@@ -1367,13 +1709,33 @@ def get_router():
             raise HTTPException(status_code=400,
                                 detail="NSFW browsing needs a Civitai API key")
         try:
-            return await _civitai_search_loras(
+            result = await _civitai_search_loras(
                 cfg, query=query.strip(), base_model=base_model.strip(),
                 lora_type=lora_type, sort=sort, nsfw_mode=nsfw,
                 category=category.strip().lower(),
                 cursor=cursor.strip(), limit=limit)
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))
+        _annotate_novita_availability(cfg, result["items"])
+        return result
+
+    @router.get("/hf/loras")
+    async def hf_loras(query: str = "", base_model: str = "",
+                       sort: str = "Most Downloaded", nsfw: str = "off",
+                       cursor: str = "", limit: int = 24):
+        cfg = _load_config()
+        if nsfw not in CIVITAI_NSFW_MODES:
+            nsfw = "off"
+        try:
+            result = await _hf_search_loras(
+                cfg, query=query.strip(), base_model=base_model.strip(),
+                sort=sort, nsfw_mode=nsfw, cursor=cursor.strip(),
+                limit=max(1, min(100, limit)))
+            await _hf_enrich_items(cfg, result["items"])
+        except RuntimeError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        _annotate_novita_availability(cfg, result["items"])
+        return result
 
     def _find_lora(cfg: dict, lora_id: str) -> dict:
         entry = next((e for e in cfg.get("lora_library") or []
@@ -1391,8 +1753,14 @@ def get_router():
         if len(library) >= LORA_LIBRARY_MAX:
             raise HTTPException(status_code=400,
                                 detail=f"Library is full ({LORA_LIBRARY_MAX} LoRAs)")
+        if item.gated:
+            raise HTTPException(
+                status_code=400,
+                detail="Gated Hugging Face repos can't be fetched by Novita")
 
         entry = _normalize_lora_entry(item.model_dump())
+        if entry["source"] == "hf" and not _entry_hashes(entry):
+            await _hf_refresh_entry_hashes(cfg, entry)
         # Flux LoRAs go to Novita as download links; only SD ones need to exist
         # in Novita's mirrored catalog.
         if _base_family(entry.get("base_model")) != "flux" and cfg.get("api_key"):
@@ -1471,12 +1839,12 @@ def get_router():
 
     @router.get("/loras/{lora_id}/download")
     async def download_lora(lora_id: str):
-        """Redirect to the Civitai file download with the user's token, so the
-        browser can grab the .safetensors for a manual Novita console upload
-        without the key ever reaching the client."""
+        """Redirect to the source's file download (with the user's token for
+        Civitai), so the browser can grab the .safetensors for a manual Novita
+        console upload without the key ever reaching the client."""
         cfg = _load_config()
         entry = _find_lora(cfg, lora_id)
-        url = _civitai_download_link(entry, cfg)
+        url = _lora_download_link(entry, cfg)
         if not url:
             raise HTTPException(status_code=404, detail="No download link for this LoRA")
         return RedirectResponse(url)
