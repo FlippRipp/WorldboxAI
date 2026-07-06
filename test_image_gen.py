@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -444,6 +445,11 @@ def test_models_endpoint_proxies_and_requires_key(tmp_path):
 # LoRA library: families, payloads, trigger words, Civitai flattening
 # ---------------------------------------------------------------------------
 
+# Civitai stores the full SHA256; Novita's catalog truncates it to 10 chars.
+FULL_HASH = "a1b2c3d4e5" + "f" * 54
+NOVITA_HASH = "A1B2C3D4E5"
+
+
 def _lora(**overrides):
     entry = {
         "id": "123456",
@@ -662,28 +668,30 @@ def test_flatten_collects_all_version_hashes(tmp_path):
 
 def test_novita_match_lora_via_older_version_hash(tmp_path):
     backend = _load_backend(tmp_path)
-    queries = []
+    calls = []
+    old_hash = "b1b2b3b4b5" + "0" * 54
 
     async def fake_list(cfg, query, cursor, limit, types="checkpoint", visibility=""):
-        queries.append(query)
+        calls.append((query, cursor, types))
         return {"models": [
-            {"hash_sha256": "BBB", "sd_name_in_api": "old_ver.safetensors", "status": 1}]}
+            {"hash_sha256": "B1B2B3B4B5", "sd_name_in_api": "old_ver.safetensors",
+             "status": 1}], "pagination": {}}
 
     backend._novita_list_models = fake_list
-    entry = _lora(sha256="ccc", all_hashes=["ccc", "bbb"], model_id=777)
+    entry = _lora(novita=None, sha256="c1" * 32, all_hashes=["c1" * 32, old_hash])
     match = asyncio.run(backend._novita_match_lora(_lora_cfg(backend, api_key="k"), entry))
     assert match == {"sd_name_in_api": "old_ver.safetensors"}
+    # One whole-catalog sync, no per-key guess queries (Novita can't find
+    # Civitai ids via filter.query).
+    assert calls == [("", "", "lora")]
 
-    # No hit anywhere: version id, then model id, then name are all searched.
-    async def no_hit(cfg, query, cursor, limit, types="checkpoint", visibility=""):
-        queries.append(query)
-        return {"models": []}
-
-    queries.clear()
-    backend._novita_list_models = no_hit
-    assert asyncio.run(backend._novita_match_lora(
-        _lora_cfg(backend), _lora(model_id=777))) is None
-    assert queries == ["123456", "777", "Detail Tweaker"]
+    # When several versions are mirrored, the newest one wins (all_hashes is
+    # ordered latest-first).
+    index = {"C1C1C1C1C1": "new_ver.safetensors",
+             "B1B2B3B4B5": "old_ver.safetensors"}
+    match = asyncio.run(backend._novita_match_lora(
+        _lora_cfg(backend, api_key="k"), entry, index))
+    assert match == {"sd_name_in_api": "new_ver.safetensors"}
 
 
 def test_match_all_endpoint_rechecks_unmatched_only(tmp_path):
@@ -691,7 +699,7 @@ def test_match_all_endpoint_rechecks_unmatched_only(tmp_path):
     _enable(backend)
     cfg = backend._load_config()
     cfg["lora_library"] = [
-        _lora(id="1", novita=None),                                   # should recheck → match
+        _lora(id="1", novita=None, sha256=FULL_HASH),                 # should recheck → match
         _lora(id="2"),                                                # already matched
         _lora(id="3", novita=None, sd_name_override="manual.st"),     # override set
         _lora(id="4", novita=None, base_model="Flux.2 D"),            # flux: link-based
@@ -701,7 +709,8 @@ def test_match_all_endpoint_rechecks_unmatched_only(tmp_path):
 
     async def fake_list(cfg, query, cursor, limit, types="checkpoint", visibility=""):
         return {"models": [
-            {"hash_sha256": "ABC123", "sd_name_in_api": "found.safetensors", "status": 1}]}
+            {"hash_sha256": NOVITA_HASH, "sd_name_in_api": "found.safetensors",
+             "status": 1}], "pagination": {}}
 
     backend._novita_list_models = fake_list
     client = _client(backend)
@@ -750,30 +759,75 @@ def test_my_novita_loras_endpoint(tmp_path):
     ]
 
 
-def test_novita_match_lora_by_hash(tmp_path):
+def test_novita_match_lora_by_truncated_hash_prefix(tmp_path):
+    """Novita returns only the first 10 uppercase chars of each SHA256; the
+    full lowercase Civitai hash must still match (the original bug: full-hash
+    equality never matched anything)."""
     backend = _load_backend(tmp_path)
     calls = []
 
-    async def fake_list(cfg, query, cursor, limit, types="checkpoint"):
-        calls.append((query, types))
+    async def fake_list(cfg, query, cursor, limit, types="checkpoint", visibility=""):
+        calls.append(cursor)
+        if not cursor:
+            return {"models": [
+                {"hash_sha256": "WRONGWRONG", "sd_name_in_api": "no.safetensors",
+                 "status": 1},
+                {"hash_sha256": "DEADBEEF00", "sd_name_in_api": "broken.safetensors",
+                 "status": 0},
+            ], "pagination": {"next_cursor": "c_100"}}
         return {"models": [
-            {"hash_sha256": "WRONG", "sd_name_in_api": "no.safetensors", "status": 1},
-            {"hash_sha256": "ABC123", "sd_name_in_api": "yes.safetensors", "status": 1},
-        ]}
+            {"hash_sha256": NOVITA_HASH, "sd_name_in_api": "yes.safetensors",
+             "status": 1}], "pagination": {}}
 
     backend._novita_list_models = fake_list
     cfg = _lora_cfg(backend, api_key="k")
-    match = asyncio.run(backend._novita_match_lora(cfg, _lora(sha256="abc123")))
+    match = asyncio.run(backend._novita_match_lora(cfg, _lora(sha256=FULL_HASH)))
     assert match == {"sd_name_in_api": "yes.safetensors"}
-    assert calls[0] == ("123456", "lora")  # version id searched first
+    assert calls == ["", "c_100"]  # paged through the whole catalog once
 
-    async def no_hit(cfg, query, cursor, limit, types="checkpoint"):
-        return {"models": [{"hash_sha256": "nope", "sd_name_in_api": "x", "status": 1}]}
+    # Broken (status != 1) mirrors never match, and the index now serves from
+    # the disk cache — no further network calls.
+    calls.clear()
+    dead = "deadbeef00" + "0" * 54
+    assert asyncio.run(backend._novita_match_lora(cfg, _lora(sha256=dead))) is None
+    assert calls == []
 
-    backend._novita_list_models = no_hit
-    assert asyncio.run(backend._novita_match_lora(cfg, _lora(sha256="abc"))) is None
-    # No hash: never touches the network.
-    assert asyncio.run(backend._novita_match_lora(cfg, _lora(sha256=""))) is None
+    # No hash at all: no lookup.
+    assert asyncio.run(backend._novita_match_lora(
+        cfg, _lora(sha256="", all_hashes=[]))) is None
+
+
+def test_novita_lora_index_ttl_and_force_refresh(tmp_path):
+    backend = _load_backend(tmp_path)
+    calls = []
+
+    async def fake_list(cfg, query, cursor, limit, types="checkpoint", visibility=""):
+        calls.append(cursor)
+        return {"models": [
+            {"hash_sha256": NOVITA_HASH, "sd_name_in_api": "x.safetensors",
+             "status": 1}], "pagination": {}}
+
+    backend._novita_list_models = fake_list
+    cfg = _lora_cfg(backend, api_key="k")
+    assert asyncio.run(backend._novita_lora_index(cfg)) == {
+        NOVITA_HASH: "x.safetensors"}
+    assert len(calls) == 1
+
+    # Within the TTL the disk cache answers.
+    asyncio.run(backend._novita_lora_index(cfg))
+    assert len(calls) == 1
+
+    # force=True rebuilds regardless.
+    asyncio.run(backend._novita_lora_index(cfg, force=True))
+    assert len(calls) == 2
+
+    # An expired cache rebuilds too.
+    path = backend._lora_index_path()
+    stale = json.loads(path.read_text(encoding="utf-8"))
+    stale["fetched_at"] = time.time() - backend.NOVITA_LORA_INDEX_TTL_S - 1
+    path.write_text(json.dumps(stale), encoding="utf-8")
+    asyncio.run(backend._novita_lora_index(cfg))
+    assert len(calls) == 3
 
 
 def test_lora_library_endpoints_roundtrip(tmp_path):
@@ -781,14 +835,15 @@ def test_lora_library_endpoints_roundtrip(tmp_path):
     _enable(backend)
     client = _client(backend)
 
-    async def fake_list(cfg, query, cursor, limit, types="checkpoint"):
+    async def fake_list(cfg, query, cursor, limit, types="checkpoint", visibility=""):
         return {"models": [
-            {"hash_sha256": "FEED", "sd_name_in_api": "found_123456.safetensors", "status": 1}]}
+            {"hash_sha256": NOVITA_HASH, "sd_name_in_api": "found_123456.safetensors",
+             "status": 1}], "pagination": {}}
 
     backend._novita_list_models = fake_list
 
     item = {"id": "123456", "name": "Detail Tweaker", "base_model": "SDXL 1.0",
-            "sha256": "feed", "download_url": "https://civitai.com/api/download/models/123456",
+            "sha256": FULL_HASH, "download_url": "https://civitai.com/api/download/models/123456",
             "trained_words": ["detailed"], "stats": {"downloads": 5, "likes": 2}}
     resp = client.post("/loras", json=item)
     assert resp.status_code == 200

@@ -52,6 +52,14 @@ LORA_LIBRARY_MAX = 200
 SD_LORAS_MAX = 5        # per txt2img request
 FLUX_LORAS_MAX = 3      # flux-2-dev accepts up to 3 URL loras
 
+# Novita's /v3/model truncates hash_sha256 to the first 10 hex chars, its
+# `name` holds the Civitai VERSION name, and filter.query cannot find Civitai
+# ids -- so availability matching syncs the whole mirrored LoRA catalog
+# (~2.5k entries, ~26 pages) into a hash-prefix index instead of querying.
+NOVITA_HASH_PREFIX_LEN = 10
+NOVITA_LORA_INDEX_TTL_S = 6 * 3600
+NOVITA_LORA_INDEX_MAX_PAGES = 100
+
 SAMPLERS = [
     "DPM++ 2M Karras",
     "DPM++ SDE Karras",
@@ -105,6 +113,7 @@ _services: dict = {}
 _tasks: set = set()
 _gen_lock: asyncio.Lock | None = None
 _index_lock: asyncio.Lock | None = None
+_lora_index_lock: asyncio.Lock | None = None
 
 
 # --------------------------------------------------------------------------
@@ -191,6 +200,13 @@ def _get_gen_lock() -> asyncio.Lock:
     if _gen_lock is None:
         _gen_lock = asyncio.Lock()
     return _gen_lock
+
+
+def _get_lora_index_lock() -> asyncio.Lock:
+    global _lora_index_lock
+    if _lora_index_lock is None:
+        _lora_index_lock = asyncio.Lock()
+    return _lora_index_lock
 
 
 def _read_index() -> list[dict]:
@@ -743,27 +759,79 @@ async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
     return {"items": items, "next_cursor": page_cursor}
 
 
-async def _novita_match_lora(cfg: dict, entry: dict) -> dict | None:
+def _lora_index_path() -> Path:
+    return _data_dir() / "novita_lora_index.json"
+
+
+def _read_lora_index_cache() -> dict | None:
+    """The cached hash-prefix index, or None when missing/expired/corrupt."""
+    path = _lora_index_path()
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(cached, dict) or not isinstance(cached.get("hashes"), dict):
+        return None
+    if time.time() - float(cached.get("fetched_at") or 0) > NOVITA_LORA_INDEX_TTL_S:
+        return None
+    return cached["hashes"]
+
+
+async def _novita_lora_index(cfg: dict, force: bool = False) -> dict:
+    """SHA256-prefix -> sd_name_in_api for every ready LoRA in Novita's public
+    Civitai-mirrored catalog. The hash prefix is the only reliable join key
+    (see NOVITA_HASH_PREFIX_LEN comment); the catalog is small enough to sync
+    whole and cache on disk."""
+    if not force:
+        cached = _read_lora_index_cache()
+        if cached is not None:
+            return cached
+    async with _get_lora_index_lock():
+        if not force:  # another request may have built it while we waited
+            cached = _read_lora_index_cache()
+            if cached is not None:
+                return cached
+        hashes: dict[str, str] = {}
+        cursor = ""
+        for _ in range(NOVITA_LORA_INDEX_MAX_PAGES):
+            body = await _novita_list_models(cfg, "", cursor, 100, types="lora")
+            models = body.get("models") or []
+            for m in models:
+                h = str(m.get("hash_sha256") or "").upper()
+                sd_name = m.get("sd_name_in_api") or m.get("sd_name")
+                if len(h) >= NOVITA_HASH_PREFIX_LEN and sd_name \
+                        and m.get("status") == 1:
+                    hashes.setdefault(h[:NOVITA_HASH_PREFIX_LEN], str(sd_name))
+            cursor = str((body.get("pagination") or {}).get("next_cursor") or "")
+            if not models or not cursor:
+                break
+        _atomic_write_json(_lora_index_path(),
+                           {"fetched_at": time.time(), "hashes": hashes})
+        return hashes
+
+
+async def _novita_match_lora(cfg: dict, entry: dict,
+                             index: dict | None = None) -> dict | None:
     """Find the saved Civitai LoRA in Novita's Civitai-mirrored catalog by
-    SHA256 (any version's hash — Novita may mirror an older one). Novita
-    sd_names usually embed the Civitai version id, so that is the first
-    search key; the model id and name are fallbacks."""
-    hashes = {str(h).lower() for h in (entry.get("all_hashes") or []) if h}
-    if entry.get("sha256"):
-        hashes.add(str(entry["sha256"]).lower())
+    SHA256 prefix. Hashes are checked newest-version-first (all_hashes keeps
+    Civitai's ordering), so when Novita mirrors several versions the most
+    recent one wins. Callers doing bulk work should build the index once and
+    pass it in."""
+    ordered = [str(entry.get("sha256") or "").lower()]
+    ordered += [str(h).lower() for h in (entry.get("all_hashes") or []) if h]
+    seen: set = set()
+    hashes = [h for h in ordered if h and not (h in seen or seen.add(h))]
     if not hashes:
         return None
-    queries = [str(entry.get("id") or ""),
-               str(entry.get("model_id") or ""),
-               str(entry.get("name") or "")[:60]]
-    for query in filter(None, queries):
-        body = await _novita_list_models(cfg, query, "", 100, types="lora")
-        for model in body.get("models") or []:
-            if str(model.get("hash_sha256") or "").lower() not in hashes:
-                continue
-            sd_name = model.get("sd_name_in_api") or model.get("sd_name")
-            if sd_name and model.get("status") == 1:
-                return {"sd_name_in_api": sd_name}
+    if index is None:
+        index = await _novita_lora_index(cfg)
+    for h in hashes:
+        sd_name = index.get(h[:NOVITA_HASH_PREFIX_LEN].upper())
+        if sd_name:
+            return {"sd_name_in_api": sd_name}
     return None
 
 
@@ -1277,11 +1345,13 @@ def get_router():
             and not str(e.get("sd_name_override") or "").strip()
         ]
         results: dict = {}
-        for entry in pending:
+        if pending:
             try:
-                results[entry["id"]] = await _novita_match_lora(cfg, entry)
+                index = await _novita_lora_index(cfg, force=True)
             except RuntimeError as e:
-                print(f"[Image Gen] Recheck failed for {entry.get('id')}: {e}")
+                raise HTTPException(status_code=502, detail=str(e))
+            for entry in pending:
+                results[entry["id"]] = await _novita_match_lora(cfg, entry, index)
 
         cfg = _load_config()  # matches awaited; re-load before mutating
         now = _now()
@@ -1327,7 +1397,8 @@ def get_router():
         if not cfg.get("api_key"):
             raise HTTPException(status_code=400, detail="No Novita API key configured")
         try:
-            match = await _novita_match_lora(cfg, entry)
+            index = await _novita_lora_index(cfg, force=True)
+            match = await _novita_match_lora(cfg, entry, index)
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))
         cfg = _load_config()
