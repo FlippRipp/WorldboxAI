@@ -757,6 +757,27 @@ def test_my_novita_loras_endpoint(tmp_path):
         {"sd_name": "processing.safetensors", "name": "Uploading",
          "base_model": "", "ready": False},
     ]
+    assert body["max_slots"] == backend.NOVITA_UPLOAD_SLOTS
+
+
+def test_lora_download_redirects_with_token(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend, civitai_api_key="civkey123")
+    cfg = backend._load_config()
+    cfg["lora_library"] = [
+        _lora(id="1"),
+        _lora(id="2", download_url=""),
+    ]
+    backend._save_config(cfg)
+
+    client = _client(backend)
+    resp = client.get("/loras/1/download", follow_redirects=False)
+    assert resp.status_code == 307
+    assert resp.headers["location"] == (
+        "https://civitai.com/api/download/models/123456?token=civkey123")
+
+    assert client.get("/loras/2/download", follow_redirects=False).status_code == 404
+    assert client.get("/loras/nope/download", follow_redirects=False).status_code == 404
 
 
 def test_novita_match_lora_by_truncated_hash_prefix(tmp_path):

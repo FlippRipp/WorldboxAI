@@ -51,6 +51,7 @@ CIVITAI_BASE_MODELS = [
 LORA_LIBRARY_MAX = 200
 SD_LORAS_MAX = 5        # per txt2img request
 FLUX_LORAS_MAX = 3      # flux-2-dev accepts up to 3 URL loras
+NOVITA_UPLOAD_SLOTS = 5  # Novita's console cap on custom LoRA uploads
 
 # Novita's /v3/model truncates hash_sha256 to the first 10 hex chars, its
 # `name` holds the Civitai VERSION name, and filter.query cannot find Civitai
@@ -1087,7 +1088,7 @@ _FILENAME_RE = re.compile(r"[A-Za-z0-9_\-]{1,120}\.(jpg|jpeg|png|webp)")
 
 def get_router():
     from fastapi import APIRouter, HTTPException
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, RedirectResponse
     from pydantic import BaseModel
 
     router = APIRouter()
@@ -1391,7 +1392,19 @@ def get_router():
             for m in (body.get("models") or [])
             if m.get("sd_name_in_api") or m.get("sd_name")
         ]
-        return {"loras": loras}
+        return {"loras": loras, "max_slots": NOVITA_UPLOAD_SLOTS}
+
+    @router.get("/loras/{lora_id}/download")
+    async def download_lora(lora_id: str):
+        """Redirect to the Civitai file download with the user's token, so the
+        browser can grab the .safetensors for a manual Novita console upload
+        without the key ever reaching the client."""
+        cfg = _load_config()
+        entry = _find_lora(cfg, lora_id)
+        url = _civitai_download_link(entry, cfg)
+        if not url:
+            raise HTTPException(status_code=404, detail="No download link for this LoRA")
+        return RedirectResponse(url)
 
     @router.post("/loras/{lora_id}/match")
     async def rematch_lora(lora_id: str):

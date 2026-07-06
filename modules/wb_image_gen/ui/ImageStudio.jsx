@@ -304,13 +304,43 @@ function loraAvailability(entry) {
   return { ok: false, label: 'not on Novita', cls: 'bg-red-900/50 text-red-300 border-red-800' };
 }
 
-function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLoras, loadMyUploads }) {
+function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLoras, maxSlots, loadMyUploads, fetchMyUploads }) {
   const [strength, setStrength] = useState(entry.strength ?? 0.7);
   const [showOverride, setShowOverride] = useState(false);
   const [override, setOverride] = useState(entry.sd_name_override || '');
   const [busy, setBusy] = useState(false);
+  const [detected, setDetected] = useState(null); // new upload seen but still processing
 
   useEffect(() => { setStrength(entry.strength ?? 0.7); }, [entry.strength]);
+
+  // While the upload helper is open, watch the account's private uploads:
+  // anything that appears after opening is assumed to be the file the user
+  // just pushed through the console, and is linked to this entry the moment
+  // Novita finishes processing it. Linking makes availability.ok true, which
+  // unmounts the panel and stops the polling.
+  useEffect(() => {
+    if (!showOverride) return undefined;
+    let cancelled = false;
+    let baseline = null;
+    const tick = async () => {
+      const loras = await fetchMyUploads();
+      if (cancelled || loras === null) return;
+      if (baseline === null) {
+        baseline = new Set(loras.map((m) => m.sd_name));
+        return;
+      }
+      const fresh = loras.filter((m) => !baseline.has(m.sd_name));
+      const ready = fresh.find((m) => m.ready);
+      if (ready) {
+        onPatch(entry.id, { sd_name_override: ready.sd_name });
+      } else if (fresh.length > 0) {
+        setDetected(fresh[0]);
+      }
+    };
+    tick();
+    const iv = setInterval(tick, 20000);
+    return () => { cancelled = true; clearInterval(iv); setDetected(null); };
+  }, [showOverride]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fam = baseFamily(entry.base_model);
   const availability = loraAvailability(entry);
@@ -402,26 +432,64 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
               onClick={() => { setShowOverride((s) => !s); loadMyUploads(); }}
               className="text-gray-500 hover:text-gray-300"
             >
-              {showOverride ? 'Hide' : 'Link Novita upload'}
+              {showOverride ? 'Hide upload helper' : 'Upload it yourself'}
             </button>
-            <a
-              href="https://novita.ai/models-console/model-management"
-              target="_blank" rel="noreferrer"
-              className="text-gray-500 hover:text-gray-300 underline"
-            >
-              Upload on Novita (5 free slots)
-            </a>
           </div>
           {showOverride && (
-            <div className="space-y-1.5">
-              {myLoras === null ? (
-                <p className="text-[11px] text-gray-500 animate-pulse">Loading your Novita uploads…</p>
-              ) : myLoras.length === 0 ? (
-                <p className="text-[11px] text-gray-500 italic">
-                  No uploads on your Novita account yet — use the console link above, then recheck here.
+            <div className="space-y-2 border border-gray-800 rounded-lg p-2.5 bg-gray-900/40">
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] text-gray-400 font-medium">
+                  Put this LoRA on your own Novita account
                 </p>
-              ) : (
-                <div className="space-y-1">
+                {myLoras !== null && (
+                  <span className={`text-[10px] ${myLoras.length >= maxSlots ? 'text-red-400' : 'text-gray-600'}`}>
+                    {myLoras.length} of {maxSlots} upload slots used
+                  </span>
+                )}
+              </div>
+              <ol className="space-y-1.5 text-[11px] text-gray-400 list-none">
+                <li className="flex items-center gap-2">
+                  <span className="text-gray-600 shrink-0">1.</span>
+                  <a
+                    href={`${API_BASE}/loras/${entry.id}/download`}
+                    className="text-purple-400 hover:text-purple-300 underline"
+                  >
+                    Download the file
+                    {entry.size_kb ? ` (${(entry.size_kb / 1024).toFixed(0)} MB)` : ''}
+                  </a>
+                  <span className="text-gray-600">— uses your Civitai key</span>
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className="text-gray-600 shrink-0">2.</span>
+                  <a
+                    href="https://novita.ai/models-console/model-management"
+                    target="_blank" rel="noreferrer"
+                    className="text-purple-400 hover:text-purple-300 underline"
+                  >
+                    Upload it in the Novita console
+                  </a>
+                  <span className="text-gray-600">— Upload Model, pick the file</span>
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className="text-gray-600 shrink-0">3.</span>
+                  {detected ? (
+                    <span className="text-yellow-500">
+                      Found “{detected.name || detected.sd_name}” — Novita is processing it,
+                      it will link itself when ready…
+                    </span>
+                  ) : (
+                    <span className="text-gray-500">
+                      Done — this entry links itself as soon as the upload appears
+                      <span className="inline-block ml-1 animate-pulse">⏳</span>
+                    </span>
+                  )}
+                </li>
+              </ol>
+              {myLoras !== null && myLoras.length > 0 && (
+                <div className="space-y-1 pt-1 border-t border-gray-800">
+                  <p className="text-[10px] uppercase tracking-wider text-gray-600">
+                    …or link an existing upload
+                  </p>
                   {myLoras.map((m) => (
                     <div key={m.sd_name} className="flex items-center gap-2 text-[11px]">
                       <span className="text-gray-300 truncate flex-1" title={m.sd_name}>
@@ -479,6 +547,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   const [open, setOpen] = useState(false);
   const [recheckBusy, setRecheckBusy] = useState(false);
   const [myLoras, setMyLoras] = useState(null); // null = not fetched yet
+  const [maxSlots, setMaxSlots] = useState(5);
   const debounceRef = useRef(null);
   const seqRef = useRef(0);
   const myLorasRef = useRef(false);
@@ -541,20 +610,29 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
     }
   };
 
-  // The account's own Novita console uploads, fetched once on demand and
-  // shared by every row's "Link Novita upload" panel.
-  const loadMyUploads = useCallback(async () => {
-    if (myLorasRef.current) return;
-    myLorasRef.current = true;
+  // The account's own Novita console uploads, shared by every row's upload
+  // helper. fetchMyUploads always hits the API (the helper polls it while
+  // waiting for a new upload to appear); loadMyUploads is the once-per-visit
+  // initial load.
+  const fetchMyUploads = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/novita/my-loras`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setMyLoras(data.loras || []);
+      if (data.max_slots) setMaxSlots(data.max_slots);
+      return data.loras || [];
     } catch (e) {
-      setMyLoras([]);
+      setMyLoras((prev) => prev ?? []);
+      return null;
     }
   }, []);
+
+  const loadMyUploads = useCallback(() => {
+    if (myLorasRef.current) return;
+    myLorasRef.current = true;
+    fetchMyUploads();
+  }, [fetchMyUploads]);
 
   const recheckAll = async () => {
     setRecheckBusy(true);
@@ -731,7 +809,9 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
               onDelete={deleteLora}
               onRematch={rematchLora}
               myLoras={myLoras}
+              maxSlots={maxSlots}
               loadMyUploads={loadMyUploads}
+              fetchMyUploads={fetchMyUploads}
             />
           ))}
         </div>
