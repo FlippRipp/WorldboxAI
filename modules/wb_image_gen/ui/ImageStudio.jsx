@@ -8,6 +8,14 @@ const inputCls =
 const labelCls = 'block text-xs uppercase tracking-wider text-gray-500 mb-1.5';
 const sectionCls = 'bg-gray-900/60 border border-gray-800 rounded-xl p-5 space-y-4';
 
+const TABS = [
+  { id: 'setup', label: 'Setup' },
+  { id: 'output', label: 'Output' },
+  { id: 'prompting', label: 'Prompting' },
+  { id: 'loras', label: 'LoRAs' },
+  { id: 'generate', label: 'Generate' },
+];
+
 function Toggle({ checked, onChange, label }) {
   return (
     <button
@@ -599,7 +607,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
               <option value="only">NSFW only</option>
             </select>
             {!config.has_civitai_key && (
-              <span className="text-[11px] text-yellow-600">Save a Civitai API key to browse NSFW LoRAs.</span>
+              <span className="text-[11px] text-yellow-600">Save a Civitai API key (Setup tab) to browse NSFW LoRAs.</span>
             )}
           </div>
 
@@ -692,6 +700,18 @@ export default function ImageStudio({ onBack }) {
   const [testError, setTestError] = useState('');
   const pollRef = useRef(null);
 
+  const [tab, setTab] = useState(() => {
+    try {
+      const saved = localStorage.getItem('wb_image_gen_tab');
+      if (TABS.some((t) => t.id === saved)) return saved;
+    } catch (e) { /* storage unavailable */ }
+    return 'setup';
+  });
+  const switchTab = (id) => {
+    setTab(id);
+    try { localStorage.setItem('wb_image_gen_tab', id); } catch (e) { /* ignore */ }
+  };
+
   const loadConfig = useCallback(async () => {
     const res = await fetch(`${API_BASE}/config`);
     const data = await res.json();
@@ -744,6 +764,8 @@ export default function ImageStudio({ onBack }) {
   const isPony = modelIdent.includes('pony');
   const checkpointFamily =
     draft.model_name === config?.flux2_model_name ? 'flux' : baseFamily(modelIdent);
+  const activeLoraCount = library.filter(
+    (e) => e.active && baseFamily(e.base_model) === checkpointFamily).length;
 
   const set = (key, value) => setDraft((d) => ({ ...d, [key]: value }));
 
@@ -833,8 +855,8 @@ export default function ImageStudio({ onBack }) {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 text-gray-100">
-      <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
-        <div className="flex items-center justify-between">
+      <div className="sticky top-0 z-20 bg-gray-950/90 backdrop-blur border-b border-gray-800">
+        <div className="max-w-3xl mx-auto px-6 py-3 flex items-center justify-between">
           <button
             onClick={onBack}
             className="flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors"
@@ -856,12 +878,45 @@ export default function ImageStudio({ onBack }) {
             {savedFlash ? 'Saved ✓' : saving ? 'Saving…' : dirty ? 'Save Changes' : 'Saved'}
           </button>
         </div>
-
+      </div>
+      <div className="max-w-3xl mx-auto px-6 py-6 space-y-6">
         <div>
           <h1 className="text-3xl font-bold flex items-center gap-3">🎨 Image Studio</h1>
           <p className="text-gray-500 mt-1 text-sm">
             Story illustrations via the Novita AI API. Auto-generates every N turns; use /image in-game for on-demand shots.
           </p>
+        </div>
+
+        <div className="flex gap-1 overflow-x-auto pb-1">
+          {TABS.map((t) => {
+            const badge =
+              t.id === 'loras' && activeLoraCount > 0 ? activeLoraCount
+                : t.id === 'generate' && pendingCount > 0 ? pendingCount : null;
+            return (
+              <button
+                key={t.id}
+                onClick={() => switchTab(t.id)}
+                className={`px-3 py-1.5 rounded-full text-sm whitespace-nowrap transition-colors shrink-0 ${
+                  tab === t.id
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-gray-900 border border-gray-800 text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                {t.label}
+                {badge != null && (
+                  <span
+                    className={`ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] ${
+                      t.id === 'generate'
+                        ? 'bg-purple-900/60 text-purple-200 animate-pulse'
+                        : 'bg-gray-800 text-gray-300'
+                    }`}
+                  >
+                    {badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
 
         {saveError && (
@@ -870,9 +925,9 @@ export default function ImageStudio({ onBack }) {
           </div>
         )}
 
-        {/* Connection */}
+        {/* Setup: keys + model */}
+        {tab === 'setup' && (
         <section className={sectionCls}>
-          <h2 className="text-sm font-semibold text-gray-300">Connection</h2>
           <div>
             <label className={labelCls}>Novita API Key</label>
             <input
@@ -917,10 +972,11 @@ export default function ImageStudio({ onBack }) {
             onSelect={(m) => setDraft((d) => ({ ...d, model_name: m.sd_name, model_base: m.base_model || '' }))}
           />
         </section>
+        )}
 
         {/* Output */}
+        {tab === 'output' && (
         <section className={sectionCls}>
-          <h2 className="text-sm font-semibold text-gray-300">Output</h2>
           <Toggle
             checked={!!draft.enabled}
             onChange={(v) => set('enabled', v)}
@@ -955,23 +1011,25 @@ export default function ImageStudio({ onBack }) {
               />
             </div>
           </div>
-          <div>
-            <label className={labelCls}>Steps: {draft.steps}</label>
-            <input
-              type="range" min={1} max={100}
-              value={draft.steps || 28}
-              onChange={(e) => set('steps', Number(e.target.value))}
-              className="w-full accent-purple-500"
-            />
-          </div>
-          <div>
-            <label className={labelCls}>Guidance Scale: {draft.guidance_scale}</label>
-            <input
-              type="range" min={1} max={30} step={0.5}
-              value={draft.guidance_scale || 7}
-              onChange={(e) => set('guidance_scale', Number(e.target.value))}
-              className="w-full accent-purple-500"
-            />
+          <div className="grid sm:grid-cols-2 gap-4">
+            <div>
+              <label className={labelCls}>Steps: {draft.steps}</label>
+              <input
+                type="range" min={1} max={100}
+                value={draft.steps || 28}
+                onChange={(e) => set('steps', Number(e.target.value))}
+                className="w-full accent-purple-500"
+              />
+            </div>
+            <div>
+              <label className={labelCls}>Guidance Scale: {draft.guidance_scale}</label>
+              <input
+                type="range" min={1} max={30} step={0.5}
+                value={draft.guidance_scale || 7}
+                onChange={(e) => set('guidance_scale', Number(e.target.value))}
+                className="w-full accent-purple-500"
+              />
+            </div>
           </div>
           <div>
             <label className={labelCls}>Sampler</label>
@@ -996,10 +1054,11 @@ export default function ImageStudio({ onBack }) {
             />
           </div>
         </section>
+        )}
 
         {/* Prompting */}
+        {tab === 'prompting' && (
         <section className={sectionCls}>
-          <h2 className="text-sm font-semibold text-gray-300">Prompting</h2>
           {draft.model_name && (
             <div className="text-xs text-gray-500 bg-gray-950/60 border border-gray-800 rounded-lg px-3 py-2">
               Selected model uses the{' '}
@@ -1098,8 +1157,10 @@ export default function ImageStudio({ onBack }) {
             />
           </div>
         </section>
+        )}
 
         {/* LoRAs */}
+        {tab === 'loras' && (
         <LoraSection
           config={config}
           draft={draft}
@@ -1108,8 +1169,10 @@ export default function ImageStudio({ onBack }) {
           setLibrary={setLibrary}
           checkpointFamily={checkpointFamily}
         />
+        )}
 
-        {/* Test generate */}
+        {/* Test generate + gallery */}
+        {tab === 'generate' && (<>
         <section className={sectionCls}>
           <h2 className="text-sm font-semibold text-gray-300">Test Generate</h2>
           <p className="text-xs text-gray-600">
@@ -1132,9 +1195,11 @@ export default function ImageStudio({ onBack }) {
               Generate
             </button>
           </div>
-          {!config.has_key && <p className="text-xs text-yellow-500">Save an API key first.</p>}
+          {!config.has_key && (
+            <p className="text-xs text-yellow-500">Save a Novita API key in the Setup tab first.</p>
+          )}
           {config.has_key && !config.model_name && (
-            <p className="text-xs text-yellow-500">Pick a model and save first.</p>
+            <p className="text-xs text-yellow-500">Pick a model in the Setup tab and save first.</p>
           )}
           {testError && <p className="text-xs text-red-400">{testError}</p>}
         </section>
@@ -1193,6 +1258,7 @@ export default function ImageStudio({ onBack }) {
             </div>
           )}
         </section>
+        </>)}
       </div>
       {lightbox && <Lightbox record={lightbox} onClose={() => setLightbox(null)} />}
     </div>
