@@ -23,6 +23,23 @@ from pathlib import Path
 MODULE_ID = "wb_image_gen"
 
 NOVITA_BASE = "https://api.novita.ai"
+CIVITAI_BASE = "https://civitai.com/api/v1"
+
+# Built-in first-party model routed to /v3/async/flux-2-dev (not in /v3/model).
+# Its LoRAs are passed as download URLs, so any Civitai Flux LoRA works directly.
+FLUX2_MODEL_NAME = "flux-2-dev"
+FLUX2_SIZE_MIN, FLUX2_SIZE_MAX = 256, 1536
+
+CIVITAI_SORTS = ["Most Downloaded", "Newest", "Highest Rated"]
+CIVITAI_LORA_TYPES = ["LORA", "LoCon", "DoRA"]
+CIVITAI_BASE_MODELS = [
+    "SD 1.5", "SDXL 1.0", "Pony", "Illustrious", "NoobAI", "Flux.1 D", "Flux.2 D",
+]
+
+LORA_LIBRARY_MAX = 200
+SD_LORAS_MAX = 5        # per txt2img request
+FLUX_LORAS_MAX = 3      # flux-2-dev accepts up to 3 URL loras
+
 SAMPLERS = [
     "DPM++ 2M Karras",
     "DPM++ SDE Karras",
@@ -110,6 +127,9 @@ def _default_config() -> dict:
         "prompt_template_tags": DEFAULT_PROMPT_TEMPLATE_TAGS,
         "pony_quality_tags": DEFAULT_PONY_QUALITY_TAGS,
         "style_suffix": "",
+        "civitai_api_key": "",
+        "civitai_nsfw": False,
+        "lora_library": [],             # saved Civitai LoRAs; see _normalize_lora_entry
     }
 
 
@@ -234,6 +254,118 @@ def _is_pony(cfg: dict) -> bool:
     return "pony" in _model_ident(cfg)
 
 
+# --------------------------------------------------------------------------
+# LoRA library
+# --------------------------------------------------------------------------
+
+def _base_family(base: str) -> str:
+    """Coarse base-model family for LoRA/checkpoint compatibility. SDXL-class
+    covers everything trained on SDXL (Pony, Illustrious, NoobAI...)."""
+    ident = str(base or "").lower()
+    if "flux" in ident:
+        return "flux"
+    if "xl" in ident or "pony" in ident or "illustrious" in ident or "noob" in ident:
+        return "sdxl"
+    if "1.5" in ident or "sd 1" in ident or "sd1" in ident:
+        return "sd15"
+    return ""
+
+
+def _checkpoint_family(cfg: dict) -> str:
+    if cfg.get("model_name") == FLUX2_MODEL_NAME:
+        return "flux"
+    return _base_family(_model_ident(cfg))
+
+
+def _entry_sd_name(entry: dict) -> str:
+    """Novita library name for an SD-family LoRA: the hash-match result, or the
+    user's manual override (for LoRAs console-uploaded to their account)."""
+    override = str(entry.get("sd_name_override") or "").strip()
+    if override:
+        return override
+    return str((entry.get("novita") or {}).get("sd_name_in_api") or "")
+
+
+def _active_loras(cfg: dict) -> list[dict]:
+    library = cfg.get("lora_library")
+    if not isinstance(library, list):
+        return []
+    return [e for e in library if isinstance(e, dict) and e.get("active")]
+
+
+def _entry_usable(entry: dict, family: str) -> bool:
+    """Active entry is usable when it matches the checkpoint family and has a
+    way to reach Novita (library name for SD, download URL for Flux)."""
+    if _base_family(entry.get("base_model")) != family or not family:
+        return False
+    if family == "flux":
+        return bool(str(entry.get("download_url") or "").strip())
+    return bool(_entry_sd_name(entry))
+
+
+def _sd_payload_loras(cfg: dict) -> list[dict]:
+    family = _checkpoint_family(cfg)
+    if family == "flux":
+        return []
+    out = []
+    for entry in _active_loras(cfg):
+        if not _entry_usable(entry, family):
+            continue
+        try:
+            strength = max(0.0, min(1.0, float(entry.get("strength", 0.7))))
+        except (TypeError, ValueError):
+            strength = 0.7
+        out.append({"model_name": _entry_sd_name(entry), "strength": round(strength, 2)})
+    return out[:SD_LORAS_MAX]
+
+
+def _civitai_download_link(entry: dict, cfg: dict) -> str:
+    """Civitai download URL with the user's token appended — Civitai requires
+    auth on downloads, and Novita fetches the file server-side."""
+    url = str(entry.get("download_url") or "").strip()
+    key = str(cfg.get("civitai_api_key") or "").strip()
+    if url and key:
+        url += ("&" if "?" in url else "?") + "token=" + key
+    return url
+
+
+def _flux_payload_loras(cfg: dict) -> list[str]:
+    if _checkpoint_family(cfg) != "flux":
+        return []
+    urls = [
+        _civitai_download_link(entry, cfg)
+        for entry in _active_loras(cfg)
+        if _entry_usable(entry, "flux")
+    ]
+    return [u for u in urls if u][:FLUX_LORAS_MAX]
+
+
+def _applied_lora_names(cfg: dict) -> list[str]:
+    family = _checkpoint_family(cfg)
+    return [
+        str(entry.get("name") or entry.get("id") or "?")
+        for entry in _active_loras(cfg)
+        if _entry_usable(entry, family)
+    ][:FLUX_LORAS_MAX if family == "flux" else SD_LORAS_MAX]
+
+
+def _active_trigger_words(cfg: dict) -> list[str]:
+    """Trained trigger words of the LoRAs that will actually be applied, so the
+    prompt-writer LLM can work them in and the LoRAs fire."""
+    family = _checkpoint_family(cfg)
+    words: list[str] = []
+    seen: set[str] = set()
+    for entry in _active_loras(cfg):
+        if not _entry_usable(entry, family):
+            continue
+        for word in (entry.get("trained_words") or [])[:4]:
+            word = str(word).strip().strip(",")
+            if word and word.lower() not in seen:
+                seen.add(word.lower())
+                words.append(word)
+    return words[:12]
+
+
 def _render_template(template: str, narration: str, history: str) -> str:
     # Sequential replace instead of str.format: narration prose routinely
     # contains braces that would blow up format().
@@ -262,6 +394,10 @@ async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk) -> s
     else:
         template = cfg.get("prompt_template") or DEFAULT_PROMPT_TEMPLATE
     prompt = _render_template(template, narration[-4000:], history[-3000:])
+    triggers = _active_trigger_words(cfg)
+    if triggers:
+        prompt += ("\n\nMANDATORY: weave these trigger words into the output verbatim "
+                   "(they activate style adapters): " + ", ".join(triggers))
     try:
         sdk.llm._current_module = MODULE_ID
         raw = await sdk.llm.generate(
@@ -309,6 +445,22 @@ def _novita_payload(cfg: dict, image_prompt: str) -> dict:
     negative = str(cfg.get("negative_prompt") or "").strip()
     if negative:
         payload["request"]["negative_prompt"] = negative[:MAX_PROMPT_CHARS]
+    loras = _sd_payload_loras(cfg)
+    if loras:
+        payload["request"]["loras"] = loras
+    return payload
+
+
+def _flux2_payload(cfg: dict, image_prompt: str) -> dict:
+    clamp = lambda v: max(FLUX2_SIZE_MIN, min(FLUX2_SIZE_MAX, int(v or 1024)))
+    payload = {
+        "prompt": image_prompt[:MAX_PROMPT_CHARS],
+        "size": f"{clamp(cfg.get('width'))}*{clamp(cfg.get('height'))}",
+        "seed": -1,
+    }
+    loras = _flux_payload_loras(cfg)
+    if loras:
+        payload["loras"] = loras
     return payload
 
 
@@ -321,10 +473,15 @@ def _novita_error_detail(resp) -> str:
 
 
 async def _novita_submit(cfg: dict, image_prompt: str) -> str:
-    """Submit an async txt2img task; return the task id."""
+    """Submit an async generation task; return the task id. FLUX.2 is a
+    first-party model on its own endpoint; everything else is SD txt2img."""
     import httpx
-    url = f"{NOVITA_BASE}/v3/async/txt2img"
-    payload = _novita_payload(cfg, image_prompt)
+    if cfg.get("model_name") == FLUX2_MODEL_NAME:
+        url = f"{NOVITA_BASE}/v3/async/flux-2-dev"
+        payload = _flux2_payload(cfg, image_prompt)
+    else:
+        url = f"{NOVITA_BASE}/v3/async/txt2img"
+        payload = _novita_payload(cfg, image_prompt)
     last_error: Exception | None = None
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -408,11 +565,12 @@ async def _download(image_url: str) -> tuple[bytes, str]:
     raise RuntimeError(f"Image download failed: {last_error}")
 
 
-async def _novita_list_models(cfg: dict, query: str, cursor: str, limit: int) -> dict:
-    """Search Novita's checkpoint catalog (thousands of models)."""
+async def _novita_list_models(cfg: dict, query: str, cursor: str, limit: int,
+                              types: str = "checkpoint") -> dict:
+    """Search Novita's model catalog (thousands of Civitai-mirrored models)."""
     import httpx
     params = {
-        "filter.types": "checkpoint",
+        "filter.types": types,
         "pagination.limit": max(1, min(100, limit)),
     }
     if query:
@@ -429,6 +587,127 @@ async def _novita_list_models(cfg: dict, query: str, cursor: str, limit: int) ->
             raise RuntimeError(f"Novita model search failed ({resp.status_code}): "
                                f"{_novita_error_detail(resp)}")
         return resp.json()
+
+
+# --------------------------------------------------------------------------
+# Civitai client (LoRA browsing) + Novita availability matching
+# --------------------------------------------------------------------------
+
+def _civitai_headers(cfg: dict) -> dict:
+    headers = {"accept": "application/json"}
+    key = str(cfg.get("civitai_api_key") or "").strip()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+def _flatten_civitai_model(model: dict) -> dict | None:
+    """Reduce a Civitai /models hit to the library-entry shape (latest version,
+    primary file). Returns None for hits without a downloadable version."""
+    versions = model.get("modelVersions") or []
+    version = versions[0] if versions else {}
+    if not version.get("id"):
+        return None
+    files = version.get("files") or []
+    file = next((f for f in files if f.get("primary")), files[0] if files else {})
+    thumb = next(
+        (i.get("url") for i in (version.get("images") or [])
+         if i.get("url") and i.get("type") != "video"),
+        "")
+    stats = model.get("stats") or {}
+    return {
+        "id": str(version["id"]),
+        "model_id": model.get("id"),
+        "name": str(model.get("name") or ""),
+        "version_name": str(version.get("name") or ""),
+        "creator": str((model.get("creator") or {}).get("username") or ""),
+        "type": str(model.get("type") or "LORA"),
+        "base_model": str(version.get("baseModel") or ""),
+        "sha256": str((file.get("hashes") or {}).get("SHA256") or "").lower(),
+        "download_url": str(file.get("downloadUrl") or version.get("downloadUrl") or ""),
+        "size_kb": file.get("sizeKB"),
+        "trained_words": [str(w) for w in (version.get("trainedWords") or [])],
+        "thumb_url": str(thumb or ""),
+        "civitai_url": f"https://civitai.com/models/{model.get('id')}",
+        "nsfw": bool(model.get("nsfw")),
+        "stats": {
+            "downloads": int(stats.get("downloadCount") or 0),
+            "likes": int(stats.get("thumbsUpCount") or 0),
+        },
+    }
+
+
+async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
+                                lora_type: str, sort: str, nsfw: bool,
+                                cursor: str, limit: int) -> dict:
+    import httpx
+    params = [
+        ("types", lora_type if lora_type in CIVITAI_LORA_TYPES else "LORA"),
+        ("sort", sort if sort in CIVITAI_SORTS else CIVITAI_SORTS[0]),
+        ("limit", str(max(1, min(100, limit)))),
+        ("nsfw", "true" if nsfw else "false"),
+    ]
+    if query:
+        params.append(("query", query))
+    if base_model:
+        params.append(("baseModels", base_model))
+    if cursor:
+        params.append(("cursor", cursor))
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        resp = await client.get(f"{CIVITAI_BASE}/models",
+                                headers=_civitai_headers(cfg), params=params)
+        if resp.status_code == 401:
+            raise RuntimeError("Civitai rejected the request: invalid API key")
+        if resp.status_code != 200:
+            raise RuntimeError(f"Civitai search failed ({resp.status_code}): "
+                               f"{resp.text[:300]}")
+        body = resp.json()
+
+    items = [
+        flat for flat in (_flatten_civitai_model(m) for m in (body.get("items") or []))
+        if flat is not None
+    ]
+    next_cursor = str((body.get("metadata") or {}).get("nextCursor") or "")
+    return {"items": items, "next_cursor": next_cursor}
+
+
+async def _novita_match_lora(cfg: dict, entry: dict) -> dict | None:
+    """Find the saved Civitai LoRA in Novita's Civitai-mirrored catalog by
+    SHA256. Novita sd_names usually embed the Civitai version id, so that is
+    the first search key; the model name is the fallback."""
+    sha = str(entry.get("sha256") or "").lower()
+    if not sha:
+        return None
+    queries = [str(entry.get("id") or ""), str(entry.get("name") or "")[:60]]
+    for query in filter(None, queries):
+        body = await _novita_list_models(cfg, query, "", 100, types="lora")
+        for model in body.get("models") or []:
+            if str(model.get("hash_sha256") or "").lower() != sha:
+                continue
+            sd_name = model.get("sd_name_in_api") or model.get("sd_name")
+            if sd_name and model.get("status") == 1:
+                return {"sd_name_in_api": sd_name}
+    return None
+
+
+def _normalize_lora_entry(item: dict) -> dict:
+    """Library entry from a browser selection, with activation defaults."""
+    entry = {k: item.get(k) for k in (
+        "id", "model_id", "name", "version_name", "creator", "type", "base_model",
+        "sha256", "download_url", "size_kb", "trained_words", "thumb_url",
+        "civitai_url", "nsfw", "stats")}
+    entry["id"] = str(entry.get("id") or "")
+    entry["trained_words"] = [str(w) for w in (entry.get("trained_words") or [])][:20]
+    entry.update({
+        "saved_at": _now(),
+        "active": False,
+        "strength": 0.7,
+        "sd_name_override": "",
+        "novita": None,
+        "novita_checked_at": None,
+    })
+    return entry
 
 
 # --------------------------------------------------------------------------
@@ -471,6 +750,7 @@ def _spawn_generation(*, save_id: str, turn: int, narration: str, history: str,
         "image_prompt": prompt_override or "",
         "narration_excerpt": (narration or "")[:200],
         "model_name": cfg.get("model_name", ""),
+        "loras": _applied_lora_names(cfg),
         "width": cfg.get("width"),
         "height": cfg.get("height"),
         "error": None,
@@ -645,21 +925,52 @@ def get_router():
         prompt_template_tags: str | None = None
         pony_quality_tags: str | None = None
         style_suffix: str | None = None
+        civitai_api_key: str | None = None
+        civitai_nsfw: bool | None = None
 
     class GenerateRequest(BaseModel):
         prompt_override: str | None = None
         save_id: str | None = None
         retry_record_id: str | None = None
 
+    class LoraSave(BaseModel):
+        id: str
+        model_id: int | None = None
+        name: str
+        version_name: str = ""
+        creator: str = ""
+        type: str = "LORA"
+        base_model: str = ""
+        sha256: str = ""
+        download_url: str = ""
+        size_kb: float | None = None
+        trained_words: list[str] = []
+        thumb_url: str = ""
+        civitai_url: str = ""
+        nsfw: bool = False
+        stats: dict = {}
+
+    class LoraPatch(BaseModel):
+        active: bool | None = None
+        strength: float | None = None
+        sd_name_override: str | None = None
+
     def _public_config(cfg: dict) -> dict:
         out = dict(cfg)
         out["api_key"] = _mask_key(cfg.get("api_key", ""))
         out["has_key"] = bool(cfg.get("api_key"))
+        out["civitai_api_key"] = _mask_key(cfg.get("civitai_api_key", ""))
+        out["has_civitai_key"] = bool(cfg.get("civitai_api_key"))
         out["samplers"] = SAMPLERS
         out["default_prompt_template"] = DEFAULT_PROMPT_TEMPLATE
         out["default_prompt_template_tags"] = DEFAULT_PROMPT_TEMPLATE_TAGS
         out["default_pony_quality_tags"] = DEFAULT_PONY_QUALITY_TAGS
         out["prompt_style"] = _prompt_style(cfg)
+        out["civitai_sorts"] = CIVITAI_SORTS
+        out["civitai_lora_types"] = CIVITAI_LORA_TYPES
+        out["civitai_base_models"] = CIVITAI_BASE_MODELS
+        out["flux2_model_name"] = FLUX2_MODEL_NAME
+        out["checkpoint_family"] = _checkpoint_family(cfg)
         return out
 
     @router.get("/config")
@@ -674,6 +985,9 @@ def get_router():
         key = incoming.pop("api_key", None)
         if key is not None and not key.startswith(KEY_MASK_PREFIX):
             cfg["api_key"] = key.strip()
+        civitai_key = incoming.pop("civitai_api_key", None)
+        if civitai_key is not None and not civitai_key.startswith(KEY_MASK_PREFIX):
+            cfg["civitai_api_key"] = civitai_key.strip()
 
         if "sampler_name" in incoming and incoming["sampler_name"] not in SAMPLERS:
             raise HTTPException(status_code=400, detail=f"Unknown sampler. Allowed: {SAMPLERS}")
@@ -736,7 +1050,108 @@ def get_router():
             if m.get("status") == 1 and (m.get("sd_name_in_api") or m.get("sd_name"))
         ]
         next_cursor = (body.get("pagination") or {}).get("next_cursor") or ""
+        # First-party FLUX.2 rides its own endpoint, so it is not in /v3/model;
+        # pin it to the top of matching first pages.
+        if not cursor.strip() and (not query.strip() or "flux" in query.lower()):
+            models.insert(0, {
+                "sd_name": FLUX2_MODEL_NAME,
+                "name": "FLUX.2 [dev] — Novita first-party (LoRAs via Civitai link)",
+                "is_sdxl": False,
+                "base_model": "Flux.2",
+                "cover_url": None,
+            })
         return {"models": models, "next_cursor": next_cursor}
+
+    @router.get("/civitai/loras")
+    async def civitai_loras(query: str = "", base_model: str = "", lora_type: str = "LORA",
+                            sort: str = "Most Downloaded", nsfw: bool = False,
+                            cursor: str = "", limit: int = 24):
+        cfg = _load_config()
+        if nsfw and not cfg.get("civitai_api_key"):
+            raise HTTPException(status_code=400,
+                                detail="NSFW browsing needs a Civitai API key")
+        try:
+            return await _civitai_search_loras(
+                cfg, query=query.strip(), base_model=base_model.strip(),
+                lora_type=lora_type, sort=sort, nsfw=nsfw,
+                cursor=cursor.strip(), limit=limit)
+        except RuntimeError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    def _find_lora(cfg: dict, lora_id: str) -> dict:
+        entry = next((e for e in cfg.get("lora_library") or []
+                      if isinstance(e, dict) and e.get("id") == lora_id), None)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="LoRA not in library")
+        return entry
+
+    @router.post("/loras")
+    async def save_lora(item: LoraSave):
+        cfg = _load_config()
+        library = cfg.get("lora_library") or []
+        if any(isinstance(e, dict) and e.get("id") == item.id for e in library):
+            raise HTTPException(status_code=409, detail="Already in library")
+        if len(library) >= LORA_LIBRARY_MAX:
+            raise HTTPException(status_code=400,
+                                detail=f"Library is full ({LORA_LIBRARY_MAX} LoRAs)")
+
+        entry = _normalize_lora_entry(item.model_dump())
+        # Flux LoRAs go to Novita as download links; only SD ones need to exist
+        # in Novita's mirrored catalog.
+        if _base_family(entry.get("base_model")) != "flux" and cfg.get("api_key"):
+            try:
+                entry["novita"] = await _novita_match_lora(cfg, entry)
+            except RuntimeError as e:
+                print(f"[Image Gen] Novita match failed for {entry['id']}: {e}")
+            else:
+                entry["novita_checked_at"] = _now()
+
+        cfg = _load_config()  # re-load: the match awaited, config may have moved
+        library = cfg.get("lora_library") or []
+        if not any(isinstance(e, dict) and e.get("id") == entry["id"] for e in library):
+            library.append(entry)
+        cfg["lora_library"] = library
+        _save_config(cfg)
+        return {"entry": entry, "lora_library": library}
+
+    @router.post("/loras/{lora_id}/match")
+    async def rematch_lora(lora_id: str):
+        cfg = _load_config()
+        entry = _find_lora(cfg, lora_id)
+        if not cfg.get("api_key"):
+            raise HTTPException(status_code=400, detail="No Novita API key configured")
+        try:
+            match = await _novita_match_lora(cfg, entry)
+        except RuntimeError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        cfg = _load_config()
+        entry = _find_lora(cfg, lora_id)
+        entry["novita"] = match
+        entry["novita_checked_at"] = _now()
+        _save_config(cfg)
+        return {"entry": entry, "lora_library": cfg["lora_library"]}
+
+    @router.patch("/loras/{lora_id}")
+    async def patch_lora(lora_id: str, patch: LoraPatch):
+        cfg = _load_config()
+        entry = _find_lora(cfg, lora_id)
+        if patch.active is not None:
+            entry["active"] = bool(patch.active)
+        if patch.strength is not None:
+            entry["strength"] = max(0.0, min(1.0, float(patch.strength)))
+        if patch.sd_name_override is not None:
+            entry["sd_name_override"] = patch.sd_name_override.strip()
+        _save_config(cfg)
+        return {"entry": entry, "lora_library": cfg["lora_library"]}
+
+    @router.delete("/loras/{lora_id}")
+    async def delete_lora(lora_id: str):
+        cfg = _load_config()
+        _find_lora(cfg, lora_id)
+        cfg["lora_library"] = [e for e in cfg["lora_library"]
+                               if not (isinstance(e, dict) and e.get("id") == lora_id)]
+        _save_config(cfg)
+        return {"lora_library": cfg["lora_library"]}
 
     @router.post("/generate")
     async def generate(req: GenerateRequest):

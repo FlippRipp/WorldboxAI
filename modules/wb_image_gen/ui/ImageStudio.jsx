@@ -202,10 +202,379 @@ function ModelPicker({ value, valueBase, hasKey, onSelect }) {
   );
 }
 
+// Mirror of the backend's _base_family heuristic.
+function baseFamily(base) {
+  const ident = String(base || '').toLowerCase();
+  if (ident.includes('flux')) return 'flux';
+  if (ident.includes('xl') || ident.includes('pony') || ident.includes('illustrious') || ident.includes('noob')) return 'sdxl';
+  if (ident.includes('1.5') || ident.includes('sd 1') || ident.includes('sd1')) return 'sd15';
+  return '';
+}
+
+const FAMILY_LABELS = { flux: 'FLUX.2', sdxl: 'SDXL-class', sd15: 'SD 1.5' };
+
+function fmtCount(n) {
+  n = Number(n) || 0;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+  return String(n);
+}
+
+// Availability of a saved LoRA on Novita: Flux LoRAs travel as download links,
+// SD-family ones must exist in Novita's mirrored catalog (or be console-uploaded
+// and named manually).
+function loraAvailability(entry) {
+  if (baseFamily(entry.base_model) === 'flux') {
+    return entry.download_url
+      ? { ok: true, label: 'via link', cls: 'bg-purple-900/40 text-purple-300 border-purple-800' }
+      : { ok: false, label: 'no download url', cls: 'bg-red-900/50 text-red-300 border-red-800' };
+  }
+  if (entry.sd_name_override) {
+    return { ok: true, label: 'manual name', cls: 'bg-green-900/50 text-green-300 border-green-800' };
+  }
+  if (entry.novita && entry.novita.sd_name_in_api) {
+    return { ok: true, label: 'on Novita', cls: 'bg-green-900/50 text-green-300 border-green-800' };
+  }
+  return { ok: false, label: 'not on Novita', cls: 'bg-red-900/50 text-red-300 border-red-800' };
+}
+
+function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch }) {
+  const [strength, setStrength] = useState(entry.strength ?? 0.7);
+  const [showOverride, setShowOverride] = useState(false);
+  const [override, setOverride] = useState(entry.sd_name_override || '');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { setStrength(entry.strength ?? 0.7); }, [entry.strength]);
+
+  const fam = baseFamily(entry.base_model);
+  const availability = loraAvailability(entry);
+  const compatible = fam && checkpointFamily && fam === checkpointFamily;
+  const dimmed = entry.active && !compatible;
+
+  return (
+    <div className={`bg-gray-950/60 border border-gray-800 rounded-lg p-3 space-y-2 ${!compatible ? 'opacity-60' : ''}`}>
+      <div className="flex items-center gap-3">
+        {entry.thumb_url ? (
+          <img src={entry.thumb_url} alt="" loading="lazy" className="w-10 h-10 rounded object-cover shrink-0 bg-gray-800" />
+        ) : (
+          <div className="w-10 h-10 rounded bg-gray-800 shrink-0" />
+        )}
+        <div className="min-w-0 flex-1">
+          <a
+            href={entry.civitai_url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-sm text-gray-200 hover:text-purple-300 truncate block"
+            title={`${entry.name} — ${entry.version_name}`}
+          >
+            {entry.name}
+          </a>
+          <div className="text-[10px] text-gray-500 truncate">
+            {entry.creator && <span>by {entry.creator} · </span>}
+            {entry.base_model}
+            {entry.trained_words?.length > 0 && (
+              <span className="text-gray-600"> · triggers: {entry.trained_words.slice(0, 3).join(', ')}</span>
+            )}
+          </div>
+        </div>
+        <span className={`px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wider border shrink-0 ${availability.cls}`}>
+          {availability.label}
+        </span>
+        <Toggle
+          checked={!!entry.active}
+          onChange={(v) => onPatch(entry.id, { active: v })}
+          label=""
+        />
+        <button
+          onClick={() => onDelete(entry.id)}
+          className="text-gray-600 hover:text-red-400 transition-colors shrink-0"
+          title="Remove from library"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+          </svg>
+        </button>
+      </div>
+
+      {dimmed && (
+        <p className="text-[11px] text-yellow-500">
+          Active but the selected checkpoint is {FAMILY_LABELS[checkpointFamily] || 'unknown'} — this{' '}
+          {FAMILY_LABELS[fam] || entry.base_model} LoRA will be skipped.
+        </p>
+      )}
+
+      {entry.active && fam !== 'flux' && (
+        <div className="flex items-center gap-3">
+          <label className="text-[10px] uppercase tracking-wider text-gray-500 shrink-0">
+            Strength: {Number(strength).toFixed(2)}
+          </label>
+          <input
+            type="range" min={0} max={1} step={0.05}
+            value={strength}
+            onChange={(e) => setStrength(Number(e.target.value))}
+            onMouseUp={() => onPatch(entry.id, { strength })}
+            onTouchEnd={() => onPatch(entry.id, { strength })}
+            onKeyUp={() => onPatch(entry.id, { strength })}
+            className="w-full accent-purple-500"
+          />
+        </div>
+      )}
+
+      {!availability.ok && fam !== 'flux' && (
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-3 text-[11px]">
+            <button
+              onClick={async () => { setBusy(true); await onRematch(entry.id); setBusy(false); }}
+              disabled={busy}
+              className="text-purple-400 hover:text-purple-300 disabled:opacity-40"
+            >
+              {busy ? 'Checking…' : 'Recheck Novita'}
+            </button>
+            <button onClick={() => setShowOverride((s) => !s)} className="text-gray-500 hover:text-gray-300">
+              {showOverride ? 'Hide manual name' : 'Enter name manually'}
+            </button>
+            <a
+              href="https://novita.ai/models-console/model-management"
+              target="_blank" rel="noreferrer"
+              className="text-gray-500 hover:text-gray-300 underline"
+            >
+              Upload on Novita (5 free slots)
+            </a>
+          </div>
+          {showOverride && (
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={override}
+                onChange={(e) => setOverride(e.target.value)}
+                placeholder="MODEL NAME IN API from your Novita private model list"
+                className={`${inputCls} text-xs`}
+              />
+              <button
+                onClick={() => onPatch(entry.id, { sd_name_override: override })}
+                className="px-3 py-1 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs shrink-0"
+              >
+                Set
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Civitai LoRA browser + local library. Browsing is proxied through the module
+// backend (which injects the Civitai key for NSFW); saving stores metadata only
+// — no file ever touches this device.
+function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily }) {
+  const [query, setQuery] = useState('');
+  const [baseModel, setBaseModel] = useState('');
+  const [loraType, setLoraType] = useState('LORA');
+  const [sort, setSort] = useState('Most Downloaded');
+  const [items, setItems] = useState([]);
+  const [nextCursor, setNextCursor] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [open, setOpen] = useState(false);
+  const debounceRef = useRef(null);
+  const seqRef = useRef(0);
+
+  const nsfw = !!draft.civitai_nsfw;
+  const savedIds = new Set(library.map((e) => e.id));
+
+  const search = useCallback(async (cursor = '') => {
+    const seq = ++seqRef.current;
+    setLoading(true);
+    setError('');
+    try {
+      const params = new URLSearchParams({ query, lora_type: loraType, sort, nsfw: String(nsfw) });
+      if (baseModel) params.set('base_model', baseModel);
+      if (cursor) params.set('cursor', cursor);
+      const res = await fetch(`${API_BASE}/civitai/loras?${params}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      if (seq !== seqRef.current) return;
+      setItems((prev) => (cursor ? [...prev, ...data.items] : data.items));
+      setNextCursor(data.next_cursor || '');
+    } catch (e) {
+      if (seq === seqRef.current) setError(String(e.message || e));
+    } finally {
+      if (seq === seqRef.current) setLoading(false);
+    }
+  }, [query, baseModel, loraType, sort, nsfw]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => search(), 400);
+    return () => clearTimeout(debounceRef.current);
+  }, [open, search]);
+
+  const callLibrary = async (path, options) => {
+    setError('');
+    try {
+      const res = await fetch(`${API_BASE}${path}`, options);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      if (data.lora_library) setLibrary(data.lora_library);
+      return data;
+    } catch (e) {
+      setError(String(e.message || e));
+      return null;
+    }
+  };
+
+  const saveLora = (item) =>
+    callLibrary('/loras', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(item),
+    });
+  const patchLora = (id, patch) =>
+    callLibrary(`/loras/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+  const deleteLora = (id) => callLibrary(`/loras/${id}`, { method: 'DELETE' });
+  const rematchLora = (id) => callLibrary(`/loras/${id}/match`, { method: 'POST' });
+
+  const activeCount = library.filter((e) => e.active && baseFamily(e.base_model) === checkpointFamily).length;
+
+  return (
+    <section className={sectionCls}>
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-gray-300">
+          LoRAs {library.length > 0 && <span className="text-gray-600">({library.length} saved{activeCount > 0 ? `, ${activeCount} active` : ''})</span>}
+        </h2>
+        <button
+          onClick={() => setOpen((o) => !o)}
+          className="text-xs text-purple-400 hover:text-purple-300"
+        >
+          {open ? 'Close browser' : 'Browse Civitai…'}
+        </button>
+      </div>
+      <p className="text-xs text-gray-600">
+        Save LoRAs you like from Civitai, then activate them. SD-family LoRAs are applied through Novita's
+        mirrored catalog; Flux LoRAs are sent as download links (FLUX.2 model only). Active LoRAs that do not
+        match the selected checkpoint are skipped.
+      </p>
+
+      {open && (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search LoRAs…"
+              className={inputCls}
+            />
+            <select value={baseModel} onChange={(e) => setBaseModel(e.target.value)} className={inputCls}>
+              <option value="">All base models</option>
+              {(config.civitai_base_models || []).map((b) => <option key={b} value={b}>{b}</option>)}
+            </select>
+            <select value={loraType} onChange={(e) => setLoraType(e.target.value)} className={inputCls}>
+              {(config.civitai_lora_types || ['LORA']).map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <select value={sort} onChange={(e) => setSort(e.target.value)} className={inputCls}>
+              {(config.civitai_sorts || []).map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div className="flex items-center gap-4">
+            <Toggle
+              checked={nsfw}
+              onChange={(v) => {
+                if (v && !config.has_civitai_key) return;
+                set('civitai_nsfw', v);
+              }}
+              label={<span className={config.has_civitai_key ? '' : 'opacity-50'}>Include NSFW</span>}
+            />
+            {!config.has_civitai_key && (
+              <span className="text-[11px] text-yellow-600">Save a Civitai API key to browse NSFW LoRAs.</span>
+            )}
+          </div>
+
+          {error && <p className="text-xs text-red-400">{error}</p>}
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-96 overflow-y-auto pr-1">
+            {items.map((item) => (
+              <div key={item.id} className="bg-gray-950/60 border border-gray-800 rounded-lg overflow-hidden">
+                {item.thumb_url ? (
+                  <img src={item.thumb_url} alt="" loading="lazy" className="w-full h-28 object-cover bg-gray-800" />
+                ) : (
+                  <div className="w-full h-28 bg-gray-800" />
+                )}
+                <div className="p-2 space-y-1">
+                  <a
+                    href={item.civitai_url} target="_blank" rel="noreferrer"
+                    className="text-xs text-gray-200 hover:text-purple-300 line-clamp-2 leading-snug"
+                    title={item.name}
+                  >
+                    {item.name}
+                  </a>
+                  <div className="flex items-center justify-between text-[10px] text-gray-500">
+                    <span className="truncate">{item.base_model}</span>
+                    <span className="shrink-0">⬇ {fmtCount(item.stats?.downloads)} · 👍 {fmtCount(item.stats?.likes)}</span>
+                  </div>
+                  <button
+                    onClick={() => saveLora(item)}
+                    disabled={savedIds.has(item.id)}
+                    className="w-full px-2 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {savedIds.has(item.id) ? 'Saved ✓' : 'Save to library'}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          {loading && <p className="text-xs text-gray-500 animate-pulse">Searching Civitai…</p>}
+          {!loading && items.length === 0 && !error && (
+            <p className="text-xs text-gray-600 italic">No LoRAs found.</p>
+          )}
+          {!loading && nextCursor && (
+            <button onClick={() => search(nextCursor)} className="text-xs text-purple-400 hover:text-purple-300">
+              Load more…
+            </button>
+          )}
+        </div>
+      )}
+
+      {!open && error && <p className="text-xs text-red-400">{error}</p>}
+
+      {library.length === 0 ? (
+        <p className="text-sm text-gray-600 italic">No saved LoRAs yet — browse Civitai to add some.</p>
+      ) : (
+        <div className="space-y-2">
+          {library.map((entry) => (
+            <LoraRow
+              key={entry.id}
+              entry={entry}
+              checkpointFamily={checkpointFamily}
+              onPatch={patchLora}
+              onDelete={deleteLora}
+              onRematch={rematchLora}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function ImageStudio({ onBack }) {
   const [config, setConfig] = useState(null);
   const [draft, setDraft] = useState({});
   const [keyInput, setKeyInput] = useState('');
+  const [civitaiKeyInput, setCivitaiKeyInput] = useState('');
+  const [library, setLibrary] = useState([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
   const [savedFlash, setSavedFlash] = useState(false);
@@ -223,6 +592,7 @@ export default function ImageStudio({ onBack }) {
     const data = await res.json();
     setConfig(data);
     setDraft(data);
+    setLibrary(data.lora_library || []);
   }, []);
 
   const loadImages = useCallback(async () => {
@@ -259,12 +629,16 @@ export default function ImageStudio({ onBack }) {
   const dirty =
     config &&
     (keyInput.trim() !== '' ||
-      JSON.stringify({ ...draft, api_key: '' }) !== JSON.stringify({ ...config, api_key: '' }));
+      civitaiKeyInput.trim() !== '' ||
+      JSON.stringify({ ...draft, api_key: '', civitai_api_key: '', lora_library: [] }) !==
+        JSON.stringify({ ...config, api_key: '', civitai_api_key: '', lora_library: [] }));
 
   // Mirror of the backend's _prompt_style heuristic, live against the draft.
   const modelIdent = `${draft.model_base || ''} ${draft.model_name || ''}`.toLowerCase();
   const promptStyle = modelIdent.includes('pony') || modelIdent.includes('illustrious') ? 'tags' : 'natural';
   const isPony = modelIdent.includes('pony');
+  const checkpointFamily =
+    draft.model_name === config?.flux2_model_name ? 'flux' : baseFamily(modelIdent);
 
   const set = (key, value) => setDraft((d) => ({ ...d, [key]: value }));
 
@@ -288,8 +662,10 @@ export default function ImageStudio({ onBack }) {
         prompt_template_tags: draft.prompt_template_tags,
         pony_quality_tags: draft.pony_quality_tags,
         style_suffix: draft.style_suffix,
+        civitai_nsfw: !!draft.civitai_nsfw,
       };
       if (keyInput.trim()) payload.api_key = keyInput.trim();
+      if (civitaiKeyInput.trim()) payload.civitai_api_key = civitaiKeyInput.trim();
       const res = await fetch(`${API_BASE}/config`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -302,7 +678,9 @@ export default function ImageStudio({ onBack }) {
       const data = await res.json();
       setConfig(data);
       setDraft(data);
+      setLibrary(data.lora_library || []);
       setKeyInput('');
+      setCivitaiKeyInput('');
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 2000);
     } catch (e) {
@@ -404,6 +782,25 @@ export default function ImageStudio({ onBack }) {
               Get a key at{' '}
               <a href="https://novita.ai/settings/key-management" target="_blank" rel="noreferrer" className="text-purple-400 hover:underline">
                 novita.ai
+              </a>
+              . Stored locally on this machine only.
+            </p>
+          </div>
+          <div>
+            <label className={labelCls}>Civitai API Key (optional)</label>
+            <input
+              type="password"
+              value={civitaiKeyInput}
+              onChange={(e) => setCivitaiKeyInput(e.target.value)}
+              placeholder={config.has_civitai_key ? `Saved (${config.civitai_api_key}) — type to replace` : 'Paste your civitai.com key'}
+              className={inputCls}
+              autoComplete="off"
+            />
+            <p className="text-xs text-gray-600 mt-1">
+              Needed for NSFW LoRA browsing and for FLUX.2 LoRA download links (Civitai requires auth on
+              downloads). Create one under{' '}
+              <a href="https://civitai.com/user/account" target="_blank" rel="noreferrer" className="text-purple-400 hover:underline">
+                civitai.com account settings
               </a>
               . Stored locally on this machine only.
             </p>
@@ -597,6 +994,16 @@ export default function ImageStudio({ onBack }) {
           </div>
         </section>
 
+        {/* LoRAs */}
+        <LoraSection
+          config={config}
+          draft={draft}
+          set={set}
+          library={library}
+          setLibrary={setLibrary}
+          checkpointFamily={checkpointFamily}
+        />
+
         {/* Test generate */}
         <section className={sectionCls}>
           <h2 className="text-sm font-semibold text-gray-300">Test Generate</h2>
@@ -649,7 +1056,7 @@ export default function ImageStudio({ onBack }) {
                     <img
                       src={`${API_BASE}/images/file/${r.filename}`}
                       alt={r.image_prompt || ''}
-                      title={r.model_name || ''}
+                      title={`${r.model_name || ''}${r.loras?.length ? ` + LoRAs: ${r.loras.join(', ')}` : ''}`}
                       loading="lazy"
                       onClick={() => setLightbox(r)}
                       className="w-full h-32 object-cover cursor-zoom-in"

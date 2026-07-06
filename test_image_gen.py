@@ -440,6 +440,324 @@ def test_models_endpoint_proxies_and_requires_key(tmp_path):
     assert "invalid API key" in resp.json()["detail"]
 
 
+# ---------------------------------------------------------------------------
+# LoRA library: families, payloads, trigger words, Civitai flattening
+# ---------------------------------------------------------------------------
+
+def _lora(**overrides):
+    entry = {
+        "id": "123456",
+        "name": "Detail Tweaker",
+        "base_model": "SDXL 1.0",
+        "sha256": "abc123",
+        "download_url": "https://civitai.com/api/download/models/123456",
+        "trained_words": ["detailed", "sharp focus"],
+        "active": True,
+        "strength": 0.7,
+        "sd_name_override": "",
+        "novita": {"sd_name_in_api": "detail_tweaker_123456.safetensors"},
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _lora_cfg(backend, **overrides):
+    cfg = {**backend._default_config(),
+           "model_name": "sd_xl_base_1.0.safetensors", "model_base": "SDXL 1.0"}
+    cfg.update(overrides)
+    return cfg
+
+
+def test_base_family_buckets(tmp_path):
+    backend = _load_backend(tmp_path)
+    assert backend._base_family("SDXL 1.0") == "sdxl"
+    assert backend._base_family("Pony") == "sdxl"
+    assert backend._base_family("Illustrious") == "sdxl"
+    assert backend._base_family("NoobAI") == "sdxl"
+    assert backend._base_family("SD 1.5") == "sd15"
+    assert backend._base_family("Flux.1 D") == "flux"
+    assert backend._base_family("Flux.2 D") == "flux"
+    assert backend._base_family("") == ""
+    # The built-in FLUX.2 model has no base metadata but must resolve to flux.
+    cfg = _lora_cfg(backend, model_name=backend.FLUX2_MODEL_NAME, model_base="")
+    assert backend._checkpoint_family(cfg) == "flux"
+
+
+def test_sd_payload_includes_matched_compatible_loras(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _lora_cfg(backend, lora_library=[_lora()])
+    payload = backend._novita_payload(cfg, "a castle")
+    assert payload["request"]["loras"] == [
+        {"model_name": "detail_tweaker_123456.safetensors", "strength": 0.7}]
+
+
+def test_sd_payload_skips_inactive_unmatched_and_incompatible(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _lora_cfg(backend, lora_library=[
+        _lora(id="1", active=False),                          # inactive
+        _lora(id="2", novita=None),                           # not on Novita
+        _lora(id="3", base_model="SD 1.5"),                   # wrong family
+        _lora(id="4", base_model="Flux.1 D"),                 # flux lora on SD checkpoint
+    ])
+    assert "loras" not in backend._novita_payload(cfg, "a castle")["request"]
+
+
+def test_sd_payload_override_beats_missing_match_and_clamps(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _lora_cfg(backend, lora_library=[
+        _lora(novita=None, sd_name_override="my_upload.safetensors", strength=5.0)])
+    loras = backend._novita_payload(cfg, "x")["request"]["loras"]
+    assert loras == [{"model_name": "my_upload.safetensors", "strength": 1.0}]
+
+    many = [_lora(id=str(i)) for i in range(8)]
+    cfg = _lora_cfg(backend, lora_library=many)
+    assert len(backend._novita_payload(cfg, "x")["request"]["loras"]) == backend.SD_LORAS_MAX
+
+
+def test_flux2_payload_uses_download_links_with_token(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _lora_cfg(backend, model_name=backend.FLUX2_MODEL_NAME, model_base="",
+                    civitai_api_key="civkey",
+                    lora_library=[_lora(base_model="Flux.2 D", novita=None)])
+    payload = backend._flux2_payload(cfg, "a castle")
+    assert payload["loras"] == [
+        "https://civitai.com/api/download/models/123456?token=civkey"]
+    assert payload["size"] == "1024*1024"
+    assert payload["seed"] == -1
+
+    # Token joins an existing query string with '&'.
+    cfg["lora_library"] = [_lora(
+        base_model="Flux.1 D", novita=None,
+        download_url="https://civitai.com/api/download/models/1?type=Model")]
+    assert backend._flux2_payload(cfg, "x")["loras"][0].endswith("?type=Model&token=civkey")
+
+
+def test_flux2_payload_skips_sd_loras_clamps_size_caps_count(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _lora_cfg(backend, model_name=backend.FLUX2_MODEL_NAME,
+                    width=2048, height=100, lora_library=[_lora()])  # SDXL lora
+    payload = backend._flux2_payload(cfg, "x")
+    assert "loras" not in payload
+    assert payload["size"] == "1536*256"
+
+    cfg["lora_library"] = [_lora(id=str(i), base_model="Flux.2 D", novita=None)
+                           for i in range(5)]
+    assert len(backend._flux2_payload(cfg, "x")["loras"]) == backend.FLUX_LORAS_MAX
+
+
+def test_submit_routes_flux2_to_its_endpoint(tmp_path):
+    backend = _load_backend(tmp_path)
+    seen = {}
+
+    class FakeResponse:
+        status_code = 200
+        def json(self):
+            return {"task_id": "t1"}
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def post(self, url, headers=None, json=None):
+            seen.update({"url": url, "payload": json})
+            return FakeResponse()
+
+    import httpx
+    original = httpx.AsyncClient
+    httpx.AsyncClient = FakeClient
+    try:
+        cfg = _lora_cfg(backend, model_name=backend.FLUX2_MODEL_NAME,
+                        api_key="k", civitai_api_key="c",
+                        lora_library=[_lora(base_model="Flux.2 D", novita=None)])
+        task_id = asyncio.run(backend._novita_submit(cfg, "a castle"))
+    finally:
+        httpx.AsyncClient = original
+    assert task_id == "t1"
+    assert seen["url"].endswith("/v3/async/flux-2-dev")
+    assert seen["payload"]["loras"] == [
+        "https://civitai.com/api/download/models/123456?token=c"]
+
+
+def test_trigger_words_injected_for_usable_loras_only(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _lora_cfg(backend, lora_library=[
+        _lora(trained_words=["glowing runes"]),
+        _lora(id="2", base_model="Flux.2 D", novita=None, trained_words=["skipme"]),
+        _lora(id="3", active=False, trained_words=["also skipped"]),
+        _lora(id="4", trained_words=["Glowing Runes", "bokeh"]),  # dedupe, case-insensitive
+    ])
+    assert backend._active_trigger_words(cfg) == ["glowing runes", "bokeh"]
+
+    captured = {}
+    sdk = _make_sdk(reply="a scene with glowing runes", captured=captured)
+    asyncio.run(backend._write_image_prompt(cfg, "narration", "", sdk))
+    assert "glowing runes, bokeh" in captured["prompts"][0]
+
+    # No active loras: the instruction never appears.
+    captured = {}
+    sdk = _make_sdk(captured=captured)
+    asyncio.run(backend._write_image_prompt(
+        _lora_cfg(backend), "narration", "", sdk))
+    assert "trigger words" not in captured["prompts"][0]
+
+
+def test_flatten_civitai_model(tmp_path):
+    backend = _load_backend(tmp_path)
+    raw = {
+        "id": 42, "name": "Cool LoRA", "type": "LORA", "nsfw": False,
+        "creator": {"username": "artist"},
+        "stats": {"downloadCount": 1000, "thumbsUpCount": 55},
+        "modelVersions": [{
+            "id": 987, "name": "v2", "baseModel": "Pony",
+            "trainedWords": ["cool style"],
+            "downloadUrl": "https://civitai.com/api/download/models/987",
+            "files": [
+                {"primary": False, "downloadUrl": "https://x/other", "hashes": {}},
+                {"primary": True, "sizeKB": 100.5,
+                 "downloadUrl": "https://civitai.com/api/download/models/987",
+                 "hashes": {"SHA256": "ABCDEF"}},
+            ],
+            "images": [
+                {"url": "https://img/clip.mp4", "type": "video"},
+                {"url": "https://img/pic.jpg", "type": "image"},
+            ],
+        }],
+    }
+    flat = backend._flatten_civitai_model(raw)
+    assert flat["id"] == "987"
+    assert flat["sha256"] == "abcdef"                 # primary file's hash, lowercased
+    assert flat["thumb_url"] == "https://img/pic.jpg"  # first non-video image
+    assert flat["stats"] == {"downloads": 1000, "likes": 55}
+    assert flat["civitai_url"] == "https://civitai.com/models/42"
+    assert flat["trained_words"] == ["cool style"]
+
+    assert backend._flatten_civitai_model({"id": 1, "modelVersions": []}) is None
+
+
+def test_novita_match_lora_by_hash(tmp_path):
+    backend = _load_backend(tmp_path)
+    calls = []
+
+    async def fake_list(cfg, query, cursor, limit, types="checkpoint"):
+        calls.append((query, types))
+        return {"models": [
+            {"hash_sha256": "WRONG", "sd_name_in_api": "no.safetensors", "status": 1},
+            {"hash_sha256": "ABC123", "sd_name_in_api": "yes.safetensors", "status": 1},
+        ]}
+
+    backend._novita_list_models = fake_list
+    cfg = _lora_cfg(backend, api_key="k")
+    match = asyncio.run(backend._novita_match_lora(cfg, _lora(sha256="abc123")))
+    assert match == {"sd_name_in_api": "yes.safetensors"}
+    assert calls[0] == ("123456", "lora")  # version id searched first
+
+    async def no_hit(cfg, query, cursor, limit, types="checkpoint"):
+        return {"models": [{"hash_sha256": "nope", "sd_name_in_api": "x", "status": 1}]}
+
+    backend._novita_list_models = no_hit
+    assert asyncio.run(backend._novita_match_lora(cfg, _lora(sha256="abc"))) is None
+    # No hash: never touches the network.
+    assert asyncio.run(backend._novita_match_lora(cfg, _lora(sha256=""))) is None
+
+
+def test_lora_library_endpoints_roundtrip(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend)
+    client = _client(backend)
+
+    async def fake_list(cfg, query, cursor, limit, types="checkpoint"):
+        return {"models": [
+            {"hash_sha256": "FEED", "sd_name_in_api": "found_123456.safetensors", "status": 1}]}
+
+    backend._novita_list_models = fake_list
+
+    item = {"id": "123456", "name": "Detail Tweaker", "base_model": "SDXL 1.0",
+            "sha256": "feed", "download_url": "https://civitai.com/api/download/models/123456",
+            "trained_words": ["detailed"], "stats": {"downloads": 5, "likes": 2}}
+    resp = client.post("/loras", json=item)
+    assert resp.status_code == 200
+    entry = resp.json()["entry"]
+    assert entry["novita"] == {"sd_name_in_api": "found_123456.safetensors"}
+    assert entry["active"] is False
+
+    assert client.post("/loras", json=item).status_code == 409  # dedupe
+
+    resp = client.patch("/loras/123456", json={"active": True, "strength": 1.7})
+    assert resp.status_code == 200
+    assert resp.json()["entry"]["strength"] == 1.0  # clamped
+
+    # Persisted: a fresh config load feeds the payload builder.
+    cfg = backend._load_config()
+    cfg.update({"model_name": "sd_xl_base_1.0.safetensors", "model_base": "SDXL 1.0"})
+    assert backend._novita_payload(cfg, "x")["request"]["loras"] == [
+        {"model_name": "found_123456.safetensors", "strength": 1.0}]
+
+    assert client.delete("/loras/123456").status_code == 200
+    assert backend._load_config()["lora_library"] == []
+    assert client.delete("/loras/123456").status_code == 404
+    assert client.patch("/loras/zzz", json={"active": True}).status_code == 404
+
+
+def test_civitai_loras_endpoint_gates_nsfw(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    resp = client.get("/civitai/loras?nsfw=true")
+    assert resp.status_code == 400
+    assert "Civitai API key" in resp.json()["detail"]
+
+    captured = {}
+
+    async def fake_search(cfg, **kwargs):
+        captured.update(kwargs)
+        return {"items": [], "next_cursor": ""}
+
+    backend._civitai_search_loras = fake_search
+    resp = client.get("/civitai/loras?query=style&base_model=Pony&sort=Newest&lora_type=LoCon")
+    assert resp.status_code == 200
+    assert captured == {"query": "style", "base_model": "Pony", "lora_type": "LoCon",
+                        "sort": "Newest", "nsfw": False, "cursor": "", "limit": 24}
+
+
+def test_models_endpoint_pins_flux2(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend)
+
+    async def fake_list(cfg, query, cursor, limit):
+        return {"models": [], "pagination": {}}
+
+    backend._novita_list_models = fake_list
+    client = _client(backend)
+
+    first = client.get("/models").json()["models"]
+    assert first[0]["sd_name"] == backend.FLUX2_MODEL_NAME
+
+    assert client.get("/models?query=flux").json()["models"][0]["sd_name"] == backend.FLUX2_MODEL_NAME
+    assert client.get("/models?query=anime").json()["models"] == []      # no pin
+    assert client.get("/models?cursor=abc").json()["models"] == []        # not on later pages
+
+
+def test_civitai_key_masked_in_config(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    resp = client.put("/config", json={"civitai_api_key": "civsecret99", "civitai_nsfw": True})
+    body = resp.json()
+    assert body["civitai_api_key"] == "****t99" or body["civitai_api_key"].endswith("t99")
+    assert body["has_civitai_key"] is True
+    assert body["civitai_nsfw"] is True
+    assert "civsecret99" not in resp.text
+
+    # Masked round-trip keeps the stored key.
+    client.put("/config", json={"civitai_api_key": body["civitai_api_key"]})
+    assert backend._load_config()["civitai_api_key"] == "civsecret99"
+
+
 def test_generate_endpoint_studio_override_and_busy(tmp_path):
     backend = _load_backend(tmp_path)
     _enable(backend)
