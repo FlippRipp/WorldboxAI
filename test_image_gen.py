@@ -829,6 +829,16 @@ def test_novita_lora_index_ttl_and_force_refresh(tmp_path):
     asyncio.run(backend._novita_lora_index(cfg))
     assert len(calls) == 3
 
+    # Training-data archives mirrored as "lora" entries are excluded (a .zip
+    # sd_name is not a loadable weight).
+    async def zip_list(cfg, query, cursor, limit, types="checkpoint", visibility=""):
+        return {"models": [
+            {"hash_sha256": "0000000000", "sd_name_in_api": "123_training_data.zip",
+             "status": 1}], "pagination": {}}
+
+    backend._novita_list_models = zip_list
+    assert asyncio.run(backend._novita_lora_index(cfg, force=True)) == {}
+
 
 def test_lora_library_endpoints_roundtrip(tmp_path):
     backend = _load_backend(tmp_path)

@@ -801,10 +801,13 @@ async def _novita_lora_index(cfg: dict, force: bool = False) -> dict:
             models = body.get("models") or []
             for m in models:
                 h = str(m.get("hash_sha256") or "").upper()
-                sd_name = m.get("sd_name_in_api") or m.get("sd_name")
+                sd_name = str(m.get("sd_name_in_api") or m.get("sd_name") or "")
+                # Novita also mirrors Civitai training-data archives as "lora"
+                # entries; a .zip is not a loadable weight.
                 if len(h) >= NOVITA_HASH_PREFIX_LEN and sd_name \
+                        and not sd_name.lower().endswith(".zip") \
                         and m.get("status") == 1:
-                    hashes.setdefault(h[:NOVITA_HASH_PREFIX_LEN], str(sd_name))
+                    hashes.setdefault(h[:NOVITA_HASH_PREFIX_LEN], sd_name)
             cursor = str((body.get("pagination") or {}).get("next_cursor") or "")
             if not models or not cursor:
                 break
