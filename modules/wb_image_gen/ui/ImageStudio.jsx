@@ -700,6 +700,7 @@ export default function ImageStudio({ onBack }) {
   const [testError, setTestError] = useState('');
   const pollRef = useRef(null);
 
+  const [showKeyGuide, setShowKeyGuide] = useState(false);
   const [tab, setTab] = useState(() => {
     try {
       const saved = localStorage.getItem('wb_image_gen_tab');
@@ -939,12 +940,47 @@ export default function ImageStudio({ onBack }) {
               autoComplete="off"
             />
             <p className="text-xs text-gray-600 mt-1">
-              Get a key at{' '}
-              <a href="https://novita.ai/settings/key-management" target="_blank" rel="noreferrer" className="text-purple-400 hover:underline">
-                novita.ai
-              </a>
-              . Stored locally on this machine only.
+              Stored locally on this machine only.{' '}
+              <button
+                onClick={() => setShowKeyGuide((s) => !s)}
+                className="text-purple-400 hover:underline"
+              >
+                {showKeyGuide ? 'Hide quick start' : 'How do I get a key?'}
+              </button>
             </p>
+            {showKeyGuide && (
+              <ol className="mt-2 space-y-1.5 text-xs text-gray-400 list-decimal list-inside bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+                <li>
+                  Create an account at{' '}
+                  <a href="https://novita.ai" target="_blank" rel="noreferrer" className="text-purple-400 hover:underline">
+                    novita.ai
+                  </a>{' '}
+                  — Google or GitHub sign-in works, and new accounts get a small free credit.
+                </li>
+                <li>
+                  Open{' '}
+                  <a href="https://novita.ai/settings/key-management" target="_blank" rel="noreferrer" className="text-purple-400 hover:underline">
+                    Key Management
+                  </a>{' '}
+                  (avatar menu → Account → API Keys).
+                </li>
+                <li>
+                  Click <span className="text-gray-300 font-medium">+ Create New Key</span>, name it anything
+                  (e.g. “worldbox”), and copy the key.
+                </li>
+                <li>
+                  Paste it above and press <span className="text-gray-300 font-medium">Save Changes</span> — it
+                  never leaves this machine.
+                </li>
+                <li>
+                  Pick a model below and you're set. Standard images cost well under a cent each; top up under{' '}
+                  <a href="https://novita.ai/billing" target="_blank" rel="noreferrer" className="text-purple-400 hover:underline">
+                    Billing
+                  </a>{' '}
+                  once the free credit runs out.
+                </li>
+              </ol>
+            )}
           </div>
           <div>
             <label className={labelCls}>Civitai API Key (optional)</label>
