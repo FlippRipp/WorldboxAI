@@ -619,6 +619,7 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
 // stores metadata only — no file ever touches this device.
 function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily }) {
   const [source, setSource] = useState('civitai');
+  const [novitaOnly, setNovitaOnly] = useState(false);
   const [query, setQuery] = useState('');
   const [baseModel, setBaseModel] = useState('');
   const [loraType, setLoraType] = useState('LORA');
@@ -640,6 +641,14 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   // Hugging Face browsing is public, so the NSFW filter needs no key there;
   // Civitai requires its key for anything beyond SFW.
   const nsfwMode = (source === 'hf' || config.has_civitai_key) ? (draft.civitai_nsfw || 'off') : 'off';
+
+  // "On Novita only": keep results that are usable as-is — hash-matched in
+  // Novita's mirror, or flux (sent as a download link, no mirror needed).
+  // Unknown availability (badge "?") is hidden too: it is not a known yes.
+  const usableOnNovita = (i) =>
+    !i.gated && (i.novita_available === true ||
+      (baseFamily(i.base_model) === 'flux' && i.download_url));
+  const visibleItems = novitaOnly ? items.filter(usableOnNovita) : items;
   const savedIds = new Set(library.map((e) => e.id));
   const isUnmatched = (e) =>
     baseFamily(e.base_model) !== 'flux' &&
@@ -863,6 +872,18 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
               <option value="include">NSFW</option>
               <option value="only">NSFW only</option>
             </select>
+            <label
+              className="flex items-center gap-1.5 text-[11px] text-gray-400 shrink-0 cursor-pointer"
+              title="Only show LoRAs that work right away: mirrored in Novita's catalog, or Flux LoRAs sent as download links. Hides ones with unknown availability."
+            >
+              <input
+                type="checkbox"
+                checked={novitaOnly}
+                onChange={(e) => setNovitaOnly(e.target.checked)}
+                className="accent-purple-500"
+              />
+              On Novita only
+            </label>
             {source === 'civitai' && !config.has_civitai_key && (
               <span className="text-[11px] text-yellow-600">Save a Civitai API key (Setup tab) to browse NSFW LoRAs.</span>
             )}
@@ -871,7 +892,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
           {error && <p className="text-xs text-red-400">{error}</p>}
 
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-96 overflow-y-auto pr-1">
-            {items.map((item) => {
+            {visibleItems.map((item) => {
               const pageUrl = item.page_url || item.civitai_url;
               const badge = browseAvailability(item);
               return (
@@ -924,6 +945,12 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
             })}
           </div>
           {loading && <p className="text-xs text-gray-500 animate-pulse">Searching {source === 'hf' ? 'Hugging Face' : 'Civitai'}…</p>}
+          {!loading && novitaOnly && items.length > visibleItems.length && (
+            <p className="text-xs text-gray-600">
+              {items.length - visibleItems.length} of {items.length} results hidden (not on Novita)
+              {visibleItems.length === 0 && nextCursor ? ' — try Load more' : ''}.
+            </p>
+          )}
           {!loading && items.length === 0 && !error && (
             <p className="text-xs text-gray-600 italic">No LoRAs found.</p>
           )}
