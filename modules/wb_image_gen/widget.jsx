@@ -74,6 +74,9 @@ function Lightbox({ record, onClose }) {
 export default function ImageFooter({ state, slotName, message, messageTurn }) {
   const [, setTick] = useState(0);
   const [lightbox, setLightbox] = useState(null);
+  const [notice, setNotice] = useState(null);
+  // Record id whose delete button is in its "Sure?" confirm state.
+  const [armed, setArmed] = useState(null);
   const saveId = state?.active_save_id;
   const lastTrigger = state?.module_data?.wb_image_gen?.last_trigger;
 
@@ -108,23 +111,49 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
   });
   if (records.length === 0) return null;
 
-  const retry = async (recordId) => {
+  // Retry an error or regenerate a done image: same endpoint, the backend
+  // removes the record being replaced. Same prompt, fresh seed.
+  const regenerate = async (recordId) => {
     try {
-      await fetch(`${API_BASE}/generate`, {
+      const res = await fetch(`${API_BASE}/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ retry_record_id: recordId }),
       });
+      if (res.status === 409) {
+        setNotice('An image is already generating — try again in a moment.');
+        setTimeout(() => setNotice(null), 4000);
+        return;
+      }
       refreshIndex(saveId);
     } catch (e) { /* surfaced by the record staying in error */ }
   };
+
+  // Deleting throws the image file away, so the first tap only arms the
+  // button ("Sure?"); it disarms itself after a beat.
+  const remove = async (recordId) => {
+    if (armed !== recordId) {
+      setArmed(recordId);
+      setTimeout(() => setArmed((a) => (a === recordId ? null : a)), 3000);
+      return;
+    }
+    setArmed(null);
+    try {
+      await fetch(`${API_BASE}/images/${recordId}`, { method: 'DELETE' });
+      refreshIndex(saveId);
+    } catch (e) { /* the next poll reconciles */ }
+  };
+
+  const overlayBtn =
+    'px-2 py-1 rounded text-xs leading-none bg-black/60 text-gray-300 ' +
+    'border border-white/10 hover:bg-black/80 hover:text-white transition-colors';
 
   return (
     <div className="mt-4 space-y-3">
       {records.map((r) => {
         if (r.status === 'done' && r.filename) {
           return (
-            <div key={r.id}>
+            <div key={r.id} className="relative inline-block">
               <img
                 src={`${API_BASE}/images/file/${r.filename}`}
                 alt={r.image_prompt || 'Story illustration'}
@@ -132,6 +161,26 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
                 onClick={() => setLightbox(r)}
                 className="max-h-80 rounded-lg border border-gray-700/60 shadow-lg cursor-zoom-in"
               />
+              <div className="absolute top-2 right-2 flex gap-1">
+                <button
+                  onClick={() => regenerate(r.id)}
+                  title="Regenerate (same prompt, new image)"
+                  aria-label="Regenerate illustration"
+                  className={overlayBtn}
+                >
+                  ↻
+                </button>
+                <button
+                  onClick={() => remove(r.id)}
+                  title="Remove this illustration"
+                  aria-label="Remove illustration"
+                  className={armed === r.id
+                    ? 'px-2 py-1 rounded text-xs leading-none bg-red-900/80 text-red-200 border border-red-500/50'
+                    : overlayBtn}
+                >
+                  {armed === r.id ? 'Sure?' : '✕'}
+                </button>
+              </div>
             </div>
           );
         }
@@ -141,10 +190,18 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
               <span className="text-red-400/70">🎨 Illustration failed:</span>
               <span className="truncate max-w-xs" title={r.error || ''}>{r.error || 'unknown error'}</span>
               <button
-                onClick={() => retry(r.id)}
+                onClick={() => regenerate(r.id)}
                 className="px-2 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
               >
                 Retry
+              </button>
+              <button
+                onClick={() => remove(r.id)}
+                className={armed === r.id
+                  ? 'px-2 py-0.5 rounded bg-red-900/80 border border-red-500/50 text-red-200'
+                  : 'px-2 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors'}
+              >
+                {armed === r.id ? 'Sure?' : 'Dismiss'}
               </button>
             </div>
           );
@@ -159,6 +216,7 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
           </div>
         );
       })}
+      {notice && <p className="text-xs text-amber-400/80">{notice}</p>}
       {lightbox && <Lightbox record={lightbox} onClose={() => setLightbox(null)} />}
     </div>
   );

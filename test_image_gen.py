@@ -1348,6 +1348,42 @@ def test_generate_retry_replaces_failed_record(tmp_path):
     assert all(r["id"] != "mystory_3_deadbeef" for r in backend._read_index())
 
 
+def test_generate_retry_regenerates_done_record_and_deletes_file(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend)
+    _fake_novita(backend, image_bytes=b"newimage")
+    client = _client(backend)
+
+    old_file = backend._data_dir() / "images" / "mystory_3_00000000.jpg"
+    old_file.write_bytes(b"oldimage")
+    asyncio.run(backend._append_record({
+        "id": "mystory_3_00000000", "save_id": "mystory", "turn": 3,
+        "status": "done", "error": None,
+        "narration_excerpt": "A merchant waves you over.",
+        "image_prompt": "a smiling merchant",
+        "filename": "mystory_3_00000000.jpg",
+    }))
+
+    resp = client.post("/generate", json={"retry_record_id": "mystory_3_00000000"})
+    assert resp.status_code == 200
+    record_id = resp.json()["record_id"]
+
+    for _ in range(100):
+        record = next((r for r in backend._read_index() if r["id"] == record_id), None)
+        if record and record["status"] in ("done", "error"):
+            break
+        import time as _t
+        _t.sleep(0.02)
+    # The regenerated image keeps the anchor and prompt; the replaced record
+    # and its file are gone.
+    assert record["status"] == "done"
+    assert record["narration_excerpt"] == "A merchant waves you over."
+    assert record["image_prompt"] == "a smiling merchant"
+    assert all(r["id"] != "mystory_3_00000000" for r in backend._read_index())
+    assert not old_file.exists()
+    assert (backend._data_dir() / "images" / record["filename"]).read_bytes() == b"newimage"
+
+
 def test_generate_endpoint_refine_runs_prompt_writer(tmp_path):
     backend = _load_backend(tmp_path)
     _enable(backend)

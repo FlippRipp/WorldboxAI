@@ -446,7 +446,7 @@ function AppContent() {
           description: (m.command_help || {})[cmd] || m.name,
         }))
       )
-      .sort((a, b) => a.command.localeCompare(b.command));
+      .sort((a, b) => a.module.localeCompare(b.module) || a.command.localeCompare(b.command));
     return (
     <ModuleEventProvider>
       <div className="flex h-dvh bg-gray-900 text-gray-100 font-sans overflow-hidden">

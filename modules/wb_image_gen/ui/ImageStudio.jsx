@@ -304,6 +304,25 @@ function loraAvailability(entry) {
   return { ok: false, label: 'not on Novita', cls: 'bg-red-900/50 text-red-300 border-red-800' };
 }
 
+// Queried Civitai searches come back relevance-ordered and the proxy sorts
+// each request's batch within itself only — so after "Load more" the merged
+// list must be re-sorted client-side or the counts jump back up mid-list.
+const BROWSE_SORT_KEYS = {
+  'Most Downloaded': (i) => i.stats?.downloads || 0,
+  'Highest Rated': (i) => i.stats?.likes || 0,
+  'Most Liked': (i) => i.stats?.likes || 0,
+  'Newest': (i) => i.published_at || '',
+  'Recently Updated': (i) => i.published_at || '',
+};
+
+function mergeBrowseResults(prev, incoming, sortLabel) {
+  const seen = new Set(prev.map((i) => i.id));
+  const merged = [...prev, ...incoming.filter((i) => !seen.has(i.id))];
+  const key = BROWSE_SORT_KEYS[sortLabel];
+  if (key) merged.sort((a, b) => (key(a) < key(b) ? 1 : key(a) > key(b) ? -1 : 0));
+  return merged;
+}
+
 // Availability badge for a browse result (not yet saved). The backend checks
 // each result's hashes against Novita's mirrored catalog; flux LoRAs travel
 // as download links so the mirror doesn't matter for them.
@@ -647,7 +666,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
       }
       const data = await res.json();
       if (seq !== seqRef.current) return;
-      setItems((prev) => (cursor ? [...prev, ...data.items] : data.items));
+      setItems((prev) => (cursor ? mergeBrowseResults(prev, data.items, sort) : data.items));
       setNextCursor(data.next_cursor || '');
     } catch (e) {
       if (seq === seqRef.current) setError(String(e.message || e));
