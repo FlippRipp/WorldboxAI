@@ -5,6 +5,7 @@ const TABS = [
   { id: 'memories', label: 'Memories' },
   { id: 'world', label: 'World' },
   { id: 'lorebooks', label: 'Lorebooks' },
+  { id: 'rag_debug', label: 'RAG Debug' },
 ];
 
 // Badge colors per world-entry source type; unknown types fall back to gray.
@@ -146,14 +147,16 @@ export default function MemoryBrowser({ isOpen, onClose, saveId }) {
             </button>
           ))}
           <div className="ml-auto flex items-center gap-2 pb-2">
-            <input
-              type="text"
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Search..."
-              className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200 w-40"
-              aria-label="Search entries"
-            />
+            {tab !== 'rag_debug' && (
+              <input
+                type="text"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Search..."
+                className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200 w-40"
+                aria-label="Search entries"
+              />
+            )}
             <button
               onClick={fetchAll}
               className="text-sm text-purple-400 hover:text-purple-300 px-2 py-1"
@@ -196,6 +199,9 @@ export default function MemoryBrowser({ isOpen, onClose, saveId }) {
               setEditing={setEditing}
               onEntriesChanged={refetchWorldEntries}
             />
+          )}
+          {!loading && tab === 'rag_debug' && (
+            <RagDebugTab contextQuery={contextQuery} />
           )}
         </div>
 
@@ -508,6 +514,154 @@ function WorldEntryCard({ entry, isActive, onEdit }) {
           </p>
         </div>
         <EditButton onClick={() => onEdit(entry)} label={`Edit world entry ${entry.source_id || entry.id}`} />
+      </div>
+    </div>
+  );
+}
+
+// ── RAG debug tab ────────────────────────────────────────────────────────────
+
+function RagDebugTab({ contextQuery }) {
+  const [query, setQuery] = useState(contextQuery || '');
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const run = async () => {
+    const q = query.trim();
+    if (!q || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      setResult(await api.ragDebugQuery(q));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const ragLimit = result?.rag_limit ?? 0;
+  const worldRagLimit = result?.world_rag_limit ?? 0;
+
+  return (
+    <div>
+      <p className="text-xs text-gray-500 mb-2">
+        Test what RAG retrieval would surface for a given input: the text is embedded and matched
+        against memories and world knowledge exactly like a real turn (turn {result?.turn ?? '—'}).
+        Highlighted entries are the ones that would be injected into the storyteller's context.
+      </p>
+      <div className="flex gap-2 items-start mb-1">
+        <textarea
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              run();
+            }
+          }}
+          placeholder="Enter text to test retrieval, e.g. a player input…"
+          rows={2}
+          className="flex-1 bg-gray-700 border border-gray-600 rounded px-2 py-1.5 text-sm text-gray-200 resize-y"
+          aria-label="RAG debug query"
+        />
+        <button
+          onClick={run}
+          disabled={busy || !query.trim()}
+          className="px-4 py-1.5 bg-purple-700 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded text-sm font-medium transition-colors"
+        >
+          {busy ? 'Searching…' : 'Search'}
+        </button>
+      </div>
+      {contextQuery && (
+        <button
+          onClick={() => setQuery(contextQuery)}
+          className="text-xs text-purple-400 hover:text-purple-300 mb-3"
+          title="Use the query from the last real turn"
+        >
+          Use last turn's query
+        </button>
+      )}
+
+      {error && <div className="bg-red-900/40 border border-red-700/50 rounded p-3 text-red-200 text-sm mb-3">{error}</div>}
+
+      {result && (
+        <div className="space-y-4 mt-2">
+          <div>
+            <div className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-2">
+              Memories <span className="normal-case font-normal">(top {ragLimit} injected)</span>
+            </div>
+            {result.memories.length === 0 && (
+              <p className="text-sm text-gray-500">No memories retrieved.</p>
+            )}
+            {result.memories.map((m, i) => (
+              <RagResultCard key={m.id} rank={i + 1} dist={m.dist} injected={i < ragLimit}>
+                <div className="flex items-center gap-2 flex-wrap mb-1">
+                  {m.turn_range && <span className="text-xs text-gray-500 font-mono">{m.turn_range}</span>}
+                  <span className="text-xs text-gray-500" title="Importance">imp {m.importance}/10</span>
+                </div>
+                <p className="text-sm text-gray-200 leading-relaxed whitespace-pre-wrap">{m.text}</p>
+                {(m.entities?.length > 0 || m.topics?.length > 0) && (
+                  <div className="flex flex-wrap gap-1 mt-2">
+                    {(m.entities || []).map(e => (
+                      <span key={e} className="text-[10px] px-1.5 py-0.5 rounded bg-blue-900/40 text-blue-300 border border-blue-800/50">{e}</span>
+                    ))}
+                    {(m.topics || []).map(t => (
+                      <span key={t} className="text-[10px] px-1.5 py-0.5 rounded bg-green-900/40 text-green-300 border border-green-800/50">{t}</span>
+                    ))}
+                  </div>
+                )}
+              </RagResultCard>
+            ))}
+          </div>
+
+          <div>
+            <div className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-2">
+              World Knowledge <span className="normal-case font-normal">(top {worldRagLimit} injected)</span>
+            </div>
+            {result.world_query !== result.query && (
+              <p className="text-xs text-gray-500 mb-2">
+                World search used the location-enriched query: <span className="text-gray-400 italic">"{result.world_query}"</span>
+              </p>
+            )}
+            {result.world_entries.length === 0 && (
+              <p className="text-sm text-gray-500">No world entries retrieved.</p>
+            )}
+            {result.world_entries.map((e, i) => (
+              <RagResultCard key={e.id} rank={i + 1} dist={e.dist} injected={i < worldRagLimit}>
+                <div className="flex items-center gap-2 flex-wrap mb-1">
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded border uppercase tracking-wide ${TYPE_COLORS[e.source_type] || TYPE_COLORS.connection}`}>
+                    {e.source_type}
+                  </span>
+                  {e.region && <span className="text-xs text-gray-500">{e.region}</span>}
+                </div>
+                <p className="text-sm text-gray-200 leading-relaxed whitespace-pre-wrap">{e.text}</p>
+              </RagResultCard>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RagResultCard({ rank, dist, injected, children }) {
+  return (
+    <div className={`bg-gray-900/60 rounded border p-3 mb-2 transition-colors ${injected ? ACTIVE_CARD : 'border-gray-700 opacity-60'}`}>
+      <div className="flex items-start gap-3">
+        <div className="shrink-0 text-center w-14">
+          <div className="text-lg font-bold text-gray-400">#{rank}</div>
+          <div className="text-[10px] text-gray-500 font-mono" title="L2 embedding distance (lower = closer match)">
+            {typeof dist === 'number' ? dist.toFixed(3) : '—'}
+          </div>
+          {injected && (
+            <div className="text-[10px] px-1 py-0.5 mt-1 rounded bg-purple-900/40 text-purple-300 border border-purple-800/50">
+              injected
+            </div>
+          )}
+        </div>
+        <div className="flex-1 min-w-0">{children}</div>
       </div>
     </div>
   );

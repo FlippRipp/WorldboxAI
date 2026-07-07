@@ -576,6 +576,63 @@ async def update_world_entry(entry_id: str, request: WorldEntryUpdateRequest):
     return {"entry": entry}
 
 
+class RagDebugRequest(BaseModel):
+    query: str
+    limit: int = 10
+
+
+@app.post("/api/session/memories/rag-debug")
+async def rag_debug_query(request: RagDebugRequest):
+    """Dry-run RAG retrieval for the memory browser's debug tab: embed the
+    given text and return the ranked memories/world entries with distance
+    scores, mirroring what gather_context_node would retrieve this turn."""
+    import json as _json
+    query = request.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query text cannot be empty.")
+    if not await _ensure_browsing_memory():
+        raise HTTPException(status_code=503, detail="No save loaded.")
+    limit = max(1, min(50, request.limit))
+    turn = session_manager.state.get("turn", 0)
+
+    vector = await _embedding_for_edit(query, "rag_debug")
+    memories = engine.memory.search_memories(vector, turn, limit=limit, with_scores=True)
+    for m in memories:
+        # search_memories keeps entities/topics as stored JSON strings.
+        for key in ("entities", "topics"):
+            try:
+                parsed = _json.loads(m[key]) if isinstance(m[key], str) else m[key]
+            except (ValueError, TypeError):
+                parsed = []
+            m[key] = parsed if isinstance(parsed, list) else []
+
+    # Mirror the location-hint enrichment the engine applies to world queries
+    # so vague inputs rank the same way they would in a real turn.
+    world_query = query
+    world_entries = []
+    if engine.memory.has_world_index():
+        location_hints = " ".join(filter(None, [
+            session_manager.state.get("player_location_region", ""),
+            session_manager.state.get("player_location_layer_id", ""),
+        ]))
+        if location_hints:
+            world_query = f"{query} {location_hints}".strip()
+            world_vector = await _embedding_for_edit(world_query, "rag_debug_world")
+        else:
+            world_vector = vector
+        world_entries = engine.memory.search_world(world_vector, limit=limit, with_scores=True)
+
+    return {
+        "query": query,
+        "world_query": world_query,
+        "turn": turn,
+        "rag_limit": engine.settings.get("memory.rag_limit"),
+        "world_rag_limit": engine.settings.get("world.rag_limit"),
+        "memories": memories,
+        "world_entries": world_entries,
+    }
+
+
 @app.get("/api/llm-inspector/calls")
 async def get_llm_inspector_calls(since_id: str = "", limit: int = 50):
     return {"calls": llm_inspector.get_calls(since_id=since_id, limit=limit)}

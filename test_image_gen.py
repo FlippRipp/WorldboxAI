@@ -1748,3 +1748,201 @@ def test_download_endpoint_redirects_hf_without_token(tmp_path):
 
     resp = client.get("/loras/123456/download", follow_redirects=False)
     assert resp.headers["location"].endswith("?token=civkey")
+
+
+# ---------------------------------------------------------------------------
+# Character reference roster (consistent appearances across images)
+# ---------------------------------------------------------------------------
+
+def _npc(name, appearance="tall and scarred", introduced=True, status="active",
+         traveling=False, last_turn=0, **extra):
+    npc = {"name": name, "race": "human", "gender": "male",
+           "appearance": appearance, "introduced": introduced, "status": status,
+           "traveling_with_player": traveling, "last_interaction_turn": last_turn}
+    npc.update(extra)
+    return npc
+
+
+def _char_state(player=True, npcs=None, **extra):
+    state = _state(**extra)
+    if player:
+        state["characters"] = {"default_player": {
+            "name": "Ash", "race": "elf", "gender": "female",
+            "short_appearance": "silver hair, green cloak"}}
+    if npcs is not None:
+        state["module_data"] = {**state.get("module_data", {}),
+                                "wb_npc_system": {"characters": npcs}}
+    return state
+
+
+def test_character_snapshot_selects_sorts_and_caps(tmp_path):
+    backend = _load_backend(tmp_path)
+
+    # Nothing to say without either source module.
+    assert backend._character_snapshot(_state()) is None
+    assert backend._character_snapshot(
+        _char_state(player=False, npcs={})) is None
+
+    # Player without any appearance text is skipped.
+    state = _state(characters={"default_player": {"name": "Ash", "race": "elf"}})
+    assert backend._character_snapshot(state) is None
+
+    snap = backend._character_snapshot(_char_state(npcs={
+        "n1": _npc("Borin", last_turn=5),
+        "n2": _npc("Kira", traveling=True, last_turn=1),
+        "n3": _npc("Ghost", status="dead"),
+        "n4": _npc("Stranger", introduced=False),
+        "n5": _npc("Blank", appearance="  "),
+        "n6": _npc("Recent", last_turn=9),
+    }))
+    assert snap["player"] == {"name": "Ash",
+                              "descriptor": "female elf; silver hair, green cloak"}
+    # Companions first, then most recently seen; dead/unmet/undescribed dropped.
+    assert [n["name"] for n in snap["npcs"]] == ["Kira", "Recent", "Borin"]
+
+    # full_appearance is the fallback when short_appearance is missing.
+    state = _state(characters={"default_player": {
+        "name": "Ash", "full_appearance": "a full paragraph of looks"}})
+    snap = backend._character_snapshot(state)
+    assert snap["player"]["descriptor"] == "a full paragraph of looks"
+
+    # Entry cap and per-appearance truncation.
+    many = {f"n{i}": _npc(f"NPC{i}", appearance="x" * 500, last_turn=i)
+            for i in range(10)}
+    snap = backend._character_snapshot(_char_state(player=False, npcs=many))
+    assert len(snap["npcs"]) <= backend.CHAR_REF_MAX_NPCS
+    assert all(len(n["descriptor"]) <= backend.CHAR_REF_APPEARANCE_MAX + 40
+               for n in snap["npcs"])
+    assert sum(len(n["descriptor"]) for n in snap["npcs"]) <= backend.CHAR_REF_MAX_CHARS
+
+
+def test_character_block_injected_in_both_styles(tmp_path):
+    backend = _load_backend(tmp_path)
+    characters = {"player": {"name": "Ash", "descriptor": "female elf; silver hair"},
+                  "npcs": [{"name": "Borin", "descriptor": "male human; tall and scarred"}]}
+
+    # Natural template.
+    captured = {}
+    sdk = _make_sdk(captured=captured)
+    cfg = backend._default_config()
+    asyncio.run(backend._write_image_prompt(cfg, "scene", "", sdk, characters))
+    prompt = captured["prompts"][0]
+    assert "KNOWN CHARACTERS" in prompt
+    assert "- Ash (player character): female elf; silver hair" in prompt
+    assert "- Borin: male human; tall and scarred" in prompt
+    assert "POV RULE" not in prompt
+
+    # Tags template converts descriptions into booru tags.
+    captured = {}
+    sdk = _make_sdk(reply="1girl", captured=captured)
+    cfg = {**backend._default_config(), "model_base": "Pony", "model_name": "m.safetensors"}
+    asyncio.run(backend._write_image_prompt(cfg, "scene", "", sdk, characters))
+    assert "booru appearance tags" in captured["prompts"][0]
+    assert "- Borin: male human; tall and scarred" in captured["prompts"][0]
+
+    # Disabled or absent roster: no block.
+    for cfg, chars in ((backend._default_config(), None),
+                       ({**backend._default_config(),
+                         "character_reference_enabled": False}, characters)):
+        captured = {}
+        asyncio.run(backend._write_image_prompt(
+            cfg, "scene", "", _make_sdk(captured=captured), chars))
+        assert "KNOWN CHARACTERS" not in captured["prompts"][0]
+
+
+def test_pov_mode_hides_player_and_adds_rule(tmp_path):
+    backend = _load_backend(tmp_path)
+    characters = {"player": {"name": "Ash", "descriptor": "female elf; silver hair"},
+                  "npcs": [{"name": "Borin", "descriptor": "tall and scarred"}]}
+    cfg = {**backend._default_config(), "player_in_images": "pov"}
+
+    captured = {}
+    asyncio.run(backend._write_image_prompt(
+        cfg, "scene", "", _make_sdk(captured=captured), characters))
+    prompt = captured["prompts"][0]
+    assert "POV RULE" in prompt
+    assert "Ash" not in prompt
+    assert "- Borin: tall and scarred" in prompt
+
+    # POV with a player-only roster: no character list, just the rule.
+    captured = {}
+    asyncio.run(backend._write_image_prompt(
+        cfg, "scene", "", _make_sdk(captured=captured),
+        {"player": characters["player"], "npcs": []}))
+    assert "KNOWN CHARACTERS" not in captured["prompts"][0]
+    assert "POV RULE" in captured["prompts"][0]
+
+    # Tags style asks for pov framing tags.
+    captured = {}
+    tag_cfg = {**cfg, "model_base": "Pony", "model_name": "m.safetensors"}
+    asyncio.run(backend._write_image_prompt(
+        tag_cfg, "scene", "", _make_sdk(reply="1boy", captured=captured), characters))
+    assert "framing tags such as pov" in captured["prompts"][0]
+
+
+def test_librarian_feeds_roster_end_to_end(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend, interval=1)
+    _fake_novita(backend)
+    captured = {}
+
+    async def run():
+        state = _char_state(npcs={"n1": _npc("Borin")}, turn=2,
+                            data={"turns_since_image": 0})
+        result = await backend.on_librarian(state, _make_sdk(captured=captured))
+        await asyncio.gather(*backend._tasks)
+        return result
+
+    result = asyncio.run(run())
+    assert result["module_data"][MID]["last_trigger"]
+    prompt = captured["prompts"][0]
+    assert "- Ash (player character): female elf; silver hair, green cloak" in prompt
+    assert "- Borin:" in prompt
+    record = backend._read_index()[0]
+    assert record["characters"] == ["Ash", "Borin"]
+    assert record["status"] == "done"
+
+
+def test_studio_generation_carries_no_roster(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend)
+    _fake_novita(backend)
+    captured = {}
+    sdk = _make_sdk(reply="a castle", captured=captured)
+    backend.set_services({"data_dir": str(tmp_path),
+                          "engine": SimpleNamespace(sdk=sdk)})
+    client = _client(backend)
+
+    resp = client.post("/generate", json={"prompt_override": "castle by the sea",
+                                          "refine": True})
+    assert resp.status_code == 200
+    record_id = resp.json()["record_id"]
+    for _ in range(100):
+        record = next((r for r in backend._read_index() if r["id"] == record_id), None)
+        if record and record["status"] in ("done", "error"):
+            break
+        time.sleep(0.02)
+    assert record["status"] == "done"
+    assert record["characters"] == []
+    assert "KNOWN CHARACTERS" not in captured["prompts"][0]
+
+
+def test_player_in_images_config_validation(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    resp = client.put("/config", json={"player_in_images": "pov",
+                                       "character_reference_enabled": False})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["player_in_images"] == "pov"
+    assert body["character_reference_enabled"] is False
+
+    assert client.put("/config", json={"player_in_images": "invisible"}).status_code == 400
+    assert backend._load_config()["player_in_images"] == "pov"
+
+    # Junk values in a hand-edited config file degrade to "show".
+    cfg = backend._load_config()
+    cfg["player_in_images"] = "nonsense"
+    backend._save_config(cfg)
+    assert backend._load_config()["player_in_images"] == "show"

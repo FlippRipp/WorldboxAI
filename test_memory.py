@@ -287,6 +287,30 @@ def test_list_world_entries_includes_constant_rows_without_embedding(tmp_path):
     assert by_source["premise"]["source_type"] == "lore"
 
 
+def test_search_with_scores_exposes_distance(tmp_path):
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    manager.add_memory([1.0, 0.0, 0.0], "Close memory", turn=1, importance=5)
+    manager.add_memory([0.0, 1.0, 0.0], "Far memory", turn=1, importance=5)
+
+    plain = manager.search_memories([1.0, 0.0, 0.0], current_turn=5, limit=5)
+    assert all("dist" not in m for m in plain)
+
+    scored = manager.search_memories([1.0, 0.0, 0.0], current_turn=5, limit=5, with_scores=True)
+    assert [m["text"] for m in scored] == ["Close memory", "Far memory"]
+    assert all(isinstance(m["dist"], float) for m in scored)
+    assert scored[0]["dist"] < scored[1]["dist"]
+
+    manager.init_world_index(str(tmp_path / "world_index"))
+    _run(manager.embed_world({"lore": {"premise": "A quiet harbor town."}}, _FakeEmbedder()))
+
+    world_plain = manager.search_world([1.0, 0.0, 0.0], limit=5)
+    assert all("dist" not in e for e in world_plain)
+
+    world_scored = manager.search_world([1.0, 0.0, 0.0], limit=5, with_scores=True)
+    assert len(world_scored) == 1
+    assert isinstance(world_scored[0]["dist"], float)
+
+
 def test_update_world_entry_replaces_text_and_vector(tmp_path):
     from backend.engine.memory import _serialize
 

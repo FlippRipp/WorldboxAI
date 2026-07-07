@@ -1068,6 +1068,8 @@ export default function ImageStudio({ onBack }) {
         prompt_template_tags: draft.prompt_template_tags,
         pony_quality_tags: draft.pony_quality_tags,
         style_suffix: draft.style_suffix,
+        character_reference_enabled: draft.character_reference_enabled !== false,
+        player_in_images: draft.player_in_images || 'show',
         civitai_nsfw: draft.civitai_nsfw || 'off',
       };
       const res = await fetch(`${API_BASE}/config`, {
@@ -1406,6 +1408,31 @@ export default function ImageStudio({ onBack }) {
             <p className="text-xs text-gray-600 mt-1">
               The LLM that turns the latest scene into an image prompt before Novita is called.
             </p>
+          </div>
+          <div className="space-y-2">
+            <Toggle
+              checked={draft.character_reference_enabled !== false}
+              onChange={(v) => set('character_reference_enabled', v)}
+              label="Keep known character appearances consistent"
+            />
+            <p className="text-xs text-gray-600">
+              Feeds canonical appearances from the Player Character Tracker and NPC System
+              modules to the prompt writer, so the same character looks the same across
+              images. For an even stronger likeness, add a character LoRA in the LoRAs tab
+              (a condition can limit it to scenes where that character appears).
+            </p>
+            <div>
+              <label className={labelCls}>Player character in images</label>
+              <select
+                value={draft.player_in_images || 'show'}
+                onChange={(e) => set('player_in_images', e.target.value)}
+                disabled={draft.character_reference_enabled === false}
+                className={`${inputCls} disabled:opacity-50`}
+              >
+                <option value="show">Show the player character</option>
+                <option value="pov">First-person POV — never depict the player</option>
+              </select>
+            </div>
           </div>
           <div>
             <div className="flex items-center justify-between mb-1.5">

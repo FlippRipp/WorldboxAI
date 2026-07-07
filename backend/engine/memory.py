@@ -124,7 +124,8 @@ class MemoryManager:
         self.conn.commit()
         return memory_id
 
-    def search_memories(self, query_vector: List[float], current_turn: int, limit: int = 3):
+    def search_memories(self, query_vector: List[float], current_turn: int, limit: int = 3,
+                        with_scores: bool = False):
         rows = self.conn.execute(
             """SELECT *, vec_distance_l2(embedding, ?) AS dist
                FROM memories
@@ -133,7 +134,13 @@ class MemoryManager:
                LIMIT ?""",
             (_serialize(query_vector), current_turn, limit),
         ).fetchall()
-        return [self._raw_memory_row(row) for row in rows]
+        results = []
+        for row in rows:
+            formatted = self._raw_memory_row(row)
+            if with_scores:
+                formatted["dist"] = row["dist"]
+            results.append(formatted)
+        return results
 
     def purge_decayed_memories(self, current_turn: int):
         self.conn.execute(
@@ -547,7 +554,8 @@ class MemoryManager:
             })
         return entries
 
-    def search_world(self, query_vector: List[float], limit: int = 3) -> list[dict]:
+    def search_world(self, query_vector: List[float], limit: int = 3,
+                     with_scores: bool = False) -> list[dict]:
         if self._world_conn is None:
             return []
         # Constant lorebook entries are excluded: they are always injected
@@ -560,16 +568,19 @@ class MemoryManager:
                LIMIT ?""",
             (_serialize(query_vector), limit),
         ).fetchall()
-        return [
-            {
+        results = []
+        for row in rows:
+            entry = {
                 "id": row["id"] or "",
                 "text": row["text"] or "",
                 "source_type": row["source_type"] or "",
                 "source_id": row["source_id"] or "",
                 "region": row["region"] or "",
             }
-            for row in rows
-        ]
+            if with_scores:
+                entry["dist"] = row["dist"]
+            results.append(entry)
+        return results
 
     @staticmethod
     def _format_world_row(row) -> dict:

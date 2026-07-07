@@ -104,6 +104,13 @@ MAX_PROMPT_CHARS = 1024
 
 LORA_CONDITION_MAX_CHARS = 300
 
+# Character reference roster fed to the prompt writer (appearances come from
+# the optional wb_character_tracker / wb_npc_system modules).
+CHAR_REF_MAX_NPCS = 6
+CHAR_REF_APPEARANCE_MAX = 200
+CHAR_REF_MAX_CHARS = 1200
+PLAYER_IN_IMAGES_MODES = ("show", "pov")
+
 LORA_CONDITION_PROMPT = """You gate style adapters (LoRAs) for an AI image generator. For each numbered condition below, decide whether it applies to the scene being illustrated. Be literal: a condition applies only when the scene actually shows or strongly implies it.
 
 SCENE:
@@ -188,6 +195,8 @@ def _default_config() -> dict:
         "prompt_template_tags": DEFAULT_PROMPT_TEMPLATE_TAGS,
         "pony_quality_tags": DEFAULT_PONY_QUALITY_TAGS,
         "style_suffix": "",
+        "character_reference_enabled": True,
+        "player_in_images": "show",     # one of PLAYER_IN_IMAGES_MODES
         "civitai_api_key": "",
         "civitai_nsfw": "off",          # one of CIVITAI_NSFW_MODES
         "hf_api_key": "",               # optional; raises Hub rate limits
@@ -216,6 +225,8 @@ def _load_config() -> dict:
     # civitai_nsfw was a bool before it became a mode string.
     if cfg.get("civitai_nsfw") not in CIVITAI_NSFW_MODES:
         cfg["civitai_nsfw"] = "include" if cfg.get("civitai_nsfw") is True else "off"
+    if cfg.get("player_in_images") not in PLAYER_IN_IMAGES_MODES:
+        cfg["player_in_images"] = "show"
     return cfg
 
 
@@ -513,7 +524,49 @@ async def _apply_lora_conditions(cfg: dict, narration: str, sdk) -> dict:
     return {**cfg, "lora_library": library}
 
 
-async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk) -> str:
+def _character_block(cfg: dict, characters: dict | None) -> str:
+    """Instruction block pinning known characters to their canonical
+    appearances (and optionally forcing first-person POV). Rides the prompt
+    writer's INPUT, so it does not eat into the MAX_PROMPT_CHARS output cap."""
+    if not characters or not cfg.get("character_reference_enabled", True):
+        return ""
+    pov = str(cfg.get("player_in_images") or "show") == "pov"
+    tags = _prompt_style(cfg) == "tags"
+
+    lines = []
+    player = characters.get("player")
+    if player and not pov:
+        lines.append(f"- {player['name']} (player character): {player['descriptor']}")
+    for npc in characters.get("npcs") or []:
+        lines.append(f"- {npc['name']}: {npc['descriptor']}")
+
+    parts = []
+    if lines:
+        if tags:
+            header = ("KNOWN CHARACTERS -- canonical appearances (MANDATORY): when any of these "
+                      "characters appears in the scene, convert their description below into "
+                      "concrete booru appearance tags (hair, eyes, skin, clothing, species, "
+                      "distinctive features) and include those tags. Stay faithful to the "
+                      "description -- never invent or contradict a listed trait; characters "
+                      "not listed may be described freely.")
+        else:
+            header = ("KNOWN CHARACTERS -- canonical appearances (MANDATORY): when any of these "
+                      "characters appears in the scene, depict them EXACTLY as described below. "
+                      "Never invent, change, or contradict a listed trait; characters not "
+                      "listed may be described freely.")
+        parts.append(header + "\n" + "\n".join(lines))
+    if pov:
+        rule = ("POV RULE (MANDATORY): render the scene in first person, through the player "
+                "character's own eyes. NEVER depict the player character -- no face, no body; "
+                "at most their hands at the frame edge.")
+        if tags:
+            rule += " Include first-person framing tags such as pov."
+        parts.append(rule)
+    return "".join("\n\n" + p for p in parts)
+
+
+async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
+                              characters: dict | None = None) -> str:
     style = _prompt_style(cfg)
     if style == "tags":
         template = cfg.get("prompt_template_tags") or DEFAULT_PROMPT_TEMPLATE_TAGS
@@ -524,6 +577,7 @@ async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk) -> s
     if triggers:
         prompt += ("\n\nMANDATORY: weave these trigger words into the output verbatim "
                    "(they activate style adapters): " + ", ".join(triggers))
+    prompt += _character_block(cfg, characters)
     try:
         sdk.llm._current_module = MODULE_ID
         raw = await sdk.llm.generate(
@@ -1307,8 +1361,58 @@ def _hook_sdk(sdk):
     return getattr(engine, "sdk", None)
 
 
+def _character_descriptor(race, gender, appearance) -> str:
+    ident = " ".join(p for p in (str(gender or "").strip(), str(race or "").strip()) if p)
+    look = str(appearance or "").strip()[:CHAR_REF_APPEARANCE_MAX]
+    return "; ".join(p for p in (ident, look) if p)
+
+
+def _character_snapshot(state: dict) -> dict | None:
+    """Canonical appearances for the prompt writer, from whichever character
+    modules happen to be active (both optional): the player tracker's
+    characters["default_player"] and the NPC system's introduced bank.
+    Returns None when neither has anything to say."""
+    player_out = None
+    player = state.get("characters", {}).get("default_player") or {}
+    appearance = player.get("short_appearance") or player.get("full_appearance") or ""
+    if str(appearance).strip():
+        player_out = {
+            "name": str(player.get("name") or "").strip() or "the player character",
+            "descriptor": _character_descriptor(player.get("race"), player.get("gender"), appearance),
+        }
+
+    bank = state.get("module_data", {}).get("wb_npc_system", {}).get("characters", {})
+    candidates = [n for n in bank.values()
+                  if isinstance(n, dict) and n.get("introduced")
+                  and str(n.get("appearance") or "").strip()
+                  and n.get("status") != "dead"]
+    candidates.sort(key=lambda n: (not n.get("traveling_with_player"),
+                                   -int(n.get("last_interaction_turn") or 0)))
+    npcs = []
+    total = 0
+    for npc in candidates[:CHAR_REF_MAX_NPCS]:
+        descriptor = _character_descriptor(npc.get("race"), npc.get("gender"), npc.get("appearance"))
+        if total + len(descriptor) > CHAR_REF_MAX_CHARS:
+            break
+        npcs.append({"name": str(npc.get("name") or "").strip() or "Unknown",
+                     "descriptor": descriptor})
+        total += len(descriptor)
+
+    if not player_out and not npcs:
+        return None
+    return {"player": player_out, "npcs": npcs}
+
+
+def _snapshot_names(characters: dict | None) -> list[str]:
+    if not characters:
+        return []
+    names = [characters["player"]["name"]] if characters.get("player") else []
+    return names + [n["name"] for n in characters.get("npcs") or []]
+
+
 def _spawn_generation(*, save_id: str, turn: int, narration: str, history: str,
-                      sdk, trigger: str = "auto", prompt_override: str | None = None) -> str | None:
+                      sdk, trigger: str = "auto", prompt_override: str | None = None,
+                      characters: dict | None = None) -> str | None:
     """Create a pending record and fire the pipeline task. Returns the record id,
     or None when a generation is already running (caller decides what that means)."""
     lock = _get_gen_lock()
@@ -1328,6 +1432,7 @@ def _spawn_generation(*, save_id: str, turn: int, narration: str, history: str,
         "narration_excerpt": (narration or "")[:200],
         "model_name": cfg.get("model_name", ""),
         "loras": _applied_lora_names(cfg),
+        "characters": _snapshot_names(characters),
         "width": cfg.get("width"),
         "height": cfg.get("height"),
         "error": None,
@@ -1339,7 +1444,7 @@ def _spawn_generation(*, save_id: str, turn: int, narration: str, history: str,
     async def _run():
         await _append_record(record)
         await _generation_pipeline(record_id, cfg, narration, history,
-                                   _hook_sdk(sdk), prompt_override)
+                                   _hook_sdk(sdk), prompt_override, characters)
 
     task = asyncio.get_running_loop().create_task(_run())
     _tasks.add(task)
@@ -1348,7 +1453,8 @@ def _spawn_generation(*, save_id: str, turn: int, narration: str, history: str,
 
 
 async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
-                               history: str, sdk, prompt_override: str | None) -> None:
+                               history: str, sdk, prompt_override: str | None,
+                               characters: dict | None = None) -> None:
     started = time.monotonic()
     lock = _get_gen_lock()
     try:
@@ -1366,7 +1472,7 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                 if sdk is None:
                     raise RuntimeError("no LLM available to write the image prompt")
                 await _patch_record(record_id, status="prompting")
-                image_prompt = await _write_image_prompt(cfg, narration, history, sdk)
+                image_prompt = await _write_image_prompt(cfg, narration, history, sdk, characters)
 
             await _patch_record(record_id, status="generating", image_prompt=image_prompt)
             task_id = await _novita_submit(cfg, image_prompt)
@@ -1428,6 +1534,7 @@ async def on_librarian(state: dict, sdk) -> dict | None:
             narration=str(history[-1]),
             history="\n".join(str(h) for h in history[-6:-1]),
             sdk=sdk,
+            characters=_character_snapshot(state),
         )
         if record_id:
             print(f"[Image Gen] Turn {state.get('turn')}: auto illustration started ({record_id}).")
@@ -1467,6 +1574,7 @@ async def on_command_image(args: list[str], state: dict, sdk) -> dict:
         history="\n".join(str(h) for h in history[-6:-1]),
         sdk=sdk,
         trigger="manual",
+        characters=_character_snapshot(state),
     )
     if record_id is None:
         return {"message": "[Image Gen] An image is already being generated — give it a moment.",
@@ -1509,6 +1617,8 @@ def get_router():
         prompt_template_tags: str | None = None
         pony_quality_tags: str | None = None
         style_suffix: str | None = None
+        character_reference_enabled: bool | None = None
+        player_in_images: str | None = None
         civitai_api_key: str | None = None
         civitai_nsfw: str | None = None
         hf_api_key: str | None = None
@@ -1612,6 +1722,10 @@ def get_router():
         if "civitai_nsfw" in incoming and incoming["civitai_nsfw"] not in CIVITAI_NSFW_MODES:
             raise HTTPException(status_code=400,
                                 detail=f"civitai_nsfw must be one of {CIVITAI_NSFW_MODES}")
+        if ("player_in_images" in incoming
+                and incoming["player_in_images"] not in PLAYER_IN_IMAGES_MODES):
+            raise HTTPException(status_code=400,
+                                detail=f"player_in_images must be one of {PLAYER_IN_IMAGES_MODES}")
 
         cfg.update(incoming)
         _save_config(cfg)
@@ -1903,6 +2017,7 @@ def get_router():
         turn = 0
         narration = ""
         history_text = ""
+        characters = None
         prompt_override = (req.prompt_override or "").strip() or None
 
         if req.retry_record_id:
@@ -1925,6 +2040,7 @@ def get_router():
             history_text = "\n".join(str(h) for h in history[-6:-1])
             turn = state.get("turn", 0)
             save_id = save_id or getattr(session_manager, "active_save_id", None) or "unknown"
+            characters = _character_snapshot(state)
         else:
             save_id = save_id or "__studio__"
             if req.refine:
@@ -1937,7 +2053,7 @@ def get_router():
         record_id = _spawn_generation(
             save_id=save_id, turn=turn, narration=narration, history=history_text,
             sdk=None, trigger="studio" if save_id == "__studio__" else "manual",
-            prompt_override=prompt_override,
+            prompt_override=prompt_override, characters=characters,
         )
         if record_id is None:
             raise HTTPException(status_code=409, detail="A generation is already running")

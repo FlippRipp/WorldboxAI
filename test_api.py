@@ -348,6 +348,35 @@ def test_memory_browser_works_before_first_turn(tmp_path, monkeypatch):
     assert resp["memories"][0]["text"] == "A stored event"
 
 
+def test_rag_debug_endpoint(tmp_path, monkeypatch):
+    import asyncio
+
+    client, _ = make_client(tmp_path, monkeypatch)
+
+    asyncio.run(server.engine.ensure_memory())
+    vector = asyncio.run(server.engine.llm.get_embedding("The dragon attacked the village"))
+    server.engine.memory.add_memory(
+        vector, "The dragon attacked the village", turn=0, importance=7,
+        entities=["Dragon", "Village"], topics=["combat"],
+    )
+
+    resp = client.post("/api/session/memories/rag-debug", json={"query": "dragon attack"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["query"] == "dragon attack"
+    assert data["world_query"] == "dragon attack"  # no location hints in a fresh save
+    assert len(data["memories"]) == 1
+    memory = data["memories"][0]
+    assert memory["text"] == "The dragon attacked the village"
+    assert isinstance(memory["dist"], float)
+    assert memory["entities"] == ["Dragon", "Village"]  # parsed, not JSON strings
+    assert memory["topics"] == ["combat"]
+    assert data["world_entries"] == []  # no world index for this save
+
+    assert client.post("/api/session/memories/rag-debug",
+                       json={"query": "   "}).status_code == 400
+
+
 def test_websocket_llm_provider_error_returns_structured_error(tmp_path, monkeypatch):
     client, session_manager = make_client(tmp_path, monkeypatch)
 

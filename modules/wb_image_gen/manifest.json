@@ -6,8 +6,8 @@
   "description": "Illustrates the story with Novita AI images. Auto-generates every N turns, or on demand with /image. Configure API key, model, prompts, and LoRAs (Civitai + Hugging Face) in the Image Studio main-menu entry.",
   "dependencies": [],
   "consumes": {
-    "state": ["turn", "history", "chat_messages", "world_id", "last_input_text", "active_save_id"],
-    "module_data": [],
+    "state": ["turn", "history", "chat_messages", "world_id", "last_input_text", "active_save_id", "characters"],
+    "module_data": ["wb_npc_system"],
     "module_configs": [],
     "world_data": false
   },

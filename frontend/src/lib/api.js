@@ -83,6 +83,7 @@ export const api = {
   getMemoryContext:       () => request('/api/session/memories/context'),
   deleteMemory:           (id) => request(`/api/session/memories/${id}`, { method: 'DELETE' }),
   updateMemory:           (id, patch) => request(`/api/session/memories/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  ragDebugQuery:          (query, limit = 10) => request('/api/session/memories/rag-debug', { method: 'POST', body: JSON.stringify({ query, limit }) }),
   getWorldEntries:        () => request('/api/session/world-entries'),
   updateWorldEntry:       (id, text) => request(`/api/session/world-entries/${id}`, { method: 'PUT', body: JSON.stringify({ text }) }),
   getLLMInspectorCalls:   (sinceId = '', limit = 50) => {
