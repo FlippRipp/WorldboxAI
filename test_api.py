@@ -182,22 +182,23 @@ def test_websocket_slash_command_bypasses_pipeline(tmp_path, monkeypatch):
 
     with client.websocket_connect("/ws/chat") as websocket:
         websocket.send_json({"text": "/plot"})
-        state_load = websocket.receive_json()
-        done = websocket.receive_json()
+        command_result = websocket.receive_json()
+        state_update = websocket.receive_json()
 
-    assert state_load["type"] == "state_load"
-    assert done["type"] == "done"
+    # Command output is ephemeral: a popup plus a state refresh for widgets,
+    # nothing written into the transcript.
+    assert command_result["type"] == "command_result"
+    assert command_result["command"] == "/plot"
+    assert command_result["message"].startswith("[Plot]")
 
-    messages = state_load["chat_messages"]
-    assert messages[-2]["role"] == "user"
-    assert messages[-2]["content"] == "/plot"
-    assert messages[-2]["meta"]["command"] is True
-    assert messages[-1]["role"] == "system"
-    assert messages[-1]["content"].startswith("[Plot]")
-    assert messages[-1]["meta"]["command"] is True
+    assert state_update["type"] == "state_update"
+    state = state_update["state"]
+    assert all(
+        message.get("content") != "/plot" for message in state.get("chat_messages", [])
+    )
 
     # The story pipeline never ran: no turn consumed, no narration produced.
-    assert done["state"]["turn"] == 0
+    assert state["turn"] == 0
     assert session_manager.state["history"] == []
 
 
