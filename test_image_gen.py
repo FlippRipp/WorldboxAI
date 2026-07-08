@@ -603,6 +603,36 @@ def test_lora_condition_gate(tmp_path):
     assert "prompts" not in captured2
 
 
+def test_lora_condition_gets_character_sheets(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _lora_cfg(backend, lora_library=[
+        _lora(id="1", condition="Elara is in the scene")])
+    characters = {
+        "player": {"name": "Rin", "descriptor": "female human; red cloak"},
+        "npcs": [{"name": "Elara", "descriptor": "female elf; silver hair"}],
+    }
+
+    captured = {}
+    asyncio.run(backend._apply_lora_conditions(
+        cfg, "The sorceress smiles.", _make_sdk(reply="[1]", captured=captured),
+        characters))
+    prompt = captured["prompts"][0]
+    assert "CHARACTERS PRESENT" in prompt
+    assert "- Rin (player character): female human; red cloak" in prompt
+    assert "- Elara: female elf; silver hair" in prompt
+    # The sheets sit between the scene and the adapter list.
+    assert prompt.index("The sorceress") < prompt.index("CHARACTERS PRESENT")
+    assert prompt.index("CHARACTERS PRESENT") < prompt.index("1. Elara is in the scene")
+
+    # No snapshot (or an empty one): the block disappears entirely.
+    for chars in (None, {"player": None, "npcs": []}):
+        captured = {}
+        asyncio.run(backend._apply_lora_conditions(
+            cfg, "x", _make_sdk(reply="[1]", captured=captured), chars))
+        assert "CHARACTERS PRESENT" not in captured["prompts"][0]
+        assert "{characters}" not in captured["prompts"][0]
+
+
 def test_lora_llm_weight(tmp_path):
     backend = _load_backend(tmp_path)
     cfg = _lora_cfg(backend, lora_library=[

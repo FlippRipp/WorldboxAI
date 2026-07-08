@@ -118,12 +118,12 @@ PLAYER_IN_IMAGES_MODES = ("show", "pov")
 # How finished images appear in chat before the user clicks to reveal them.
 CHAT_IMAGE_CONCEAL_MODES = ("off", "blur", "blackout")
 
-LORA_CONDITION_PROMPT = """You control style adapters (LoRAs) for an AI image generator. For each numbered adapter below, decide whether its condition applies to the scene being illustrated. Be literal: a condition applies only when the scene actually shows or strongly implies it. Adapters marked "always applies" always apply.
+LORA_CONDITION_PROMPT = """You control style adapters (LoRAs) for an AI image generator. For each numbered adapter below, decide whether its condition applies to the scene being illustrated. Be literal: a condition applies only when the scene actually shows or strongly implies it. Adapters marked "always applies" always apply. When character sheets are listed, use them to recognize characters the scene mentions indirectly (by pronoun, epithet, or description).
 
 For adapters marked "pick the weight", also choose how strongly to apply them: follow the adapter's instructions and the scene, starting from the listed default. Weights are numbers from -10 to 10 (typical range 0 to 1.5; 0 disables, negative inverts the style). For all other adapters, echo their listed weight unchanged.
 
 SCENE:
-{narration}
+{narration}{characters}
 
 ADAPTERS:
 {conditions}
@@ -518,11 +518,30 @@ def _condition_line(n: int, entry: dict) -> str:
     return f"{n}. {cond} (weight {weight})"
 
 
-async def _apply_lora_conditions(cfg: dict, narration: str, sdk) -> dict:
+def _condition_character_block(characters: dict | None) -> str:
+    """Character sheets for the gate prompt, so conditions and weight
+    instructions can reference who is present even when the narration only
+    uses pronouns or epithets. Same snapshot the prompt writer gets."""
+    if not characters:
+        return ""
+    lines = []
+    player = characters.get("player")
+    if player:
+        lines.append(f"- {player['name']} (player character): {player['descriptor']}")
+    for npc in characters.get("npcs") or []:
+        lines.append(f"- {npc['name']}: {npc['descriptor']}")
+    if not lines:
+        return ""
+    return "\n\nCHARACTERS PRESENT (canonical sheets):\n" + "\n".join(lines)
+
+
+async def _apply_lora_conditions(cfg: dict, narration: str, sdk,
+                                 characters: dict | None = None) -> dict:
     """A cfg copy whose lora_library reflects the scene as judged by the
     fastest LLM slot: active conditional LoRAs it deems irrelevant are
     dropped, and LoRAs with llm_weight enabled get the weight it picked (an
-    LLM weight of 0 also drops the LoRA). Any failure (no LLM, LLM error,
+    LLM weight of 0 also drops the LoRA). Character sheets ride along so
+    conditions can reference who is present. Any failure (no LLM, LLM error,
     unparseable reply) fails open: every active LoRA stays at its configured
     strength, same as before conditions existed."""
     participating = [
@@ -533,8 +552,10 @@ async def _apply_lora_conditions(cfg: dict, narration: str, sdk) -> dict:
         return cfg
     lines = "\n".join(
         _condition_line(i + 1, e) for i, e in enumerate(participating))
-    prompt = LORA_CONDITION_PROMPT.replace(
-        "{narration}", (narration or "")[-3000:]).replace("{conditions}", lines)
+    prompt = (LORA_CONDITION_PROMPT
+              .replace("{narration}", (narration or "")[-3000:])
+              .replace("{characters}", _condition_character_block(characters))
+              .replace("{conditions}", lines))
     try:
         sdk.llm._current_module = MODULE_ID
         raw = await sdk.llm.generate(prompt, model_preference="fastest")
@@ -1522,7 +1543,7 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
         async with lock:
             # Conditional LoRAs are gated first so both the trigger words fed
             # to the prompt writer and the submit payload see the final set.
-            gated = await _apply_lora_conditions(cfg, narration, sdk)
+            gated = await _apply_lora_conditions(cfg, narration, sdk, characters)
             if gated is not cfg:
                 cfg = gated
                 await _patch_record(record_id, loras=_applied_lora_names(cfg))
