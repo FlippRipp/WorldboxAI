@@ -802,6 +802,163 @@ async def on_validate_output(llm_output: str, state: dict, sdk) -> None:
         raise sdk.ValidationVeto(UNCONSCIOUS_PHYSICAL_VETO)
 
 
+# --------------------------------------------------------------------------
+# Skill editing API (router mounted at /api/modules/wb_core_rpg)
+# --------------------------------------------------------------------------
+
+SKILL_TYPES = ("active", "passive", "curse")
+
+# Shared engine services injected by the server at startup (set_services).
+# The router resolves the session manager through this at request time so
+# tests can swap in a fake.
+_services: dict = {}
+
+
+def set_services(services: dict) -> None:
+    global _services
+    _services = services or {}
+
+
+def get_router():
+    from fastapi import APIRouter, HTTPException
+    from pydantic import BaseModel
+
+    router = APIRouter()
+
+    class SkillPayload(BaseModel):
+        name: str | None = None  # POST: skill name; PUT: rename target
+        rating: int | None = None
+        description: str | None = None
+        trigger_words: list[str] | None = None
+        type: str | None = None
+
+    def _session_manager():
+        sm = _services.get("session_manager")
+        if sm is None or not getattr(sm, "active_save_id", None):
+            raise HTTPException(status_code=409, detail="No active story loaded.")
+        return sm
+
+    def _rpg_data(sm) -> dict:
+        rpg = sm.state.get("module_data", {}).get("wb_core_rpg")
+        if not isinstance(rpg, dict):
+            raise HTTPException(status_code=404, detail="RPG character data not initialized for this story.")
+        return rpg
+
+    def _persist(sm):
+        sm.save_manager.save_turn(sm.active_save_id, sm.state, sm.state.get("turn", 0))
+
+    def _find_key(skills: dict, name: str) -> str | None:
+        if name in skills:
+            return name
+        lowered = name.strip().lower()
+        for key in skills:
+            if key.lower() == lowered:
+                return key
+        return None
+
+    def _clean_name(raw: str) -> str:
+        # Skill names are stored lowercase everywhere else (Reader mutations,
+        # librarian events), so edits follow suit.
+        name = (raw or "").strip().lower()
+        if not name:
+            raise HTTPException(status_code=400, detail="Skill name cannot be empty.")
+        return name
+
+    def _validate_fields(payload: SkillPayload):
+        if payload.rating is not None and not (1 <= payload.rating <= 10):
+            raise HTTPException(status_code=400, detail="Rating must be between 1 and 10.")
+        if payload.type is not None and payload.type not in SKILL_TYPES:
+            raise HTTPException(status_code=400, detail=f"Type must be one of: {', '.join(SKILL_TYPES)}.")
+
+    def _clean_triggers(words: list[str]) -> list[str]:
+        seen, out = set(), []
+        for w in words:
+            word = str(w).strip()
+            if word and word.lower() not in seen:
+                seen.add(word.lower())
+                out.append(word)
+        return out
+
+    @router.post("/skills")
+    def add_skill(payload: SkillPayload):
+        sm = _session_manager()
+        rpg = _rpg_data(sm)
+        skills = rpg.setdefault("skills", {})
+        if payload.name is None:
+            raise HTTPException(status_code=400, detail="Skill name is required.")
+        _validate_fields(payload)
+        name = _clean_name(payload.name)
+        if _find_key(skills, name) is not None:
+            raise HTTPException(status_code=409, detail=f"Skill '{name}' already exists.")
+        skills[name] = {
+            "rating": payload.rating if payload.rating is not None else 3,
+            "description": (payload.description or "").strip(),
+            "trigger_words": _clean_triggers(payload.trigger_words or []),
+            "type": payload.type or "active",
+        }
+        _persist(sm)
+        return {"skills": skills}
+
+    @router.put("/skills/{skill_name}")
+    def update_skill(skill_name: str, payload: SkillPayload):
+        sm = _session_manager()
+        rpg = _rpg_data(sm)
+        skills = rpg.setdefault("skills", {})
+        key = _find_key(skills, skill_name)
+        if key is None:
+            raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found.")
+        _validate_fields(payload)
+
+        # Validate the rename before touching anything, so a rejected request
+        # leaves the in-memory state untouched.
+        new_name = None
+        if payload.name is not None:
+            new_name = _clean_name(payload.name)
+            if new_name == key:
+                new_name = None
+            else:
+                existing = _find_key(skills, new_name)
+                if existing is not None and existing != key:
+                    raise HTTPException(status_code=409, detail=f"Skill '{new_name}' already exists.")
+
+        skill = skills[key]
+        if payload.rating is not None:
+            skill["rating"] = payload.rating
+        if payload.description is not None:
+            skill["description"] = payload.description.strip()
+        if payload.trigger_words is not None:
+            skill["trigger_words"] = _clean_triggers(payload.trigger_words)
+        if payload.type is not None:
+            skill["type"] = payload.type
+
+        if new_name is not None:
+            skills[new_name] = skills.pop(key)
+            # Practice progression counters are keyed by skill name.
+            counters = rpg.get("practice_counters")
+            if isinstance(counters, dict) and key in counters:
+                counters[new_name] = counters.pop(key)
+
+        _persist(sm)
+        return {"skills": skills}
+
+    @router.delete("/skills/{skill_name}")
+    def delete_skill(skill_name: str):
+        sm = _session_manager()
+        rpg = _rpg_data(sm)
+        skills = rpg.setdefault("skills", {})
+        key = _find_key(skills, skill_name)
+        if key is None:
+            raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found.")
+        del skills[key]
+        counters = rpg.get("practice_counters")
+        if isinstance(counters, dict):
+            counters.pop(key, None)
+        _persist(sm)
+        return {"skills": skills}
+
+    return router
+
+
 async def on_character_get_defaults(state: dict, world_context: dict) -> dict:
     hp_per_con = 7
     base_stats = {s: 10 for s in STAT_NAMES}

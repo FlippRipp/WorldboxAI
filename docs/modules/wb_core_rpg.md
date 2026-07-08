@@ -108,6 +108,29 @@ Displays in `slot_sidebar`:
 - **Stat grid** (3x2 compact view)
 - **Skills list** (top 5, with "more" indicator)
 
+The widget's "View Full Character Sheet" modal additionally supports **skill
+editing**: each skill card has a pencil button opening an inline form (name,
+type, rating, description, trigger words), plus delete and an "+ Add Skill"
+button. Edits are saved immediately through the module API below and persist
+into the active save.
+
+## Skill Editing API
+
+The module owns a router mounted at `/api/modules/wb_core_rpg` (via
+`get_router()` / `set_services()`), operating on the active session's
+`module_data.wb_core_rpg.skills`:
+
+| Endpoint | Description |
+|---|---|
+| `POST /api/modules/wb_core_rpg/skills` | Add a skill. Body: `{name, rating?, description?, trigger_words?, type?}`. Defaults: rating 3, type `active`. |
+| `PUT /api/modules/wb_core_rpg/skills/{skill_name}` | Update any subset of fields; `name` renames the skill (practice counters follow). |
+| `DELETE /api/modules/wb_core_rpg/skills/{skill_name}` | Remove the skill and its practice counter. |
+
+Validation: rating 1-10, type one of `active`/`passive`/`curse`, names stored
+lowercase (matching Reader/librarian conventions), rename collisions are
+rejected with 409. Every successful call persists the state to the active save
+at the current turn and returns the full updated `skills` map.
+
 ## Migration from `wb_core_combat`
 
 This module fully replaces `wb_core_combat`. Key differences:
