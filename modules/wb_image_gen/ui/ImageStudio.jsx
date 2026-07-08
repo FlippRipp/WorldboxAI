@@ -32,6 +32,7 @@ const TABS = [
   { id: 'prompting', label: 'Prompting' },
   { id: 'loras', label: 'LoRAs' },
   { id: 'generate', label: 'Generate' },
+  { id: 'library', label: 'Image Library' },
 ];
 
 function Toggle({ checked, onChange, label }) {
@@ -1090,6 +1091,9 @@ export default function ImageStudio({ onBack }) {
   const [records, setRecords] = useState([]);
   const [pendingCount, setPendingCount] = useState(0);
   const [lightbox, setLightbox] = useState(null);
+  // Ids the user has revealed this visit, so a concealed image stays open once
+  // clicked (mirrors the in-chat widget's per-session reveal behavior).
+  const [revealed, setRevealed] = useState(() => new Set());
 
   const [testPrompt, setTestPrompt] = useState('');
   const [testRefine, setTestRefine] = useState(true);
@@ -1237,6 +1241,16 @@ export default function ImageStudio({ onBack }) {
     loadImages();
   };
 
+  // How finished images appear in the library until clicked — same setting that
+  // conceals story illustrations in chat (Output tab).
+  const conceal = draft.chat_image_conceal || 'off';
+  const revealImage = (recordId) =>
+    setRevealed((prev) => {
+      const next = new Set(prev);
+      next.add(recordId);
+      return next;
+    });
+
   if (!config) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex items-center justify-center">
@@ -1287,7 +1301,7 @@ export default function ImageStudio({ onBack }) {
           {TABS.map((t) => {
             const badge =
               t.id === 'loras' && activeLoraCount > 0 ? activeLoraCount
-                : t.id === 'generate' && pendingCount > 0 ? pendingCount : null;
+                : t.id === 'library' && pendingCount > 0 ? pendingCount : null;
             return (
               <button
                 key={t.id}
@@ -1302,7 +1316,7 @@ export default function ImageStudio({ onBack }) {
                 {badge != null && (
                   <span
                     className={`ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] ${
-                      t.id === 'generate'
+                      t.id === 'library'
                         ? 'bg-purple-900/60 text-purple-200 animate-pulse'
                         : 'bg-gray-800 text-gray-300'
                     }`}
@@ -1656,15 +1670,15 @@ export default function ImageStudio({ onBack }) {
         />
         )}
 
-        {/* Test generate + gallery */}
-        {tab === 'generate' && (<>
+        {/* Test generate */}
+        {tab === 'generate' && (
         <section className={sectionCls}>
           <h2 className="text-sm font-semibold text-gray-300">Test Generate</h2>
           <p className="text-xs text-gray-600">
             {testRefine
               ? 'Your text is treated as a scene: the prompt-writer LLM refines it with your templates, trigger words and style — exactly like a story illustration.'
               : 'Sends your text straight to the image model, word for word (skips the prompt-writer LLM).'}
-            {' '}Uses saved settings — save changes first.
+            {' '}Uses saved settings — save changes first. Results appear in the Image Library tab.
           </p>
           <div className="flex gap-2">
             <input
@@ -1702,12 +1716,14 @@ export default function ImageStudio({ onBack }) {
           )}
           {testError && <p className="text-xs text-red-400">{testError}</p>}
         </section>
+        )}
 
-        {/* Gallery */}
+        {/* Image Library — every generated image, with the chat conceal setting applied */}
+        {tab === 'library' && (
         <section className={sectionCls}>
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-gray-300">
-              Gallery {records.length > 0 && <span className="text-gray-600">({records.length})</span>}
+              Image Library {records.length > 0 && <span className="text-gray-600">({records.length})</span>}
             </h2>
             {pendingCount > 0 && (
               <span className="text-xs text-purple-400 animate-pulse">
@@ -1715,21 +1731,50 @@ export default function ImageStudio({ onBack }) {
               </span>
             )}
           </div>
+          <p className="text-xs text-gray-600">
+            Every image generated for this world — story illustrations and studio tests alike.
+            {conceal !== 'off'
+              ? ` Images are ${conceal === 'blackout' ? 'blacked out' : 'blurred'} until clicked, matching the chat conceal setting (Output tab).`
+              : ' Set “Hide images in chat until clicked” in the Output tab to conceal them here too.'}
+          </p>
           {records.length === 0 ? (
             <p className="text-sm text-gray-600 italic">No images yet.</p>
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-              {records.map((r) => (
+              {records.map((r) => {
+                const concealed =
+                  r.status === 'done' && !!r.filename &&
+                  conceal !== 'off' && !revealed.has(r.id);
+                return (
                 <div key={r.id} className="group relative bg-gray-950/60 border border-gray-800 rounded-lg overflow-hidden">
                   {r.status === 'done' && r.filename ? (
-                    <img
-                      src={`${API_BASE}/images/file/${r.filename}`}
-                      alt={r.image_prompt || ''}
-                      title={`${r.model_name || ''}${r.loras?.length ? ` + LoRAs: ${r.loras.join(', ')}` : ''}`}
-                      loading="lazy"
-                      onClick={() => setLightbox(r)}
-                      className="w-full h-32 object-cover cursor-zoom-in"
-                    />
+                    <div className="relative overflow-hidden">
+                      <img
+                        src={`${API_BASE}/images/file/${r.filename}`}
+                        alt={concealed ? 'Hidden image' : (r.image_prompt || '')}
+                        title={`${r.model_name || ''}${r.loras?.length ? ` + LoRAs: ${r.loras.join(', ')}` : ''}`}
+                        loading="lazy"
+                        onClick={() => (concealed ? revealImage(r.id) : setLightbox(r))}
+                        className={`w-full h-32 object-cover ${
+                          concealed
+                            ? conceal === 'blackout'
+                              ? 'cursor-pointer brightness-0'
+                              : 'cursor-pointer blur-2xl scale-110'
+                            : 'cursor-zoom-in'
+                        }`}
+                      />
+                      {concealed && (
+                        <button
+                          onClick={() => revealImage(r.id)}
+                          aria-label="Reveal image"
+                          className="absolute inset-0 flex items-center justify-center cursor-pointer"
+                        >
+                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 border border-white/10 text-[10px] text-gray-300">
+                            <span aria-hidden="true">👁</span> Click to reveal
+                          </span>
+                        </button>
+                      )}
+                    </div>
                   ) : (
                     <div className="w-full h-32 flex items-center justify-center text-xs text-gray-600 px-2 text-center">
                       {r.status === 'error' ? (r.error || 'failed') : 'generating…'}
@@ -1753,11 +1798,12 @@ export default function ImageStudio({ onBack }) {
                     </button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </section>
-        </>)}
+        )}
       </div>
       {lightbox && <Lightbox record={lightbox} onClose={() => setLightbox(null)} />}
     </div>
