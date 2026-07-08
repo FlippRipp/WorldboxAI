@@ -70,6 +70,13 @@
       "category": "NPC System",
       "description": "Inject the profiles of characters currently in the scene (traveling with the player or at the player's location) directly into the storyteller's context every turn, independent of RAG retrieval."
     },
+    "scene_presence_use_llm": {
+      "type": "toggle",
+      "default": true,
+      "label": "LLM Scene Presence Check",
+      "category": "NPC System",
+      "description": "In saves without location tracking, use a fast LLM call to decide which known characters are physically in the current scene (so they reach the storyteller's context). When off, characters count as present only when named in the recent story."
+    },
     "embed_profiles": {
       "type": "toggle",
       "default": true,

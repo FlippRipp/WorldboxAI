@@ -245,35 +245,91 @@ def test_present_characters_injected_into_context():
     assert "Vex" not in ctx and "Old Han" not in ctx and "Ilya" not in ctx
 
 
-def test_present_characters_include_story_mentions_without_location():
-    # Saves without location tracking (or NPCs the travel pass moved) can't
-    # match on location; a character named in the recent story is still on
-    # stage and must reach the context.
-    backend = _load_backend()
-    sdk, _ = _make_sdk()
-    bank = {"npc_x": _present_npc("npc_x", "Mara", location_node_id=None,
-                                  location_region=None, location_layer_id=None)}
-    state = _state(bank, history=["You enter the market.", "Mara waves you over."])
+def _locationless_state(bank, history, **config):
+    state = _state(bank, mutation_config=config or None, history=history)
     state["player_location_node_id"] = ""
     state["player_location_region"] = ""
     state["player_location_layer_id"] = ""
+    return state
+
+
+def _unlocated_npc(npc_id, name, **overrides):
+    return _present_npc(npc_id, name, location_node_id=None,
+                        location_region=None, location_layer_id=None, **overrides)
+
+
+def test_present_characters_include_story_mentions_without_location():
+    # Saves without location tracking can't match on location; with the LLM
+    # check disabled, a character named in the recent story is still on stage
+    # and must reach the context.
+    backend = _load_backend()
+    sdk, calls = _make_sdk()
+    bank = {"npc_x": _unlocated_npc("npc_x", "Mara")}
+    state = _locationless_state(bank, ["You enter the market.", "Mara waves you over."],
+                                scene_presence_use_llm=False)
+
+    result = asyncio.run(backend.on_gather_context(state, sdk))
+
+    assert "Mara" in result["context_string"]
+    assert calls["generate_count"] == 0
+
+
+def test_present_characters_mention_matches_whole_words_only():
+    backend = _load_backend()
+    sdk, _ = _make_sdk()
+    bank = {"npc_x": _unlocated_npc("npc_x", "Han")}
+    state = _locationless_state(bank, ["You reach out a hand to the merchant."],
+                                scene_presence_use_llm=False)
+
+    assert asyncio.run(backend.on_gather_context(state, sdk)) is None
+
+
+def test_llm_scene_presence_includes_unnamed_character():
+    # The scene refers to "the guide" without naming her; the LLM presence
+    # check still puts her in context.
+    backend = _load_backend()
+    sdk, calls = _make_sdk(json.dumps(["npc_x"]))
+    bank = {"npc_x": _unlocated_npc("npc_x", "Mara")}
+    state = _locationless_state(bank, ["The guide leads you deeper into the tunnels."])
+
+    result = asyncio.run(backend.on_gather_context(state, sdk))
+
+    assert "Mara" in result["context_string"]
+    assert calls["generate_count"] == 1
+    assert "PHYSICALLY PRESENT" in calls["prompts"][0]
+
+
+def test_llm_scene_presence_excludes_merely_mentioned_character():
+    # Mara is talked about but not there; the LLM verdict overrides the
+    # name-mention heuristic.
+    backend = _load_backend()
+    sdk, _ = _make_sdk(json.dumps([]))
+    bank = {"npc_x": _unlocated_npc("npc_x", "Mara")}
+    state = _locationless_state(bank, ["The merchant tells you Mara left town yesterday."])
+
+    assert asyncio.run(backend.on_gather_context(state, sdk)) is None
+
+
+def test_llm_scene_presence_falls_back_to_name_matching_on_bad_reply():
+    backend = _load_backend()
+    sdk, _ = _make_sdk("I cannot answer that.")
+    bank = {"npc_x": _unlocated_npc("npc_x", "Mara")}
+    state = _locationless_state(bank, ["Mara waves you over to her stall."])
 
     result = asyncio.run(backend.on_gather_context(state, sdk))
 
     assert "Mara" in result["context_string"]
 
 
-def test_present_characters_mention_matches_whole_words_only():
+def test_llm_scene_presence_not_used_when_location_is_tracked():
     backend = _load_backend()
-    sdk, _ = _make_sdk()
-    bank = {"npc_x": _present_npc("npc_x", "Han", location_node_id=None,
-                                  location_region=None, location_layer_id=None)}
-    state = _state(bank, history=["You reach out a hand to the merchant."])
-    state["player_location_node_id"] = ""
-    state["player_location_region"] = ""
-    state["player_location_layer_id"] = ""
+    sdk, calls = _make_sdk(json.dumps(["npc_far"]))
+    bank = {"npc_far": _present_npc("npc_far", "Vex", location_node_id="node_keep",
+                                    location_region="Frostpeak")}
 
-    assert asyncio.run(backend.on_gather_context(state, sdk)) is None
+    # Located elsewhere, not named in the story: absent, and no LLM call spent.
+    assert asyncio.run(backend.on_gather_context(_state(bank), sdk)) is None
+    assert calls["generate_count"] == 0
 
 
 def test_present_characters_excluded_across_layers():

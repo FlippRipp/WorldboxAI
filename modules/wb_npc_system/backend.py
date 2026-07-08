@@ -334,38 +334,85 @@ def _named_in_recent_story(npc: dict, state: dict) -> bool:
     return bool(re.search(rf"\b{re.escape(name)}\b", recent, re.IGNORECASE))
 
 
-def _present_npcs(state: dict) -> list[dict]:
-    """Introduced, living characters who are in the player's scene right now --
-    traveling with the player, located at their current node/region, or named
-    in the recent story."""
+async def _llm_scene_presence(state: dict, sdk, candidates: list[dict]) -> set[str]:
+    """One fast-model call deciding which candidate characters are physically
+    in the current scene. Used when there is no location tracking to consult.
+    Falls back to name matching so a bad LLM reply never hides a character."""
+    scene = "\n".join(str(h) for h in state.get("history", [])[-RECENT_STORY_ENTRIES:])[-3000:]
+    listing = "\n".join(
+        f"- {npc['id']} | {npc.get('name', '?')} ({npc.get('archetype', '')}): {npc.get('pitch', '')}"
+        for npc in candidates
+    )
+    prompt = f"""You track which characters are on stage in a text RPG.
+
+RECENT STORY (oldest to newest):
+{scene}
+
+KNOWN CHARACTERS:
+{listing}
+
+Which of these characters are PHYSICALLY PRESENT in the current scene -- actually there with the player right now? Being mentioned, remembered, or discussed does not count as present.
+
+Respond with ONLY a JSON array of the present character ids (may be empty):
+["npc_xxxxxxxx", ...]"""
+
+    try:
+        result = await sdk.llm.generate(prompt, model_preference="fastest")
+        parsed = _parse_json_block(result)
+        if isinstance(parsed, list):
+            valid = {npc["id"] for npc in candidates}
+            return {str(i) for i in parsed if str(i) in valid}
+    except Exception as e:
+        print(f"[NPC System] LLM scene presence failed, falling back to name matching: {e}")
+    return {npc["id"] for npc in candidates if _named_in_recent_story(npc, state)}
+
+
+async def _present_npcs(state: dict, sdk) -> list[dict]:
+    """Introduced, living characters who are in the player's scene right now.
+    Party members always count. With location tracking, so do characters at
+    the player's node/region (plus recent story mentions, since stored
+    locations can drift). Without location tracking, a fast LLM pass decides
+    from the story itself (name matching when disabled or on failure)."""
     p_node = state.get("player_location_node_id")
     p_region = state.get("player_location_region")
     p_layer = state.get("player_location_layer_id")
+    location_tracked = bool(p_node or p_region)
 
     present = []
+    undetermined = []
     for npc in _get_bank(state).values():
         if not npc.get("introduced") or npc.get("status") != "active":
             continue
         if npc.get("traveling_with_player"):
             present.append(npc)
             continue
-        node, region, layer = _npc_effective_location(npc, state)
-        layer_ok = not (layer and p_layer and layer != p_layer)
-        located_here = layer_ok and (
-            (node and node == p_node) or (region and region == p_region)
-        )
-        if located_here or _named_in_recent_story(npc, state):
-            present.append(npc)
+        if location_tracked:
+            node, region, layer = _npc_effective_location(npc, state)
+            layer_ok = not (layer and p_layer and layer != p_layer)
+            located_here = layer_ok and (
+                (node and node == p_node) or (region and region == p_region)
+            )
+            if located_here or _named_in_recent_story(npc, state):
+                present.append(npc)
+        else:
+            undetermined.append(npc)
+
+    if undetermined and state.get("history"):
+        if _config(state).get("scene_presence_use_llm", True):
+            present_ids = await _llm_scene_presence(state, sdk, undetermined)
+            present.extend(npc for npc in undetermined if npc["id"] in present_ids)
+        else:
+            present.extend(npc for npc in undetermined if _named_in_recent_story(npc, state))
     return present
 
 
-def _present_characters_context(state: dict) -> str:
+async def _present_characters_context(state: dict, sdk) -> str:
     """A per-turn context block with the established records of every character
     in the scene, so the storyteller always has them -- RAG retrieval is
     query-dependent and can miss a character who is standing right there."""
     if not _config(state).get("present_character_context", True):
         return ""
-    present = _present_npcs(state)
+    present = await _present_npcs(state, sdk)
     if not present:
         return ""
 
@@ -382,7 +429,7 @@ def _present_characters_context(state: dict) -> str:
 async def on_gather_context(state: dict, sdk) -> dict | None:
     result = {}
 
-    context = _present_characters_context(state)
+    context = await _present_characters_context(state, sdk)
     if context:
         result["context_string"] = context
 
