@@ -5,6 +5,10 @@ const API_BASE = '/api/modules/wb_image_gen';
 const inputCls =
   'w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 ' +
   'focus:border-purple-500 focus:outline-none placeholder-gray-600';
+
+// Mirrors LORA_WEIGHT_MIN/MAX in the backend.
+const LORA_WEIGHT_MIN = -10;
+const LORA_WEIGHT_MAX = 10;
 const labelCls = 'block text-xs uppercase tracking-wider text-gray-500 mb-1.5';
 const sectionCls = 'bg-gray-900/60 border border-gray-800 rounded-xl p-5 space-y-4';
 
@@ -383,6 +387,17 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
     }
   };
 
+  const commitStrength = () => {
+    const v = Number(strength);
+    if (!Number.isFinite(v)) {
+      setStrength(entry.strength ?? 0.7);
+      return;
+    }
+    const clamped = Math.max(LORA_WEIGHT_MIN, Math.min(LORA_WEIGHT_MAX, v));
+    setStrength(clamped);
+    if (clamped !== (entry.strength ?? 0.7)) onPatch(entry.id, { strength: clamped });
+  };
+
   // While the upload helper is open, watch the account's private uploads:
   // anything that appears after opening is assumed to be the file the user
   // just pushed through the console, and is linked to this entry the moment
@@ -475,28 +490,55 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
 
       {entry.active && fam !== 'flux' && (
         <div className="flex items-center gap-3">
-          <label className="text-[10px] uppercase tracking-wider text-gray-500 shrink-0">
-            Strength: {Number(strength).toFixed(2)}
+          <label
+            className="text-[10px] uppercase tracking-wider text-gray-500 shrink-0"
+            title={entry.llm_weight
+              ? 'Default weight — before each image an AI picks the actual weight, following the instructions below'
+              : `LoRA weight, ${LORA_WEIGHT_MIN} to ${LORA_WEIGHT_MAX} (0 disables, negative inverts the style)`}
+          >
+            {entry.llm_weight ? 'Default' : 'Weight'}
           </label>
           <input
-            type="range" min={0} max={1} step={0.05}
-            value={strength}
+            type="range" min={LORA_WEIGHT_MIN} max={LORA_WEIGHT_MAX} step={0.1}
+            value={Number(strength) || 0}
             onChange={(e) => setStrength(Number(e.target.value))}
-            onMouseUp={() => onPatch(entry.id, { strength })}
-            onTouchEnd={() => onPatch(entry.id, { strength })}
-            onKeyUp={() => onPatch(entry.id, { strength })}
+            onMouseUp={() => onPatch(entry.id, { strength: Number(strength) })}
+            onTouchEnd={() => onPatch(entry.id, { strength: Number(strength) })}
+            onKeyUp={() => onPatch(entry.id, { strength: Number(strength) })}
             className="w-full accent-purple-500"
           />
+          <input
+            type="number" min={LORA_WEIGHT_MIN} max={LORA_WEIGHT_MAX} step={0.05}
+            value={strength}
+            onChange={(e) => setStrength(e.target.value)}
+            onBlur={commitStrength}
+            onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+            className="w-16 shrink-0 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-gray-200 focus:border-purple-500 focus:outline-none"
+          />
+          <button
+            type="button"
+            onClick={() => onPatch(entry.id, { llm_weight: !entry.llm_weight })}
+            title={`Let an AI pick this LoRA's weight for each image (${LORA_WEIGHT_MIN} to ${LORA_WEIGHT_MAX}), following the instructions below. The slider value is the default it starts from.`}
+            className={`px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wider border shrink-0 whitespace-nowrap transition-colors ${
+              entry.llm_weight
+                ? 'bg-purple-900/40 text-purple-300 border-purple-800'
+                : 'bg-gray-900/40 text-gray-500 border-gray-800 hover:text-gray-300'
+            }`}
+          >
+            AI weight
+          </button>
         </div>
       )}
 
       {entry.active && (
         <div className="flex items-center gap-2">
           <label
-            className={`text-[10px] uppercase tracking-wider shrink-0 ${condition.trim() ? 'text-purple-400' : 'text-gray-500'}`}
-            title="Describe when this LoRA should be used; before each image an AI reads the scene and decides. Leave empty to always use it."
+            className={`text-[10px] uppercase tracking-wider shrink-0 ${condition.trim() || entry.llm_weight ? 'text-purple-400' : 'text-gray-500'}`}
+            title={entry.llm_weight
+              ? 'Instructions the AI follows before each image: when this LoRA applies and how to weight it. Leave empty to always apply it and let the AI judge the weight from the scene.'
+              : 'Describe when this LoRA should be used; before each image an AI reads the scene and decides. Leave empty to always use it.'}
           >
-            {condition.trim() ? 'AI-gated' : 'Condition'}
+            {entry.llm_weight ? 'Instructions' : condition.trim() ? 'AI-gated' : 'Condition'}
           </label>
           <input
             type="text"
@@ -504,7 +546,9 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
             onChange={(e) => setCondition(e.target.value)}
             onBlur={commitCondition}
             onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
-            placeholder="always on — describe a situation (e.g. battle scenes, at night) and an AI decides per image"
+            placeholder={entry.llm_weight
+              ? 'weight instructions (e.g. subtle 0.3 by day, up to 1.5 in battles; only in forests) — an AI decides per image'
+              : 'always on — describe a situation (e.g. battle scenes, at night) and an AI decides per image'}
             className={`${inputCls} text-xs`}
             maxLength={300}
           />

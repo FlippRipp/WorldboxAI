@@ -103,6 +103,11 @@ KEY_MASK_PREFIX = "****"
 MAX_PROMPT_CHARS = 1024
 
 LORA_CONDITION_MAX_CHARS = 300
+# Novita/SD tooling accepts weights well outside 0..1 (negative inverts the
+# adapter); sliders, API patches, and LLM-picked weights all clamp to this.
+LORA_WEIGHT_MIN = -10.0
+LORA_WEIGHT_MAX = 10.0
+LORA_DEFAULT_WEIGHT = 0.7
 
 # Character reference roster fed to the prompt writer (appearances come from
 # the optional wb_character_tracker / wb_npc_system modules).
@@ -113,15 +118,17 @@ PLAYER_IN_IMAGES_MODES = ("show", "pov")
 # How finished images appear in chat before the user clicks to reveal them.
 CHAT_IMAGE_CONCEAL_MODES = ("off", "blur", "blackout")
 
-LORA_CONDITION_PROMPT = """You gate style adapters (LoRAs) for an AI image generator. For each numbered condition below, decide whether it applies to the scene being illustrated. Be literal: a condition applies only when the scene actually shows or strongly implies it.
+LORA_CONDITION_PROMPT = """You control style adapters (LoRAs) for an AI image generator. For each numbered adapter below, decide whether its condition applies to the scene being illustrated. Be literal: a condition applies only when the scene actually shows or strongly implies it. Adapters marked "always applies" always apply.
+
+For adapters marked "pick the weight", also choose how strongly to apply them: follow the adapter's instructions and the scene, starting from the listed default. Weights are numbers from -10 to 10 (typical range 0 to 1.5; 0 disables, negative inverts the style). For all other adapters, echo their listed weight unchanged.
 
 SCENE:
 {narration}
 
-CONDITIONS:
+ADAPTERS:
 {conditions}
 
-Output ONLY a JSON array with the numbers of the conditions that apply, e.g. [1, 3]. Output [] if none apply."""
+Output ONLY a JSON object mapping the number of each adapter that applies to its weight, e.g. {"1": 0.7, "3": 1.2}. Output {} if none apply."""
 
 POLL_INTERVAL_S = 2.0
 POLL_MAX_ITERATIONS = 240          # ~8 minutes
@@ -374,6 +381,13 @@ def _entry_sd_name(entry: dict) -> str:
     return str((entry.get("novita") or {}).get("sd_name_in_api") or "")
 
 
+def _clamp_lora_weight(value, default: float = LORA_DEFAULT_WEIGHT) -> float:
+    try:
+        return round(max(LORA_WEIGHT_MIN, min(LORA_WEIGHT_MAX, float(value))), 2)
+    except (TypeError, ValueError):
+        return default
+
+
 def _active_loras(cfg: dict) -> list[dict]:
     library = cfg.get("lora_library")
     if not isinstance(library, list):
@@ -399,11 +413,8 @@ def _sd_payload_loras(cfg: dict) -> list[dict]:
     for entry in _active_loras(cfg):
         if not _entry_usable(entry, family):
             continue
-        try:
-            strength = max(0.0, min(1.0, float(entry.get("strength", 0.7))))
-        except (TypeError, ValueError):
-            strength = 0.7
-        out.append({"model_name": _entry_sd_name(entry), "strength": round(strength, 2)})
+        strength = _clamp_lora_weight(entry.get("strength", LORA_DEFAULT_WEIGHT))
+        out.append({"model_name": _entry_sd_name(entry), "strength": strength})
     return out[:SD_LORAS_MAX]
 
 
@@ -478,32 +489,50 @@ def _clean_image_prompt(raw: str) -> str:
     return text[:MAX_PROMPT_CHARS]
 
 
-def _parse_condition_numbers(raw: str) -> set[int] | None:
-    """The JSON array of condition numbers from an LLM reply, or None when no
-    array can be found (callers fail open)."""
+def _parse_condition_reply(raw: str) -> dict[int, float | None] | None:
+    """Adapter verdicts from an LLM reply: {number: weight} from a JSON
+    object, or {number: None} from a bare number array (weight unspecified,
+    keep the configured one). None when neither can be found (callers fail
+    open)."""
+    m = re.search(r"\{[^{}]*\}", raw or "")
+    if m:
+        try:
+            parsed = json.loads(m.group(0))
+            return {int(k): _clamp_lora_weight(v, None) for k, v in parsed.items()}
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
     m = re.search(r"\[[\d,\s]*\]", raw or "")
     if not m:
         return None
     try:
-        return {int(n) for n in json.loads(m.group(0))}
+        return {int(n): None for n in json.loads(m.group(0))}
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
 
 
+def _condition_line(n: int, entry: dict) -> str:
+    cond = str(entry.get("condition") or "").strip()[:LORA_CONDITION_MAX_CHARS]
+    weight = _clamp_lora_weight(entry.get("strength", LORA_DEFAULT_WEIGHT))
+    if entry.get("llm_weight"):
+        return f"{n}. {cond or 'always applies'} — pick the weight (default {weight})"
+    return f"{n}. {cond} (weight {weight})"
+
+
 async def _apply_lora_conditions(cfg: dict, narration: str, sdk) -> dict:
-    """A cfg copy whose lora_library drops active conditional LoRAs that the
-    fastest LLM slot judges irrelevant to this scene. Any failure (no LLM,
-    LLM error, unparseable reply) fails open: every active LoRA stays, same
-    as before conditions existed."""
-    conditional = [
+    """A cfg copy whose lora_library reflects the scene as judged by the
+    fastest LLM slot: active conditional LoRAs it deems irrelevant are
+    dropped, and LoRAs with llm_weight enabled get the weight it picked (an
+    LLM weight of 0 also drops the LoRA). Any failure (no LLM, LLM error,
+    unparseable reply) fails open: every active LoRA stays at its configured
+    strength, same as before conditions existed."""
+    participating = [
         e for e in _active_loras(cfg)
-        if str(e.get("condition") or "").strip()
+        if str(e.get("condition") or "").strip() or e.get("llm_weight")
     ]
-    if not conditional or sdk is None:
+    if not participating or sdk is None:
         return cfg
     lines = "\n".join(
-        f"{i + 1}. {str(e['condition']).strip()[:LORA_CONDITION_MAX_CHARS]}"
-        for i, e in enumerate(conditional))
+        _condition_line(i + 1, e) for i, e in enumerate(participating))
     prompt = LORA_CONDITION_PROMPT.replace(
         "{narration}", (narration or "")[-3000:]).replace("{conditions}", lines)
     try:
@@ -514,18 +543,44 @@ async def _apply_lora_conditions(cfg: dict, narration: str, sdk) -> dict:
         return cfg
     finally:
         sdk.llm._current_module = ""
-    applies = _parse_condition_numbers(raw)
-    if applies is None:
+    verdicts = _parse_condition_reply(raw)
+    if verdicts is None:
         print(f"[Image Gen] Unparseable LoRA condition reply (keeping all): {raw[:200]!r}")
         return cfg
-    rejected = [e for i, e in enumerate(conditional) if (i + 1) not in applies]
-    if not rejected:
+
+    rejected: list[dict] = []
+    weights: dict = {}  # entry id -> LLM-picked strength for this image
+    for i, e in enumerate(participating):
+        if (i + 1) not in verdicts:
+            # Weight-only entries always apply; an omission there is an LLM
+            # slip, so they fail open to their configured strength.
+            if str(e.get("condition") or "").strip():
+                rejected.append(e)
+            continue
+        weight = verdicts[i + 1]
+        if e.get("llm_weight") and weight is not None:
+            if abs(weight) < 0.005:
+                rejected.append(e)
+            else:
+                weights[e.get("id")] = weight
+    if not rejected and not weights:
         return cfg
     rejected_ids = {e.get("id") for e in rejected}
-    library = [e for e in cfg.get("lora_library") or []
-               if not (isinstance(e, dict) and e.get("id") in rejected_ids)]
-    skipped = ", ".join(str(e.get("name") or e.get("id")) for e in rejected)
-    print(f"[Image Gen] Conditions skipped LoRAs for this scene: {skipped}")
+    library = []
+    for e in cfg.get("lora_library") or []:
+        if isinstance(e, dict) and e.get("id") in rejected_ids:
+            continue
+        if isinstance(e, dict) and e.get("id") in weights:
+            e = {**e, "strength": weights[e.get("id")]}
+        library.append(e)
+    if rejected:
+        skipped = ", ".join(str(e.get("name") or e.get("id")) for e in rejected)
+        print(f"[Image Gen] Conditions skipped LoRAs for this scene: {skipped}")
+    if weights:
+        picked = ", ".join(
+            f"{e.get('name') or e.get('id')}={weights[e.get('id')]}"
+            for e in participating if e.get("id") in weights)
+        print(f"[Image Gen] LLM-picked LoRA weights for this scene: {picked}")
     return {**cfg, "lora_library": library}
 
 
@@ -1337,9 +1392,10 @@ def _normalize_lora_entry(item: dict) -> dict:
     entry.update({
         "saved_at": _now(),
         "active": False,
-        "strength": 0.7,
+        "strength": LORA_DEFAULT_WEIGHT,
         "sd_name_override": "",
         "condition": "",     # free-text situation gate; empty = always apply
+        "llm_weight": False,  # let the condition LLM also pick the weight
         "novita": None,
         "novita_checked_at": None,
     })
@@ -1664,6 +1720,7 @@ def get_router():
         strength: float | None = None
         sd_name_override: str | None = None
         condition: str | None = None
+        llm_weight: bool | None = None
 
     class KeySubmit(BaseModel):
         api_key: str
@@ -1690,6 +1747,8 @@ def get_router():
         out["hf_base_models"] = list(HF_BASE_MODELS)
         out["flux2_model_name"] = FLUX2_MODEL_NAME
         out["checkpoint_family"] = _checkpoint_family(cfg)
+        out["lora_weight_min"] = LORA_WEIGHT_MIN
+        out["lora_weight_max"] = LORA_WEIGHT_MAX
         return out
 
     @router.get("/config")
@@ -2001,11 +2060,13 @@ def get_router():
         if patch.active is not None:
             entry["active"] = bool(patch.active)
         if patch.strength is not None:
-            entry["strength"] = max(0.0, min(1.0, float(patch.strength)))
+            entry["strength"] = _clamp_lora_weight(patch.strength)
         if patch.sd_name_override is not None:
             entry["sd_name_override"] = patch.sd_name_override.strip()
         if patch.condition is not None:
             entry["condition"] = patch.condition.strip()[:LORA_CONDITION_MAX_CHARS]
+        if patch.llm_weight is not None:
+            entry["llm_weight"] = bool(patch.llm_weight)
         _save_config(cfg)
         return {"entry": entry, "lora_library": cfg["lora_library"]}
 

@@ -535,20 +535,34 @@ def test_sd_payload_override_beats_missing_match_and_clamps(tmp_path):
     cfg = _lora_cfg(backend, lora_library=[
         _lora(novita=None, sd_name_override="my_upload.safetensors", strength=5.0)])
     loras = backend._novita_payload(cfg, "x")["request"]["loras"]
-    assert loras == [{"model_name": "my_upload.safetensors", "strength": 1.0}]
+    assert loras == [{"model_name": "my_upload.safetensors", "strength": 5.0}]
+
+    # Weights beyond the unlocked -10..10 range (or garbage) clamp/default.
+    cfg = _lora_cfg(backend, lora_library=[
+        _lora(id="1", strength=50.0), _lora(id="2", strength=-50.0),
+        _lora(id="3", strength=-1.2), _lora(id="4", strength="junk")])
+    loras = backend._novita_payload(cfg, "x")["request"]["loras"]
+    assert [entry["strength"] for entry in loras] == [10.0, -10.0, -1.2, 0.7]
 
     many = [_lora(id=str(i)) for i in range(8)]
     cfg = _lora_cfg(backend, lora_library=many)
     assert len(backend._novita_payload(cfg, "x")["request"]["loras"]) == backend.SD_LORAS_MAX
 
 
-def test_parse_condition_numbers(tmp_path):
+def test_parse_condition_reply(tmp_path):
     backend = _load_backend(tmp_path)
-    assert backend._parse_condition_numbers("[1, 3]") == {1, 3}
-    assert backend._parse_condition_numbers("The answer is [2].") == {2}
-    assert backend._parse_condition_numbers("[]") == set()
-    assert backend._parse_condition_numbers("none of them") is None
-    assert backend._parse_condition_numbers("") is None
+    # New object form: number -> weight (clamped to the allowed range).
+    assert backend._parse_condition_reply('{"1": 0.7, "3": 1.2}') == {1: 0.7, 3: 1.2}
+    assert backend._parse_condition_reply('Sure: {"2": -50}') == {2: -10.0}
+    assert backend._parse_condition_reply('{"1": "high"}') == {1: None}
+    assert backend._parse_condition_reply("{}") == {}
+    # Legacy bare-array form still parses (weight unspecified).
+    assert backend._parse_condition_reply("[1, 3]") == {1: None, 3: None}
+    assert backend._parse_condition_reply("The answer is [2].") == {2: None}
+    assert backend._parse_condition_reply("[]") == {}
+    assert backend._parse_condition_reply("none of them") is None
+    assert backend._parse_condition_reply("") is None
+    assert backend._parse_condition_reply('{"one": 0.7}') is None
 
 
 def test_lora_condition_gate(tmp_path):
@@ -587,6 +601,47 @@ def test_lora_condition_gate(tmp_path):
     assert asyncio.run(backend._apply_lora_conditions(
         plain, "x", _make_sdk(captured=captured2))) is plain
     assert "prompts" not in captured2
+
+
+def test_lora_llm_weight(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _lora_cfg(backend, lora_library=[
+        _lora(id="1", llm_weight=True, condition="stronger in battles"),
+        _lora(id="2", llm_weight=True),                    # no condition: always applies
+        _lora(id="3", condition="at night", strength=0.5), # gate only: weight stays put
+        _lora(id="4"),                                     # neither: not asked
+    ])
+
+    captured = {}
+    sdk = _make_sdk(reply='{"1": 1.4, "2": -60, "3": 9.9}', captured=captured)
+    gated = asyncio.run(backend._apply_lora_conditions(cfg, "A duel at midnight.", sdk))
+    by_id = {e["id"]: e for e in gated["lora_library"]}
+    assert by_id["1"]["strength"] == 1.4
+    assert by_id["2"]["strength"] == -10.0  # clamped to the allowed range
+    assert by_id["3"]["strength"] == 0.5    # gate-only: LLM weight ignored
+    assert by_id["4"]["strength"] == 0.7
+    assert cfg["lora_library"][0]["strength"] == 0.7  # original untouched
+
+    # The prompt marks weight-picking adapters and lists defaults.
+    prompt = captured["prompts"][0]
+    assert "1. stronger in battles — pick the weight (default 0.7)" in prompt
+    assert "2. always applies — pick the weight (default 0.7)" in prompt
+    assert "3. at night (weight 0.5)" in prompt
+    assert "4." not in prompt
+
+    # A weight of 0 drops the lora for this image; conditional loras omitted
+    # from the reply are dropped, weight-only ones fail open to their slider.
+    gated = asyncio.run(backend._apply_lora_conditions(
+        cfg, "x", _make_sdk(reply='{"1": 0}')))
+    ids = [e["id"] for e in gated["lora_library"]]
+    assert ids == ["2", "4"]
+    assert {e["id"]: e["strength"] for e in gated["lora_library"]} == {"2": 0.7, "4": 0.7}
+
+    # Legacy array reply: gates still work, weights stay at the slider value.
+    gated = asyncio.run(backend._apply_lora_conditions(
+        cfg, "x", _make_sdk(reply="[1, 2]")))
+    assert [e["id"] for e in gated["lora_library"]] == ["1", "2", "4"]
+    assert all(e["strength"] == 0.7 for e in gated["lora_library"])
 
 
 def test_lora_condition_patch_roundtrip(tmp_path):
@@ -970,18 +1025,27 @@ def test_lora_library_endpoints_roundtrip(tmp_path):
     entry = resp.json()["entry"]
     assert entry["novita"] == {"sd_name_in_api": "found_123456.safetensors"}
     assert entry["active"] is False
+    assert entry["llm_weight"] is False
 
     assert client.post("/loras", json=item).status_code == 409  # dedupe
 
     resp = client.patch("/loras/123456", json={"active": True, "strength": 1.7})
     assert resp.status_code == 200
-    assert resp.json()["entry"]["strength"] == 1.0  # clamped
+    assert resp.json()["entry"]["strength"] == 1.7  # beyond 1 is fine now
+
+    resp = client.patch("/loras/123456", json={"strength": -12})
+    assert resp.json()["entry"]["strength"] == -10.0  # clamped to the range
+
+    resp = client.patch("/loras/123456", json={"llm_weight": True})
+    assert resp.json()["entry"]["llm_weight"] is True
+    resp = client.patch("/loras/123456", json={"strength": 1.7, "llm_weight": False})
+    assert resp.json()["entry"]["llm_weight"] is False
 
     # Persisted: a fresh config load feeds the payload builder.
     cfg = backend._load_config()
     cfg.update({"model_name": "sd_xl_base_1.0.safetensors", "model_base": "SDXL 1.0"})
     assert backend._novita_payload(cfg, "x")["request"]["loras"] == [
-        {"model_name": "found_123456.safetensors", "strength": 1.0}]
+        {"model_name": "found_123456.safetensors", "strength": 1.7}]
 
     assert client.delete("/loras/123456").status_code == 200
     assert backend._load_config()["lora_library"] == []
