@@ -319,7 +319,63 @@ Respond with ONLY a JSON array:
     return []
 
 
+def _present_npcs(state: dict) -> list[dict]:
+    """Introduced, living characters who are in the player's scene right now --
+    traveling with the player or located at their current node/region."""
+    p_node = state.get("player_location_node_id")
+    p_region = state.get("player_location_region")
+    p_layer = state.get("player_location_layer_id")
+
+    present = []
+    for npc in _get_bank(state).values():
+        if not npc.get("introduced") or npc.get("status") != "active":
+            continue
+        if npc.get("traveling_with_player"):
+            present.append(npc)
+            continue
+        node, region, layer = _npc_effective_location(npc, state)
+        if layer and p_layer and layer != p_layer:
+            continue
+        if (node and node == p_node) or (region and region == p_region):
+            present.append(npc)
+    return present
+
+
+def _present_characters_context(state: dict) -> str:
+    """A per-turn context block with the established records of every character
+    in the scene, so the storyteller always has them -- RAG retrieval is
+    query-dependent and can miss a character who is standing right there."""
+    if not _config(state).get("present_character_context", True):
+        return ""
+    present = _present_npcs(state)
+    if not present:
+        return ""
+
+    lines = ["Characters currently present in the scene. Keep them consistent with these established records:"]
+    for npc in present:
+        party = " (traveling with the player)" if npc.get("traveling_with_player") else ""
+        lines.append(f"- {_profile_text(npc)}{party}")
+        notes = str(npc.get("notes", "")).strip()
+        if notes:
+            lines.append(f"  Notes: {notes[-400:]}")
+    return "\n".join(lines)
+
+
 async def on_gather_context(state: dict, sdk) -> dict | None:
+    result = {}
+
+    context = _present_characters_context(state)
+    if context:
+        result["context_string"] = context
+
+    introduction = await _introduction_pass(state, sdk)
+    if introduction:
+        result.update(introduction)
+
+    return result or None
+
+
+async def _introduction_pass(state: dict, sdk) -> dict | None:
     config = _config(state)
 
     if not config.get("introduction_enabled", True):

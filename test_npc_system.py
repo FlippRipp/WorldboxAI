@@ -201,3 +201,81 @@ def test_mutation_schema_disabled_returns_none():
     state = _state({}, mutation_config={"capture_story_characters": False})
 
     assert asyncio.run(backend.on_mutation_schema(state, sdk)) is None
+
+
+# ── Part C: present characters always in context ─────────────────────────────
+
+def _present_npc(npc_id, name, **overrides):
+    npc = {
+        "id": npc_id, "name": name, "race": "human", "gender": "female",
+        "appearance": f"{name} has a scarred cheek.", "archetype": "guide",
+        "personality": ["stern", "loyal", "quiet"], "role": "ally",
+        "pitch": f"{name} knows every alley in Harborside.",
+        "encounter_type": "location_bound", "introduced": True, "status": "active",
+        "location_node_id": "node_market", "location_region": "Harborside",
+        "location_layer_id": "surface", "traveling_with_player": False, "notes": "",
+    }
+    npc.update(overrides)
+    return npc
+
+
+def test_present_characters_injected_into_context():
+    backend = _load_backend()
+    sdk, _ = _make_sdk()
+    bank = {
+        "npc_here": _present_npc("npc_here", "Mara", notes="Owes the player a favor."),
+        "npc_party": _present_npc("npc_party", "Tobin", location_node_id="node_far",
+                                  location_region="Frostpeak", traveling_with_player=True),
+        "npc_far": _present_npc("npc_far", "Vex", location_node_id="node_keep",
+                                location_region="Frostpeak"),
+        "npc_dead": _present_npc("npc_dead", "Old Han", status="deceased"),
+        "npc_pending": _present_npc("npc_pending", "Ilya", introduced=False,
+                                    status="unintroduced"),
+    }
+
+    result = asyncio.run(backend.on_gather_context(_state(bank), sdk))
+
+    ctx = result["context_string"]
+    # At the player's location, with full established record and notes.
+    assert "Mara" in ctx and "scarred cheek" in ctx and "stern" in ctx
+    assert "Owes the player a favor." in ctx
+    # Party members are present wherever the player is.
+    assert "Tobin" in ctx and "traveling with the player" in ctx
+    # Elsewhere / dead / unintroduced characters stay out.
+    assert "Vex" not in ctx and "Old Han" not in ctx and "Ilya" not in ctx
+
+
+def test_present_characters_excluded_across_layers():
+    backend = _load_backend()
+    sdk, _ = _make_sdk()
+    bank = {"npc_below": _present_npc("npc_below", "Drez", location_layer_id="underdark",
+                                      location_region="Harborside")}
+
+    result = asyncio.run(backend.on_gather_context(_state(bank), sdk))
+
+    assert result is None
+
+
+def test_present_character_context_toggle_off():
+    backend = _load_backend()
+    sdk, _ = _make_sdk()
+    bank = {"npc_here": _present_npc("npc_here", "Mara")}
+    state = _state(bank, mutation_config={"present_character_context": False})
+
+    assert asyncio.run(backend.on_gather_context(state, sdk)) is None
+
+
+def test_context_and_introduction_merge_in_one_result():
+    backend = _load_backend()
+    reply = json.dumps({"introduce": True, "npc_id": "npc_pending", "reason": "The player asks around."})
+    sdk, _ = _make_sdk(reply)
+    bank = {
+        "npc_here": _present_npc("npc_here", "Mara"),
+        "npc_pending": _present_npc("npc_pending", "Ilya", introduced=False,
+                                    status="unintroduced", encounter_type="encounter"),
+    }
+
+    result = asyncio.run(backend.on_gather_context(_state(bank), sdk))
+
+    assert "Mara" in result["context_string"]
+    assert result["module_data"]["wb_npc_system"]["pending_introduction"] == "npc_pending"

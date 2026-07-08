@@ -11,7 +11,7 @@
   },
   "produces": {
     "module_data": true,
-    "context_string": false,
+    "context_string": true,
     "messages": false
   },
   "settings_schema": {
@@ -62,6 +62,13 @@
       "label": "LLM-Based Travel Motivation",
       "category": "NPC System",
       "description": "Use an LLM to decide which NPCs are motivated to travel toward the player (richer but slower/costlier). When off, a fast rule-based heuristic is used."
+    },
+    "present_character_context": {
+      "type": "toggle",
+      "default": true,
+      "label": "Always Include Present Characters",
+      "category": "NPC System",
+      "description": "Inject the profiles of characters currently in the scene (traveling with the player or at the player's location) directly into the storyteller's context every turn, independent of RAG retrieval."
     },
     "embed_profiles": {
       "type": "toggle",
