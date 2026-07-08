@@ -633,7 +633,55 @@ def test_lora_condition_gets_character_sheets(tmp_path):
         assert "{characters}" not in captured["prompts"][0]
 
 
-def test_lora_llm_weight(tmp_path):
+def test_lora_llm_mode_derivation(tmp_path):
+    backend = _load_backend(tmp_path)
+    # Explicit modes win; gating without text degrades (nothing to decide).
+    assert backend._entry_llm_mode(_lora(llm_mode="weight", condition="x")) == "weight"
+    assert backend._entry_llm_mode(_lora(llm_mode="gate", condition="x")) == "gate"
+    assert backend._entry_llm_mode(_lora(llm_mode="gate")) == "off"
+    assert backend._entry_llm_mode(_lora(llm_mode="both")) == "weight"
+    # Legacy entries (no llm_mode): condition meant gate, llm_weight meant weight.
+    assert backend._entry_llm_mode(_lora(condition="x")) == "gate"
+    assert backend._entry_llm_mode(_lora(llm_weight=True)) == "weight"
+    assert backend._entry_llm_mode(_lora(llm_weight=True, condition="x")) == "both"
+    assert backend._entry_llm_mode(_lora()) == "off"
+    assert backend._entry_llm_mode(_lora(llm_mode="sometimes")) == "off"
+
+
+def test_lora_llm_mode_weight_is_not_gated(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _lora_cfg(backend, lora_library=[
+        _lora(id="1", llm_mode="weight", condition="0.2 calm, 1.5 battle"),
+        _lora(id="2", llm_mode="both", condition="only during storms"),
+        _lora(id="3", llm_mode="gate", condition="at night"),
+        _lora(id="4", llm_mode="gate"),  # no text: degrades to off, not asked
+    ])
+
+    captured = {}
+    sdk = _make_sdk(reply='{"1": 1.3}', captured=captured)
+    gated = asyncio.run(backend._apply_lora_conditions(cfg, "A calm morning.", sdk))
+    by_id = {e["id"]: e for e in gated["lora_library"]}
+    # Weight mode's text is instructions, NOT a gate: entry 1 gets its weight;
+    # entries 2 and 3 were omitted from the reply, so their gates drop them.
+    assert sorted(by_id) == ["1", "4"]
+    assert by_id["1"]["strength"] == 1.3
+
+    prompt = captured["prompts"][0]
+    assert ("1. always applies — pick the weight (default 0.7); "
+            "instructions: 0.2 calm, 1.5 battle") in prompt
+    assert "2. only during storms — pick the weight (default 0.7)" in prompt
+    assert "3. at night (weight 0.7)" in prompt
+    assert "4." not in prompt
+
+    # Omitted weight-only entries fail open to the slider value.
+    gated = asyncio.run(backend._apply_lora_conditions(
+        cfg, "x", _make_sdk(reply="{}")))
+    assert [e["id"] for e in gated["lora_library"]] == ["1", "4"]
+    assert all(e["strength"] == 0.7 for e in gated["lora_library"])
+
+
+def test_lora_llm_weight_legacy_fields(tmp_path):
+    # Entries saved before explicit llm_mode keep working via derivation.
     backend = _load_backend(tmp_path)
     cfg = _lora_cfg(backend, lora_library=[
         _lora(id="1", llm_weight=True, condition="stronger in battles"),
@@ -1055,7 +1103,7 @@ def test_lora_library_endpoints_roundtrip(tmp_path):
     entry = resp.json()["entry"]
     assert entry["novita"] == {"sd_name_in_api": "found_123456.safetensors"}
     assert entry["active"] is False
-    assert entry["llm_weight"] is False
+    assert entry["llm_mode"] == "off"
 
     assert client.post("/loras", json=item).status_code == 409  # dedupe
 
@@ -1066,10 +1114,11 @@ def test_lora_library_endpoints_roundtrip(tmp_path):
     resp = client.patch("/loras/123456", json={"strength": -12})
     assert resp.json()["entry"]["strength"] == -10.0  # clamped to the range
 
-    resp = client.patch("/loras/123456", json={"llm_weight": True})
-    assert resp.json()["entry"]["llm_weight"] is True
-    resp = client.patch("/loras/123456", json={"strength": 1.7, "llm_weight": False})
-    assert resp.json()["entry"]["llm_weight"] is False
+    for mode in ("gate", "weight", "both", "off"):
+        resp = client.patch("/loras/123456", json={"llm_mode": mode})
+        assert resp.json()["entry"]["llm_mode"] == mode
+    assert client.patch("/loras/123456", json={"llm_mode": "sometimes"}).status_code == 400
+    resp = client.patch("/loras/123456", json={"strength": 1.7})
 
     # Persisted: a fresh config load feeds the payload builder.
     cfg = backend._load_config()

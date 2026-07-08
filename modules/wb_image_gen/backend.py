@@ -108,6 +108,9 @@ LORA_CONDITION_MAX_CHARS = 300
 LORA_WEIGHT_MIN = -10.0
 LORA_WEIGHT_MAX = 10.0
 LORA_DEFAULT_WEIGHT = 0.7
+# What the per-image LLM pass decides for a LoRA: nothing, whether it
+# applies (condition text), its weight (instructions text), or both.
+LORA_LLM_MODES = ("off", "gate", "weight", "both")
 
 # Character reference roster fed to the prompt writer (appearances come from
 # the optional wb_character_tracker / wb_npc_system modules).
@@ -510,12 +513,35 @@ def _parse_condition_reply(raw: str) -> dict[int, float | None] | None:
         return None
 
 
+def _entry_llm_mode(entry: dict) -> str:
+    """Effective AI mode for a library entry: 'gate' (the condition decides
+    whether it applies), 'weight' (the LLM picks the strength, guided by the
+    instructions), 'both', or 'off'. Entries saved before explicit modes
+    derive it from their fields (condition text meant gating, the llm_weight
+    flag meant weight control). Gating without condition text has nothing to
+    decide, so it degrades to 'off' / 'weight'."""
+    mode = entry.get("llm_mode")
+    has_text = bool(str(entry.get("condition") or "").strip())
+    if mode not in LORA_LLM_MODES:
+        if entry.get("llm_weight"):
+            mode = "both" if has_text else "weight"
+        else:
+            mode = "gate" if has_text else "off"
+    if mode in ("gate", "both") and not has_text:
+        mode = "off" if mode == "gate" else "weight"
+    return mode
+
+
 def _condition_line(n: int, entry: dict) -> str:
+    mode = _entry_llm_mode(entry)
     cond = str(entry.get("condition") or "").strip()[:LORA_CONDITION_MAX_CHARS]
     weight = _clamp_lora_weight(entry.get("strength", LORA_DEFAULT_WEIGHT))
-    if entry.get("llm_weight"):
-        return f"{n}. {cond or 'always applies'} — pick the weight (default {weight})"
-    return f"{n}. {cond} (weight {weight})"
+    if mode == "gate":
+        return f"{n}. {cond} (weight {weight})"
+    if mode == "weight":
+        line = f"{n}. always applies — pick the weight (default {weight})"
+        return f"{line}; instructions: {cond}" if cond else line
+    return f"{n}. {cond} — pick the weight (default {weight})"
 
 
 def _condition_character_block(characters: dict | None) -> str:
@@ -539,14 +565,13 @@ async def _apply_lora_conditions(cfg: dict, narration: str, sdk,
                                  characters: dict | None = None) -> dict:
     """A cfg copy whose lora_library reflects the scene as judged by the
     fastest LLM slot: active conditional LoRAs it deems irrelevant are
-    dropped, and LoRAs with llm_weight enabled get the weight it picked (an
-    LLM weight of 0 also drops the LoRA). Character sheets ride along so
+    dropped, and weight-controlled LoRAs get the weight it picked (an LLM
+    weight of 0 also drops the LoRA). Character sheets ride along so
     conditions can reference who is present. Any failure (no LLM, LLM error,
     unparseable reply) fails open: every active LoRA stays at its configured
     strength, same as before conditions existed."""
     participating = [
-        e for e in _active_loras(cfg)
-        if str(e.get("condition") or "").strip() or e.get("llm_weight")
+        e for e in _active_loras(cfg) if _entry_llm_mode(e) != "off"
     ]
     if not participating or sdk is None:
         return cfg
@@ -572,14 +597,15 @@ async def _apply_lora_conditions(cfg: dict, narration: str, sdk,
     rejected: list[dict] = []
     weights: dict = {}  # entry id -> LLM-picked strength for this image
     for i, e in enumerate(participating):
+        mode = _entry_llm_mode(e)
         if (i + 1) not in verdicts:
             # Weight-only entries always apply; an omission there is an LLM
             # slip, so they fail open to their configured strength.
-            if str(e.get("condition") or "").strip():
+            if mode != "weight":
                 rejected.append(e)
             continue
         weight = verdicts[i + 1]
-        if e.get("llm_weight") and weight is not None:
+        if mode != "gate" and weight is not None:
             if abs(weight) < 0.005:
                 rejected.append(e)
             else:
@@ -1415,8 +1441,8 @@ def _normalize_lora_entry(item: dict) -> dict:
         "active": False,
         "strength": LORA_DEFAULT_WEIGHT,
         "sd_name_override": "",
-        "condition": "",     # free-text situation gate; empty = always apply
-        "llm_weight": False,  # let the condition LLM also pick the weight
+        "condition": "",     # condition / weight instructions for the AI modes
+        "llm_mode": "off",   # what the per-image LLM decides; see LORA_LLM_MODES
         "novita": None,
         "novita_checked_at": None,
     })
@@ -1770,7 +1796,7 @@ def get_router():
         strength: float | None = None
         sd_name_override: str | None = None
         condition: str | None = None
-        llm_weight: bool | None = None
+        llm_mode: str | None = None
 
     class KeySubmit(BaseModel):
         api_key: str
@@ -2115,8 +2141,13 @@ def get_router():
             entry["sd_name_override"] = patch.sd_name_override.strip()
         if patch.condition is not None:
             entry["condition"] = patch.condition.strip()[:LORA_CONDITION_MAX_CHARS]
-        if patch.llm_weight is not None:
-            entry["llm_weight"] = bool(patch.llm_weight)
+        if patch.llm_mode is not None:
+            if patch.llm_mode not in LORA_LLM_MODES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"llm_mode must be one of: {', '.join(LORA_LLM_MODES)}")
+            entry["llm_mode"] = patch.llm_mode
+            entry.pop("llm_weight", None)  # superseded pre-mode flag
         _save_config(cfg)
         return {"entry": entry, "lora_library": cfg["lora_library"]}
 

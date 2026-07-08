@@ -9,6 +9,20 @@ const inputCls =
 // Mirrors LORA_WEIGHT_MIN/MAX in the backend.
 const LORA_WEIGHT_MIN = -10;
 const LORA_WEIGHT_MAX = 10;
+
+// What the per-image AI pass decides for a LoRA; mirrors the backend's
+// LORA_LLM_MODES and its legacy-field fallback.
+const LORA_LLM_MODES = ['off', 'gate', 'weight', 'both'];
+const LORA_LLM_MODE_LABELS = {
+  off: 'AI: off', gate: 'AI: gated', weight: 'AI: weight', both: 'AI: both',
+};
+
+function loraLlmMode(entry) {
+  if (LORA_LLM_MODES.includes(entry.llm_mode)) return entry.llm_mode;
+  const hasText = (entry.condition || '').trim().length > 0;
+  if (entry.llm_weight) return hasText ? 'both' : 'weight';
+  return hasText ? 'gate' : 'off';
+}
 const labelCls = 'block text-xs uppercase tracking-wider text-gray-500 mb-1.5';
 const sectionCls = 'bg-gray-900/60 border border-gray-800 rounded-xl p-5 space-y-4';
 
@@ -381,10 +395,23 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
   useEffect(() => { setStrength(entry.strength ?? 0.7); }, [entry.strength]);
   useEffect(() => { setCondition(entry.condition || ''); }, [entry.condition]);
 
+  const llmMode = loraLlmMode(entry);
+  const aiWeighted = llmMode === 'weight' || llmMode === 'both';
+
   const commitCondition = () => {
-    if ((entry.condition || '') !== condition.trim()) {
-      onPatch(entry.id, { condition: condition.trim() });
+    const next = condition.trim();
+    if ((entry.condition || '') !== next) {
+      // Typing a condition on a mode-less LoRA gates it, matching the old
+      // "condition text means gated" behavior.
+      const patch = { condition: next };
+      if (next && llmMode === 'off') patch.llm_mode = 'gate';
+      onPatch(entry.id, patch);
     }
+  };
+
+  const cycleLlmMode = () => {
+    const next = LORA_LLM_MODES[(LORA_LLM_MODES.indexOf(llmMode) + 1) % LORA_LLM_MODES.length];
+    onPatch(entry.id, { llm_mode: next });
   };
 
   const commitStrength = () => {
@@ -492,11 +519,11 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
         <div className="flex items-center gap-3">
           <label
             className="text-[10px] uppercase tracking-wider text-gray-500 shrink-0"
-            title={entry.llm_weight
+            title={aiWeighted
               ? 'Default weight — before each image an AI picks the actual weight, following the instructions below'
               : `LoRA weight, ${LORA_WEIGHT_MIN} to ${LORA_WEIGHT_MAX} (0 disables, negative inverts the style)`}
           >
-            {entry.llm_weight ? 'Default' : 'Weight'}
+            {aiWeighted ? 'Default' : 'Weight'}
           </label>
           <input
             type="range" min={LORA_WEIGHT_MIN} max={LORA_WEIGHT_MAX} step={0.1}
@@ -517,15 +544,19 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
           />
           <button
             type="button"
-            onClick={() => onPatch(entry.id, { llm_weight: !entry.llm_weight })}
-            title={`Let an AI pick this LoRA's weight for each image (${LORA_WEIGHT_MIN} to ${LORA_WEIGHT_MAX}), following the instructions below. The slider value is the default it starts from.`}
+            onClick={cycleLlmMode}
+            title={'Click to cycle what an AI decides for this LoRA before each image:\n'
+              + 'off — always applied at the slider weight.\n'
+              + 'gated — the condition below decides whether it applies.\n'
+              + `weight — always applies; the AI picks the weight (${LORA_WEIGHT_MIN} to ${LORA_WEIGHT_MAX}), following the instructions below.\n`
+              + 'both — the text below gates it AND guides the weight.'}
             className={`px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wider border shrink-0 whitespace-nowrap transition-colors ${
-              entry.llm_weight
+              llmMode !== 'off'
                 ? 'bg-purple-900/40 text-purple-300 border-purple-800'
                 : 'bg-gray-900/40 text-gray-500 border-gray-800 hover:text-gray-300'
             }`}
           >
-            AI weight
+            {LORA_LLM_MODE_LABELS[llmMode]}
           </button>
         </div>
       )}
@@ -533,12 +564,15 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
       {entry.active && (
         <div className="flex items-center gap-2">
           <label
-            className={`text-[10px] uppercase tracking-wider shrink-0 ${condition.trim() || entry.llm_weight ? 'text-purple-400' : 'text-gray-500'}`}
-            title={entry.llm_weight
-              ? 'Instructions the AI follows before each image: when this LoRA applies and how to weight it. Leave empty to always apply it and let the AI judge the weight from the scene.'
-              : 'Describe when this LoRA should be used; before each image an AI reads the scene and decides. Leave empty to always use it.'}
+            className={`text-[10px] uppercase tracking-wider shrink-0 ${llmMode !== 'off' ? 'text-purple-400' : 'text-gray-500'}`}
+            title={{
+              off: 'Describe when this LoRA should be used; before each image an AI reads the scene and decides. Typing here switches the LoRA to gated.',
+              gate: 'Before each image an AI reads the scene and applies this LoRA only when this condition holds.',
+              weight: 'Instructions the AI follows to pick this LoRA’s weight per image — say what low vs high (or negative) weights mean.',
+              both: 'One text, two jobs: it decides whether this LoRA applies AND how the AI should weight it.',
+            }[llmMode]}
           >
-            {entry.llm_weight ? 'Instructions' : condition.trim() ? 'AI-gated' : 'Condition'}
+            {{ off: 'Condition', gate: 'AI-gated', weight: 'Instructions', both: 'Gate + weight' }[llmMode]}
           </label>
           <input
             type="text"
@@ -546,9 +580,12 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
             onChange={(e) => setCondition(e.target.value)}
             onBlur={commitCondition}
             onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
-            placeholder={entry.llm_weight
-              ? 'weight instructions (e.g. subtle 0.3 by day, up to 1.5 in battles; only in forests) — an AI decides per image'
-              : 'always on — describe a situation (e.g. battle scenes, at night) and an AI decides per image'}
+            placeholder={{
+              off: 'always on — describe a situation (e.g. battle scenes, at night) and an AI decides per image',
+              gate: 'describe a situation (e.g. battle scenes, at night) — an AI decides per image',
+              weight: 'what weights mean (e.g. 0.3 subtle by day, 1.5 in night battles) — an AI picks per image',
+              both: 'when it applies and how to weight it (e.g. only in battles; 0.8 skirmish, 1.5 all-out war)',
+            }[llmMode]}
             className={`${inputCls} text-xs`}
             maxLength={300}
           />
