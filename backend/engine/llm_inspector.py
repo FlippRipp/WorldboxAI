@@ -119,13 +119,16 @@ class LLMInspector:
         calls.sort(key=lambda c: c.timestamp, reverse=True)
 
         if since_id:
-            found = False
+            # Strictly newer than the anchor: the list is newest-first, so take
+            # entries until we hit the anchor call. If the anchor was evicted or
+            # cleared, everything counts as new. Returning the anchor itself (or
+            # anything older) would make every poll non-empty, so idle clients
+            # would re-render forever.
             results = []
             for c in calls:
-                if not found and c.id == since_id:
-                    found = True
-                if found:
-                    results.append(c)
+                if c.id == since_id:
+                    break
+                results.append(c)
             calls = results
 
         return [self._record_to_dict(c) for c in calls[:limit]]

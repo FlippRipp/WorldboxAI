@@ -26,7 +26,7 @@ import ModuleScreen from './components/shared/ModuleScreen';
 import ScenarioManager from './components/Scenario/ScenarioManager';
 import LorebookManager from './components/Lorebook/LorebookManager';
 import { useToasts, ToastStack } from './components/shared/Toasts';
-import { LLMInspectorProvider, useLLMInspector } from './hooks/useLLMInspector';
+import { LLMInspectorProvider, useLLMInspectorActions } from './hooks/useLLMInspector';
 import { ThemeProvider, useTheme } from './hooks/useTheme';
 import { useMediaQuery } from './hooks/useMediaQuery';
 import LLMInspectorButton from './components/LLMInspector/LLMInspectorButton';
@@ -55,6 +55,11 @@ function PlaceholderMode({ title, onBack }) {
 }
 
 const ONBOARDING_DONE_KEY = 'wb_onboarding_done';
+// The save id of the story currently open, kept in sessionStorage so a page
+// reload can drop the player straight back in. Mobile browsers (Android
+// especially) discard background tabs under memory pressure; returning to the
+// tab reloads the page, which would otherwise reset to the main menu.
+const RESUME_KEY = 'wb_active_story';
 
 function AppContent() {
   const [currentMode, setCurrentMode] = useState(null);
@@ -68,6 +73,11 @@ function AppContent() {
   const [editCharacterId, setEditCharacterId] = useState(null);
   const [editCharacterData, setEditCharacterData] = useState(null);
   const [gameState, setGameState] = useState({});
+  // Captured before any effect can clear it: the story that was open when the
+  // page last unloaded (see RESUME_KEY). Non-null means "reload mid-story" —
+  // hold the menu back and jump straight back into the game.
+  const [resumeSaveId] = useState(() => sessionStorage.getItem(RESUME_KEY));
+  const [resuming, setResuming] = useState(resumeSaveId != null);
 
   const handleStateFromServer = useCallback((state) => {
     setGameState(prev => ({
@@ -84,7 +94,9 @@ function AppContent() {
     }));
   }, []);
 
-  const { addCall } = useLLMInspector();
+  // Actions-only subscription: new LLM calls must not re-render the whole app
+  // (that made the storyteller feed "refresh" and drop text selections).
+  const { addCall } = useLLMInspectorActions();
   const ws = useWebSocket(handleStateFromServer, addCall);
   const session = useSession();
   const { modules, setModules } = useModules();
@@ -244,6 +256,41 @@ function AppContent() {
     setCurrentMode('storyteller-game');
   }, [session]);
 
+  // Keep the resume marker in sync: set while a story is open (following the
+  // active save across branches), cleared when the player exits to the menu.
+  useEffect(() => {
+    if (currentMode === 'storyteller-game') {
+      const id = session.sessionState?.active_save_id;
+      if (id) sessionStorage.setItem(RESUME_KEY, id);
+    } else if (currentMode === null) {
+      sessionStorage.removeItem(RESUME_KEY);
+    }
+  }, [currentMode, session.sessionState?.active_save_id]);
+
+  // Auto-resume after a reload while a story was open (e.g. Android discarded
+  // the tab while the player checked another app). Mirrors SaveSelectScreen's
+  // load path: fetch the save, then enter with its state as the seed so the
+  // transcript paints instantly instead of waiting on the intro round-trip.
+  useEffect(() => {
+    if (!resumeSaveId) return undefined;
+    let alive = true;
+    (async () => {
+      try {
+        const data = await api.loadSave(resumeSaveId);
+        if (!alive) return;
+        await handleEnterGame(resumeSaveId, data?.state);
+      } catch (e) {
+        // Save gone or backend restarted into a clean state — fall back to
+        // the menu rather than looping on a broken resume.
+        if (alive) sessionStorage.removeItem(RESUME_KEY);
+      } finally {
+        if (alive) setResuming(false);
+      }
+    })();
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Completed turns are autosaved server-side, so exiting while idle loses
   // nothing; only an in-flight generation is at risk (it never gets saved if
   // interrupted), so that's the only case that warrants a warning.
@@ -325,8 +372,9 @@ function AppContent() {
 
   if (currentMode === null) {
     // Hold the menu back until the first-launch check resolves (fast, local)
-    // so a fresh install doesn't flash the menu before the wizard.
-    if (showOnboarding === null) {
+    // so a fresh install doesn't flash the menu before the wizard — and while
+    // auto-resuming a story after a reload, so the menu never flashes by.
+    if (showOnboarding === null || resuming) {
       return <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950" />;
     }
     if (showOnboarding) {
