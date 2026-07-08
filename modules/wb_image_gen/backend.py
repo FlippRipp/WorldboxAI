@@ -1449,11 +1449,35 @@ def _character_descriptor(race, gender, appearance) -> str:
     return "; ".join(p for p in (ident, look) if p)
 
 
+def _scene_presence_ids(state: dict) -> set[str] | None:
+    """The NPC system's published scene roster (who is physically present),
+    or None when it is absent or stale (module disabled, older saves) --
+    callers then fall back to the recency heuristic."""
+    presence = state.get("module_data", {}).get("wb_npc_system", {}).get("scene_presence")
+    if not isinstance(presence, dict):
+        return None
+    try:
+        if abs(int(state.get("turn") or 0) - int(presence.get("turn"))) > 1:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return {str(i) for i in presence.get("npc_ids") or []}
+
+
+def _named_in(npc: dict, text: str) -> bool:
+    name = str(npc.get("name") or "").strip()
+    return bool(name) and bool(re.search(rf"\b{re.escape(name)}\b", text, re.IGNORECASE))
+
+
 def _character_snapshot(state: dict) -> dict | None:
-    """Canonical appearances for the prompt writer, from whichever character
-    modules happen to be active (both optional): the player tracker's
-    characters["default_player"] and the NPC system's introduced bank.
-    Returns None when neither has anything to say."""
+    """Canonical appearances for the prompt writer and the LoRA gate, from
+    whichever character modules happen to be active (both optional): the
+    player tracker's characters["default_player"] and the NPC system's
+    introduced bank. NPCs are the ones the NPC system judged present in the
+    scene (plus any named in the latest narration, which the roster --
+    computed before the storyteller ran -- cannot know about); without a
+    fresh roster, recently-interacted NPCs stand in. Returns None when
+    neither module has anything to say."""
     player_out = None
     player = state.get("characters", {}).get("default_player") or {}
     appearance = player.get("short_appearance") or player.get("full_appearance") or ""
@@ -1468,6 +1492,11 @@ def _character_snapshot(state: dict) -> dict | None:
                   if isinstance(n, dict) and n.get("introduced")
                   and str(n.get("appearance") or "").strip()
                   and n.get("status") != "dead"]
+    presence = _scene_presence_ids(state)
+    if presence is not None:
+        latest = str((state.get("history") or [""])[-1])
+        candidates = [n for n in candidates
+                      if str(n.get("id")) in presence or _named_in(n, latest)]
     candidates.sort(key=lambda n: (not n.get("traveling_with_player"),
                                    -int(n.get("last_interaction_turn") or 0)))
     npcs = []

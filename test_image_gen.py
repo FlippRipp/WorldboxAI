@@ -1932,6 +1932,38 @@ def test_character_snapshot_selects_sorts_and_caps(tmp_path):
     assert sum(len(n["descriptor"]) for n in snap["npcs"]) <= backend.CHAR_REF_MAX_CHARS
 
 
+def test_character_snapshot_uses_npc_scene_presence(tmp_path):
+    backend = _load_backend(tmp_path)
+    npcs = {
+        "n1": _npc("Borin", id="n1", last_turn=9),  # recent but absent: dropped
+        "n2": _npc("Kira", id="n2", last_turn=1),   # present per the roster
+        "n3": _npc("Vex", id="n3", last_turn=2),    # named in the latest narration
+    }
+
+    state = _char_state(npcs=npcs, history=["Earlier.", "Vex steps from the shadows."])
+    state["module_data"]["wb_npc_system"]["scene_presence"] = {"turn": 3, "npc_ids": ["n2"]}
+    snap = backend._character_snapshot(state)
+    assert [n["name"] for n in snap["npcs"]] == ["Vex", "Kira"]
+
+    # An empty roster means nobody is present: only the player remains.
+    state = _char_state(npcs=npcs, history=["The alley is empty."])
+    state["module_data"]["wb_npc_system"]["scene_presence"] = {"turn": 3, "npc_ids": []}
+    snap = backend._character_snapshot(state)
+    assert snap["player"] and snap["npcs"] == []
+
+    # A stale or malformed roster falls back to the recency heuristic.
+    for presence in ({"turn": 99, "npc_ids": ["n2"]}, {"npc_ids": ["n2"]}, "junk"):
+        state = _char_state(npcs=npcs)
+        state["module_data"]["wb_npc_system"]["scene_presence"] = presence
+        snap = backend._character_snapshot(state)
+        assert [n["name"] for n in snap["npcs"]] == ["Borin", "Vex", "Kira"]
+
+    # Name matching is whole-word: "Vexation" must not resurrect Vex.
+    state = _char_state(npcs=npcs, history=["Pure vexation grips the crowd."])
+    state["module_data"]["wb_npc_system"]["scene_presence"] = {"turn": 3, "npc_ids": []}
+    assert backend._character_snapshot(state)["npcs"] == []
+
+
 def test_character_block_injected_in_both_styles(tmp_path):
     backend = _load_backend(tmp_path)
     characters = {"player": {"name": "Ash", "descriptor": "female elf; silver hair"},

@@ -244,6 +244,11 @@ def test_present_characters_injected_into_context():
     # Elsewhere / dead / unintroduced characters stay out.
     assert "Vex" not in ctx and "Old Han" not in ctx and "Ilya" not in ctx
 
+    # The same roster is published for other modules to consume.
+    presence = result["module_data"]["wb_npc_system"]["scene_presence"]
+    assert presence["turn"] == 4
+    assert sorted(presence["npc_ids"]) == ["npc_here", "npc_party"]
+
 
 def _locationless_state(bank, history, **config):
     state = _state(bank, mutation_config=config or None, history=history)
@@ -281,7 +286,9 @@ def test_present_characters_mention_matches_whole_words_only():
     state = _locationless_state(bank, ["You reach out a hand to the merchant."],
                                 scene_presence_use_llm=False)
 
-    assert asyncio.run(backend.on_gather_context(state, sdk)) is None
+    result = asyncio.run(backend.on_gather_context(state, sdk))
+    assert "context_string" not in result
+    assert result["module_data"]["wb_npc_system"]["scene_presence"]["npc_ids"] == []
 
 
 def test_llm_scene_presence_includes_unnamed_character():
@@ -307,7 +314,9 @@ def test_llm_scene_presence_excludes_merely_mentioned_character():
     bank = {"npc_x": _unlocated_npc("npc_x", "Mara")}
     state = _locationless_state(bank, ["The merchant tells you Mara left town yesterday."])
 
-    assert asyncio.run(backend.on_gather_context(state, sdk)) is None
+    result = asyncio.run(backend.on_gather_context(state, sdk))
+    assert "context_string" not in result
+    assert result["module_data"]["wb_npc_system"]["scene_presence"]["npc_ids"] == []
 
 
 def test_llm_scene_presence_falls_back_to_name_matching_on_bad_reply():
@@ -328,7 +337,9 @@ def test_llm_scene_presence_not_used_when_location_is_tracked():
                                     location_region="Frostpeak")}
 
     # Located elsewhere, not named in the story: absent, and no LLM call spent.
-    assert asyncio.run(backend.on_gather_context(_state(bank), sdk)) is None
+    result = asyncio.run(backend.on_gather_context(_state(bank), sdk))
+    assert "context_string" not in result
+    assert result["module_data"]["wb_npc_system"]["scene_presence"]["npc_ids"] == []
     assert calls["generate_count"] == 0
 
 
@@ -340,7 +351,8 @@ def test_present_characters_excluded_across_layers():
 
     result = asyncio.run(backend.on_gather_context(_state(bank), sdk))
 
-    assert result is None
+    assert "context_string" not in result
+    assert result["module_data"]["wb_npc_system"]["scene_presence"]["npc_ids"] == []
 
 
 def test_present_character_context_toggle_off():
@@ -349,7 +361,11 @@ def test_present_character_context_toggle_off():
     bank = {"npc_here": _present_npc("npc_here", "Mara")}
     state = _state(bank, mutation_config={"present_character_context": False})
 
-    assert asyncio.run(backend.on_gather_context(state, sdk)) is None
+    # The toggle suppresses the storyteller block, but the scene roster is
+    # still published for other modules.
+    result = asyncio.run(backend.on_gather_context(state, sdk))
+    assert "context_string" not in result
+    assert result["module_data"]["wb_npc_system"]["scene_presence"]["npc_ids"] == ["npc_here"]
 
 
 def test_context_and_introduction_merge_in_one_result():
@@ -366,3 +382,6 @@ def test_context_and_introduction_merge_in_one_result():
 
     assert "Mara" in result["context_string"]
     assert result["module_data"]["wb_npc_system"]["pending_introduction"] == "npc_pending"
+    # The about-to-be-introduced character counts as present in the roster.
+    presence = result["module_data"]["wb_npc_system"]["scene_presence"]
+    assert sorted(presence["npc_ids"]) == ["npc_here", "npc_pending"]

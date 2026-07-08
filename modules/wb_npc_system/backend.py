@@ -406,14 +406,11 @@ async def _present_npcs(state: dict, sdk) -> list[dict]:
     return present
 
 
-async def _present_characters_context(state: dict, sdk) -> str:
+def _present_characters_context(state: dict, present: list[dict]) -> str:
     """A per-turn context block with the established records of every character
     in the scene, so the storyteller always has them -- RAG retrieval is
     query-dependent and can miss a character who is standing right there."""
-    if not _config(state).get("present_character_context", True):
-        return ""
-    present = await _present_npcs(state, sdk)
-    if not present:
+    if not present or not _config(state).get("present_character_context", True):
         return ""
 
     lines = ["Characters currently present in the scene. Keep them consistent with these established records:"]
@@ -429,7 +426,8 @@ async def _present_characters_context(state: dict, sdk) -> str:
 async def on_gather_context(state: dict, sdk) -> dict | None:
     result = {}
 
-    context = await _present_characters_context(state, sdk)
+    present = await _present_npcs(state, sdk)
+    context = _present_characters_context(state, present)
     if context:
         result["context_string"] = context
 
@@ -437,7 +435,20 @@ async def on_gather_context(state: dict, sdk) -> dict | None:
     if introduction:
         result.update(introduction)
 
-    return result or None
+    # Publish this turn's scene roster so other modules (e.g. image gen's
+    # character reference and LoRA gating) share the storyteller's notion of
+    # who is present. A character about to be introduced counts: they will
+    # appear in the narration this roster is consumed against.
+    payload = result.setdefault("module_data", {}).setdefault("wb_npc_system", {})
+    npc_ids = [npc["id"] for npc in present if npc.get("id")]
+    pending = payload.get("pending_introduction")
+    if pending and pending not in npc_ids:
+        npc_ids.append(pending)
+    payload["scene_presence"] = {
+        "turn": int(state.get("turn") or 0),
+        "npc_ids": npc_ids,
+    }
+    return result
 
 
 async def _introduction_pass(state: dict, sdk) -> dict | None:
