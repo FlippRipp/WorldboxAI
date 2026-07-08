@@ -1,12 +1,16 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import WidgetErrorBoundary from '../shared/WidgetErrorBoundary';
 import DynamicWidget from '../shared/DynamicWidget';
 
 // Unified character view for the storyteller. Shows the story character's core
 // identity (from state.characters.default_player) plus any additional sections
 // contributed by modules that declare a `character_panel` jsx in their manifest
-// (e.g. wb_core_rpg stats/skills, wb_character_tracker change log).
+// (e.g. wb_core_rpg stats/skills, wb_character_tracker change log). Modules can
+// also contribute whole tabs next to the player tab via `character_tab`
+// (e.g. wb_npc_system's character browser).
 export default function CharacterView({ isOpen, onClose, modules, gameState, onCommand, busy }) {
+  const [tab, setTab] = useState('player');
+
   useEffect(() => {
     if (!isOpen) return;
     function onKey(e) { if (e.key === 'Escape') onClose(); }
@@ -15,6 +19,10 @@ export default function CharacterView({ isOpen, onClose, modules, gameState, onC
   }, [isOpen, onClose]);
 
   if (!isOpen) return null;
+
+  const tabModules = (modules || []).filter((m) => m.character_tab);
+  const activeTab = tabModules.some((m) => m.id === tab) ? tab : 'player';
+  const activeTabModule = tabModules.find((m) => m.id === activeTab);
 
   const player = gameState?.characters?.default_player || {};
   const name = player.name || 'Adventurer';
@@ -41,28 +49,65 @@ export default function CharacterView({ isOpen, onClose, modules, gameState, onC
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div
-        className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-2xl max-h-[88vh] overflow-y-auto shadow-2xl"
+        className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-3xl max-h-[88vh] overflow-y-auto shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="sticky top-0 z-10 bg-gray-900/95 backdrop-blur border-b border-gray-700 px-5 py-3 flex items-center justify-between rounded-t-xl">
-          <div className="flex items-center gap-3 min-w-0">
-            <h2 className="text-gray-100 font-bold text-lg truncate">{name}</h2>
-            {identity && (
-              <span className="text-xs px-2 py-0.5 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 rounded-full capitalize whitespace-nowrap">
-                {identity}
-              </span>
-            )}
+        <div className="sticky top-0 z-10 bg-gray-900/95 backdrop-blur border-b border-gray-700 px-5 pt-3 rounded-t-xl">
+          <div className="flex items-center justify-between pb-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <h2 className="text-gray-100 font-bold text-lg truncate">
+                {activeTab === 'player' ? name : (activeTabModule?.character_tab_label || activeTabModule?.name)}
+              </h2>
+              {activeTab === 'player' && identity && (
+                <span className="text-xs px-2 py-0.5 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 rounded-full capitalize whitespace-nowrap">
+                  {identity}
+                </span>
+              )}
+            </div>
+            <button
+              onClick={onClose}
+              className="text-gray-500 hover:text-gray-200 text-lg leading-none p-1 transition-colors"
+              aria-label="Close character view"
+            >
+              {'✕'}
+            </button>
           </div>
-          <button
-            onClick={onClose}
-            className="text-gray-500 hover:text-gray-200 text-lg leading-none p-1 transition-colors"
-            aria-label="Close character view"
-          >
-            {'✕'}
-          </button>
+
+          {tabModules.length > 0 && (
+            <div className="flex gap-1 -mb-px">
+              {[{ id: 'player', label: 'Player' }, ...tabModules.map((m) => ({ id: m.id, label: m.character_tab_label || m.name }))].map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => setTab(t.id)}
+                  className={`px-3 py-1.5 text-sm rounded-t-lg border-b-2 transition-colors ${
+                    activeTab === t.id
+                      ? 'border-indigo-400 text-indigo-300'
+                      : 'border-transparent text-gray-500 hover:text-gray-300'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
-        <div className="p-5 space-y-5">
+        {activeTabModule && (
+          <div className="p-5">
+            <WidgetErrorBoundary modId={activeTabModule.id}>
+              <DynamicWidget
+                modId={activeTabModule.id}
+                entryFile={activeTabModule.character_tab}
+                state={gameState}
+                config={gameState?.module_configs?.[activeTabModule.id] || {}}
+                slotName="character_tab"
+                slotProps={{ onCommand, busy }}
+              />
+            </WidgetErrorBoundary>
+          </div>
+        )}
+
+        <div className={activeTab === 'player' ? 'p-5 space-y-5' : 'hidden'}>
           {/* --- Core identity --- */}
           {appearance && (
             <section>

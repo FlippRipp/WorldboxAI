@@ -239,6 +239,8 @@ async def get_modules():
             "character_context": manifest.get("character_context"),
             "game_overlay": manifest.get("game_overlay"),
             "character_panel": manifest.get("character_panel"),
+            "character_tab": manifest.get("character_tab"),
+            "character_tab_label": manifest.get("character_tab_label"),
         })
     return {"modules": modules}
 

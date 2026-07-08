@@ -1,9 +1,19 @@
 """NPC System -- background character generation and introduction management."""
 import json
+import urllib.parse
 import uuid
 
 
 NPC_ROLES = ["quest_giver", "antagonist", "ally", "informant", "rival", "neutral", "wildcard"]
+NPC_STATUSES = ["unintroduced", "active", "departed", "deceased"]
+
+# Fields the character browser may change, via manual edit or story update.
+EDITABLE_FIELDS = ("name", "race", "gender", "appearance", "archetype", "pitch",
+                   "personality", "role", "notes", "status")
+# Subset the story-update pass is asked to rewrite (race/gender/archetype are
+# creation-time facts the story rarely changes; edit them manually instead).
+UPDATE_FIELDS = ("name", "appearance", "personality", "pitch", "role", "status", "notes")
+MAX_CHANGE_LOG = 20
 DEFAULT_GENERATOR_FREQUENCY = 5
 DEFAULT_MAX_POOL = 6
 DEFAULT_TRAVEL_COOLDOWN_TURNS = 10
@@ -1074,3 +1084,163 @@ async def on_command_npclist(args: list[str], state: dict, sdk) -> dict:
             lines.append(f"  - {t['text']}{tag}")
 
     return {"message": "\n".join(lines), "signal": "end_turn"}
+
+
+def _log_change(npc: dict, turn: int, note: str, fields: list[str], source: str) -> None:
+    log = list(npc.get("change_log", []))
+    log.append({"turn": turn, "note": note, "fields": fields, "source": source})
+    npc["change_log"] = log[-MAX_CHANGE_LOG:]
+
+
+def _sanitize_edits(raw: dict, npc: dict) -> dict:
+    """Whitelist, coerce, and validate browser-supplied field changes, keeping
+    only fields whose value actually differs from the current record."""
+    edits = {}
+    for field in EDITABLE_FIELDS:
+        if field not in raw:
+            continue
+        val = raw[field]
+        if field == "personality":
+            if isinstance(val, str):
+                val = val.split(",")
+            if not isinstance(val, list):
+                continue
+            val = [str(p).strip() for p in val if str(p).strip()]
+        elif field == "role":
+            if val not in NPC_ROLES:
+                continue
+        elif field == "status":
+            if val not in NPC_STATUSES:
+                continue
+        else:
+            if not isinstance(val, str):
+                continue
+            val = val.strip()
+            if not val and field != "notes":
+                continue
+        if val != npc.get(field):
+            edits[field] = val
+    return edits
+
+
+async def _update_npc_from_story(npc_id: str, state: dict, sdk) -> dict:
+    """Player-requested refresh of one NPC's record: check the recent story for
+    lasting changes to the character and rewrite only the fields that changed."""
+    bank = _get_bank(state)
+    npc = bank.get(npc_id)
+    if not npc:
+        return {"message": f"[NPC] Unknown character id: {npc_id}", "signal": "end_turn"}
+    if not npc.get("introduced"):
+        return {
+            "message": f"[NPC] {npc.get('name', npc_id)} has not appeared in the story yet -- there is nothing to update from.",
+            "signal": "end_turn",
+        }
+
+    history = state.get("history", [])
+    if not history:
+        return {"message": "[NPC] There is no story yet to update from.", "signal": "end_turn"}
+
+    story = "\n\n".join(str(h) for h in history)[-10000:]
+    personality = ", ".join(npc.get("personality", []))
+
+    prompt = f"""You maintain the character records for the NPCs of a text RPG. The player has asked you to bring one character's record up to date: check the recent story for LASTING changes to this character and rewrite only the fields that changed.
+
+CHARACTER RECORD FOR: {npc.get('name', '')}
+  Name: {npc.get('name', '')}
+  Race: {npc.get('race', '') or '(not recorded)'}
+  Gender: {npc.get('gender', '') or '(not recorded)'}
+  Appearance: {npc.get('appearance', '') or '(not yet described)'}
+  Archetype: {npc.get('archetype', '')}
+  Role: {npc.get('role', 'neutral')}
+  Status: {npc.get('status', 'active')}
+  Personality: {personality or '(not yet described)'}
+  Pitch: {npc.get('pitch', '') or '(none)'}
+  Notes: {npc.get('notes', '') or '(none)'}
+
+RECENT STORY (oldest to newest):
+{story}
+
+Report ONLY durable changes this character undergoes in the story above -- new injuries or looks, a new name or title, a lasting personality shift, a changed narrative role, death or departure, or noteworthy things they did. Ignore scenes that don't involve them and momentary emotions or states.
+
+For each changed field return its NEW full value (rewrite the field in full, incorporating the change):
+- "appearance", "pitch": full rewritten text
+- "personality": the full updated list of exactly 3 trait keywords
+- "name": only if they are now called something else
+- "role": one of {'|'.join(NPC_ROLES)} -- only if their narrative function clearly shifted
+- "status": one of active|departed|deceased -- only if the story shows them dying or leaving the story
+- "notes": the existing notes plus new observations appended (keep it a compact running log)
+Also return "change_note": one short sentence summarizing what changed.
+
+If nothing durable changed, return an empty object {{}}.
+
+Respond with ONLY valid JSON containing just the changed fields (plus change_note)."""
+
+    raw = await sdk.llm.generate(prompt, model_preference="balanced")
+    parsed = _parse_json_block(raw)
+    if not isinstance(parsed, dict):
+        return {"message": "[NPC] The update pass returned nothing usable -- try again.", "signal": "end_turn"}
+
+    changes = _sanitize_edits({k: v for k, v in parsed.items() if k in UPDATE_FIELDS}, npc)
+    if not changes:
+        return {
+            "message": f"[NPC] No lasting changes to {npc.get('name', npc_id)} found in the recent story.",
+            "signal": "end_turn",
+        }
+
+    turn = state.get("turn", 0)
+    change_note = str(parsed.get("change_note", "")).strip()
+    npc.update(changes)
+    _log_change(npc, turn, change_note or f"Story update: {', '.join(changes)}", list(changes), "story")
+
+    if change_note:
+        await sdk.memory.remember(npc_id, change_note, turn, importance=6)
+
+    print(f"[NPC System] {npc.get('name', npc_id)} updated from story: {', '.join(changes)}")
+
+    lines = [f"[NPC] Updated {npc.get('name', npc_id)} from the recent story."]
+    if change_note:
+        lines.append(change_note)
+    lines.append(f"Fields updated: {', '.join(changes)}")
+    return {"message": "\n".join(lines), "signal": "end_turn", **_set_bank({}, bank)}
+
+
+def _apply_manual_edit(npc_id: str, payload: str, state: dict) -> dict:
+    """Apply a browser edit. The payload is URL-encoded JSON (one whitespace-free
+    token, so it survives the command dispatcher's text.split())."""
+    bank = _get_bank(state)
+    npc = bank.get(npc_id)
+    if not npc:
+        return {"message": f"[NPC] Unknown character id: {npc_id}", "signal": "end_turn"}
+
+    try:
+        raw = json.loads(urllib.parse.unquote(payload))
+    except (json.JSONDecodeError, ValueError):
+        raw = None
+    if not isinstance(raw, dict):
+        return {"message": "[NPC] Could not parse the edit payload.", "signal": "end_turn"}
+
+    edits = _sanitize_edits(raw, npc)
+    if not edits:
+        return {"message": f"[NPC] Nothing to change for {npc.get('name', npc_id)}.", "signal": "end_turn"}
+
+    npc.update(edits)
+    _log_change(npc, state.get("turn", 0), f"Manual edit: {', '.join(edits)}", list(edits), "manual")
+
+    return {
+        "message": f"[NPC] Updated {npc.get('name', npc_id)}: {', '.join(edits)}",
+        "signal": "end_turn",
+        **_set_bank({}, bank),
+    }
+
+
+async def on_command_npc(args: list[str], state: dict, sdk) -> dict:
+    usage = "[NPC] Usage: /npc update <npc_id> | /npc edit <npc_id> <data>"
+    if not args:
+        return {"message": usage, "signal": "end_turn"}
+
+    sub = args[0].lower()
+    if sub in ("update", "refresh") and len(args) >= 2:
+        return await _update_npc_from_story(args[1], state, sdk)
+    if sub == "edit" and len(args) >= 3:
+        return _apply_manual_edit(args[1], " ".join(args[2:]), state)
+    return {"message": usage, "signal": "end_turn"}

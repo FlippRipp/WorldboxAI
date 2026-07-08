@@ -93,12 +93,16 @@
       "config": {}
     }
   ],
+  "character_tab": "character_tab.jsx",
+  "character_tab_label": "Characters",
   "commands": {
     "/npcs": "on_command_npcs",
-    "/npclist": "on_command_npclist"
+    "/npclist": "on_command_npclist",
+    "/npc": "on_command_npc"
   },
   "command_help": {
     "/npcs": "Show details on known NPCs",
-    "/npclist": "List all NPCs you've met"
+    "/npclist": "List all NPCs you've met",
+    "/npc": "Manage a character: /npc update <id> | /npc edit <id> <data>"
   }
 }

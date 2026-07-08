@@ -286,6 +286,16 @@ function fmtCount(n) {
   return String(n);
 }
 
+// Source page link for a browse item or saved entry. NSFW Civitai models live
+// on the dedicated .red domain (same /models/{id} path), so route them there.
+function loraLink(item) {
+  const url = item.page_url || item.civitai_url || '';
+  if (item.nsfw && url.startsWith('https://civitai.com/')) {
+    return url.replace('https://civitai.com/', 'https://civitai.red/');
+  }
+  return url;
+}
+
 // Availability of a saved LoRA on Novita: Flux LoRAs travel as download links,
 // SD-family ones must exist in Novita's mirrored catalog (or be console-uploaded
 // and named manually).
@@ -406,7 +416,7 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
   const availability = loraAvailability(entry);
   const compatible = fam && checkpointFamily && fam === checkpointFamily;
   const dimmed = entry.active && !compatible;
-  const pageUrl = entry.page_url || entry.civitai_url;
+  const pageUrl = loraLink(entry);
   const sourceName = entry.source === 'hf' ? 'Hugging Face' : 'Civitai';
 
   return (
@@ -893,7 +903,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
 
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-96 overflow-y-auto pr-1">
             {visibleItems.map((item) => {
-              const pageUrl = item.page_url || item.civitai_url;
+              const pageUrl = loraLink(item);
               const badge = browseAvailability(item);
               return (
                 <div key={item.id} className="bg-gray-950/60 border border-gray-800 rounded-lg overflow-hidden">
