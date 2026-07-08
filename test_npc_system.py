@@ -245,6 +245,37 @@ def test_present_characters_injected_into_context():
     assert "Vex" not in ctx and "Old Han" not in ctx and "Ilya" not in ctx
 
 
+def test_present_characters_include_story_mentions_without_location():
+    # Saves without location tracking (or NPCs the travel pass moved) can't
+    # match on location; a character named in the recent story is still on
+    # stage and must reach the context.
+    backend = _load_backend()
+    sdk, _ = _make_sdk()
+    bank = {"npc_x": _present_npc("npc_x", "Mara", location_node_id=None,
+                                  location_region=None, location_layer_id=None)}
+    state = _state(bank, history=["You enter the market.", "Mara waves you over."])
+    state["player_location_node_id"] = ""
+    state["player_location_region"] = ""
+    state["player_location_layer_id"] = ""
+
+    result = asyncio.run(backend.on_gather_context(state, sdk))
+
+    assert "Mara" in result["context_string"]
+
+
+def test_present_characters_mention_matches_whole_words_only():
+    backend = _load_backend()
+    sdk, _ = _make_sdk()
+    bank = {"npc_x": _present_npc("npc_x", "Han", location_node_id=None,
+                                  location_region=None, location_layer_id=None)}
+    state = _state(bank, history=["You reach out a hand to the merchant."])
+    state["player_location_node_id"] = ""
+    state["player_location_region"] = ""
+    state["player_location_layer_id"] = ""
+
+    assert asyncio.run(backend.on_gather_context(state, sdk)) is None
+
+
 def test_present_characters_excluded_across_layers():
     backend = _load_backend()
     sdk, _ = _make_sdk()

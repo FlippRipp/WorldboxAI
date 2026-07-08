@@ -1,5 +1,6 @@
 """NPC System -- background character generation and introduction management."""
 import json
+import re
 import urllib.parse
 import uuid
 
@@ -319,9 +320,24 @@ Respond with ONLY a JSON array:
     return []
 
 
+RECENT_STORY_ENTRIES = 3
+
+
+def _named_in_recent_story(npc: dict, state: dict) -> bool:
+    """Whether the character is mentioned by name in the last few story turns.
+    Catches on-stage characters whose location data can't confirm presence --
+    saves without location tracking, or records the travel pass moved."""
+    name = str(npc.get("name", "")).strip()
+    if not name:
+        return False
+    recent = " ".join(str(h) for h in state.get("history", [])[-RECENT_STORY_ENTRIES:])
+    return bool(re.search(rf"\b{re.escape(name)}\b", recent, re.IGNORECASE))
+
+
 def _present_npcs(state: dict) -> list[dict]:
     """Introduced, living characters who are in the player's scene right now --
-    traveling with the player or located at their current node/region."""
+    traveling with the player, located at their current node/region, or named
+    in the recent story."""
     p_node = state.get("player_location_node_id")
     p_region = state.get("player_location_region")
     p_layer = state.get("player_location_layer_id")
@@ -334,9 +350,11 @@ def _present_npcs(state: dict) -> list[dict]:
             present.append(npc)
             continue
         node, region, layer = _npc_effective_location(npc, state)
-        if layer and p_layer and layer != p_layer:
-            continue
-        if (node and node == p_node) or (region and region == p_region):
+        layer_ok = not (layer and p_layer and layer != p_layer)
+        located_here = layer_ok and (
+            (node and node == p_node) or (region and region == p_region)
+        )
+        if located_here or _named_in_recent_story(npc, state):
             present.append(npc)
     return present
 
