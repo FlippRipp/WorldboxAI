@@ -1107,6 +1107,7 @@ export default function ImageStudio({ onBack }) {
         style_suffix: draft.style_suffix,
         character_reference_enabled: draft.character_reference_enabled !== false,
         player_in_images: draft.player_in_images || 'show',
+        chat_image_conceal: draft.chat_image_conceal || 'off',
         civitai_nsfw: draft.civitai_nsfw || 'off',
       };
       const res = await fetch(`${API_BASE}/config`, {
@@ -1344,6 +1345,22 @@ export default function ImageStudio({ onBack }) {
             onChange={(v) => set('enabled', v)}
             label="Auto-illustrate the story"
           />
+          <div>
+            <label className={labelCls}>Hide images in chat until clicked</label>
+            <select
+              value={draft.chat_image_conceal || 'off'}
+              onChange={(e) => set('chat_image_conceal', e.target.value)}
+              className={inputCls}
+            >
+              <option value="off">Off — show images immediately</option>
+              <option value="blur">Blur until clicked</option>
+              <option value="blackout">Black out until clicked</option>
+            </select>
+            <p className="text-xs text-gray-600 mt-1">
+              New illustrations in the story arrive covered; click one to reveal it.
+              Useful for surprise-sensitive scenes or reading in public.
+            </p>
+          </div>
           <div>
             <label className={labelCls}>Generate every N storyteller turns: {draft.interval}</label>
             <input

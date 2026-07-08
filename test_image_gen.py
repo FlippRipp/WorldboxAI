@@ -314,6 +314,28 @@ def test_images_index_filters_by_save_and_counts_pending(tmp_path):
     assert body["pending"] == 2
 
 
+def test_chat_image_conceal_config_and_index_exposure(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    # Defaults to off; the chat widget reads the mode off the images index.
+    assert client.get("/config").json()["chat_image_conceal"] == "off"
+    assert client.get("/images").json()["chat_image_conceal"] == "off"
+
+    assert client.put("/config", json={"chat_image_conceal": "sepia"}).status_code == 400
+
+    resp = client.put("/config", json={"chat_image_conceal": "blackout"})
+    assert resp.status_code == 200
+    assert resp.json()["chat_image_conceal"] == "blackout"
+    assert client.get("/images").json()["chat_image_conceal"] == "blackout"
+
+    # An unknown stored value (hand-edited config) normalizes back to off.
+    cfg = backend._load_config()
+    cfg["chat_image_conceal"] = "bogus"
+    backend._save_config(cfg)
+    assert backend._load_config()["chat_image_conceal"] == "off"
+
+
 def test_prompt_style_detection(tmp_path):
     backend = _load_backend(tmp_path)
 

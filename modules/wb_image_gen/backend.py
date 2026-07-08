@@ -110,6 +110,8 @@ CHAR_REF_MAX_NPCS = 6
 CHAR_REF_APPEARANCE_MAX = 200
 CHAR_REF_MAX_CHARS = 1200
 PLAYER_IN_IMAGES_MODES = ("show", "pov")
+# How finished images appear in chat before the user clicks to reveal them.
+CHAT_IMAGE_CONCEAL_MODES = ("off", "blur", "blackout")
 
 LORA_CONDITION_PROMPT = """You gate style adapters (LoRAs) for an AI image generator. For each numbered condition below, decide whether it applies to the scene being illustrated. Be literal: a condition applies only when the scene actually shows or strongly implies it.
 
@@ -197,6 +199,7 @@ def _default_config() -> dict:
         "style_suffix": "",
         "character_reference_enabled": True,
         "player_in_images": "show",     # one of PLAYER_IN_IMAGES_MODES
+        "chat_image_conceal": "off",    # one of CHAT_IMAGE_CONCEAL_MODES
         "civitai_api_key": "",
         "civitai_nsfw": "off",          # one of CIVITAI_NSFW_MODES
         "hf_api_key": "",               # optional; raises Hub rate limits
@@ -227,6 +230,8 @@ def _load_config() -> dict:
         cfg["civitai_nsfw"] = "include" if cfg.get("civitai_nsfw") is True else "off"
     if cfg.get("player_in_images") not in PLAYER_IN_IMAGES_MODES:
         cfg["player_in_images"] = "show"
+    if cfg.get("chat_image_conceal") not in CHAT_IMAGE_CONCEAL_MODES:
+        cfg["chat_image_conceal"] = "off"
     return cfg
 
 
@@ -1619,6 +1624,7 @@ def get_router():
         style_suffix: str | None = None
         character_reference_enabled: bool | None = None
         player_in_images: str | None = None
+        chat_image_conceal: str | None = None
         civitai_api_key: str | None = None
         civitai_nsfw: str | None = None
         hf_api_key: str | None = None
@@ -1726,6 +1732,10 @@ def get_router():
                 and incoming["player_in_images"] not in PLAYER_IN_IMAGES_MODES):
             raise HTTPException(status_code=400,
                                 detail=f"player_in_images must be one of {PLAYER_IN_IMAGES_MODES}")
+        if ("chat_image_conceal" in incoming
+                and incoming["chat_image_conceal"] not in CHAT_IMAGE_CONCEAL_MODES):
+            raise HTTPException(status_code=400,
+                                detail=f"chat_image_conceal must be one of {CHAT_IMAGE_CONCEAL_MODES}")
 
         cfg.update(incoming)
         _save_config(cfg)
@@ -1766,7 +1776,10 @@ def get_router():
         records = records[-max(1, min(500, limit)):]
         records.reverse()
         pending = sum(1 for r in records if r.get("status") in ("pending", "prompting", "generating"))
-        return {"records": records, "pending": pending}
+        # The chat footer conceals images per this mode; riding along on the
+        # index it already polls saves it a second config request.
+        conceal = _load_config().get("chat_image_conceal", "off")
+        return {"records": records, "pending": pending, "chat_image_conceal": conceal}
 
     @router.get("/images/file/{filename}")
     async def get_image(filename: str):

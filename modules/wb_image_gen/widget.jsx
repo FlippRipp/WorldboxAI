@@ -9,6 +9,11 @@ const POLL_MS = 4000;
 const store = {
   records: [],
   pending: 0,
+  // 'off' | 'blur' | 'blackout' — how finished images appear until clicked.
+  conceal: 'off',
+  // Record ids the user has revealed this browser session. Shared so a
+  // remount (scroll, save switch and back) doesn't re-hide them.
+  revealed: new Set(),
   saveId: null,
   listeners: new Set(),
   timer: null,
@@ -29,6 +34,7 @@ async function refreshIndex(saveId) {
     const data = await res.json();
     store.records = data.records || [];
     store.pending = data.pending || 0;
+    store.conceal = data.chat_image_conceal || 'off';
     notify();
   } catch (e) {
     // Network hiccups just mean the next poll tries again.
@@ -148,19 +154,46 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
     'px-2 py-1 rounded text-xs leading-none bg-black/60 text-gray-300 ' +
     'border border-white/10 hover:bg-black/80 hover:text-white transition-colors';
 
+  const reveal = (recordId) => {
+    store.revealed.add(recordId);
+    notify();
+  };
+
   return (
     <div className="mt-4 space-y-3">
       {records.map((r) => {
         if (r.status === 'done' && r.filename) {
+          const concealed = store.conceal !== 'off' && !store.revealed.has(r.id);
           return (
             <div key={r.id} className="relative inline-block">
-              <img
-                src={`${API_BASE}/images/file/${r.filename}`}
-                alt={r.image_prompt || 'Story illustration'}
-                loading="lazy"
-                onClick={() => setLightbox(r)}
-                className="max-h-80 rounded-lg border border-gray-700/60 shadow-lg cursor-zoom-in"
-              />
+              {/* The wrapper clips the blur's soft edges (the image is scaled
+                  up slightly so blurred content still fills its own frame). */}
+              <div className="overflow-hidden rounded-lg">
+                <img
+                  src={`${API_BASE}/images/file/${r.filename}`}
+                  alt={concealed ? 'Hidden story illustration' : (r.image_prompt || 'Story illustration')}
+                  loading="lazy"
+                  onClick={() => (concealed ? reveal(r.id) : setLightbox(r))}
+                  className={`max-h-80 rounded-lg border border-gray-700/60 shadow-lg ${
+                    concealed
+                      ? store.conceal === 'blackout'
+                        ? 'cursor-pointer brightness-0'
+                        : 'cursor-pointer blur-2xl scale-110'
+                      : 'cursor-zoom-in'
+                  }`}
+                />
+              </div>
+              {concealed && (
+                <button
+                  onClick={() => reveal(r.id)}
+                  aria-label="Reveal illustration"
+                  className="absolute inset-0 flex items-center justify-center rounded-lg cursor-pointer"
+                >
+                  <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/60 border border-white/10 text-xs text-gray-300">
+                    <span aria-hidden="true">👁</span> Click to reveal
+                  </span>
+                </button>
+              )}
               <div className="absolute top-2 right-2 flex gap-1">
                 <button
                   onClick={() => regenerate(r.id)}
