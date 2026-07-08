@@ -21,11 +21,18 @@ def _make_sdk(reply: str, captured: dict):
         return reply
 
     async def remember(entity_id, text, turn, importance=5, permanent=False, tags=None):
-        captured.setdefault("memories", []).append({"id": entity_id, "text": text, "turn": turn})
+        captured.setdefault("memories", []).append({
+            "id": entity_id, "text": text, "turn": turn,
+            "permanent": permanent, "tags": list(tags or []),
+        })
+
+    async def forget(entity_id, tags=None):
+        captured.setdefault("forgotten", []).append({"id": entity_id, "tags": list(tags or [])})
+        return 1
 
     return SimpleNamespace(
         llm=SimpleNamespace(generate=generate, _current_module=""),
-        memory=SimpleNamespace(remember=remember),
+        memory=SimpleNamespace(remember=remember, forget=forget),
     )
 
 
@@ -145,6 +152,77 @@ def test_edit_unknown_id_and_bad_payload_fail_gracefully():
     assert "Could not parse" in garbage["message"]
 
 
+def test_edit_replaces_rag_profile_when_profile_fields_change():
+    backend = _load_backend()
+    captured = {}
+    npc = _npc()
+    npc["profile_embedded"] = True
+    state = _state(npc=npc)
+
+    result = asyncio.run(backend.on_command_npc(
+        _edit_cmd("npc_aaaa1111", {"name": "Serah Veil", "appearance": "Scarred and grey-cloaked."}),
+        state, _make_sdk("{}", captured),
+    ))
+
+    # Old profile removed from RAG, then the updated one embedded.
+    assert captured["forgotten"] == [{"id": "npc_aaaa1111", "tags": ["profile"]}]
+    profiles = [m for m in captured["memories"] if "profile" in m["tags"]]
+    assert len(profiles) == 1
+    assert profiles[0]["permanent"] is True
+    assert "Serah Veil" in profiles[0]["text"]
+    assert "grey-cloaked" in profiles[0]["text"]
+    npc = result["module_data"]["wb_npc_system"]["characters"]["npc_aaaa1111"]
+    assert npc["profile_embedded"] is True
+
+
+def test_edit_of_non_profile_fields_leaves_rag_alone():
+    backend = _load_backend()
+    captured = {}
+    npc = _npc()
+    npc["profile_embedded"] = True
+
+    asyncio.run(backend.on_command_npc(
+        _edit_cmd("npc_aaaa1111", {"notes": "Owes the player a favor.", "status": "departed"}),
+        _state(npc=npc), _make_sdk("{}", captured),
+    ))
+
+    assert "forgotten" not in captured
+    assert not any("profile" in m["tags"] for m in captured.get("memories", []))
+
+
+def test_edit_before_profile_embedded_does_not_touch_rag():
+    # An unintroduced NPC has no profile in RAG yet; editing it must not embed
+    # one early -- the (now current) profile is embedded at introduction.
+    backend = _load_backend()
+    captured = {}
+    npc = _npc(introduced=False)
+
+    asyncio.run(backend.on_command_npc(
+        _edit_cmd("npc_aaaa1111", {"name": "Serah Veil"}),
+        _state(npc=npc), _make_sdk("{}", captured),
+    ))
+
+    assert "forgotten" not in captured
+    assert "memories" not in captured
+
+
+def test_edit_respects_embed_profiles_toggle_off():
+    backend = _load_backend()
+    captured = {}
+    npc = _npc()
+    npc["profile_embedded"] = True
+    state = _state(npc=npc)
+    state["module_configs"] = {"wb_npc_system": {"embed_profiles": False}}
+
+    asyncio.run(backend.on_command_npc(
+        _edit_cmd("npc_aaaa1111", {"name": "Serah Veil"}),
+        state, _make_sdk("{}", captured),
+    ))
+
+    assert "forgotten" not in captured
+    assert "memories" not in captured
+
+
 def test_usage_message_for_missing_args():
     backend = _load_backend()
     sdk = _make_sdk("{}", {})
@@ -184,6 +262,26 @@ def test_update_merges_changed_fields_and_remembers():
     assert captured["memories"][0]["id"] == "npc_aaaa1111"
     assert "wounded" in captured["memories"][0]["text"]
     assert "Serah" in result["message"]
+
+
+def test_update_replaces_rag_profile_when_profile_fields_change():
+    backend = _load_backend()
+    captured = {}
+    npc = _npc()
+    npc["profile_embedded"] = True
+    reply = json.dumps({
+        "appearance": "Silver-haired, her shoulder bandaged from an arrow wound.",
+        "change_note": "Serah was wounded defending the archive.",
+    })
+
+    asyncio.run(backend.on_command_npc(
+        ["update", "npc_aaaa1111"], _state(npc=npc), _make_sdk(reply, captured),
+    ))
+
+    assert captured["forgotten"] == [{"id": "npc_aaaa1111", "tags": ["profile"]}]
+    profiles = [m for m in captured["memories"] if "profile" in m["tags"]]
+    assert len(profiles) == 1
+    assert "bandaged" in profiles[0]["text"]
 
 
 def test_update_can_mark_a_character_deceased():

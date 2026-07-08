@@ -392,6 +392,34 @@ def test_memory_bridge_remember_permanent_profile(tmp_path):
     assert any(m["text"] == "A dragon-blooded knight in crimson." for m in semantic)
 
 
+def test_memory_bridge_forget_deletes_only_matching_memories(tmp_path):
+    # forget(tags=["profile"]) must remove exactly the NPC's profile memory,
+    # leaving its episodic memories and other NPCs' rows untouched.
+    from backend.sdk.memory_bridge import MemoryBridge
+
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    engine = SimpleNamespace(memory=manager, llm=_FakeEmbedder())
+    bridge = MemoryBridge()
+    bridge._set_engine(engine)
+
+    _run(bridge.remember("npc_1", "A dragon-blooded knight in crimson.", turn=1,
+                         importance=8, permanent=True, tags=["profile"]))
+    _run(bridge.remember("npc_1", "Met the player at the harbor.", turn=2))
+    _run(bridge.remember("npc_2", "A dragon cultist in hiding.", turn=1,
+                         importance=8, permanent=True, tags=["profile"]))
+
+    deleted = _run(bridge.forget("npc_1", tags=["profile"]))
+    assert deleted == 1
+
+    npc1_rows = manager.get_memories_by_entity("npc:npc_1", limit=10)
+    assert [m["text"] for m in npc1_rows] == ["Met the player at the harbor."]
+    assert len(manager.get_memories_by_entity("npc:npc_2", limit=10)) == 1
+
+    # Untagged forget clears everything left for the NPC.
+    assert _run(bridge.forget("npc_1")) == 1
+    assert manager.get_memories_by_entity("npc:npc_1", limit=10) == []
+
+
 async def _mock_structured_summary():
     os.environ["LLM_MODE"] = "mock"
     try:

@@ -26,6 +26,26 @@ class MemoryBridge:
             logger.error(f"[MemoryBridge] remember failed for {npc_id}: {e}")
             return ""
 
+    async def forget(self, npc_id: str, tags: list[str] | None = None) -> int:
+        """Delete an NPC's stored memories -- all of them, or only those carrying
+        every tag in ``tags`` (e.g. tags=["profile"] removes just the embedded
+        profile). Returns the number of memories deleted."""
+        if self._engine is None or self._engine.memory is None:
+            return 0
+        try:
+            wanted = set(tags or [])
+            rows = self._engine.memory.get_memories_by_entity(f"npc:{npc_id}", limit=10000)
+            deleted = 0
+            for row in rows:
+                if wanted and not wanted.issubset(set(row.get("entities", []))):
+                    continue
+                if self._engine.memory.delete_memory(row["id"]):
+                    deleted += 1
+            return deleted
+        except Exception as e:
+            logger.error(f"[MemoryBridge] forget failed for {npc_id}: {e}")
+            return 0
+
     async def recall(self, npc_id: str, limit: int = 3) -> list[dict]:
         if self._engine is None or self._engine.memory is None:
             return []

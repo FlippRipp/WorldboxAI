@@ -13,6 +13,10 @@ EDITABLE_FIELDS = ("name", "race", "gender", "appearance", "archetype", "pitch",
 # Subset the story-update pass is asked to rewrite (race/gender/archetype are
 # creation-time facts the story rarely changes; edit them manually instead).
 UPDATE_FIELDS = ("name", "appearance", "personality", "pitch", "role", "status", "notes")
+# Fields that feed _profile_text -- changing any of these makes the RAG profile
+# stale, so edits touching them must replace the stored embedding.
+PROFILE_FIELDS = ("name", "race", "gender", "appearance", "archetype", "pitch",
+                  "personality", "role")
 MAX_CHANGE_LOG = 20
 DEFAULT_GENERATOR_FREQUENCY = 5
 DEFAULT_MAX_POOL = 6
@@ -66,19 +70,36 @@ def _profile_text(npc: dict) -> str:
     return ". ".join(parts)
 
 
-async def _embed_profile(npc: dict, turn: int, sdk) -> None:
+async def _embed_profile(npc: dict, turn: int, sdk, force: bool = False) -> None:
     """Embed a character's full profile into RAG as a permanent memory so it
-    stays retrievable for the rest of the story. Idempotent per NPC."""
-    if npc.get("profile_embedded"):
+    stays retrievable for the rest of the story. Idempotent per NPC unless
+    ``force`` is set, which deletes the stored profile and embeds the current
+    one in its place."""
+    if npc.get("profile_embedded") and not force:
         return
     npc_id = npc.get("id")
     if not npc_id:
         return
+    if npc.get("profile_embedded"):
+        await sdk.memory.forget(npc_id, tags=["profile"])
     await sdk.memory.remember(
         npc_id, _profile_text(npc), turn,
         importance=8, permanent=True, tags=["profile"],
     )
     npc["profile_embedded"] = True
+
+
+async def _refresh_profile_embedding(npc: dict, changed_fields: list[str], state: dict, sdk) -> None:
+    """After an edit, replace the character's RAG profile if any field that
+    feeds it changed. NPCs with no embedded profile yet are left alone -- they
+    get an already-current embedding when they are introduced."""
+    if not npc.get("profile_embedded"):
+        return
+    if not _config(state).get("embed_profiles", True):
+        return
+    if not any(f in PROFILE_FIELDS for f in changed_fields):
+        return
+    await _embed_profile(npc, state.get("turn", 0), sdk, force=True)
 
 
 def _build_npc_record(npc_data: dict, turn: int, bank: dict, *, introduced: bool = False,
@@ -1191,6 +1212,7 @@ Respond with ONLY valid JSON containing just the changed fields (plus change_not
     change_note = str(parsed.get("change_note", "")).strip()
     npc.update(changes)
     _log_change(npc, turn, change_note or f"Story update: {', '.join(changes)}", list(changes), "story")
+    await _refresh_profile_embedding(npc, list(changes), state, sdk)
 
     if change_note:
         await sdk.memory.remember(npc_id, change_note, turn, importance=6)
@@ -1204,7 +1226,7 @@ Respond with ONLY valid JSON containing just the changed fields (plus change_not
     return {"message": "\n".join(lines), "signal": "end_turn", **_set_bank({}, bank)}
 
 
-def _apply_manual_edit(npc_id: str, payload: str, state: dict) -> dict:
+async def _apply_manual_edit(npc_id: str, payload: str, state: dict, sdk) -> dict:
     """Apply a browser edit. The payload is URL-encoded JSON (one whitespace-free
     token, so it survives the command dispatcher's text.split())."""
     bank = _get_bank(state)
@@ -1225,6 +1247,7 @@ def _apply_manual_edit(npc_id: str, payload: str, state: dict) -> dict:
 
     npc.update(edits)
     _log_change(npc, state.get("turn", 0), f"Manual edit: {', '.join(edits)}", list(edits), "manual")
+    await _refresh_profile_embedding(npc, list(edits), state, sdk)
 
     return {
         "message": f"[NPC] Updated {npc.get('name', npc_id)}: {', '.join(edits)}",
@@ -1242,5 +1265,5 @@ async def on_command_npc(args: list[str], state: dict, sdk) -> dict:
     if sub in ("update", "refresh") and len(args) >= 2:
         return await _update_npc_from_story(args[1], state, sdk)
     if sub == "edit" and len(args) >= 3:
-        return _apply_manual_edit(args[1], " ".join(args[2:]), state)
+        return await _apply_manual_edit(args[1], " ".join(args[2:]), state, sdk)
     return {"message": usage, "signal": "end_turn"}

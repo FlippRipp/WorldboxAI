@@ -14,7 +14,7 @@ def _load_backend():
 
 
 def _make_sdk(generate_reply="{}"):
-    calls = {"remember": [], "prompts": [], "generate_count": 0}
+    calls = {"remember": [], "forget": [], "prompts": [], "generate_count": 0}
 
     async def generate(prompt, model_preference="balanced", max_tokens=None):
         calls["prompts"].append(prompt)
@@ -31,9 +31,13 @@ def _make_sdk(generate_reply="{}"):
     async def recall(npc_id, limit=3):
         return []
 
+    async def forget(npc_id, tags=None):
+        calls["forget"].append({"npc_id": npc_id, "tags": list(tags or [])})
+        return 1
+
     sdk = SimpleNamespace(
         llm=SimpleNamespace(generate=generate),
-        memory=SimpleNamespace(remember=remember, recall=recall),
+        memory=SimpleNamespace(remember=remember, recall=recall, forget=forget),
     )
     return sdk, calls
 
@@ -93,6 +97,23 @@ def test_embed_profile_is_idempotent():
     asyncio.run(backend._embed_profile(npc, turn=3, sdk=sdk))
 
     assert len([c for c in calls["remember"] if c["tags"] == ["profile"]]) == 1
+
+
+def test_embed_profile_force_replaces_old_profile():
+    backend = _load_backend()
+    sdk, calls = _make_sdk()
+    npc = {"id": "npc_x", "name": "Sela", "role": "informant", "personality": []}
+
+    asyncio.run(backend._embed_profile(npc, turn=2, sdk=sdk))
+    npc["name"] = "Sela the Grey"
+    asyncio.run(backend._embed_profile(npc, turn=5, sdk=sdk, force=True))
+
+    # The stale profile is forgotten before the updated one is embedded.
+    assert calls["forget"] == [{"npc_id": "npc_x", "tags": ["profile"]}]
+    profiles = [c for c in calls["remember"] if c["tags"] == ["profile"]]
+    assert len(profiles) == 2
+    assert "Sela the Grey" in profiles[-1]["text"]
+    assert npc["profile_embedded"] is True
 
 
 def test_embed_profiles_toggle_off_skips_embedding():
