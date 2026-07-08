@@ -80,8 +80,8 @@ export default function MemoryBrowser({ isOpen, onClose, saveId }) {
   const editMemory = (memory) => setEditing({
     title: 'Edit Memory',
     fields: [
-      { key: 'summary', label: 'Summary', type: 'textarea' },
-      { key: 'text', label: 'Full text (changing it re-embeds the memory)', type: 'textarea' },
+      { key: 'summary', label: 'Summary (what retrieval matches on — editing re-embeds)', type: 'textarea' },
+      { key: 'text', label: 'Full text (what gets injected into the story context)', type: 'textarea' },
       { key: 'importance', label: 'Importance (1-10)', type: 'number', min: 1, max: 10 },
       { key: 'permanent', label: 'Permanent (never decays)', type: 'checkbox' },
     ],

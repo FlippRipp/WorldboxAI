@@ -310,6 +310,13 @@ def test_memory_update_endpoint(tmp_path, monkeypatch):
     vector = asyncio.run(server.engine.llm.get_embedding("Original memory"))
     memory_id = server.engine.memory.add_memory(vector, "Original memory", turn=1, importance=5)
 
+    def stored_embedding():
+        return server.engine.memory.conn.execute(
+            "SELECT embedding FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()["embedding"]
+
+    # A summary edit changes what retrieval matches on, so it must re-embed.
+    before = stored_embedding()
     resp = client.put(f"/api/session/memories/{memory_id}", json={
         "summary": "Concise version", "importance": 12, "permanent": True,
     })
@@ -319,16 +326,55 @@ def test_memory_update_endpoint(tmp_path, monkeypatch):
     assert memory["importance"] == 10  # clamped
     assert memory["permanent"] is True
     assert memory["text"] == "Original memory"
+    assert stored_embedding() != before
+    # The new vector is the embedding of the edited summary, not the text.
+    from backend.engine.memory import _serialize
+    expected = asyncio.run(server.engine.llm.get_embedding("Concise version"))
+    assert stored_embedding() == _serialize(expected)
 
-    # Text edit re-embeds with the mock provider.
+    # A text-only edit on a row with a distinct summary changes what gets
+    # injected but not the retrieval key, so the embedding stays put.
+    before = stored_embedding()
     resp = client.put(f"/api/session/memories/{memory_id}", json={"text": "Rewritten memory"})
     assert resp.status_code == 200
-    assert resp.json()["memory"]["text"] == "Rewritten memory"
+    updated = resp.json()["memory"]
+    assert updated["text"] == "Rewritten memory"
+    assert updated["summary"] == "Concise version"
+    assert stored_embedding() == before
 
     assert client.put("/api/session/memories/no-such-id",
                       json={"importance": 3}).status_code == 404
     assert client.put(f"/api/session/memories/{memory_id}",
                       json={"text": "   "}).status_code == 400
+
+
+def test_memory_update_syncs_summary_for_bridge_rows(tmp_path, monkeypatch):
+    # Module/bridge memories are stored with summary == text; editing the text
+    # must carry the summary along and re-embed, or the browser keeps showing
+    # (and RAG keeps matching) the old content.
+    import asyncio
+
+    client, _ = make_client(tmp_path, monkeypatch)
+
+    asyncio.run(server.engine.ensure_memory())
+    vector = asyncio.run(server.engine.llm.get_embedding("Borin owes the player a debt."))
+    memory_id = server.engine.memory.add_memory(
+        vector, "Borin owes the player a debt.", turn=1, importance=8,
+        entities=["npc:npc_1", "profile"], permanent=True)
+
+    def stored_embedding():
+        return server.engine.memory.conn.execute(
+            "SELECT embedding FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()["embedding"]
+
+    before = stored_embedding()
+    resp = client.put(f"/api/session/memories/{memory_id}",
+                      json={"text": "Borin has repaid his debt to the player."})
+    assert resp.status_code == 200
+    memory = resp.json()["memory"]
+    assert memory["text"] == "Borin has repaid his debt to the player."
+    assert memory["summary"] == "Borin has repaid his debt to the player."
+    assert stored_embedding() != before
 
 
 def test_memory_browser_works_before_first_turn(tmp_path, monkeypatch):

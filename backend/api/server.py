@@ -526,15 +526,33 @@ class MemoryUpdateRequest(BaseModel):
 async def update_memory(memory_id: str, request: MemoryUpdateRequest):
     if not await _ensure_browsing_memory():
         raise HTTPException(status_code=503, detail="Memory system not initialized.")
+    rows = engine.memory.get_memories_by_ids([memory_id])
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found.")
+    existing = rows[0]
     fields = {k: v for k, v in request.model_dump().items() if v is not None}
     if "importance" in fields:
         fields["importance"] = max(1, min(10, fields["importance"]))
-    vector = None
-    if fields.get("text", "").strip():
+    if "text" in fields:
         fields["text"] = fields["text"].strip()
-        vector = await _embedding_for_edit(fields["text"], "memory_edit")
-    elif "text" in fields:
-        raise HTTPException(status_code=400, detail="Memory text cannot be empty.")
+        if not fields["text"]:
+            raise HTTPException(status_code=400, detail="Memory text cannot be empty.")
+        # Rows that never had a distinct summary (module/bridge memories store
+        # summary == text) keep the two in step, since the summary is what the
+        # browser displays and what the embedding is derived from.
+        if "summary" not in fields and existing["summary"] == existing["text"]:
+            fields["summary"] = fields["text"]
+    if "summary" in fields:
+        # An emptied summary falls back to the (possibly new) text, mirroring add_memory.
+        fields["summary"] = fields["summary"].strip() or fields.get("text", existing["text"])
+    # The stored embedding is derived from the summary (the librarian embeds its
+    # summary; bridge memories embed text, where summary == text), so re-embed
+    # whenever the effective summary changes — otherwise RAG retrieval keeps
+    # matching against the pre-edit content.
+    vector = None
+    new_summary = fields.get("summary", existing["summary"])
+    if new_summary != existing["summary"]:
+        vector = await _embedding_for_edit(new_summary, "memory_edit")
     memory = engine.memory.update_memory(memory_id, fields, vector=vector)
     if memory is None:
         raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found.")
