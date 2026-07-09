@@ -790,6 +790,27 @@ def test_lora_condition_patch_roundtrip(tmp_path):
     assert body["entry"]["condition"] == ""
 
 
+def test_lora_trained_words_patch_roundtrip(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend)
+    cfg = backend._load_config()
+    cfg["lora_library"] = [_lora(id="1")]
+    backend._save_config(cfg)
+
+    client = _client(backend)
+    # Edited words are trimmed, blanks dropped, and persisted.
+    body = client.patch(
+        "/loras/1", json={"trained_words": ["  glowing runes ", "", "ornate armor"]}).json()
+    assert body["entry"]["trained_words"] == ["glowing runes", "ornate armor"]
+    assert backend._load_config()["lora_library"][0]["trained_words"] == [
+        "glowing runes", "ornate armor"]
+
+    # Clearing works, and the list is capped.
+    assert client.patch("/loras/1", json={"trained_words": []}).json()["entry"]["trained_words"] == []
+    body = client.patch("/loras/1", json={"trained_words": [str(i) for i in range(40)]}).json()
+    assert len(body["entry"]["trained_words"]) == 20
+
+
 def test_flux2_payload_uses_download_links_with_token(tmp_path):
     backend = _load_backend(tmp_path)
     cfg = _lora_cfg(backend, model_name=backend.FLUX2_MODEL_NAME, model_base="",

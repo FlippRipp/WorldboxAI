@@ -415,9 +415,12 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
   const [busy, setBusy] = useState(false);
   const [detected, setDetected] = useState(null); // new upload seen but still processing
   const [condition, setCondition] = useState(entry.condition || '');
+  const [triggers, setTriggers] = useState((entry.trained_words || []).join(', '));
 
   useEffect(() => { setStrength(entry.strength ?? 0.7); }, [entry.strength]);
   useEffect(() => { setCondition(entry.condition || ''); }, [entry.condition]);
+  useEffect(() => { setTriggers((entry.trained_words || []).join(', ')); },
+    [entry.trained_words]);
 
   const llmMode = loraLlmMode(entry);
   const aiWeighted = llmMode === 'weight' || llmMode === 'both';
@@ -431,6 +434,12 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
       if (next && llmMode === 'off') patch.llm_mode = 'gate';
       onPatch(entry.id, patch);
     }
+  };
+
+  const commitTriggers = () => {
+    const next = triggers.split(',').map((w) => w.trim()).filter(Boolean).slice(0, 20);
+    const cur = entry.trained_words || [];
+    if (next.join('\n') !== cur.join('\n')) onPatch(entry.id, { trained_words: next });
   };
 
   const cycleLlmMode = () => {
@@ -612,6 +621,26 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
             }[llmMode]}
             className={`${inputCls} text-xs`}
             maxLength={300}
+          />
+        </div>
+      )}
+
+      {entry.active && (
+        <div className="flex items-center gap-2">
+          <label
+            className="text-[10px] uppercase tracking-wider shrink-0 text-gray-500"
+            title="Trigger words woven into every prompt that uses this LoRA. Pulled from the model page — edit them here if they're wrong or missing. Comma-separated."
+          >
+            Triggers
+          </label>
+          <input
+            type="text"
+            value={triggers}
+            onChange={(e) => setTriggers(e.target.value)}
+            onBlur={commitTriggers}
+            onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+            placeholder="none — comma-separated words injected into the prompt (e.g. glowing runes, ornate armor)"
+            className={`${inputCls} text-xs`}
           />
         </div>
       )}

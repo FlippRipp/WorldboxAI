@@ -1848,6 +1848,7 @@ def get_router():
         sd_name_override: str | None = None
         condition: str | None = None
         llm_mode: str | None = None
+        trained_words: list[str] | None = None
 
     class KeySubmit(BaseModel):
         api_key: str
@@ -2199,6 +2200,12 @@ def get_router():
                     detail=f"llm_mode must be one of: {', '.join(LORA_LLM_MODES)}")
             entry["llm_mode"] = patch.llm_mode
             entry.pop("llm_weight", None)  # superseded pre-mode flag
+        if patch.trained_words is not None:
+            # Trigger words are pulled from the model page but are often wrong
+            # or missing; let the user correct them. Same shape as intake:
+            # trimmed, non-empty, capped.
+            entry["trained_words"] = [
+                str(w).strip() for w in patch.trained_words if str(w).strip()][:20]
         _save_config(cfg)
         return {"entry": entry, "lora_library": cfg["lora_library"]}
 
