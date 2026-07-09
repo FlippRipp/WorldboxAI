@@ -374,3 +374,36 @@ def test_attach_detach_lorebooks_on_save(tmp_path, monkeypatch):
     # Detach: rows are removed on the follow-up sync.
     client.put("/api/saves/autosave/lorebooks", json={"lorebook_ids": []})
     assert _world_db_lorebook_rows(tmp_path, "autosave") == []
+
+
+def test_undo_preserves_lorebook_links_and_keeps_toggles_effective(tmp_path, monkeypatch):
+    # Regression: undo_turn used to overwrite metadata with just {"turn": n},
+    # dropping lorebook_ids/fingerprint. The embedded rows survived in the world
+    # index but toggles no longer re-synced, so disabled entries kept surfacing
+    # in RAG. Undo must preserve the metadata the way restore_turn_snapshot does.
+    client, session_manager, _, _ = make_client(tmp_path, monkeypatch)
+    sm = session_manager
+
+    book_id = client.post(
+        "/api/lorebooks/import", json={"data": V2_LOREBOOK, "name": "Realm Lore"}
+    ).json()["lorebook"]["id"]
+    client.put("/api/saves/autosave/lorebooks", json={"lorebook_ids": [book_id]})
+    assert [r[0] for r in _world_db_lorebook_rows(tmp_path, "autosave")] == [
+        f"{book_id}:0", f"{book_id}:1"]
+
+    # Play two turns so a snapshot exists to undo to.
+    sm.state["turn"] = 1
+    sm.save_manager.save_turn("autosave", sm.state, 1)
+    sm.state["turn"] = 2
+    sm.save_manager.save_turn("autosave", sm.state, 2)
+
+    sm.save_manager.undo_turn("autosave", 1)
+
+    meta = sm.save_manager.read_core_json("autosave", "metadata.json", {})
+    assert meta["lorebook_ids"] == [book_id]
+    assert "lorebook_embed_fingerprint" in meta
+
+    # Toggling an entry off still re-embeds the active save (was a no-op before).
+    resp = client.put(f"/api/lorebooks/{book_id}/entries/0", json={"enabled": False})
+    assert resp.json()["synced"] is True
+    assert [r[0] for r in _world_db_lorebook_rows(tmp_path, "autosave")] == [f"{book_id}:1"]

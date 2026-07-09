@@ -407,10 +407,23 @@ class SaveManager:
             snap_turn = int(snap.stem.split("_")[1])
             if snap_turn > target_turn:
                 snap.unlink()
-                
-        # Update metadata to reflect target turn
-        with open(save_path / "Core" / "metadata.json", "w", encoding="utf-8") as f:
-            json.dump({"turn": target_turn}, f, indent=2)
+
+        # Update the turn counter while preserving the rest of the metadata
+        # (world_id, player location, lorebook_ids, lorebook_embed_fingerprint,
+        # …). Overwriting it wholesale would orphan the save's lorebook links —
+        # their rows stay embedded in the world index while lorebook_ids is lost,
+        # so disabled entries keep surfacing in RAG and can't be re-synced.
+        meta_path = save_path / "Core" / "metadata.json"
+        meta = {}
+        if meta_path.exists():
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                meta = {}
+        meta["turn"] = target_turn
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
 
         self._pack_save(save_id)
         self.clear_swipes(save_id)
