@@ -8,6 +8,11 @@ from litellm import acompletion, aembedding
 from backend.engine.schemas import MemorySummary, MemoryImportance
 from backend.engine.llm_inspector import LLMInspector
 
+try:
+    from litellm.utils import supports_reasoning as _litellm_supports_reasoning
+except Exception:  # pragma: no cover - older/newer litellm without the helper
+    _litellm_supports_reasoning = None
+
 
 def _llm_debug():
     return os.getenv("LLM_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
@@ -96,6 +101,13 @@ class LLMService:
         self._temperature = None
         self._top_p = None
         self._max_output_tokens = None
+        #: Reasoning effort requested on every completion so providers emit their
+        #: chain-of-thought (surfaced in the LLM inspector). "" / "off" / "none"
+        #: disables it. Only applied to models litellm reports as reasoning-capable.
+        self._reasoning_effort = (os.getenv("LLM_REASONING_EFFORT", "low") or "").strip().lower()
+        #: Cache of model -> reasoning-capable, so we don't re-query litellm (which
+        #: logs a warning for unknown models) on every request.
+        self._reasoning_support: dict[str, bool] = {}
         self.inspector: LLMInspector | None = None
 
     def set_inspector(self, inspector: LLMInspector):
@@ -117,6 +129,7 @@ class LLMService:
             "temperature": "_temperature",
             "top_p": "_top_p",
             "max_output_tokens": "_max_output_tokens",
+            "reasoning_effort": "_reasoning_effort",
         }
         for config_key, attr in mapping.items():
             val = config.get(config_key)
@@ -132,6 +145,8 @@ class LLMService:
                     val = float(val)
                 elif attr == "_max_output_tokens":
                     val = int(val)
+                elif attr == "_reasoning_effort":
+                    val = str(val).strip().lower()
                 setattr(self, attr, val)
 
         # Slots the provider config left empty must never keep another
@@ -179,6 +194,31 @@ class LLMService:
             return {}
         return {"extra_body": {"provider": {"order": [prov]}}}
 
+    def _model_supports_reasoning(self, model: str) -> bool:
+        """Whether ``model`` accepts a reasoning request. Cached because litellm's
+        ``supports_reasoning`` logs a warning for models missing from its cost map."""
+        if _litellm_supports_reasoning is None or not model:
+            return False
+        cached = self._reasoning_support.get(model)
+        if cached is None:
+            try:
+                cached = bool(_litellm_supports_reasoning(model))
+            except Exception:
+                cached = False
+            self._reasoning_support[model] = cached
+        return cached
+
+    def _reasoning_kwargs(self, model: str) -> dict:
+        """Return litellm kwargs that ask the provider to emit its chain-of-thought
+        so the LLM inspector can show it. Empty when reasoning is disabled or the
+        model isn't reasoning-capable (passing it there would error the request)."""
+        effort = self._reasoning_effort
+        if not effort or effort in ("off", "none", "disable", "false"):
+            return {}
+        if not self._model_supports_reasoning(model):
+            return {}
+        return {"reasoning_effort": effort}
+
     async def simple_completion(self, messages: list[dict[str, str]], model: str = None, max_tokens: int = None, temperature: float = None, top_p: float = None, response_format: Any = None, inspector_ctx: dict = None, return_reasoning: bool = False, return_usage: bool = False):
         # NOTE: `max_tokens` should NOT be used for content generation. It cuts off LLM output
         # mid-sentence and causes bugs. Prefer prompt-level output control instead
@@ -195,6 +235,7 @@ class LLMService:
         if response_format is not None:
             kwargs["response_format"] = response_format
         kwargs.update(self._provider_route_kwargs(model))
+        kwargs.update(self._reasoning_kwargs(model))
         extra_parts = []
         if max_tokens is not None:
             extra_parts.append(f"max_tokens: {max_tokens}")
@@ -227,7 +268,8 @@ class LLMService:
             if self.inspector and cid:
                 await self.inspector.end_call(cid, messages, content,
                                         usage.get("prompt_tokens", 0),
-                                        usage.get("completion_tokens", 0))
+                                        usage.get("completion_tokens", 0),
+                                        reasoning=reasoning)
             if return_usage:
                 return content, reasoning, usage
             return (content, reasoning) if return_reasoning else content
@@ -350,7 +392,7 @@ class LLMService:
             reasoning = self._mock_reasoning(messages)
             if self.inspector:
                 cid = await self.inspector.start_call(call_type=ctx.get("call_type", "storyteller"), model="mock", step=ctx.get("step", "storyteller"), module_source=ctx.get("module_source", ""), streaming=bool(streaming_callback), input_data=messages)
-                await self.inspector.end_call(cid, messages, story, 0, 0)
+                await self.inspector.end_call(cid, messages, story, 0, 0, reasoning=reasoning)
             if reasoning_callback and reasoning:
                 await reasoning_callback(reasoning)
             if streaming_callback:
@@ -565,6 +607,7 @@ Return a JSON object with:
             if streaming_callback:
                 kwargs["stream"] = True
                 kwargs.update(self._provider_route_kwargs(model))
+                kwargs.update(self._reasoning_kwargs(model))
                 extra = f"stream: True | max_tokens: {self._max_output_tokens}" if self._max_output_tokens is not None else "stream: True"
                 _llm_log_req("storyteller_stream", model, messages, extra)
                 response = await acompletion(**kwargs)
@@ -593,7 +636,8 @@ Return a JSON object with:
                 if self.inspector and cid:
                     await self.inspector.end_call(cid, messages, full_text,
                                             usage.get("prompt_tokens", 0),
-                                            usage.get("completion_tokens", 0))
+                                            usage.get("completion_tokens", 0),
+                                            reasoning=full_reasoning)
                 return {"content": full_text, "reasoning": full_reasoning, "model": model, "usage": usage}
 
             # No inspector_ctx here: this call is already recorded above as the
@@ -612,7 +656,8 @@ Return a JSON object with:
             if self.inspector and cid:
                 await self.inspector.end_call(cid, messages, result,
                                         usage.get("prompt_tokens", 0),
-                                        usage.get("completion_tokens", 0))
+                                        usage.get("completion_tokens", 0),
+                                        reasoning=reasoning)
             return {"content": result, "reasoning": reasoning, "model": model, "usage": usage}
         except asyncio.CancelledError:
             if self.inspector and cid:

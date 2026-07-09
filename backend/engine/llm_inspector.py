@@ -23,6 +23,7 @@ class LLMCallRecord:
     output_summary: str = ""
     full_input: Any = None
     full_output: str = ""
+    reasoning: str = ""
     error: str = ""
 
 
@@ -95,6 +96,7 @@ class LLMInspector:
         tokens_out: int = 0,
         error: str = "",
         cancelled: bool = False,
+        reasoning: str = "",
     ):
         record = self._records.pop(call_id, None)
         if record is None:
@@ -107,6 +109,7 @@ class LLMInspector:
             record.input_summary = self._summarize(input_data, 200)
         record.full_output = str(output_data) if output_data else ""
         record.output_summary = self._summarize(output_data, 200)
+        record.reasoning = str(reasoning) if reasoning else ""
         record.tokens_in = tokens_in
         record.tokens_out = tokens_out
         record.error = error
@@ -185,5 +188,6 @@ class LLMInspector:
             "output_summary": r.output_summary,
             "full_input": r.full_input,
             "full_output": r.full_output,
+            "reasoning": r.reasoning,
             "error": r.error,
         }

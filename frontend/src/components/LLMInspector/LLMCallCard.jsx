@@ -106,6 +106,18 @@ export default function LLMCallCard({ call, expanded, onToggle }) {
             <InputView input={call.full_input} fallback={call.input_summary} />
           </div>
 
+          {/* Reasoning (model chain-of-thought, when the provider emits it) */}
+          {!hasError && call.reasoning && (
+            <div>
+              <div className="text-[10px] text-gray-600 mb-1 flex items-center gap-1">
+                <span>🧠</span> Reasoning
+              </div>
+              <pre className="text-[11px] text-indigo-200/90 bg-indigo-950/30 border border-indigo-800/40 rounded p-2 overflow-x-auto max-h-40 whitespace-pre-wrap break-words font-mono leading-relaxed italic">
+                {call.reasoning}
+              </pre>
+            </div>
+          )}
+
           {/* Output */}
           {!hasError && (
             <div>

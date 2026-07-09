@@ -82,9 +82,11 @@ class LLMBridge:
                 cid = await self._inspector.start_call(call_type="module_fast", model=model, step="module:generate", module_source=mod_src, input_data=messages)
             from litellm import acompletion
             response = await acompletion(model=model, messages=messages, max_tokens=max_tokens)
-            content = response.choices[0].message.content or ""
+            message = response.choices[0].message
+            content = message.content or ""
+            reasoning = getattr(message, "reasoning_content", "") or ""
             if self._inspector and cid:
-                await self._inspector.end_call(cid, prompt, content, 0, 0)
+                await self._inspector.end_call(cid, prompt, content, 0, 0, reasoning=reasoning)
             return content
         except asyncio.CancelledError:
             # CancelledError bypasses the Exception handler below; close the

@@ -6,10 +6,14 @@ runs websocket handlers across portal threads, and the LanceDB/SQLite memory sto
 is thread-affine, which is a harness artifact (uvicorn uses a single event loop),
 not a product concern. Reasoning is verified end-to-end over a single-turn socket.
 """
+import asyncio
+
 from fastapi.testclient import TestClient
 
 import backend.api.server as server
 from backend.engine.session import GameSessionManager
+from backend.engine.llm import LLMService
+from backend.engine.llm_inspector import LLMInspector
 from backend.engine.prompt_pipeline import PromptCompiler, DEFAULT_CONTINUE_PROMPT
 
 
@@ -67,6 +71,35 @@ def test_reasoning_is_captured_and_streamed(tmp_path, monkeypatch):
     assert saw_reasoning_token, "expected a reasoning_token stream"
     ai = done["state"]["chat_messages"][-1]
     assert ai["role"] == "ai" and ai.get("reasoning"), "ai message should carry reasoning"
+
+
+def test_reasoning_requested_only_for_capable_models():
+    """Every completion asks the provider for its chain-of-thought, but only on
+    models litellm reports as reasoning-capable (else the param errors the call)."""
+    svc = LLMService(mode="mock")
+    assert svc._reasoning_kwargs("gemini/gemini-2.5-flash") == {"reasoning_effort": "low"}
+    # Embedding / unknown models must not receive the reasoning param.
+    assert svc._reasoning_kwargs("gemini/gemini-embedding-001") == {}
+    # Disabling via config removes it everywhere.
+    svc._reasoning_effort = "off"
+    assert svc._reasoning_kwargs("gemini/gemini-2.5-flash") == {}
+
+
+def test_inspector_records_reasoning():
+    """The LLM inspector stores and exposes the model's reasoning so the UI can
+    show it for every call that produced any."""
+    svc = LLMService(mode="mock")
+    inspector = LLMInspector()
+    svc.set_inspector(inspector)
+
+    asyncio.run(svc.generate_story_from_messages(
+        [{"role": "user", "content": "open the door"}],
+        inspector_ctx={"call_type": "storyteller", "step": "storyteller"},
+    ))
+
+    record = inspector.get_calls()[0]
+    assert "reasoning" in record
+    assert record["reasoning"], "inspector record should carry the model's reasoning"
 
 
 def test_swipe_manifest_and_roundtrip(tmp_path):
