@@ -185,6 +185,54 @@ def test_pipeline_failure_marks_record_and_never_raises(tmp_path):
     assert "403" in record["error"]
 
 
+class _ErrResponse:
+    """Minimal stand-in for an httpx error response."""
+    def __init__(self, body=None, text="", status_code=400):
+        self._body = body
+        self.text = text
+        self.status_code = status_code
+
+    def json(self):
+        if self._body is None:
+            raise ValueError("no json body")
+        return self._body
+
+
+def test_novita_error_detail_combines_message_reason_and_metadata(tmp_path):
+    backend = _load_backend(tmp_path)
+    resp = _ErrResponse({
+        "code": 40001,
+        "message": "request rejected",
+        "reason": "SENSITIVE_CONTENT",
+        "metadata": {"field": "prompt"},
+    })
+    detail = backend._novita_error_detail(resp)
+    # All three signal-bearing fields survive, not just the first one found.
+    assert "request rejected" in detail
+    assert "SENSITIVE_CONTENT" in detail
+    assert "prompt" in detail
+
+
+def test_novita_error_detail_falls_back_to_text_without_json(tmp_path):
+    backend = _load_backend(tmp_path)
+    assert backend._novita_error_detail(_ErrResponse(text="Bad Gateway")) == "Bad Gateway"
+    assert "HTTP 400" in backend._novita_error_detail(_ErrResponse(text=""))
+
+
+def test_describe_novita_failure_flags_content_refusals(tmp_path):
+    backend = _load_backend(tmp_path)
+    # A refusal reads as a content-policy message regardless of which path
+    # (submit HTTP error or task failure) produced it.
+    submit = backend._describe_novita_failure("nsfw content detected", 400)
+    poll = backend._describe_novita_failure("prompt flagged by moderation")
+    assert "content policy" in submit.lower()
+    assert "content policy" in poll.lower()
+    # A genuine request error keeps its HTTP context and no refusal wording.
+    other = backend._describe_novita_failure("width must be a multiple of 8", 400)
+    assert "HTTP 400" in other
+    assert "content policy" not in other.lower()
+
+
 def test_restart_flips_stale_pending_records(tmp_path):
     backend = _load_backend(tmp_path)
     asyncio.run(backend._append_record({"id": "x1", "status": "generating"}))

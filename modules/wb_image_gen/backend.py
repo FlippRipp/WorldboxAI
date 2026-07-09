@@ -751,12 +751,60 @@ def _flux2_payload(cfg: dict, image_prompt: str) -> dict:
     return payload
 
 
+# Markers that identify a provider content-policy refusal (as opposed to a
+# bad-parameter or quota error) in Novita's `reason`/`message` text.
+_REFUSAL_MARKERS = (
+    "content policy", "policy", "moderat", "sensitive", "nsfw", "safety",
+    "prohibit", "not allowed", "violat", "forbidden", "flagged",
+)
+
+
+def _looks_like_refusal(text: str) -> bool:
+    low = (text or "").lower()
+    return any(m in low for m in _REFUSAL_MARKERS)
+
+
 def _novita_error_detail(resp) -> str:
+    """Flatten Novita's error envelope into one legible line.
+
+    Novita wraps errors as ``{code, reason, message, metadata}``: ``message``
+    is human-readable, ``reason`` is a stable code (content-policy tags land
+    here), and ``metadata`` carries extra context. The old version returned
+    only the first of ``message``/``reason`` it found and dropped the rest, so
+    a refusal whose signal lived in ``reason`` or ``metadata`` surfaced as a
+    vague message. Surface all three."""
     try:
         body = resp.json()
-        return str(body.get("message") or body.get("reason") or body)[:300]
     except Exception:
-        return resp.text[:300]
+        return (resp.text or "").strip()[:300] or f"HTTP {resp.status_code}"
+    if not isinstance(body, dict):
+        return str(body)[:300]
+    message = str(body.get("message") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    parts = [message] if message else []
+    # The reason code adds signal only when it isn't already echoed by message.
+    if reason and reason.lower() not in message.lower():
+        parts.append(f"[{reason}]")
+    meta = body.get("metadata")
+    if isinstance(meta, dict):
+        extra = "; ".join(
+            f"{k}: {v}" for k, v in meta.items()
+            if str(v).strip() and str(v).strip().lower() not in message.lower())
+        if extra:
+            parts.append(f"({extra})")
+    return (" ".join(parts).strip() or str(body))[:300]
+
+
+def _describe_novita_failure(detail: str, status_code: int | None = None) -> str:
+    """Turn a raw Novita error detail into the message we store on the record.
+    Content-policy refusals get a plain-language prefix; everything else keeps
+    the HTTP context so genuine request errors stay diagnosable."""
+    detail = (detail or "").strip() or "no detail given"
+    if _looks_like_refusal(detail):
+        return f"The image provider refused this prompt (content policy): {detail}"
+    if status_code is not None:
+        return f"Novita rejected the request (HTTP {status_code}): {detail}"
+    return f"Novita generation failed: {detail}"
 
 
 async def _novita_submit(cfg: dict, image_prompt: str) -> str:
@@ -780,7 +828,7 @@ async def _novita_submit(cfg: dict, image_prompt: str) -> str:
                         f"Novita rejected the request ({resp.status_code}): invalid API key")
                 if resp.status_code in (400, 402, 422, 429):
                     raise RuntimeError(
-                        f"Novita rejected the request ({resp.status_code}): {_novita_error_detail(resp)}")
+                        _describe_novita_failure(_novita_error_detail(resp), resp.status_code))
                 if resp.status_code >= 500:
                     raise httpx.HTTPStatusError(
                         f"Novita server error {resp.status_code}", request=resp.request, response=resp)
@@ -826,8 +874,11 @@ async def _novita_poll(cfg: dict, task_id: str) -> str:
                     raise RuntimeError("Novita task succeeded but returned no image URL")
                 return image_url
             if status == "TASK_STATUS_FAILED":
-                reason = str(task.get("reason") or "no reason given")[:300]
-                raise RuntimeError(f"Novita generation failed: {reason}")
+                # V3 async reports `reason`; older/other endpoints use
+                # `failed_reason` — check both so nothing collapses to blank.
+                reason = str(task.get("reason") or task.get("failed_reason")
+                             or "no reason given").strip()[:300]
+                raise RuntimeError(_describe_novita_failure(reason))
             # TASK_STATUS_QUEUED / TASK_STATUS_PROCESSING: keep polling.
     raise RuntimeError("Novita generation timed out")
 
