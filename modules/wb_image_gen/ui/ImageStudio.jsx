@@ -73,18 +73,41 @@ function StatusBadge({ status }) {
 }
 
 function Lightbox({ record, onClose }) {
+  // Failed generations have no image file — open them to read the failure
+  // reason (e.g. a provider content-policy refusal) instead of an image.
+  const failed = record.status === 'error' || !record.filename;
   return (
     <div
       className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4 cursor-zoom-out"
       onClick={onClose}
     >
-      <img
-        src={`${API_BASE}/images/file/${record.filename}`}
-        alt={record.image_prompt || 'Generated image'}
-        className="max-w-full max-h-[85vh] rounded-lg shadow-2xl"
-      />
-      {record.image_prompt && (
-        <p className="mt-3 max-w-2xl text-center text-xs text-gray-400">{record.image_prompt}</p>
+      {failed ? (
+        <div
+          className="max-w-lg w-full rounded-lg border border-red-900/60 bg-gray-900/80 p-6 text-center cursor-auto"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="text-3xl mb-3" aria-hidden="true">🚫</div>
+          <p className="text-sm font-semibold text-red-300 mb-2">Image generation failed</p>
+          <p className="text-xs text-gray-300 whitespace-pre-wrap break-words">
+            {record.error || 'unknown error'}
+          </p>
+          {record.image_prompt && (
+            <p className="mt-4 text-[11px] text-gray-500 whitespace-pre-wrap break-words">
+              <span className="text-gray-600">Prompt: </span>{record.image_prompt}
+            </p>
+          )}
+        </div>
+      ) : (
+        <>
+          <img
+            src={`${API_BASE}/images/file/${record.filename}`}
+            alt={record.image_prompt || 'Generated image'}
+            className="max-w-full max-h-[85vh] rounded-lg shadow-2xl"
+          />
+          {record.image_prompt && (
+            <p className="mt-3 max-w-2xl text-center text-xs text-gray-400">{record.image_prompt}</p>
+          )}
+        </>
       )}
     </div>
   );
@@ -1793,9 +1816,18 @@ export default function ImageStudio({ onBack }) {
                         </button>
                       )}
                     </div>
+                  ) : r.status === 'error' ? (
+                    <button
+                      onClick={() => setLightbox(r)}
+                      title="Open to see why it failed"
+                      className="w-full h-32 flex flex-col items-center justify-center gap-1 px-2 text-center text-xs text-red-300/80 cursor-pointer hover:bg-red-950/20 transition-colors"
+                    >
+                      <span className="text-lg" aria-hidden="true">🚫</span>
+                      <span className="line-clamp-3">{r.error || 'failed'}</span>
+                    </button>
                   ) : (
                     <div className="w-full h-32 flex items-center justify-center text-xs text-gray-600 px-2 text-center">
-                      {r.status === 'error' ? (r.error || 'failed') : 'generating…'}
+                      generating…
                     </div>
                   )}
                   <div className="px-2 py-1.5 flex items-center justify-between gap-1">
