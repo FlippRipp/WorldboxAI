@@ -1098,6 +1098,7 @@ export default function ImageStudio({ onBack }) {
   const [testPrompt, setTestPrompt] = useState('');
   const [testRefine, setTestRefine] = useState(true);
   const [testError, setTestError] = useState('');
+  const [testBusy, setTestBusy] = useState(false);
   const pollRef = useRef(null);
 
   const [showKeyGuide, setShowKeyGuide] = useState(false);
@@ -1219,6 +1220,7 @@ export default function ImageStudio({ onBack }) {
 
   const testGenerate = async () => {
     setTestError('');
+    setTestBusy(true);
     try {
       const res = await fetch(`${API_BASE}/generate`, {
         method: 'POST',
@@ -1233,8 +1235,21 @@ export default function ImageStudio({ onBack }) {
       loadImages();
     } catch (e) {
       setTestError(String(e.message || e));
+      setTestBusy(false);
     }
   };
+
+  // The button stays in its "generating" state from the click until the studio
+  // image finishes. testBusy covers the brief window between the request and the
+  // queued record appearing in the gallery; after that the record's own status
+  // (below) drives it, so drop the local flag once the record shows up.
+  const studioGenerating = records.some(
+    (r) => r.save_id === '__studio__' &&
+      (r.status === 'pending' || r.status === 'prompting' || r.status === 'generating'));
+  useEffect(() => {
+    if (studioGenerating) setTestBusy(false);
+  }, [studioGenerating]);
+  const generating = testBusy || studioGenerating;
 
   const deleteRecord = async (recordId) => {
     await fetch(`${API_BASE}/images/${recordId}`, { method: 'DELETE' }).catch(() => {});
@@ -1685,7 +1700,7 @@ export default function ImageStudio({ onBack }) {
               type="text"
               value={testPrompt}
               onChange={(e) => setTestPrompt(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && testPrompt.trim()) testGenerate(); }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && testPrompt.trim() && !generating) testGenerate(); }}
               placeholder={testRefine
                 ? 'The knight faces the dragon on the crumbling bridge at dawn'
                 : 'A moonlit castle above a stormy sea, oil painting'}
@@ -1693,10 +1708,13 @@ export default function ImageStudio({ onBack }) {
             />
             <button
               onClick={testGenerate}
-              disabled={!testPrompt.trim() || !config.has_key || !config.model_name}
-              className="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+              disabled={generating || !testPrompt.trim() || !config.has_key || !config.model_name}
+              className="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed shrink-0 inline-flex items-center gap-2"
             >
-              Generate
+              {generating && (
+                <span className="h-3.5 w-3.5 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+              )}
+              {generating ? 'Generating…' : 'Generate'}
             </button>
           </div>
           <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none">
@@ -1755,12 +1773,12 @@ export default function ImageStudio({ onBack }) {
                         title={`${r.model_name || ''}${r.loras?.length ? ` + LoRAs: ${r.loras.join(', ')}` : ''}`}
                         loading="lazy"
                         onClick={() => (concealed ? revealImage(r.id) : setLightbox(r))}
-                        className={`w-full h-32 object-cover ${
+                        className={`w-full h-32 ${
                           concealed
                             ? conceal === 'blackout'
-                              ? 'cursor-pointer brightness-0'
-                              : 'cursor-pointer blur-2xl scale-110'
-                            : 'cursor-zoom-in'
+                              ? 'object-cover cursor-pointer brightness-0'
+                              : 'object-cover cursor-pointer blur-2xl scale-110'
+                            : 'object-contain cursor-zoom-in'
                         }`}
                       />
                       {concealed && (
