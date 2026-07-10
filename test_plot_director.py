@@ -485,6 +485,50 @@ def test_plot_regen_failure_keeps_current_thread():
     assert update["thread"]["status"] == "active"
 
 
+def test_plot_profile_edit_lists_and_tone():
+    backend = _load_backend()
+    captured = {}
+    sdk = _make_sdk([], captured)
+    data = _active_data(backend)
+    data["profile"] = _profile_reply()
+
+    def run(args, current=data):
+        return asyncio.run(backend.on_command_plot(["profile"] + args, _state(data=current), sdk))
+
+    # Add (multi-word text joined from args) and remove (case-insensitive).
+    result = run(["likes", "add", "sea", "voyages"])
+    assert 'Added "sea voyages"' in result["message"]
+    profile = result["module_data"]["wb_plot_director"]["profile"]
+    assert "sea voyages" in profile["likes"]
+
+    result = run(["likes", "remove", "HAGGLING"])
+    assert "Removed" in result["message"]
+    assert "haggling" not in result["module_data"]["wb_plot_director"]["profile"]["likes"]
+
+    result = run(["dislikes", "add", "dungeon", "crawls"])
+    assert "dungeon crawls" in result["module_data"]["wb_plot_director"]["profile"]["dislikes"]
+
+    result = run(["themes", "remove", "smuggling"])
+    assert result["module_data"]["wb_plot_director"]["profile"]["themes"] == ["harbor politics"]
+
+    result = run(["tone", "cozy", "and", "warm"])
+    assert result["module_data"]["wb_plot_director"]["profile"]["tone"] == "cozy and warm"
+
+    # Failed edits write nothing back; bad grammar shows usage. No LLM calls ever.
+    assert "module_data" not in run(["likes", "remove", "not there"])
+    assert "already in" in run(["likes", "add", "back-alley", "deals"])["message"]
+    assert "Usage" in run(["playstyle", "add", "x"])["message"]
+    assert "captured" == "captured" and captured == {}
+
+    # Adding past the cap drops the oldest entry.
+    full = _active_data(backend)
+    full["profile"] = _profile_reply(likes=[f"like {i}" for i in range(backend.PROFILE_LIST_CAP)])
+    likes = run(["likes", "add", "newest"], current=full)["module_data"]["wb_plot_director"]["profile"]["likes"]
+    assert len(likes) == backend.PROFILE_LIST_CAP
+    assert likes[-1] == "newest"
+    assert "like 0" not in likes
+
+
 def test_plot_command_shows_thread_openly():
     backend = _load_backend()
     data = _active_data(backend)

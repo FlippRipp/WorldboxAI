@@ -515,7 +515,7 @@ Judge and update:
 - opportunity: does the scene end with a natural opening to bring the thread forward next turn?
 - nudge: one subtle piece of story material (a rumor, an arrival, a discovery) that could pull the scene toward the thread without contradicting what the player is doing. Never an instruction to the player.
 - momentum: building | steady | stalled
-- profile: the FULL updated profile. playstyle values are integers 0-10 for what the player actually does. tone is the story's prevailing tone in a few words. themes, likes and dislikes are short phrases, at most 8 each -- drop the least relevant to make room.
+- profile: the FULL updated profile. playstyle values are integers 0-10 for what the player actually does. tone is the story's prevailing tone in a few words. themes, likes and dislikes are short phrases, at most 8 each -- drop the least relevant to make room. Some entries may have been set directly by the player; preserve those unless the story clearly contradicts them.
 
 Respond with ONLY valid JSON:
 {{"thread_engaged": false, "thread_resolved": false, "resolution_note": "one sentence, only if resolved", "opportunity": false, "nudge": "...", "momentum": "steady", "profile": {{"playstyle": {{"combat": 0, "diplomacy": 0, "exploration": 0, "mystery": 0, "social": 0, "intrigue": 0}}, "tone": "...", "themes": [], "likes": [], "dislikes": []}}}}"""
@@ -642,6 +642,62 @@ async def _command_regen(state: dict, sdk, data: dict) -> dict:
     }
 
 
+PROFILE_EDITABLE_LISTS = ("likes", "dislikes", "themes")
+PROFILE_USAGE = (
+    "[Plot] Usage: /plot profile tone <text> | "
+    "/plot profile <likes|dislikes|themes> <add|remove> <text>"
+)
+
+
+def _norm_entry(text: str) -> str:
+    return " ".join(str(text).split()).lower()
+
+
+def _command_profile_edit(data: dict, args: list[str]) -> dict:
+    """Player edits to the story profile. List entries are matched with
+    collapsed whitespace, case-insensitively; adds past the cap drop the
+    oldest entry. Failed edits write nothing back."""
+    if not data or data.get("schema") != SCHEMA_VERSION:
+        return {"message": "[Plot] The story is still settling in -- try again next turn.", "signal": "end_turn"}
+    if not args:
+        return {"message": PROFILE_USAGE, "signal": "end_turn"}
+
+    profile = _clean_profile(data.get("profile"), _default_profile())
+    field = args[0].lower()
+
+    if field == "tone":
+        tone = " ".join(args[1:]).strip()[:PROFILE_ENTRY_MAX_CHARS]
+        profile["tone"] = tone
+        message = f'[Plot] Tone set to "{tone}".' if tone else "[Plot] Tone cleared."
+    elif field in PROFILE_EDITABLE_LISTS and len(args) >= 3 and args[1].lower() in ("add", "remove"):
+        op = args[1].lower()
+        text = " ".join(args[2:]).strip()[:PROFILE_ENTRY_MAX_CHARS]
+        if not text:
+            return {"message": PROFILE_USAGE, "signal": "end_turn"}
+        entries = list(profile[field])
+        if op == "add":
+            if any(_norm_entry(e) == _norm_entry(text) for e in entries):
+                return {"message": f'[Plot] "{text}" is already in {field}.', "signal": "end_turn"}
+            entries.append(text)
+            entries = entries[-PROFILE_LIST_CAP:]
+            message = f'[Plot] Added "{text}" to {field}.'
+        else:
+            kept = [e for e in entries if _norm_entry(e) != _norm_entry(text)]
+            if len(kept) == len(entries):
+                return {"message": f'[Plot] "{text}" is not in {field}.', "signal": "end_turn"}
+            entries = kept
+            message = f'[Plot] Removed "{text}" from {field}.'
+        profile[field] = entries
+    else:
+        return {"message": PROFILE_USAGE, "signal": "end_turn"}
+
+    return {
+        "message": message,
+        "signal": "end_turn",
+        "module_data": {MODULE_ID: {"profile": profile}},
+    }
+
+
 async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
     config = _config(state)
     data = _own_data(state)
@@ -651,6 +707,9 @@ async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
 
     if args and args[0].lower() in ("regen", "reroll", "new"):
         return await _command_regen(state, sdk, data)
+
+    if args and args[0].lower() == "profile":
+        return _command_profile_edit(data, args[1:])
 
     if data.get("status") == "failed":
         return {"message": "[Plot] Plot direction is inactive.", "signal": "end_turn"}

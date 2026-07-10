@@ -10,9 +10,72 @@ const MOMENTUM_STYLES = {
 
 const OUTCOME_ICONS = { resolved: '✓', abandoned: '✕', expired: '⌛', rerolled: '↻' };
 
+// One editable profile list (themes / likes / dislikes): chips with remove
+// buttons in edit mode, plus an add input. Persistence is a command round-trip;
+// the refreshed list arrives via the next state_update.
+function ProfileList({ label, field, entries, editing, onCommand }) {
+  const [draft, setDraft] = useState('');
+
+  if (!editing && entries.length === 0) return null;
+
+  const add = () => {
+    const text = draft.trim();
+    if (!text) return;
+    onCommand?.(`/plot profile ${field} add ${text}`);
+    setDraft('');
+  };
+
+  return (
+    <div className="space-y-1">
+      <div className="text-[10px] text-gray-500 uppercase tracking-wider">{label}</div>
+      <div className="flex flex-wrap gap-1">
+        {entries.map((entry, i) => (
+          <span
+            key={`${entry}-${i}`}
+            className="flex items-center gap-1 bg-gray-900 border border-gray-700 rounded-full text-[10px] text-gray-300 px-2 py-0.5"
+          >
+            {entry}
+            {editing && (
+              <button
+                onClick={() => onCommand?.(`/plot profile ${field} remove ${entry}`)}
+                className="text-gray-500 hover:text-red-400 transition-colors"
+                aria-label={`Remove ${entry} from ${label}`}
+              >
+                ✕
+              </button>
+            )}
+          </span>
+        ))}
+        {entries.length === 0 && (
+          <span className="text-[10px] text-gray-600 italic">none yet</span>
+        )}
+      </div>
+      {editing && (
+        <div className="flex gap-1">
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') add(); }}
+            placeholder={`Add to ${label.toLowerCase()}…`}
+            className="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 placeholder-gray-600 focus:outline-none focus:border-indigo-500"
+          />
+          <button
+            onClick={add}
+            disabled={!draft.trim()}
+            className="px-2 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-[11px] text-gray-200"
+          >
+            +
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function PlotDirectorWidget({ state, config, onCommand }) {
   const [open, setOpen] = useState(false);
-  const [showLikes, setShowLikes] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [toneDraft, setToneDraft] = useState(null);
 
   const data = state?.module_data?.wb_plot_director;
   if (!data) return null;
@@ -30,7 +93,10 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
     .filter(([, v]) => v > 0)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 3);
-  const likes = profile.likes ?? [];
+  const tone = profile.tone ?? '';
+  const hasProfile = topStyles.length > 0 || tone
+    || (profile.themes ?? []).length > 0 || (profile.likes ?? []).length > 0
+    || (profile.dislikes ?? []).length > 0;
 
   const subtitle = hasThread
     ? thread.title
@@ -39,6 +105,12 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
       : legacy || data.status === 'observing'
         ? 'Observing your story…'
         : 'Weaving a new thread…';
+
+  const saveTone = () => {
+    if (toneDraft === null || toneDraft.trim() === tone) { setToneDraft(null); return; }
+    onCommand?.(`/plot profile tone ${toneDraft.trim()}`);
+    setToneDraft(null);
+  };
 
   return (
     <>
@@ -57,7 +129,7 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
 
       {open && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setOpen(false)} />
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => { setOpen(false); setEditing(false); }} />
           <div className="relative w-full max-w-md mx-4 max-h-[80vh] overflow-y-auto bg-gray-800 border border-gray-700 rounded-xl shadow-2xl p-4 space-y-4 text-sm">
             <div className="flex items-center justify-between">
               <span className="text-gray-100 font-semibold text-base">Plot Thread</span>
@@ -66,7 +138,7 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
                   {momentum}
                 </span>
                 <button
-                  onClick={() => setOpen(false)}
+                  onClick={() => { setOpen(false); setEditing(false); }}
                   className="p-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded"
                   aria-label="Close plot view"
                 >
@@ -116,9 +188,24 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
               </div>
             )}
 
-            {(topStyles.length > 0 || profile.tone || likes.length > 0) && (
-              <div className="space-y-1.5 border-t border-gray-700 pt-3">
-                <div className="text-[10px] text-gray-500 uppercase tracking-wider">Your story profile</div>
+            {!legacy && (hasProfile || onCommand) && (
+              <div className="space-y-2.5 border-t border-gray-700 pt-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-gray-500 uppercase tracking-wider">Your story profile</span>
+                  {onCommand && (
+                    <button
+                      onClick={() => { setEditing(!editing); setToneDraft(null); }}
+                      className={`text-[10px] px-2 py-0.5 rounded transition-colors ${
+                        editing
+                          ? 'bg-indigo-600/80 text-gray-100 hover:bg-indigo-500'
+                          : 'text-gray-500 hover:text-gray-300 hover:bg-gray-700'
+                      }`}
+                    >
+                      {editing ? 'Done' : 'Edit'}
+                    </button>
+                  )}
+                </div>
+
                 {topStyles.length > 0 && (
                   <div className="flex flex-wrap gap-1">
                     {topStyles.map(([key, value]) => (
@@ -131,27 +218,26 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
                     ))}
                   </div>
                 )}
-                {profile.tone && (
-                  <div className="text-[10px] text-gray-500">tone: {profile.tone}</div>
+
+                {editing ? (
+                  <div className="space-y-1">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider">Tone</div>
+                    <input
+                      value={toneDraft ?? tone}
+                      onChange={(e) => setToneDraft(e.target.value)}
+                      onBlur={saveTone}
+                      onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+                      placeholder="e.g. gritty, whimsical…"
+                      className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 placeholder-gray-600 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                ) : (
+                  tone && <div className="text-[10px] text-gray-500">tone: {tone}</div>
                 )}
-                {likes.length > 0 && (
-                  <>
-                    <button
-                      onClick={() => setShowLikes(!showLikes)}
-                      className="w-full flex items-center justify-between text-[10px] text-gray-500 hover:text-gray-300 transition-colors"
-                    >
-                      <span className="uppercase tracking-wider">Enjoying ({likes.length})</span>
-                      <span className="text-gray-600">{showLikes ? '▼' : '▶'}</span>
-                    </button>
-                    {showLikes && (
-                      <div className="space-y-0.5">
-                        {likes.map((like, i) => (
-                          <div key={`${like}-${i}`} className="text-[10px] text-gray-400">{like}</div>
-                        ))}
-                      </div>
-                    )}
-                  </>
-                )}
+
+                <ProfileList label="Themes" field="themes" entries={profile.themes ?? []} editing={editing} onCommand={onCommand} />
+                <ProfileList label="Likes" field="likes" entries={profile.likes ?? []} editing={editing} onCommand={onCommand} />
+                <ProfileList label="Dislikes" field="dislikes" entries={profile.dislikes ?? []} editing={editing} onCommand={onCommand} />
               </div>
             )}
 
