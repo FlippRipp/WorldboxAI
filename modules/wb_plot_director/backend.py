@@ -167,9 +167,17 @@ def _clean_pref_list(value, previous: list) -> list:
     return _cap_prefs(cleaned)
 
 
+def _norm_entry(text: str) -> str:
+    return " ".join(str(text).split()).lower()
+
+
 def _clean_profile(parsed, previous: dict) -> dict:
     """Sanitize an LLM profile reply; fall back to previous values on garbage.
-    Always returns the full profile shape (all playstyle keys, capped lists)."""
+    Always returns the full profile shape (all playstyle keys, capped lists).
+
+    Dislikes are player authority: the LLM's dislikes are ignored outright
+    (in-character aversion often contradicts the player's real taste), and any
+    proposed like that matches a player-set dislike is dropped."""
     previous = previous if isinstance(previous, dict) else _default_profile()
     if not isinstance(parsed, dict):
         parsed = {}
@@ -189,12 +197,18 @@ def _clean_profile(parsed, previous: dict) -> dict:
                 playstyle[key] = 0
 
     tone = str(parsed.get("tone") or previous.get("tone") or "").strip()[:PROFILE_ENTRY_MAX_CHARS]
+    dislikes = _clean_pref_list(None, previous.get("dislikes", []))
+    disliked = {_norm_entry(e["text"]) for e in dislikes}
+    likes = [
+        e for e in _clean_pref_list(parsed.get("likes"), previous.get("likes", []))
+        if _norm_entry(e["text"]) not in disliked
+    ]
     return {
         "playstyle": playstyle,
         "tone": tone,
         "themes": _clean_str_list(parsed.get("themes"), previous.get("themes", [])),
-        "likes": _clean_pref_list(parsed.get("likes"), previous.get("likes", [])),
-        "dislikes": _clean_pref_list(parsed.get("dislikes"), previous.get("dislikes", [])),
+        "likes": likes,
+        "dislikes": dislikes,
     }
 
 
@@ -299,10 +313,10 @@ STORY SO FAR (oldest to newest):
 THE PLAYER'S OWN ACTIONS (their typed inputs, oldest to newest):
 {inputs_block or '(none recorded)'}
 
-Base the profile on demonstrated behavior, not on what the setting suggests. playstyle values are integers 0-10 for how much the player actually does each thing. tone is a few words. themes are short phrases; likes and dislikes are objects with a short phrase and a weight (low, medium, high) for how strongly the player seems to feel. At most 8 entries each.
+Base the profile on demonstrated behavior, not on what the setting suggests. playstyle values are integers 0-10 for how much the player actually does each thing. tone is a few words. themes are short phrases; likes are objects with a short phrase and a weight (low, medium, high) for how strongly the player seems to feel. At most 8 entries each. Do not infer dislikes -- those are set by the player themselves, and a character acting averse to something in-story does not mean the player dislikes it.
 
 Respond with ONLY valid JSON:
-{{"playstyle": {{"combat": 0, "diplomacy": 0, "exploration": 0, "mystery": 0, "social": 0, "intrigue": 0}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high"}}], "dislikes": [{{"text": "...", "weight": "low|medium|high"}}]}}"""
+{{"playstyle": {{"combat": 0, "diplomacy": 0, "exploration": 0, "mystery": 0, "social": 0, "intrigue": 0}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high"}}]}}"""
 
     model_pref = config.get("thread_ai_model", "smartest")
     try:
@@ -350,7 +364,7 @@ async def _generate_thread(state: dict, sdk, data: dict, avoid_previous_kind: bo
 
     prompt = f"""You design short plot threads for a text RPG storyteller. A thread is a small self-contained arc the storyteller can weave in over roughly the next {thread_max_turns} turns: a hook that enters the story naturally, a challenge that opposes or complicates, and stakes. The player will see the thread openly, so make it enticing, not a spoiler-dependent twist.
 
-PLAYER PROFILE (cater to their demonstrated preferences; in likes and dislikes, weight marks how strongly the player feels -- give high-weight entries the most influence):
+PLAYER PROFILE (cater to their demonstrated preferences; in likes and dislikes, weight marks how strongly the player feels -- give high-weight entries the most influence. Dislikes were set directly by the player: steer firmly away from them):
 {json.dumps(profile, ensure_ascii=False)}
 
 CHALLENGE DIFFICULTY:
@@ -423,17 +437,10 @@ def _finalize_thread(updates: dict, data: dict, thread: dict, outcome: str, turn
     updates["thread_history"] = history[-THREAD_HISTORY_CAP:]
     updates["pending_nudge"] = ""
 
-    if outcome == "abandoned":
-        profile = updates.get("profile") or data.get("profile") or _default_profile()
-        profile = json.loads(json.dumps(profile))  # deep copy; mutated below
-        flavor = thread.get("appeal") or str(thread.get("challenge", ""))[:40]
-        dislikes = _clean_pref_list(profile.get("dislikes", []), [])
-        dislikes.append({
-            "text": f'ignored thread: "{thread.get("title", "")}" ({flavor})'[:PROFILE_ENTRY_MAX_CHARS],
-            "weight": "medium",
-        })
-        profile["dislikes"] = _cap_prefs(dislikes)
-        updates["profile"] = profile
+    # Abandonment feeds back only through thread_history (the "do not repeat"
+    # list and the different-kind instruction) -- never through dislikes, which
+    # are player-set only: ignoring a thread is too weak a signal to outweigh
+    # what the player tells us directly.
 
 
 async def on_gather_context(state: dict, sdk) -> dict:
@@ -550,10 +557,10 @@ Judge and update:
 - opportunity: does the scene end with a natural opening to bring the thread forward next turn?
 - nudge: one subtle piece of story material (a rumor, an arrival, a discovery) that could pull the scene toward the thread without contradicting what the player is doing. Never an instruction to the player.
 - momentum: building | steady | stalled
-- profile: the FULL updated profile. playstyle values are integers 0-10 for what the player actually does. tone is the story's prevailing tone in a few words. themes are short phrases; likes and dislikes are objects with a short phrase and a weight (low, medium, high) for how strongly the player feels. At most 8 entries each -- drop the least relevant to make room. Some entries may have been set directly by the player; preserve those (including their weight) unless the story clearly contradicts them.
+- profile: the updated profile. playstyle values are integers 0-10 for what the player actually does. tone is the story's prevailing tone in a few words. themes are short phrases; likes are objects with a short phrase and a weight (low, medium, high) for how strongly the player feels. At most 8 entries each -- drop the least relevant to make room. Some entries may have been set directly by the player; preserve those (including their weight) unless the story clearly contradicts them. The profile's dislikes are set by the player themselves and are NOT yours to change -- do not include dislikes in your reply, and never add a like that contradicts one. A character acting averse to something in-story does not mean the player dislikes it.
 
 Respond with ONLY valid JSON:
-{{"thread_engaged": false, "thread_resolved": false, "resolution_note": "one sentence, only if resolved", "opportunity": false, "nudge": "...", "momentum": "steady", "profile": {{"playstyle": {{"combat": 0, "diplomacy": 0, "exploration": 0, "mystery": 0, "social": 0, "intrigue": 0}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high"}}], "dislikes": [{{"text": "...", "weight": "low|medium|high"}}]}}}}"""
+{{"thread_engaged": false, "thread_resolved": false, "resolution_note": "one sentence, only if resolved", "opportunity": false, "nudge": "...", "momentum": "steady", "profile": {{"playstyle": {{"combat": 0, "diplomacy": 0, "exploration": 0, "mystery": 0, "social": 0, "intrigue": 0}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high"}}]}}}}"""
 
     model_pref = config.get("assessment_ai_model", "balanced")
     try:
@@ -685,10 +692,6 @@ PROFILE_USAGE = (
 )
 
 
-def _norm_entry(text: str) -> str:
-    return " ".join(str(text).split()).lower()
-
-
 def _command_profile_edit(data: dict, args: list[str]) -> dict:
     """Player edits to the story profile. List entries are matched with
     collapsed whitespace, case-insensitively. Re-adding an existing
@@ -700,7 +703,10 @@ def _command_profile_edit(data: dict, args: list[str]) -> dict:
     if not args:
         return {"message": PROFILE_USAGE, "signal": "end_turn"}
 
-    profile = _clean_profile(data.get("profile"), _default_profile())
+    # Normalize the stored profile as the "previous" side: passing it as the
+    # parsed side would discard dislikes, which _clean_profile treats as
+    # player-authority and never accepts from the parsed reply.
+    profile = _clean_profile({}, data.get("profile") or _default_profile())
     field = args[0].lower()
 
     if field == "tone":
@@ -745,9 +751,17 @@ def _command_profile_edit(data: dict, args: list[str]) -> dict:
                 existing["weight"] = weight
                 message = f'[Plot] "{existing["text"]}" set to {weight}.'
             else:
+                # A like and a dislike can't coexist: adding to one side moves
+                # the entry out of the other.
+                other = "dislikes" if field == "likes" else "likes"
+                kept = [e for e in profile[other] if _norm_entry(e["text"]) != _norm_entry(text)]
+                if len(kept) != len(profile[other]):
+                    profile[other] = kept
+                    message = f'[Plot] Moved "{text}" from {other} to {field} ({weight}).'
+                else:
+                    message = f'[Plot] Added "{text}" to {field} ({weight}).'
                 entries.append({"text": text, "weight": weight})
                 entries = _cap_prefs(entries)
-                message = f'[Plot] Added "{text}" to {field} ({weight}).'
         else:
             kept = [e for e in entries if _norm_entry(e["text"]) != _norm_entry(text)]
             if len(kept) == len(entries):

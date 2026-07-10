@@ -354,7 +354,7 @@ def test_resolution_regenerates_immediately_with_full_replacement():
     assert update["pending_nudge"] == ""
 
 
-def test_ignored_streak_nudges_then_abandons_and_records_dislike():
+def test_ignored_streak_nudges_then_abandons_without_touching_dislikes():
     backend = _load_backend()
     data = _active_data(backend, created_turn=1)
     config = {}  # defaults: stall_threshold 2, abandon_after 4
@@ -378,9 +378,8 @@ def test_ignored_streak_nudges_then_abandons_and_records_dislike():
         if turn == 5:  # streak 4 = abandon_after -> abandoned + regeneration
             assert len(captured["prompts"]) == 2
             assert update["thread_history"][-1]["outcome"] == "abandoned"
-            assert any(
-                "Salt Baron" in dislike["text"] for dislike in update["profile"]["dislikes"]
-            )
+            # Abandonment must not write a dislike -- those are player-set only.
+            assert update["profile"]["dislikes"] == []
             assert "DIFFERENT kind" in captured["prompts"][1]
             assert '"The Salt Baron\'s Ledger" -- abandoned' in captured["prompts"][1]
             assert update["thread"]["title"] == "Tremors Below"
@@ -486,6 +485,43 @@ def test_plot_regen_failure_keeps_current_thread():
     update = result["module_data"]["wb_plot_director"]
     assert update["status"] == "active"
     assert update["thread"]["status"] == "active"
+
+
+def test_ai_cannot_write_dislikes_and_contradicting_likes_are_dropped():
+    backend = _load_backend()
+    data = _active_data(backend)
+    data["profile"] = backend._default_profile()
+    data["profile"]["dislikes"] = [{"text": "disobedience", "weight": "high"}]
+
+    reply_profile = _profile_reply(
+        likes=[{"text": "Disobedience", "weight": "low"}, {"text": "sea voyages", "weight": "medium"}],
+        dislikes=[{"text": "ai-invented aversion", "weight": "high"}],
+    )
+    result = asyncio.run(backend.on_librarian(
+        _state(turn=3, data=data), _make_sdk([_assessment_reply(profile=reply_profile)], {})))
+    profile = _updates(result)["profile"]
+
+    # The LLM's dislikes are ignored; the player's stand untouched.
+    assert profile["dislikes"] == [{"text": "disobedience", "weight": "high"}]
+    # A proposed like matching a player-set dislike is dropped (case-insensitive).
+    texts = [e["text"] for e in profile["likes"]]
+    assert "Disobedience" not in texts and "disobedience" not in texts
+    assert "sea voyages" in texts
+
+
+def test_profile_add_moves_entry_between_likes_and_dislikes():
+    backend = _load_backend()
+    data = _active_data(backend)
+    data["profile"] = backend._default_profile()
+    data["profile"]["dislikes"] = [{"text": "sea voyages", "weight": "medium"}]
+
+    result = asyncio.run(backend.on_command_plot(
+        ["profile", "likes", "add", "high", "sea", "voyages"], _state(data=data), _make_sdk([], {})))
+
+    assert "Moved" in result["message"]
+    profile = result["module_data"]["wb_plot_director"]["profile"]
+    assert {"text": "sea voyages", "weight": "high"} in profile["likes"]
+    assert profile["dislikes"] == []
 
 
 def test_plot_profile_edit_lists_and_tone():

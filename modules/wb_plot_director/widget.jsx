@@ -32,7 +32,7 @@ function normalizeEntry(entry) {
 // add input. Weighted lists also get a low/medium/high picker on add and a
 // per-chip badge that cycles the weight. Persistence is a command round-trip;
 // the refreshed list arrives via the next state_update.
-function ProfileList({ label, field, entries, weighted, editing, onCommand }) {
+function ProfileList({ label, field, entries, weighted, editing, onCommand, hint }) {
   const [draft, setDraft] = useState('');
   const [draftWeight, setDraftWeight] = useState('medium');
 
@@ -58,7 +58,10 @@ function ProfileList({ label, field, entries, weighted, editing, onCommand }) {
 
   return (
     <div className="space-y-1">
-      <div className="text-[10px] text-gray-500 uppercase tracking-wider">{label}</div>
+      <div className="text-[10px] text-gray-500 uppercase tracking-wider">
+        {label}
+        {hint && editing && <span className="normal-case tracking-normal text-gray-600 ml-1.5">— {hint}</span>}
+      </div>
       <div className="flex flex-wrap gap-1">
         {items.map((item, i) => (
           <span
@@ -291,7 +294,7 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
 
                 <ProfileList label="Themes" field="themes" entries={profile.themes ?? []} editing={editing} onCommand={onCommand} />
                 <ProfileList label="Likes" field="likes" entries={profile.likes ?? []} weighted editing={editing} onCommand={onCommand} />
-                <ProfileList label="Dislikes" field="dislikes" entries={profile.dislikes ?? []} weighted editing={editing} onCommand={onCommand} />
+                <ProfileList label="Dislikes" field="dislikes" entries={profile.dislikes ?? []} weighted editing={editing} onCommand={onCommand} hint="yours alone; the AI never adds these" />
               </div>
             )}
 
