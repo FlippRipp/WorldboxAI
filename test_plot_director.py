@@ -444,6 +444,47 @@ def test_malformed_assessment_reply_is_noop():
     assert result is None
 
 
+def test_plot_regen_replaces_thread_and_writes_back():
+    backend = _load_backend()
+    captured = {}
+    sdk = _make_sdk([SECOND_THREAD_REPLY], captured)
+    data = _active_data(backend, created_turn=1)
+
+    result = asyncio.run(backend.on_command_plot(["regen"], _state(turn=6, data=data), sdk))
+
+    assert "Tremors Below" in result["message"]
+    update = result["module_data"]["wb_plot_director"]
+    assert update["thread_history"][-1]["outcome"] == "rerolled"
+    assert update["thread_history"][-1]["title"] == "The Salt Baron's Ledger"
+    assert update["thread"]["title"] == "Tremors Below"
+    assert update["thread"]["status"] == "active"
+    # The old thread appears in the generation prompt's do-not-repeat list.
+    assert '"The Salt Baron\'s Ledger" -- rerolled' in captured["prompts"][0]
+    # A player reroll records no dislike.
+    assert "profile" not in update
+
+
+def test_plot_regen_failure_keeps_current_thread():
+    backend = _load_backend()
+    data = _active_data(backend, created_turn=1)
+
+    result = asyncio.run(backend.on_command_plot(
+        ["regen"], _state(turn=6, data=data), _make_sdk(["not json"], {})))
+
+    assert "nothing changed" in result["message"]
+    assert "module_data" not in result
+
+    # Regen also revives a dormant module on success.
+    failed = backend._default_data()
+    failed["status"] = "failed"
+    failed["gen_attempts"] = 3
+    result = asyncio.run(backend.on_command_plot(
+        ["regen"], _state(turn=6, data=failed), _make_sdk([THREAD_REPLY], {})))
+    update = result["module_data"]["wb_plot_director"]
+    assert update["status"] == "active"
+    assert update["thread"]["status"] == "active"
+
+
 def test_plot_command_shows_thread_openly():
     backend = _load_backend()
     data = _active_data(backend)

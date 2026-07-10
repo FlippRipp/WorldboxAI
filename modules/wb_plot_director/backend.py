@@ -617,11 +617,42 @@ def _profile_line(profile: dict) -> str:
     return " · ".join(parts)
 
 
+async def _command_regen(state: dict, sdk, data: dict) -> dict:
+    """Player-requested reroll: close the active thread as 'rerolled' and weave
+    a new one. On a failed generation nothing is written back, so the old
+    thread survives. Also revives a dormant 'failed' module on success."""
+    if not data or data.get("schema") != SCHEMA_VERSION:
+        return {"message": "[Plot] The story is still settling in -- try again next turn.", "signal": "end_turn"}
+
+    turn = state.get("turn", 0)
+    updates: dict = {}
+    thread = data.get("thread") or {}
+    if thread.get("status") == "active":
+        _finalize_thread(updates, data, thread, "rerolled", turn)
+
+    generated = await _generate_thread(state, sdk, {**data, **updates, "gen_attempts": 0})
+    if "thread" not in generated:
+        return {"message": "[Plot] Couldn't weave a new thread -- nothing changed. Try again.", "signal": "end_turn"}
+
+    updates.update(generated)
+    return {
+        "message": f"[Plot] New thread: {generated['thread']['title']}",
+        "signal": "end_turn",
+        "module_data": {MODULE_ID: updates},
+    }
+
+
 async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
     config = _config(state)
     data = _own_data(state)
 
-    if not config.get("plot_enabled", True) or data.get("status") == "failed":
+    if not config.get("plot_enabled", True):
+        return {"message": "[Plot] Plot direction is inactive.", "signal": "end_turn"}
+
+    if args and args[0].lower() in ("regen", "reroll", "new"):
+        return await _command_regen(state, sdk, data)
+
+    if data.get("status") == "failed":
         return {"message": "[Plot] Plot direction is inactive.", "signal": "end_turn"}
     if data.get("status") != "active":
         return {"message": "[Plot] Watching how you play -- the first plot thread arrives shortly.", "signal": "end_turn"}
