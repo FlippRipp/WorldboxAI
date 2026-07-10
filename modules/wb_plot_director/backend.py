@@ -30,6 +30,7 @@ BOOTSTRAP_INPUTS = 15
 BOOTSTRAP_INPUTS_MAX_CHARS = 2500
 
 MOMENTUM_VALUES = ("observing", "building", "steady", "stalled", "resolving")
+PREF_WEIGHTS = ("low", "medium", "high")  # likes/dislikes strength, weakest first
 
 # Legacy (v1, 3-act outline) keys wiped on migration. Writing "" replaces the
 # old dicts/lists outright because _deep_merge only recurses dict-into-dict.
@@ -135,6 +136,37 @@ def _clean_str_list(value, previous: list) -> list:
     return cleaned[:PROFILE_LIST_CAP]
 
 
+def _cap_prefs(entries: list) -> list:
+    """Enforce the cap by evicting the lowest-weight entries, oldest first --
+    a strongly-held preference should never fall off before a mild one."""
+    entries = list(entries)
+    while len(entries) > PROFILE_LIST_CAP:
+        idx = min(range(len(entries)), key=lambda i: PREF_WEIGHTS.index(entries[i]["weight"]))
+        entries.pop(idx)
+    return entries
+
+
+def _clean_pref_list(value, previous: list) -> list:
+    """Likes/dislikes: [{text, weight}] entries. Plain strings (legacy saves,
+    LLM shortcuts) normalize to medium weight; bad weights become medium."""
+    source = value if isinstance(value, list) else previous
+    cleaned = []
+    for item in (source if isinstance(source, list) else []):
+        if isinstance(item, dict):
+            text = item.get("text", "")
+            weight = item.get("weight")
+        else:
+            text = item
+            weight = "medium"
+        text = str(text).strip()[:PROFILE_ENTRY_MAX_CHARS]
+        if not text:
+            continue
+        if weight not in PREF_WEIGHTS:
+            weight = "medium"
+        cleaned.append({"text": text, "weight": weight})
+    return _cap_prefs(cleaned)
+
+
 def _clean_profile(parsed, previous: dict) -> dict:
     """Sanitize an LLM profile reply; fall back to previous values on garbage.
     Always returns the full profile shape (all playstyle keys, capped lists)."""
@@ -161,8 +193,8 @@ def _clean_profile(parsed, previous: dict) -> dict:
         "playstyle": playstyle,
         "tone": tone,
         "themes": _clean_str_list(parsed.get("themes"), previous.get("themes", [])),
-        "likes": _clean_str_list(parsed.get("likes"), previous.get("likes", [])),
-        "dislikes": _clean_str_list(parsed.get("dislikes"), previous.get("dislikes", [])),
+        "likes": _clean_pref_list(parsed.get("likes"), previous.get("likes", [])),
+        "dislikes": _clean_pref_list(parsed.get("dislikes"), previous.get("dislikes", [])),
     }
 
 
@@ -267,10 +299,10 @@ STORY SO FAR (oldest to newest):
 THE PLAYER'S OWN ACTIONS (their typed inputs, oldest to newest):
 {inputs_block or '(none recorded)'}
 
-Base the profile on demonstrated behavior, not on what the setting suggests. playstyle values are integers 0-10 for how much the player actually does each thing. tone is a few words. themes, likes and dislikes are short phrases, at most 8 each.
+Base the profile on demonstrated behavior, not on what the setting suggests. playstyle values are integers 0-10 for how much the player actually does each thing. tone is a few words. themes are short phrases; likes and dislikes are objects with a short phrase and a weight (low, medium, high) for how strongly the player seems to feel. At most 8 entries each.
 
 Respond with ONLY valid JSON:
-{{"playstyle": {{"combat": 0, "diplomacy": 0, "exploration": 0, "mystery": 0, "social": 0, "intrigue": 0}}, "tone": "...", "themes": [], "likes": [], "dislikes": []}}"""
+{{"playstyle": {{"combat": 0, "diplomacy": 0, "exploration": 0, "mystery": 0, "social": 0, "intrigue": 0}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high"}}], "dislikes": [{{"text": "...", "weight": "low|medium|high"}}]}}"""
 
     model_pref = config.get("thread_ai_model", "smartest")
     try:
@@ -318,7 +350,7 @@ async def _generate_thread(state: dict, sdk, data: dict, avoid_previous_kind: bo
 
     prompt = f"""You design short plot threads for a text RPG storyteller. A thread is a small self-contained arc the storyteller can weave in over roughly the next {thread_max_turns} turns: a hook that enters the story naturally, a challenge that opposes or complicates, and stakes. The player will see the thread openly, so make it enticing, not a spoiler-dependent twist.
 
-PLAYER PROFILE (cater to their demonstrated preferences):
+PLAYER PROFILE (cater to their demonstrated preferences; in likes and dislikes, weight marks how strongly the player feels -- give high-weight entries the most influence):
 {json.dumps(profile, ensure_ascii=False)}
 
 CHALLENGE DIFFICULTY:
@@ -395,9 +427,12 @@ def _finalize_thread(updates: dict, data: dict, thread: dict, outcome: str, turn
         profile = updates.get("profile") or data.get("profile") or _default_profile()
         profile = json.loads(json.dumps(profile))  # deep copy; mutated below
         flavor = thread.get("appeal") or str(thread.get("challenge", ""))[:40]
-        dislikes = list(profile.get("dislikes", []))
-        dislikes.append(f'ignored thread: "{thread.get("title", "")}" ({flavor})')
-        profile["dislikes"] = dislikes[-PROFILE_LIST_CAP:]
+        dislikes = _clean_pref_list(profile.get("dislikes", []), [])
+        dislikes.append({
+            "text": f'ignored thread: "{thread.get("title", "")}" ({flavor})'[:PROFILE_ENTRY_MAX_CHARS],
+            "weight": "medium",
+        })
+        profile["dislikes"] = _cap_prefs(dislikes)
         updates["profile"] = profile
 
 
@@ -515,10 +550,10 @@ Judge and update:
 - opportunity: does the scene end with a natural opening to bring the thread forward next turn?
 - nudge: one subtle piece of story material (a rumor, an arrival, a discovery) that could pull the scene toward the thread without contradicting what the player is doing. Never an instruction to the player.
 - momentum: building | steady | stalled
-- profile: the FULL updated profile. playstyle values are integers 0-10 for what the player actually does. tone is the story's prevailing tone in a few words. themes, likes and dislikes are short phrases, at most 8 each -- drop the least relevant to make room. Some entries may have been set directly by the player; preserve those unless the story clearly contradicts them.
+- profile: the FULL updated profile. playstyle values are integers 0-10 for what the player actually does. tone is the story's prevailing tone in a few words. themes are short phrases; likes and dislikes are objects with a short phrase and a weight (low, medium, high) for how strongly the player feels. At most 8 entries each -- drop the least relevant to make room. Some entries may have been set directly by the player; preserve those (including their weight) unless the story clearly contradicts them.
 
 Respond with ONLY valid JSON:
-{{"thread_engaged": false, "thread_resolved": false, "resolution_note": "one sentence, only if resolved", "opportunity": false, "nudge": "...", "momentum": "steady", "profile": {{"playstyle": {{"combat": 0, "diplomacy": 0, "exploration": 0, "mystery": 0, "social": 0, "intrigue": 0}}, "tone": "...", "themes": [], "likes": [], "dislikes": []}}}}"""
+{{"thread_engaged": false, "thread_resolved": false, "resolution_note": "one sentence, only if resolved", "opportunity": false, "nudge": "...", "momentum": "steady", "profile": {{"playstyle": {{"combat": 0, "diplomacy": 0, "exploration": 0, "mystery": 0, "social": 0, "intrigue": 0}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high"}}], "dislikes": [{{"text": "...", "weight": "low|medium|high"}}]}}}}"""
 
     model_pref = config.get("assessment_ai_model", "balanced")
     try:
@@ -611,9 +646,10 @@ def _profile_line(profile: dict) -> str:
         parts.append("/".join(k for k, _ in top) + "-leaning")
     if profile.get("tone"):
         parts.append(f"tone: {profile['tone']}")
-    likes = profile.get("likes", [])[:2]
+    likes = _clean_pref_list(profile.get("likes", []), [])
+    likes.sort(key=lambda e: PREF_WEIGHTS.index(e["weight"]), reverse=True)
     if likes:
-        parts.append("likes: " + ", ".join(likes))
+        parts.append("likes: " + ", ".join(e["text"] for e in likes[:2]))
     return " · ".join(parts)
 
 
@@ -642,10 +678,10 @@ async def _command_regen(state: dict, sdk, data: dict) -> dict:
     }
 
 
-PROFILE_EDITABLE_LISTS = ("likes", "dislikes", "themes")
 PROFILE_USAGE = (
     "[Plot] Usage: /plot profile tone <text> | "
-    "/plot profile <likes|dislikes|themes> <add|remove> <text>"
+    "/plot profile themes <add|remove> <text> | "
+    "/plot profile <likes|dislikes> <add|remove> [low|medium|high] <text>"
 )
 
 
@@ -655,8 +691,10 @@ def _norm_entry(text: str) -> str:
 
 def _command_profile_edit(data: dict, args: list[str]) -> dict:
     """Player edits to the story profile. List entries are matched with
-    collapsed whitespace, case-insensitively; adds past the cap drop the
-    oldest entry. Failed edits write nothing back."""
+    collapsed whitespace, case-insensitively. Re-adding an existing
+    like/dislike with a different weight updates the weight in place; adds
+    past the cap evict the lowest-weight (themes: oldest) entry. Failed
+    edits write nothing back."""
     if not data or data.get("schema") != SCHEMA_VERSION:
         return {"message": "[Plot] The story is still settling in -- try again next turn.", "signal": "end_turn"}
     if not args:
@@ -669,20 +707,49 @@ def _command_profile_edit(data: dict, args: list[str]) -> dict:
         tone = " ".join(args[1:]).strip()[:PROFILE_ENTRY_MAX_CHARS]
         profile["tone"] = tone
         message = f'[Plot] Tone set to "{tone}".' if tone else "[Plot] Tone cleared."
-    elif field in PROFILE_EDITABLE_LISTS and len(args) >= 3 and args[1].lower() in ("add", "remove"):
+    elif field == "themes" and len(args) >= 3 and args[1].lower() in ("add", "remove"):
         op = args[1].lower()
         text = " ".join(args[2:]).strip()[:PROFILE_ENTRY_MAX_CHARS]
         if not text:
             return {"message": PROFILE_USAGE, "signal": "end_turn"}
-        entries = list(profile[field])
+        entries = list(profile["themes"])
         if op == "add":
             if any(_norm_entry(e) == _norm_entry(text) for e in entries):
-                return {"message": f'[Plot] "{text}" is already in {field}.', "signal": "end_turn"}
+                return {"message": f'[Plot] "{text}" is already in themes.', "signal": "end_turn"}
             entries.append(text)
             entries = entries[-PROFILE_LIST_CAP:]
-            message = f'[Plot] Added "{text}" to {field}.'
+            message = f'[Plot] Added "{text}" to themes.'
         else:
             kept = [e for e in entries if _norm_entry(e) != _norm_entry(text)]
+            if len(kept) == len(entries):
+                return {"message": f'[Plot] "{text}" is not in themes.', "signal": "end_turn"}
+            entries = kept
+            message = f'[Plot] Removed "{text}" from themes.'
+        profile["themes"] = entries
+    elif field in ("likes", "dislikes") and len(args) >= 3 and args[1].lower() in ("add", "remove"):
+        op = args[1].lower()
+        rest = args[2:]
+        weight = "medium"
+        if op == "add" and len(rest) >= 2 and rest[0].lower() in PREF_WEIGHTS:
+            weight = rest[0].lower()
+            rest = rest[1:]
+        text = " ".join(rest).strip()[:PROFILE_ENTRY_MAX_CHARS]
+        if not text:
+            return {"message": PROFILE_USAGE, "signal": "end_turn"}
+        entries = list(profile[field])
+        if op == "add":
+            existing = next((e for e in entries if _norm_entry(e["text"]) == _norm_entry(text)), None)
+            if existing is not None:
+                if existing["weight"] == weight:
+                    return {"message": f'[Plot] "{existing["text"]}" is already in {field} ({weight}).', "signal": "end_turn"}
+                existing["weight"] = weight
+                message = f'[Plot] "{existing["text"]}" set to {weight}.'
+            else:
+                entries.append({"text": text, "weight": weight})
+                entries = _cap_prefs(entries)
+                message = f'[Plot] Added "{text}" to {field} ({weight}).'
+        else:
+            kept = [e for e in entries if _norm_entry(e["text"]) != _norm_entry(text)]
             if len(kept) == len(entries):
                 return {"message": f'[Plot] "{text}" is not in {field}.', "signal": "end_turn"}
             entries = kept

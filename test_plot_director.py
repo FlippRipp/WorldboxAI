@@ -243,7 +243,10 @@ def test_adoption_midstory_bootstraps_profile_before_first_thread():
     assert "I slip the clerk a purse." in bootstrap_prompt
     # The thread generation that follows sees the bootstrapped profile.
     assert "back-alley deals" in captured["prompts"][1]
-    assert update["profile"]["likes"] == ["back-alley deals", "haggling"]
+    assert update["profile"]["likes"] == [
+        {"text": "back-alley deals", "weight": "medium"},
+        {"text": "haggling", "weight": "medium"},
+    ]
     assert update["status"] == "active"
     assert update["thread"]["title"] == "The Salt Baron's Ledger"
 
@@ -376,7 +379,7 @@ def test_ignored_streak_nudges_then_abandons_and_records_dislike():
             assert len(captured["prompts"]) == 2
             assert update["thread_history"][-1]["outcome"] == "abandoned"
             assert any(
-                "Salt Baron" in dislike for dislike in update["profile"]["dislikes"]
+                "Salt Baron" in dislike["text"] for dislike in update["profile"]["dislikes"]
             )
             assert "DIFFERENT kind" in captured["prompts"][1]
             assert '"The Salt Baron\'s Ledger" -- abandoned' in captured["prompts"][1]
@@ -495,18 +498,26 @@ def test_plot_profile_edit_lists_and_tone():
     def run(args, current=data):
         return asyncio.run(backend.on_command_plot(["profile"] + args, _state(data=current), sdk))
 
-    # Add (multi-word text joined from args) and remove (case-insensitive).
+    # Add (multi-word text joined from args, default medium weight) and
+    # remove (case-insensitive). String entries normalize to {text, weight}.
     result = run(["likes", "add", "sea", "voyages"])
-    assert 'Added "sea voyages"' in result["message"]
+    assert 'Added "sea voyages" to likes (medium)' in result["message"]
     profile = result["module_data"]["wb_plot_director"]["profile"]
-    assert "sea voyages" in profile["likes"]
+    assert {"text": "sea voyages", "weight": "medium"} in profile["likes"]
 
     result = run(["likes", "remove", "HAGGLING"])
     assert "Removed" in result["message"]
-    assert "haggling" not in result["module_data"]["wb_plot_director"]["profile"]["likes"]
+    assert all(e["text"] != "haggling" for e in result["module_data"]["wb_plot_director"]["profile"]["likes"])
 
-    result = run(["dislikes", "add", "dungeon", "crawls"])
-    assert "dungeon crawls" in result["module_data"]["wb_plot_director"]["profile"]["dislikes"]
+    # Explicit weight on add; re-adding with a new weight updates in place.
+    result = run(["dislikes", "add", "high", "dungeon", "crawls"])
+    assert {"text": "dungeon crawls", "weight": "high"} in result["module_data"]["wb_plot_director"]["profile"]["dislikes"]
+
+    weighted = _active_data(backend)
+    weighted["profile"] = _profile_reply(likes=[{"text": "haggling", "weight": "medium"}])
+    result = run(["likes", "add", "high", "haggling"], current=weighted)
+    assert 'set to high' in result["message"]
+    assert result["module_data"]["wb_plot_director"]["profile"]["likes"] == [{"text": "haggling", "weight": "high"}]
 
     result = run(["themes", "remove", "smuggling"])
     assert result["module_data"]["wb_plot_director"]["profile"]["themes"] == ["harbor politics"]
@@ -518,15 +529,21 @@ def test_plot_profile_edit_lists_and_tone():
     assert "module_data" not in run(["likes", "remove", "not there"])
     assert "already in" in run(["likes", "add", "back-alley", "deals"])["message"]
     assert "Usage" in run(["playstyle", "add", "x"])["message"]
-    assert "captured" == "captured" and captured == {}
+    assert captured == {}
 
-    # Adding past the cap drops the oldest entry.
+    # Adding past the cap evicts the lowest-weight entry, not the oldest.
     full = _active_data(backend)
-    full["profile"] = _profile_reply(likes=[f"like {i}" for i in range(backend.PROFILE_LIST_CAP)])
+    full["profile"] = _profile_reply(likes=(
+        [{"text": "old but loved", "weight": "high"}]
+        + [{"text": f"like {i}", "weight": "medium"} for i in range(backend.PROFILE_LIST_CAP - 2)]
+        + [{"text": "meh", "weight": "low"}]
+    ))
     likes = run(["likes", "add", "newest"], current=full)["module_data"]["wb_plot_director"]["profile"]["likes"]
     assert len(likes) == backend.PROFILE_LIST_CAP
-    assert likes[-1] == "newest"
-    assert "like 0" not in likes
+    texts = [e["text"] for e in likes]
+    assert "meh" not in texts          # low-weight entry evicted first
+    assert "old but loved" in texts    # high-weight entry survives despite age
+    assert "newest" in texts
 
 
 def test_plot_command_shows_thread_openly():

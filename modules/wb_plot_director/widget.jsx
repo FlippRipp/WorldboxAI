@@ -10,48 +10,102 @@ const MOMENTUM_STYLES = {
 
 const OUTCOME_ICONS = { resolved: '✓', abandoned: '✕', expired: '⌛', rerolled: '↻' };
 
-// One editable profile list (themes / likes / dislikes): chips with remove
-// buttons in edit mode, plus an add input. Persistence is a command round-trip;
+const PREF_WEIGHTS = ['low', 'medium', 'high'];
+const WEIGHT_CHIP_STYLES = {
+  high: 'border-indigo-500/70 text-gray-100',
+  medium: 'border-gray-700 text-gray-300',
+  low: 'border-gray-700 text-gray-500',
+};
+const WEIGHT_BADGE = { low: 'L', medium: 'M', high: 'H' };
+
+// Weighted lists (likes/dislikes) store {text, weight} objects; themes are
+// plain strings. Tolerate both shapes -- old saves normalize server-side on
+// the next write.
+function normalizeEntry(entry) {
+  if (entry && typeof entry === 'object') {
+    return { text: entry.text ?? '', weight: PREF_WEIGHTS.includes(entry.weight) ? entry.weight : 'medium' };
+  }
+  return { text: String(entry ?? ''), weight: 'medium' };
+}
+
+// One editable profile list: chips with remove buttons in edit mode, plus an
+// add input. Weighted lists also get a low/medium/high picker on add and a
+// per-chip badge that cycles the weight. Persistence is a command round-trip;
 // the refreshed list arrives via the next state_update.
-function ProfileList({ label, field, entries, editing, onCommand }) {
+function ProfileList({ label, field, entries, weighted, editing, onCommand }) {
   const [draft, setDraft] = useState('');
+  const [draftWeight, setDraftWeight] = useState('medium');
 
   if (!editing && entries.length === 0) return null;
+
+  const items = entries.map(normalizeEntry);
+  if (weighted) {
+    items.sort((a, b) => PREF_WEIGHTS.indexOf(b.weight) - PREF_WEIGHTS.indexOf(a.weight));
+  }
 
   const add = () => {
     const text = draft.trim();
     if (!text) return;
-    onCommand?.(`/plot profile ${field} add ${text}`);
+    onCommand?.(`/plot profile ${field} add ${weighted ? `${draftWeight} ` : ''}${text}`);
     setDraft('');
+  };
+
+  const cycleWeight = (item) => {
+    const next = PREF_WEIGHTS[(PREF_WEIGHTS.indexOf(item.weight) + 1) % PREF_WEIGHTS.length];
+    // Re-adding an existing entry with a different weight updates it in place.
+    onCommand?.(`/plot profile ${field} add ${next} ${item.text}`);
   };
 
   return (
     <div className="space-y-1">
       <div className="text-[10px] text-gray-500 uppercase tracking-wider">{label}</div>
       <div className="flex flex-wrap gap-1">
-        {entries.map((entry, i) => (
+        {items.map((item, i) => (
           <span
-            key={`${entry}-${i}`}
-            className="flex items-center gap-1 bg-gray-900 border border-gray-700 rounded-full text-[10px] text-gray-300 px-2 py-0.5"
+            key={`${item.text}-${i}`}
+            className={`flex items-center gap-1 bg-gray-900 border rounded-full text-[10px] px-2 py-0.5 ${
+              weighted ? (WEIGHT_CHIP_STYLES[item.weight] ?? WEIGHT_CHIP_STYLES.medium) : 'border-gray-700 text-gray-300'
+            }`}
           >
-            {entry}
+            {weighted && editing && (
+              <button
+                onClick={() => cycleWeight(item)}
+                className="font-mono text-[9px] text-indigo-400 hover:text-indigo-300"
+                title={`Weight: ${item.weight} (click to change)`}
+                aria-label={`Change weight of ${item.text} (currently ${item.weight})`}
+              >
+                {WEIGHT_BADGE[item.weight]}
+              </button>
+            )}
+            {weighted && !editing && item.weight === 'high' && <span className="text-indigo-400">★</span>}
+            {item.text}
             {editing && (
               <button
-                onClick={() => onCommand?.(`/plot profile ${field} remove ${entry}`)}
+                onClick={() => onCommand?.(`/plot profile ${field} remove ${item.text}`)}
                 className="text-gray-500 hover:text-red-400 transition-colors"
-                aria-label={`Remove ${entry} from ${label}`}
+                aria-label={`Remove ${item.text} from ${label}`}
               >
                 ✕
               </button>
             )}
           </span>
         ))}
-        {entries.length === 0 && (
+        {items.length === 0 && (
           <span className="text-[10px] text-gray-600 italic">none yet</span>
         )}
       </div>
       {editing && (
         <div className="flex gap-1">
+          {weighted && (
+            <select
+              value={draftWeight}
+              onChange={(e) => setDraftWeight(e.target.value)}
+              className="bg-gray-900 border border-gray-700 rounded px-1 py-1 text-[11px] text-gray-300 focus:outline-none focus:border-indigo-500"
+              aria-label={`Weight for new ${label.toLowerCase()} entry`}
+            >
+              {PREF_WEIGHTS.map((w) => <option key={w} value={w}>{w}</option>)}
+            </select>
+          )}
           <input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -236,8 +290,8 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
                 )}
 
                 <ProfileList label="Themes" field="themes" entries={profile.themes ?? []} editing={editing} onCommand={onCommand} />
-                <ProfileList label="Likes" field="likes" entries={profile.likes ?? []} editing={editing} onCommand={onCommand} />
-                <ProfileList label="Dislikes" field="dislikes" entries={profile.dislikes ?? []} editing={editing} onCommand={onCommand} />
+                <ProfileList label="Likes" field="likes" entries={profile.likes ?? []} weighted editing={editing} onCommand={onCommand} />
+                <ProfileList label="Dislikes" field="dislikes" entries={profile.dislikes ?? []} weighted editing={editing} onCommand={onCommand} />
               </div>
             )}
 
