@@ -86,6 +86,49 @@ def test_ws_sync_after_restart_restores_active_save(tmp_path, monkeypatch):
     assert loaded["chat_messages"][-2]["content"] == "I mark my path."
 
 
+def test_intro_skips_module_reinit_for_existing_story(tmp_path, monkeypatch):
+    # Opening an already-started story must not re-run the module context pass
+    # (initialize_module_data -> every module's on_gather_context). That pass
+    # fires the NPC system's introduction + scene-presence LLM calls, and on an
+    # existing story the result is thrown away (the transcript is just
+    # replayed), so running it on every load/resume/branch burns tokens for
+    # nothing.
+    client, session_manager = make_client(tmp_path, monkeypatch)
+
+    calls = {"n": 0}
+    original = server.engine.initialize_module_data
+
+    async def counting_init(state):
+        calls["n"] += 1
+        return await original(state)
+
+    monkeypatch.setattr(server.engine, "initialize_module_data", counting_init)
+
+    # New story (no transcript yet): intro seeds module_data before generating
+    # the opening scene.
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"action": "intro"})
+        receive_until(ws, {"done", "error"})
+    assert calls["n"] == 1
+
+    # Ensure a transcript exists regardless of the mock intro's outcome.
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"action": "turn", "text": "I press on."})
+        receive_until(ws, {"done", "error"})
+    assert session_manager.state.get("history")
+
+    # Re-opening the now-existing story replays the transcript without the
+    # wasteful re-init.
+    before = calls["n"]
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"action": "intro"})
+        loaded = receive_until(ws, {"state_load"})
+        done = receive_until(ws, {"done"})
+    assert calls["n"] == before
+    assert loaded["chat_messages"]
+    assert done["state"]["swipes"] is not None
+
+
 def test_ws_stop_cancels_turn_and_rejects_concurrent_turns(tmp_path, monkeypatch):
     client, session_manager = make_client(tmp_path, monkeypatch)
     turn_before = session_manager.state.get("turn", 0)

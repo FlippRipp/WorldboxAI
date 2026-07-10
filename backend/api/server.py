@@ -1436,9 +1436,21 @@ async def websocket_endpoint(websocket: WebSocket):
 
     async def handle_intro():
         state = session_manager.state
-        state = await engine.initialize_module_data(state)
-        session_manager.state = state
         if len(state.get("history", [])) == 0:
+            # New story: seed module_data by running each module's
+            # on_gather_context before generating the opening scene.
+            #
+            # This pass is deliberately skipped for an already-started story.
+            # There it would only re-run every module's per-turn context work
+            # (including the NPC system's introduction + scene-presence LLM
+            # calls) and immediately discard the result -- the else branch below
+            # just replays the saved transcript, and module_data already came
+            # from the loaded save. Since handle_intro fires on every load,
+            # resume and branch, that made those NPC checks run in the
+            # background on each open, burning tokens for nothing. The hooks
+            # still run normally inside a real turn (gather_context_node).
+            state = await engine.initialize_module_data(state)
+            session_manager.state = state
             await engine.ensure_memory()
             engine.set_memory_path(session_manager.get_memory_path())
             _init_world_index_for_save(session_manager.active_save_id)
