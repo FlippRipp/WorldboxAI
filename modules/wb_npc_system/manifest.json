@@ -117,6 +117,6 @@
   "command_help": {
     "/npcs": "Show details on known NPCs",
     "/npclist": "List all NPCs you've met",
-    "/npc": "Manage a character: /npc add <data> | /npc update <id> | /npc edit <id> <data> | /npc delete <id>"
+    "/npc": "Manage a character: /npc generate | /npc add <data> | /npc update <id> | /npc edit <id> <data> | /npc delete <id>"
   }
 }

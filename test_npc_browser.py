@@ -419,6 +419,90 @@ def test_add_respects_embed_profiles_toggle_off():
 
 
 # --------------------------------------------------------------------------
+# /npc generate
+# --------------------------------------------------------------------------
+
+_GEN_REPLY = json.dumps({"npc": {
+    "name": "Mira Voss",
+    "race": "human",
+    "gender": "female",
+    "appearance": "Cloaked, ink-stained fingers.",
+    "archetype": "rogue cartographer",
+    "pitch": "Maps the routes smugglers wish stayed secret.",
+    "personality": ["restless", "clever", "secretive"],
+    "role": "wildcard",
+    "encounter_type": "encounter",
+}})
+
+
+def test_generate_creates_hidden_character():
+    backend = _load_backend()
+    captured = {}
+    state = _state()  # already holds npc_aaaa1111
+
+    result = asyncio.run(backend.on_command_npc(
+        ["generate"], state, _make_sdk(_GEN_REPLY, captured),
+    ))
+
+    assert result["module_data_replace"] == ["characters"]
+    chars = result["module_data"]["wb_npc_system"]["characters"]
+    # The existing character survives and the generated one is added alongside it.
+    assert len(chars) == 2
+    assert "npc_aaaa1111" in chars
+    gen = next(n for n in chars.values() if n["name"] == "Mira Voss")
+    assert gen["id"].startswith("npc_")
+    # Always hidden: kept in the unintroduced pool, not yet met.
+    assert gen["introduced"] is False
+    assert gen["status"] == "unintroduced"
+    assert gen["met_turn"] is None
+    assert gen["source"] == "generated"
+    assert gen["role"] == "wildcard"
+    assert gen["personality"] == ["restless", "clever", "secretive"]
+    assert gen["change_log"][-1]["source"] == "generated"
+    # Nothing embedded into RAG while the character is unmet.
+    assert "memories" not in captured
+    assert "Mira Voss" in result["message"]
+
+
+def test_generate_accepts_gen_and_random_aliases():
+    backend = _load_backend()
+    for alias in ("gen", "random"):
+        result = asyncio.run(backend.on_command_npc(
+            [alias], _state(), _make_sdk(_GEN_REPLY, {}),
+        ))
+        chars = result["module_data"]["wb_npc_system"]["characters"]
+        assert any(n["name"] == "Mira Voss" for n in chars.values())
+
+
+def test_generate_forces_hidden_even_if_llm_marks_location_bound():
+    backend = _load_backend()
+    reply = json.dumps({"npc": {"name": "Ser Hidden", "encounter_type": "location_bound"}})
+
+    result = asyncio.run(backend.on_command_npc(["generate"], _state(), _make_sdk(reply, {})))
+
+    gen = next(n for n in result["module_data"]["wb_npc_system"]["characters"].values()
+               if n["name"] == "Ser Hidden")
+    assert gen["introduced"] is False
+    assert gen["status"] == "unintroduced"
+
+
+def test_generate_handles_unparseable_llm_output():
+    backend = _load_backend()
+    result = asyncio.run(backend.on_command_npc(["generate"], _state(), _make_sdk("not json", {})))
+    assert "module_data" not in result
+    assert "Could not generate" in result["message"]
+
+
+def test_generate_handles_empty_payload():
+    backend = _load_backend()
+    result = asyncio.run(backend.on_command_npc(
+        ["generate"], _state(), _make_sdk(json.dumps({"npc": {}}), {}),
+    ))
+    assert "module_data" not in result
+    assert "nothing usable" in result["message"]
+
+
+# --------------------------------------------------------------------------
 # /npc delete
 # --------------------------------------------------------------------------
 

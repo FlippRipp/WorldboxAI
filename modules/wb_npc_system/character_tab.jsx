@@ -244,6 +244,12 @@ export default function CharacterTab({ state, onCommand, busy }) {
     onCommand(`/npc add ${encodeURIComponent(JSON.stringify(payload))}`);
   };
 
+  const generateCharacter = () => {
+    if (!onCommand || busy) return;
+    setAdding(false);
+    onCommand('/npc generate');
+  };
+
   const deleteCharacter = (npc) => {
     setConfirmDeleteId(null);
     setExpandedId(null);
@@ -264,6 +270,16 @@ export default function CharacterTab({ state, onCommand, busy }) {
         />
         {onCommand && (
           <button
+            onClick={generateCharacter}
+            disabled={busy}
+            title="Generate a random character and keep them hidden until you meet them"
+            className="text-xs px-3 py-2 rounded-lg border whitespace-nowrap transition-colors border-purple-500/30 bg-purple-500/15 text-purple-300 hover:bg-purple-500/25 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            ✨ Generate
+          </button>
+        )}
+        {onCommand && (
+          <button
             onClick={() => setAdding((v) => !v)}
             className={`text-xs px-3 py-2 rounded-lg border whitespace-nowrap transition-colors ${
               adding
@@ -275,6 +291,11 @@ export default function CharacterTab({ state, onCommand, busy }) {
           </button>
         )}
       </div>
+      {onCommand && busy && (
+        <p className="text-xs text-purple-300/80 animate-pulse">
+          Working… a generated character will appear (hidden) when the AI finishes.
+        </p>
+      )}
 
       {adding && (
         <AddForm busy={busy} onCreate={createCharacter} onCancel={() => setAdding(false)} />

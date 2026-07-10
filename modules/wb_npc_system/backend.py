@@ -1458,6 +1458,75 @@ async def _apply_manual_add(payload: str, state: dict, sdk) -> dict:
     }
 
 
+async def _generate_random_character(state: dict, sdk) -> dict:
+    """Generate a single random character via the LLM and drop it straight into
+    the unintroduced pool, kept hidden until the player meets them in the story.
+    Triggered by the browser's "Generate Character" button (/npc generate)."""
+    bank = _get_bank(state)
+    turn = state.get("turn", 0)
+
+    scene = _scene_summary(state)
+    bank_text = _bank_summary(bank)
+    wctx = _world_context(state)
+    region = state.get("player_location_region", "unknown")
+
+    prompt = f"""You are a character designer for a text-based RPG. Create 1 new NPC concept for the game.
+
+WORLD CONTEXT:
+{wctx}
+
+CURRENT STORY STATE:
+{scene}
+
+EXISTING CHARACTERS (DO NOT duplicate or create similar concepts):
+{bank_text}
+
+INSTRUCTIONS:
+1. Create 1 character that fills a gap NOT covered by existing NPCs.
+2. The character must have a DISTINCT archetype, personality, and role from all existing ones.
+3. The character can be location-bound to the current region ({region}) or an encounter-type NPC that can appear anywhere.
+4. The character should feel authentic to this world's genre, factions, and regions.
+5. The pitch should be 2-3 sentences -- a hook that suggests story potential.
+6. Personality should be exactly 3 keywords describing core traits.
+7. Optionally relate the character to an EXISTING character above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.
+
+Respond with ONLY valid JSON:
+{{"npc": {{"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_layer_id": "layer_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}}}"""
+
+    try:
+        result = await sdk.llm.generate(prompt, model_preference="balanced")
+        result = result.strip()
+        if result.startswith("```"):
+            parts = result.split("```")
+            result = parts[1] if len(parts) > 1 else result
+            if result.startswith("json"):
+                result = result[4:]
+            result = result.strip()
+        parsed = json.loads(result)
+    except Exception as e:
+        print(f"[NPC System] Generate-character command failed: {e}")
+        return {"message": "[NPC] Could not generate a character right now. Try again.", "signal": "end_turn"}
+
+    npc_data = parsed.get("npc")
+    if not isinstance(npc_data, dict) or not str(npc_data.get("name", "")).strip():
+        return {"message": "[NPC] The generator returned nothing usable. Try again.", "signal": "end_turn"}
+
+    # Always hidden: force it into the unintroduced pool regardless of what the
+    # LLM suggested, so the character stays a spoiler until met in the story.
+    npc_id, record = _build_npc_record(npc_data, turn, bank, introduced=False, source="generated")
+    name = record["name"]
+    _log_change(record, turn, f"Generated {name}", ["name"], "generated")
+    bank[npc_id] = record
+
+    print(f"[NPC System] Generated hidden character {name} ({npc_id}) at turn {turn}")
+    return {
+        "message": f"[NPC] Generated {name} — hidden until you meet them in the story.",
+        "signal": "end_turn",
+        "module_data_replace": ["characters"],
+        **_set_bank({}, bank),
+    }
+
+
 async def _delete_npc(npc_id: str, state: dict, sdk) -> dict:
     """Permanently remove a character from the bank, purge their stored memories
     (RAG profile included), and drop any relationship references the surviving
@@ -1491,12 +1560,14 @@ async def _delete_npc(npc_id: str, state: dict, sdk) -> dict:
 
 
 async def on_command_npc(args: list[str], state: dict, sdk) -> dict:
-    usage = ("[NPC] Usage: /npc add <data> | /npc update <npc_id> | "
+    usage = ("[NPC] Usage: /npc generate | /npc add <data> | /npc update <npc_id> | "
              "/npc edit <npc_id> <data> | /npc delete <npc_id>")
     if not args:
         return {"message": usage, "signal": "end_turn"}
 
     sub = args[0].lower()
+    if sub in ("generate", "gen", "random"):
+        return await _generate_random_character(state, sdk)
     if sub in ("update", "refresh") and len(args) >= 2:
         return await _update_npc_from_story(args[1], state, sdk)
     if sub == "edit" and len(args) >= 3:
