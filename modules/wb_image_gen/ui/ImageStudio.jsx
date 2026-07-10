@@ -1646,7 +1646,7 @@ export default function ImageStudio({ onBack }) {
                 className={`${inputCls} disabled:opacity-50`}
               >
                 <option value="show">Show the player character</option>
-                <option value="pov">First-person POV — never depict the player</option>
+                <option value="pov">Never depict the player — first-person POV only during direct interactions</option>
               </select>
             </div>
           </div>

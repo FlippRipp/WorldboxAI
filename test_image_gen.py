@@ -2116,7 +2116,7 @@ def test_character_block_injected_in_both_styles(tmp_path):
         assert "KNOWN CHARACTERS" not in captured["prompts"][0]
 
 
-def test_pov_mode_hides_player_and_adds_rule(tmp_path):
+def test_pov_mode_hides_player_and_adds_conditional_rule(tmp_path):
     backend = _load_backend(tmp_path)
     characters = {"player": {"name": "Ash", "descriptor": "female elf; silver hair"},
                   "npcs": [{"name": "Borin", "descriptor": "tall and scarred"}]}
@@ -2127,8 +2127,13 @@ def test_pov_mode_hides_player_and_adds_rule(tmp_path):
         cfg, "scene", "", _make_sdk(captured=captured), characters))
     prompt = captured["prompts"][0]
     assert "POV RULE" in prompt
+    # The player is never depicted in POV mode, so they stay out of the roster.
     assert "Ash" not in prompt
     assert "- Borin: tall and scarred" in prompt
+    # First person is reserved for direct interaction; ordinary scenes just
+    # leave the player out of frame with no forced viewpoint.
+    assert "first person" in prompt
+    assert "no forced first-person viewpoint" in prompt
 
     # POV with a player-only roster: no character list, just the rule.
     captured = {}

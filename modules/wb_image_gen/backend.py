@@ -633,8 +633,9 @@ async def _apply_lora_conditions(cfg: dict, narration: str, sdk,
 
 def _character_block(cfg: dict, characters: dict | None) -> str:
     """Instruction block pinning known characters to their canonical
-    appearances (and optionally forcing first-person POV). Rides the prompt
-    writer's INPUT, so it does not eat into the MAX_PROMPT_CHARS output cap."""
+    appearances (and, in POV mode, switching to first-person only when the
+    player is directly interacting with someone). Rides the prompt writer's
+    INPUT, so it does not eat into the MAX_PROMPT_CHARS output cap."""
     if not characters or not cfg.get("character_reference_enabled", True):
         return ""
     pov = str(cfg.get("player_in_images") or "show") == "pov"
@@ -663,11 +664,21 @@ def _character_block(cfg: dict, characters: dict | None) -> str:
                       "listed may be described freely.")
         parts.append(header + "\n" + "\n".join(lines))
     if pov:
-        rule = ("POV RULE (MANDATORY): render the scene in first person, through the player "
-                "character's own eyes. NEVER depict the player character -- no face, no body; "
-                "at most their hands at the frame edge.")
+        # The player is never depicted in POV mode. The first-person camera,
+        # though, is a last resort -- forcing every scene through the player's
+        # eyes is disorienting -- so it is reserved for the moments that truly
+        # need it: the player in direct, physical contact with someone (an
+        # embrace, close combat, sex). Ordinary scenes simply leave the player
+        # out of frame with no forced viewpoint.
+        rule = ("POV RULE (MANDATORY): never depict the player character -- no face, no "
+                "body; keep them out of frame. ONLY when the scene shows the player in "
+                "direct, physical interaction with another character -- an embrace, close "
+                "combat, sex, or similar close contact -- render it in first person through "
+                "the player's own eyes (at most their hands at the frame edge). In every "
+                "other scene, simply frame it so the player is absent, with no forced "
+                "first-person viewpoint.")
         if tags:
-            rule += " Include first-person framing tags such as pov."
+            rule += " When first person applies, include framing tags such as pov."
         parts.append(rule)
     return "".join("\n\n" + p for p in parts)
 
