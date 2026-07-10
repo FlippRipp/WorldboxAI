@@ -1627,7 +1627,15 @@ async def websocket_endpoint(websocket: WebSocket):
         own_data = (result.get("module_data") or {}).get(mod_id)
         if isinstance(own_data, dict) and manifest.get("produces", {}).get("module_data"):
             module_data = state.setdefault("module_data", {})
-            module_data[mod_id] = engine._deep_merge(module_data.get(mod_id) or {}, own_data)
+            merged = engine._deep_merge(module_data.get(mod_id) or {}, own_data)
+            # Deep-merge is additive and can't delete a dict entry (e.g. removing
+            # a character from the NPC bank). A handler may list top-level keys of
+            # its own subtree to overwrite wholesale with the authoritative value
+            # it returned, so removals actually take effect.
+            for key in result.get("module_data_replace") or []:
+                if key in own_data:
+                    merged[key] = own_data[key]
+            module_data[mod_id] = merged
 
     async def try_handle_command(data) -> bool:
         """Route ``/command`` inputs to module handlers declared in manifests.

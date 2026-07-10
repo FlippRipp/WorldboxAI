@@ -4,7 +4,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 // Character view. Lists every character in the bank; ones the player hasn't
 // met yet are blurred behind a per-card spoiler reveal. Introduced characters
 // can be refreshed from the recent story (/npc update) and every character can
-// be edited manually (/npc edit). Receives { state, config, onCommand, busy }.
+// be edited manually (/npc edit). Characters can also be created from scratch
+// (/npc add) or removed (/npc delete). Receives { state, config, onCommand, busy }.
 
 const ROLES = ['quest_giver', 'antagonist', 'ally', 'informant', 'rival', 'neutral', 'wildcard'];
 const STATUSES = ['active', 'departed', 'deceased', 'unintroduced'];
@@ -32,6 +33,77 @@ function Field({ label, children }) {
     <div>
       <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">{label}</div>
       {children}
+    </div>
+  );
+}
+
+const inputCls = 'w-full bg-gray-900/70 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200 focus:outline-none focus:border-indigo-500';
+
+function AddForm({ busy, onCreate, onCancel }) {
+  const [draft, setDraft] = useState({
+    name: '', archetype: '', race: '', gender: '', role: 'neutral',
+    appearance: '', pitch: '', personality: '', notes: '', introduced: true,
+  });
+
+  const set = (key) => (e) => setDraft((d) => ({ ...d, [key]: e.target.value }));
+
+  const create = () => {
+    const name = draft.name.trim();
+    if (!name) return;
+    const payload = { name, introduced: draft.introduced };
+    for (const key of ['archetype', 'race', 'gender', 'appearance', 'pitch', 'notes']) {
+      const v = draft[key].trim();
+      if (v) payload[key] = v;
+    }
+    if (draft.role) payload.role = draft.role;
+    const traits = draft.personality.split(',').map((t) => t.trim()).filter(Boolean);
+    if (traits.length) payload.personality = traits;
+    onCreate(payload);
+  };
+
+  return (
+    <div className="space-y-3 bg-gray-800/60 border border-indigo-500/30 rounded-lg p-3">
+      <div className="text-xs font-semibold text-indigo-300">New character</div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Name"><input className={inputCls} value={draft.name} onChange={set('name')} placeholder="Required" /></Field>
+        <Field label="Archetype"><input className={inputCls} value={draft.archetype} onChange={set('archetype')} /></Field>
+        <Field label="Race"><input className={inputCls} value={draft.race} onChange={set('race')} /></Field>
+        <Field label="Gender"><input className={inputCls} value={draft.gender} onChange={set('gender')} /></Field>
+        <Field label="Role">
+          <select className={inputCls} value={draft.role} onChange={set('role')}>
+            {ROLES.map((r) => <option key={r} value={r}>{r.replace(/_/g, ' ')}</option>)}
+          </select>
+        </Field>
+        <Field label="Standing">
+          <select
+            className={inputCls}
+            value={draft.introduced ? 'known' : 'pending'}
+            onChange={(e) => setDraft((d) => ({ ...d, introduced: e.target.value === 'known' }))}
+          >
+            <option value="known">Already met</option>
+            <option value="pending">Unintroduced (in the wings)</option>
+          </select>
+        </Field>
+      </div>
+      <Field label="Appearance"><textarea className={inputCls} rows={2} value={draft.appearance} onChange={set('appearance')} /></Field>
+      <Field label="Pitch"><textarea className={inputCls} rows={2} value={draft.pitch} onChange={set('pitch')} /></Field>
+      <Field label="Personality (comma-separated)"><input className={inputCls} value={draft.personality} onChange={set('personality')} /></Field>
+      <Field label="Notes"><textarea className={inputCls} rows={2} value={draft.notes} onChange={set('notes')} /></Field>
+      <div className="flex gap-2 justify-end">
+        <button
+          onClick={onCancel}
+          className="text-xs px-3 py-1.5 rounded-lg border border-gray-600 text-gray-400 hover:text-gray-200 transition-colors"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={create}
+          disabled={busy || !draft.name.trim()}
+          className="text-xs px-3 py-1.5 rounded-lg border border-indigo-500/30 bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Create
+        </button>
+      </div>
     </div>
   );
 }
@@ -67,8 +139,6 @@ function EditForm({ npc, busy, onSave, onCancel }) {
     if (traits.join(', ') !== (npc.personality || []).join(', ')) changed.personality = traits;
     onSave(changed);
   };
-
-  const inputCls = 'w-full bg-gray-900/70 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200 focus:outline-none focus:border-indigo-500';
 
   return (
     <div className="space-y-3 bg-gray-800/60 border border-gray-700 rounded-lg p-3 mt-2">
@@ -118,6 +188,8 @@ export default function CharacterTab({ state, onCommand, busy }) {
   const [expandedId, setExpandedId] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [updatingId, setUpdatingId] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
   // The pending update is done once the turn stops being busy; the refreshed
   // record has already arrived via state_update by then.
@@ -166,22 +238,53 @@ export default function CharacterTab({ state, onCommand, busy }) {
     onCommand(`/npc edit ${npc.id} ${encodeURIComponent(JSON.stringify(changed))}`);
   };
 
-  if (Object.keys(bank).length === 0) {
-    return (
-      <p className="text-sm text-gray-500 italic">
-        No characters yet. The NPC System fills its cast as the story progresses.
-      </p>
-    );
-  }
+  const createCharacter = (payload) => {
+    setAdding(false);
+    if (!onCommand) return;
+    onCommand(`/npc add ${encodeURIComponent(JSON.stringify(payload))}`);
+  };
+
+  const deleteCharacter = (npc) => {
+    setConfirmDeleteId(null);
+    setExpandedId(null);
+    if (!onCommand || busy) return;
+    onCommand(`/npc delete ${npc.id}`);
+  };
+
+  const empty = Object.keys(bank).length === 0;
 
   return (
     <div className="space-y-3">
-      <input
-        className="w-full bg-gray-800/60 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-500"
-        placeholder="Search by name, archetype, role…"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-      />
+      <div className="flex items-center gap-2">
+        <input
+          className="flex-1 bg-gray-800/60 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+          placeholder="Search by name, archetype, role…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        {onCommand && (
+          <button
+            onClick={() => setAdding((v) => !v)}
+            className={`text-xs px-3 py-2 rounded-lg border whitespace-nowrap transition-colors ${
+              adding
+                ? 'border-gray-600 text-gray-400 hover:text-gray-200'
+                : 'border-indigo-500/30 bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25'
+            }`}
+          >
+            {adding ? 'Close' : '+ Add'}
+          </button>
+        )}
+      </div>
+
+      {adding && (
+        <AddForm busy={busy} onCreate={createCharacter} onCancel={() => setAdding(false)} />
+      )}
+
+      {empty && !adding && (
+        <p className="text-sm text-gray-500 italic">
+          No characters yet. Add one with “+ Add”, or let the NPC System fill its cast as the story progresses.
+        </p>
+      )}
 
       {npcs.map((npc) => {
         const spoiler = isSpoiler(npc);
@@ -281,6 +384,23 @@ export default function CharacterTab({ state, onCommand, busy }) {
                     onSave={(changed) => saveEdits(npc, changed)}
                     onCancel={() => setEditingId(null)}
                   />
+                ) : confirmDeleteId === npc.id ? (
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <span className="text-xs text-gray-400">Delete {npc.name} for good?</span>
+                    <button
+                      onClick={() => deleteCharacter(npc)}
+                      disabled={busy}
+                      className="text-xs px-3 py-1.5 rounded-lg border border-red-500/40 bg-red-500/15 text-red-300 hover:bg-red-500/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Confirm delete
+                    </button>
+                    <button
+                      onClick={() => setConfirmDeleteId(null)}
+                      className="text-xs px-3 py-1.5 rounded-lg border border-gray-600 text-gray-400 hover:text-gray-200 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
                 ) : (
                   <div className="flex flex-wrap gap-2 pt-1">
                     {npc.introduced && onCommand && (
@@ -298,6 +418,14 @@ export default function CharacterTab({ state, onCommand, busy }) {
                     >
                       Edit
                     </button>
+                    {onCommand && (
+                      <button
+                        onClick={() => setConfirmDeleteId(npc.id)}
+                        className="text-xs px-3 py-1.5 rounded-lg border border-red-500/30 text-red-300/80 hover:bg-red-500/15 hover:text-red-300 transition-colors ml-auto"
+                      >
+                        Delete
+                      </button>
+                    )}
                   </div>
                 )}
                 {busy && updatingId === npc.id && (
@@ -311,7 +439,7 @@ export default function CharacterTab({ state, onCommand, busy }) {
         );
       })}
 
-      {npcs.length === 0 && (
+      {!empty && npcs.length === 0 && (
         <p className="text-sm text-gray-500 italic">No characters match your search.</p>
       )}
     </div>

@@ -320,3 +320,159 @@ def test_update_with_unusable_or_empty_llm_reply_is_a_noop():
     ))
     assert "module_data" not in no_changes
     assert "No lasting changes" in no_changes["message"]
+
+
+# --------------------------------------------------------------------------
+# /npc add
+# --------------------------------------------------------------------------
+
+def _add_cmd(payload: dict) -> list[str]:
+    return ["add", urllib.parse.quote(json.dumps(payload))]
+
+
+def test_add_creates_introduced_character_and_embeds_profile():
+    backend = _load_backend()
+    captured = {}
+    state = _state()  # already holds npc_aaaa1111
+
+    result = asyncio.run(backend.on_command_npc(_add_cmd({
+        "name": "Bram Holt",
+        "race": "human",
+        "gender": "male",
+        "archetype": "dockside fixer",
+        "role": "informant",
+        "appearance": "Weathered, missing two fingers.",
+        "pitch": "Knows who moves what through the harbor.",
+        "personality": "shrewd, wry, cautious",
+        "notes": "Owes nobody, trusts nobody.",
+    }), state, _make_sdk("{}", captured)))
+
+    # Delete-safe write-back so the new bank is authoritative.
+    assert result["module_data_replace"] == ["characters"]
+    chars = result["module_data"]["wb_npc_system"]["characters"]
+    # The existing character survives and the new one is added alongside it.
+    assert len(chars) == 2
+    assert "npc_aaaa1111" in chars
+    added = next(n for n in chars.values() if n["name"] == "Bram Holt")
+    assert added["id"].startswith("npc_")
+    assert added["introduced"] is True
+    assert added["status"] == "active"
+    assert added["source"] == "manual"
+    assert added["met_turn"] == state["turn"]
+    assert added["role"] == "informant"
+    assert added["personality"] == ["shrewd", "wry", "cautious"]
+    assert added["notes"] == "Owes nobody, trusts nobody."
+    assert added["change_log"][-1]["source"] == "manual"
+    # An introduced manual character gets its profile embedded into RAG.
+    profiles = [m for m in captured["memories"] if "profile" in m["tags"]]
+    assert len(profiles) == 1
+    assert profiles[0]["id"] == added["id"]
+    assert "Bram Holt" in profiles[0]["text"]
+    assert "Added Bram Holt" in result["message"]
+
+
+def test_add_unintroduced_character_stays_in_the_wings_without_rag():
+    backend = _load_backend()
+    captured = {}
+
+    result = asyncio.run(backend.on_command_npc(_add_cmd({
+        "name": "The Whisper", "role": "wildcard", "introduced": False,
+    }), _state(), _make_sdk("{}", captured)))
+
+    chars = result["module_data"]["wb_npc_system"]["characters"]
+    added = next(n for n in chars.values() if n["name"] == "The Whisper")
+    assert added["introduced"] is False
+    assert added["status"] == "unintroduced"
+    assert added["met_turn"] is None
+    # No profile embedded until the character is actually introduced.
+    assert "memories" not in captured
+
+
+def test_add_requires_a_name():
+    backend = _load_backend()
+    result = asyncio.run(backend.on_command_npc(
+        _add_cmd({"role": "ally", "archetype": "nameless"}), _state(), _make_sdk("{}", {}),
+    ))
+    assert "module_data" not in result
+    assert "needs a name" in result["message"]
+
+
+def test_add_with_unparseable_payload_fails_gracefully():
+    backend = _load_backend()
+    result = asyncio.run(backend.on_command_npc(
+        ["add", "not%7Bjson"], _state(), _make_sdk("{}", {}),
+    ))
+    assert "module_data" not in result
+    assert "Could not parse" in result["message"]
+
+
+def test_add_respects_embed_profiles_toggle_off():
+    backend = _load_backend()
+    captured = {}
+    state = _state()
+    state["module_configs"] = {"wb_npc_system": {"embed_profiles": False}}
+
+    asyncio.run(backend.on_command_npc(
+        _add_cmd({"name": "Bram Holt"}), state, _make_sdk("{}", captured),
+    ))
+    assert "memories" not in captured
+
+
+# --------------------------------------------------------------------------
+# /npc delete
+# --------------------------------------------------------------------------
+
+def test_delete_removes_character_and_purges_memories():
+    backend = _load_backend()
+    captured = {}
+    state = _state()
+
+    result = asyncio.run(backend.on_command_npc(
+        ["delete", "npc_aaaa1111"], state, _make_sdk("{}", captured),
+    ))
+
+    chars = result["module_data"]["wb_npc_system"]["characters"]
+    assert "npc_aaaa1111" not in chars
+    # Authoritative replace so the removal actually propagates past deep-merge.
+    assert result["module_data_replace"] == ["characters"]
+    # All of the character's memories are purged (no tag filter).
+    assert captured["forgotten"] == [{"id": "npc_aaaa1111", "tags": []}]
+    assert "Deleted Serah" in result["message"]
+
+
+def test_delete_strips_dangling_relationships_from_survivors():
+    backend = _load_backend()
+    doomed = _npc()  # npc_aaaa1111
+    survivor = _npc()
+    survivor["id"] = "npc_bbbb2222"
+    survivor["name"] = "Corin"
+    survivor["relationships"] = [
+        {"npc_id": "npc_aaaa1111", "type": "rival", "description": "old grudge"},
+        {"npc_id": "npc_cccc3333", "type": "ally", "description": "kept"},
+    ]
+    state = {
+        "turn": 9,
+        "history": [],
+        "module_configs": {},
+        "module_data": {"wb_npc_system": {"characters": {
+            doomed["id"]: doomed, survivor["id"]: survivor,
+        }}},
+    }
+
+    result = asyncio.run(backend.on_command_npc(
+        ["delete", "npc_aaaa1111"], state, _make_sdk("{}", {}),
+    ))
+
+    chars = result["module_data"]["wb_npc_system"]["characters"]
+    assert "npc_aaaa1111" not in chars
+    rels = chars["npc_bbbb2222"]["relationships"]
+    assert [r["npc_id"] for r in rels] == ["npc_cccc3333"]
+
+
+def test_delete_unknown_id_is_a_noop():
+    backend = _load_backend()
+    result = asyncio.run(backend.on_command_npc(
+        ["delete", "npc_nope"], _state(), _make_sdk("{}", {}),
+    ))
+    assert "module_data" not in result
+    assert "Unknown character" in result["message"]

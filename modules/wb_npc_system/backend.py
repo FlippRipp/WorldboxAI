@@ -1388,8 +1388,111 @@ async def _apply_manual_edit(npc_id: str, payload: str, state: dict, sdk) -> dic
     }
 
 
+def _coerce_personality(value) -> list[str]:
+    """Normalize a personality field (comma string or list) to a trait list."""
+    if isinstance(value, str):
+        value = value.split(",")
+    if not isinstance(value, list):
+        return []
+    return [str(p).strip() for p in value if str(p).strip()]
+
+
+async def _apply_manual_add(payload: str, state: dict, sdk) -> dict:
+    """Create a brand-new character from browser-supplied fields. The payload is
+    URL-encoded JSON (one whitespace-free token, matching the edit path).
+
+    Manually added characters default to already-introduced (they show up in the
+    known cast immediately); pass ``introduced: false`` to drop one into the
+    unintroduced pool instead."""
+    bank = _get_bank(state)
+
+    try:
+        raw = json.loads(urllib.parse.unquote(payload))
+    except (json.JSONDecodeError, ValueError):
+        raw = None
+    if not isinstance(raw, dict):
+        return {"message": "[NPC] Could not parse the character payload.", "signal": "end_turn"}
+
+    name = str(raw.get("name", "")).strip()
+    if not name:
+        return {"message": "[NPC] A new character needs a name.", "signal": "end_turn"}
+
+    introduced = bool(raw.get("introduced", True))
+    turn = state.get("turn", 0)
+    location = (
+        (state.get("player_location_node_id"),
+         state.get("player_location_region"),
+         state.get("player_location_layer_id"))
+        if introduced else (None, None, None)
+    )
+
+    npc_data = {
+        "name": name,
+        "race": str(raw.get("race", "")).strip(),
+        "gender": str(raw.get("gender", "")).strip(),
+        "appearance": str(raw.get("appearance", "")).strip(),
+        "archetype": str(raw.get("archetype", "")).strip(),
+        "pitch": str(raw.get("pitch", "")).strip(),
+        "personality": _coerce_personality(raw.get("personality", [])),
+        "role": raw.get("role", "neutral"),
+    }
+
+    npc_id, record = _build_npc_record(
+        npc_data, turn, bank, introduced=introduced, source="manual", location=location,
+    )
+    notes = str(raw.get("notes", "")).strip()
+    if notes:
+        record["notes"] = notes
+    _log_change(record, turn, f"Manually added {name}", ["name"], "manual")
+    bank[npc_id] = record
+
+    if introduced and _config(state).get("embed_profiles", True):
+        await _embed_profile(record, turn, sdk)
+
+    print(f"[NPC System] Manually added character {name} ({npc_id}) at turn {turn}")
+    return {
+        "message": f"[NPC] Added {name}.",
+        "signal": "end_turn",
+        "module_data_replace": ["characters"],
+        **_set_bank({}, bank),
+    }
+
+
+async def _delete_npc(npc_id: str, state: dict, sdk) -> dict:
+    """Permanently remove a character from the bank, purge their stored memories
+    (RAG profile included), and drop any relationship references the surviving
+    characters held to them."""
+    bank = _get_bank(state)
+    npc = bank.get(npc_id)
+    if not npc:
+        return {"message": f"[NPC] Unknown character id: {npc_id}", "signal": "end_turn"}
+
+    name = npc.get("name", npc_id)
+
+    try:
+        await sdk.memory.forget(npc_id)
+    except Exception as e:
+        print(f"[NPC System] Failed to purge memories for {npc_id}: {e}")
+
+    del bank[npc_id]
+
+    for other in bank.values():
+        rels = other.get("relationships")
+        if isinstance(rels, list) and any(r.get("npc_id") == npc_id for r in rels):
+            other["relationships"] = [r for r in rels if r.get("npc_id") != npc_id]
+
+    print(f"[NPC System] Deleted character {name} ({npc_id})")
+    return {
+        "message": f"[NPC] Deleted {name}.",
+        "signal": "end_turn",
+        "module_data_replace": ["characters"],
+        **_set_bank({}, bank),
+    }
+
+
 async def on_command_npc(args: list[str], state: dict, sdk) -> dict:
-    usage = "[NPC] Usage: /npc update <npc_id> | /npc edit <npc_id> <data>"
+    usage = ("[NPC] Usage: /npc add <data> | /npc update <npc_id> | "
+             "/npc edit <npc_id> <data> | /npc delete <npc_id>")
     if not args:
         return {"message": usage, "signal": "end_turn"}
 
@@ -1398,4 +1501,8 @@ async def on_command_npc(args: list[str], state: dict, sdk) -> dict:
         return await _update_npc_from_story(args[1], state, sdk)
     if sub == "edit" and len(args) >= 3:
         return await _apply_manual_edit(args[1], " ".join(args[2:]), state, sdk)
+    if sub == "add" and len(args) >= 2:
+        return await _apply_manual_add(args[1], state, sdk)
+    if sub in ("delete", "remove") and len(args) >= 2:
+        return await _delete_npc(args[1], state, sdk)
     return {"message": usage, "signal": "end_turn"}

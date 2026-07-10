@@ -129,6 +129,49 @@ def test_intro_skips_module_reinit_for_existing_story(tmp_path, monkeypatch):
     assert done["state"]["swipes"] is not None
 
 
+def test_npc_delete_command_removes_character_end_to_end(tmp_path, monkeypatch):
+    # Deleting a character must survive the command write-back. module_data is
+    # deep-merged (additive), so without the module_data_replace opt-in the
+    # removed key would linger; this exercises the full WS -> handler -> replace
+    # path and asserts the bank actually shrinks.
+    client, session_manager = make_client(tmp_path, monkeypatch)
+    session_manager.state.setdefault("module_data", {})["wb_npc_system"] = {
+        "characters": {
+            "npc_keep0001": {"id": "npc_keep0001", "name": "Keeper", "role": "ally",
+                             "introduced": True, "status": "active", "relationships": []},
+            "npc_gone0002": {"id": "npc_gone0002", "name": "Doomed", "role": "neutral",
+                             "introduced": True, "status": "active", "relationships": []},
+        }
+    }
+
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"action": "turn", "text": "/npc delete npc_gone0002"})
+        upd = receive_until(ws, {"state_update", "error"})
+
+    assert upd["type"] == "state_update"
+    chars = upd["state"]["module_data"]["wb_npc_system"]["characters"]
+    assert "npc_gone0002" not in chars
+    assert "npc_keep0001" in chars
+    # The removal is also persisted to the live session state.
+    assert "npc_gone0002" not in session_manager.state["module_data"]["wb_npc_system"]["characters"]
+
+
+def test_npc_add_command_creates_character_end_to_end(tmp_path, monkeypatch):
+    client, session_manager = make_client(tmp_path, monkeypatch)
+
+    import urllib.parse
+    import json as _json
+    payload = urllib.parse.quote(_json.dumps({"name": "Fresh Face", "role": "wildcard"}))
+
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"action": "turn", "text": f"/npc add {payload}"})
+        upd = receive_until(ws, {"state_update", "error"})
+
+    assert upd["type"] == "state_update"
+    chars = upd["state"]["module_data"]["wb_npc_system"]["characters"]
+    assert any(c["name"] == "Fresh Face" for c in chars.values())
+
+
 def test_ws_stop_cancels_turn_and_rejects_concurrent_turns(tmp_path, monkeypatch):
     client, session_manager = make_client(tmp_path, monkeypatch)
     turn_before = session_manager.state.get("turn", 0)
