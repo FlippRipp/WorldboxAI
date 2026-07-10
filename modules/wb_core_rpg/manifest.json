@@ -1,7 +1,7 @@
 {
   "id": "wb_core_rpg",
   "name": "Core RPG System",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "dependencies": [],
   "consumes": {
     "state": ["input_text", "turn", "history"],
@@ -35,6 +35,29 @@
       ],
       "default": "fastest"
     },
+    "xp_gain_condition": {
+      "type": "select",
+      "label": "XP Gain Condition",
+      "category": "Core RPG System",
+      "description": "Defines what earns the player XP (XP-Based progression only). The automatic options award XP each turn from the action assessment, scaled by difficulty. 'AI Reader decides' defers to the story reader's per-turn judgement; 'Disabled' turns XP off.",
+      "options": [
+        {"value": "successful_action", "label": "Successful actions"},
+        {"value": "any_action", "label": "Any substantive action"},
+        {"value": "challenging_action", "label": "Only challenging actions"},
+        {"value": "reader", "label": "AI Reader decides"},
+        {"value": "disabled", "label": "Disabled"}
+      ],
+      "default": "successful_action"
+    },
+    "xp_per_action": {
+      "type": "slider",
+      "min": 1,
+      "max": 50,
+      "default": 10,
+      "label": "Base XP per Action",
+      "category": "Core RPG System",
+      "description": "Base XP granted when the XP gain condition is met, scaled by the action's difficulty (trivial x0.25 up to extreme x2.5)."
+    },
     "xp_curve_steepness": {"type": "slider", "min": 1, "max": 5, "default": 2},
     "hp_per_vitality": {"type": "slider", "min": 3, "max": 15, "default": 7},
     "action_rating_strictness": {"type": "slider", "min": 1, "max": 10, "default": 5},
@@ -63,7 +86,7 @@
     "hp_change": "integer, HP gained or lost by the player in the story. Use 0 if no player HP changed.",
     "stat_changes": "object mapping stat name (power/agility/vitality/intelligence/spirit/charm) to integer change. Empty object if none.",
     "skill_changes": "object mapping skill name to {rating: int, description: str, trigger_words: [str], type: 'active'|'passive'|'curse'}. For new skills, provide rating/description/trigger_words/type. description: 1-2 tight sentences stating what the ability actually does, how it manifests, its source, and any limits/costs/conditions shown in the story — concrete and specific to this story, never generic filler like 'skilled in X'. For existing skills, just rating. Empty object if none.",
-    "xp_gained": "integer, experience points the character earned from this action. Use 0 if none."
+    "xp_gained": "integer, experience points the character earned from this action. Use 0 if none. Only consulted when the module's XP Gain Condition is set to 'AI Reader decides'; otherwise XP is awarded automatically from the action assessment."
   },
   "character_creation": {
     "default_state": {

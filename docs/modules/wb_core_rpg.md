@@ -45,6 +45,8 @@ Stored in `state["module_data"]["wb_core_rpg"]`:
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `progression_system` | select | `xp` | How characters advance: XP-Based, Practice-Based, or Milestone-Based |
+| `xp_gain_condition` | select | `successful_action` | What earns the player XP (XP-Based only). See below. |
+| `xp_per_action` | slider 1-50 | 10 | Base XP granted when the XP gain condition is met, scaled by action difficulty. |
 | `xp_curve_steepness` | slider 1-5 | 2 | Controls the exponential XP curve. Higher = slower leveling. |
 | `hp_per_constitution` | slider 3-15 | 7 | Multiplier for HP calculation. CON 10 = 70 base HP at level 1. |
 | `action_rating_strictness` | slider 1-10 | 5 | How harshly actions are judged. Higher = harder outcomes. |
@@ -55,10 +57,27 @@ Stored in `state["module_data"]["wb_core_rpg"]`:
 ## Progression Systems
 
 ### XP-Based (default)
-- Each action awards XP via the `xp_gained` mutation from the Reader agent.
 - XP accumulates toward level thresholds.
 - Level-up: +2 HP, +1 to two random stats (capped by `max_stat_value`).
 - XP curve example (steepness=2): L1→L2: 50 XP, L2→L3: 200 XP, L3→L4: 450 XP.
+
+**XP Gain Condition (`xp_gain_condition`)** defines what actually earns XP. The
+first three options award XP automatically each turn from the module's own
+action assessment (the same fast-model pre-assessment used for feasibility), so
+XP no longer depends on the Reader agent choosing to emit an `xp_gained` value:
+
+| Condition | Awards XP when… |
+|---|---|
+| `successful_action` (default) | The turn's action is assessed and does **not** resolve as a hard failure (feasibility ≥ 3). |
+| `any_action` | Any substantive action is assessed, success or failure. |
+| `challenging_action` | The action's difficulty is `hard` or `extreme`. |
+| `reader` | The Reader agent emits an `xp_gained` mutation (legacy AI-driven behaviour). |
+| `disabled` | Never — XP progression is effectively off. |
+
+For the automatic conditions the amount is `xp_per_action` scaled by the
+assessed difficulty: trivial ×0.25, easy ×0.5, moderate ×1.0, hard ×1.75,
+extreme ×2.5, impossible ×0. Only substantive actions are assessed — pure dialog
+and trivial moves grant no XP.
 
 ### Practice-Based
 - Each time a skill is used (detected via keyword matching in the action text), its practice counter increments by the skill's current rating.
@@ -90,7 +109,7 @@ Only substantive actions are assessed: pure dialog with nothing at stake or triv
 |---|---|
 | `on_gather_context` | Injects action feasibility prompt into context before Storyteller |
 | `on_render_prompt_block` | Renders `character_sheet` (system) and `action_feasibility` (chat-depth-0) prompt blocks |
-| `on_mutate_state` | Processes `hp_change`, `stat_changes`, `skill_changes`, `xp_gained` from Reader. Handles level-ups, skill practice, and milestone detection. |
+| `on_mutate_state` | Processes `hp_change`, `stat_changes`, `skill_changes` from Reader. Awards XP per the `xp_gain_condition` (from the action assessment, or the Reader's `xp_gained` in `reader` mode). Handles level-ups, skill practice, and milestone detection. |
 
 ## Slash Commands
 

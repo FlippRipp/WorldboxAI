@@ -124,6 +124,51 @@ class Character:
         return c
 
 
+# How much the base XP award is scaled by the assessed difficulty of an action.
+# Harder actions are worth more; an impossible attempt earns nothing.
+DIFFICULTY_XP_WEIGHT = {
+    "trivial": 0.25,
+    "easy": 0.5,
+    "moderate": 1.0,
+    "hard": 1.75,
+    "extreme": 2.5,
+    "impossible": 0.0,
+}
+
+
+def _xp_from_assessment(char: "Character", config: dict) -> int:
+    """Deterministic XP for the turn, driven by the configured XP gain condition
+    and this turn's action assessment. Returns 0 when the condition isn't met or
+    no substantive action was assessed."""
+    condition = config.get("xp_gain_condition", "successful_action")
+    if condition in ("reader", "disabled"):
+        return 0
+
+    assessment = char.action_assessment or {}
+    try:
+        feasibility = int(assessment.get("feasibility"))
+    except (TypeError, ValueError):
+        # No substantive action was assessed this turn (trivial move, pure
+        # dialog, or no player input) -> nothing to reward.
+        return 0
+
+    difficulty = str(assessment.get("difficulty", "moderate")).lower()
+    # Feasibility 1-2 is the only band that resolves as a hard failure.
+    succeeded = feasibility >= 3
+
+    if condition == "successful_action" and not succeeded:
+        return 0
+    if condition == "challenging_action" and difficulty not in ("hard", "extreme"):
+        return 0
+    # "any_action" awards regardless of outcome.
+
+    base = config.get("xp_per_action", 10)
+    if not isinstance(base, (int, float)) or base <= 0:
+        base = 10
+    weight = DIFFICULTY_XP_WEIGHT.get(difficulty, 1.0)
+    return max(0, round(base * weight))
+
+
 def xp_for_level(level: int, steepness: int = 2) -> int:
     return int(50 * (level ** steepness))
 
@@ -141,6 +186,10 @@ async def on_gather_context(state: dict, sdk) -> dict:
     input_text = state.get("input_text", "").strip()
 
     updates = {}
+
+    # Start each turn with a clean assessment so a prior turn's ruling can't be
+    # reused (e.g. to re-award XP) on a turn with no substantive player action.
+    char.action_assessment = {}
 
     # Track which stats are relevant to this action via keyword matching
     if input_text:
@@ -321,8 +370,10 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
 async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
     char = Character.from_dict(state.get("module_data", {}).get("wb_core_rpg", {}))
     config = state.get("module_configs", {}).get("wb_core_rpg", {})
-    if not mutation:
-        return {}
+    # An empty mutation is still processed: condition-based XP is awarded from the
+    # turn's action assessment even when the Reader reports no other state change.
+    if mutation is None:
+        mutation = {}
 
     hp_per_con = config.get("hp_per_vitality", config.get("hp_per_constitution", 7))
     const_changed = False
@@ -393,8 +444,15 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
     progression = config.get("progression_system", "xp")
 
     if progression == "xp":
-        xp_gained = mutation.get("xp_gained", 0)
-        if isinstance(xp_gained, int) and xp_gained > 0:
+        condition = config.get("xp_gain_condition", "successful_action")
+        if condition == "reader":
+            # Defer entirely to the Reader agent's per-turn judgement.
+            raw = mutation.get("xp_gained", 0)
+            xp_gained = int(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0 else 0
+        else:
+            # Award XP deterministically from the turn's action assessment.
+            xp_gained = _xp_from_assessment(char, config)
+        if xp_gained > 0:
             char.xp += xp_gained
             steepness = config.get("xp_curve_steepness", 2)
             while total_xp_for_level(char.level + 1, steepness) <= char.xp:

@@ -293,10 +293,12 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
                             descriptor={{
                               key: `${mod.id}.${key}`,
                               type: schema.type,
-                              label: key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+                              label: schema.label || key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
                               min: schema.min,
                               max: schema.max,
                               default: schema.default,
+                              options: schema.options,
+                              description: schema.description,
                             }}
                             value={moduleValues[mod.id]?.[key] ?? schema.default}
                             onChange={(v) => handleModuleChange(mod.id, key, v)}
