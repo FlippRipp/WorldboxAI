@@ -216,6 +216,66 @@ def test_generation_prompt_includes_profile_difficulty_and_npc_threads():
     assert "OTHER ACTIVE STORYLINES" not in captured2["prompts"][0]
 
 
+def test_adoption_midstory_bootstraps_profile_before_first_thread():
+    backend = _load_backend()
+    captured = {}
+    bootstrap_reply = json.dumps(_profile_reply())
+    sdk = _make_sdk([bootstrap_reply, THREAD_REPLY], captured)
+    state = _state(
+        turn=12,
+        data=backend._default_data(),
+        history=["The intro.", "You duel the harbor watch.", "You bribe the customs clerk."],
+    )
+    state["chat_messages"] = [
+        {"role": "user", "content": "I challenge the watch captain."},
+        {"role": "ai", "content": "Steel rings."},
+        {"role": "user", "content": "I slip the clerk a purse."},
+    ]
+
+    result = asyncio.run(backend.on_librarian(state, sdk))
+    update = _updates(result)
+
+    assert len(captured["prompts"]) == 2
+    assert captured["preferences"] == ["smartest", "smartest"]
+    bootstrap_prompt = captured["prompts"][0]
+    assert "already in progress" in bootstrap_prompt
+    assert "bribe the customs clerk" in bootstrap_prompt
+    assert "I slip the clerk a purse." in bootstrap_prompt
+    # The thread generation that follows sees the bootstrapped profile.
+    assert "back-alley deals" in captured["prompts"][1]
+    assert update["profile"]["likes"] == ["back-alley deals", "haggling"]
+    assert update["status"] == "active"
+    assert update["thread"]["title"] == "The Salt Baron's Ledger"
+
+
+def test_adoption_bootstrap_failure_still_generates_thread():
+    backend = _load_backend()
+    captured = {}
+    sdk = _make_sdk(["not json", THREAD_REPLY], captured)
+
+    result = asyncio.run(backend.on_librarian(
+        _state(turn=12, data=backend._default_data()), sdk))
+    update = _updates(result)
+
+    assert len(captured["prompts"]) == 2
+    assert "profile" not in update  # starting blind, no profile written
+    assert update["status"] == "active"
+    assert update["thread"]["title"] == "The Salt Baron's Ledger"
+
+
+def test_fresh_story_does_not_bootstrap():
+    backend = _load_backend()
+    captured = {}
+    sdk = _make_sdk([THREAD_REPLY], captured)
+
+    result = asyncio.run(backend.on_librarian(
+        _state(turn=1, data=backend._default_data()), sdk))
+
+    assert len(captured["prompts"]) == 1  # thread generation only
+    assert "already in progress" not in captured["prompts"][0]
+    assert _updates(result)["status"] == "active"
+
+
 def test_generation_failure_retries_then_dormant():
     backend = _load_backend()
     data = backend._default_data()

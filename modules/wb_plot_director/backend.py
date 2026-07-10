@@ -24,6 +24,10 @@ THREAD_HISTORY_CAP = 10
 MAX_LOG_ENTRIES = 20
 GEN_MAX_ATTEMPTS = 3
 OPPORTUNITY_COOLDOWN_TURNS = 2
+BOOTSTRAP_SCENES = 15
+BOOTSTRAP_SCENES_MAX_CHARS = 12000
+BOOTSTRAP_INPUTS = 15
+BOOTSTRAP_INPUTS_MAX_CHARS = 2500
 
 MOMENTUM_VALUES = ("observing", "building", "steady", "stalled", "resolving")
 
@@ -181,9 +185,8 @@ def _storylines_block(state: dict) -> str:
     return "OTHER ACTIVE STORYLINES (tracked by the NPC system):\n" + "\n".join(f"- {t}" for t in lines) + "\n\n"
 
 
-def _story_material(state: dict) -> str:
-    """Collect the material threads are woven from: scenario, world rules/lore,
-    and the most recent scenes (newest always in full)."""
+def _setting_material(state: dict) -> list[str]:
+    """Scenario and world rules/lore blocks shared by every generation prompt."""
     parts = []
 
     scenario = state.get("scenario_data")
@@ -209,6 +212,14 @@ def _story_material(state: dict) -> str:
         if lines:
             parts.append("<world>\n" + "\n".join(lines) + "\n</world>")
 
+    return parts
+
+
+def _story_material(state: dict) -> str:
+    """Collect the material threads are woven from: scenario, world rules/lore,
+    and the most recent scenes (newest always in full)."""
+    parts = _setting_material(state)
+
     history = state.get("history", [])
     if history:
         latest = str(history[-1])[-4000:]
@@ -217,6 +228,64 @@ def _story_material(state: dict) -> str:
         parts.append(f"<story_so_far>\n{story}\n</story_so_far>")
 
     return "\n\n".join(parts)
+
+
+def _is_profile_empty(profile: dict) -> bool:
+    if not isinstance(profile, dict):
+        return True
+    return (
+        not any(profile.get("playstyle", {}).values())
+        and not profile.get("tone")
+        and not profile.get("themes")
+        and not profile.get("likes")
+        and not profile.get("dislikes")
+    )
+
+
+async def _bootstrap_profile(state: dict, sdk) -> dict | None:
+    """One-time deep read when the module joins a story already in progress:
+    distill an initial player profile from the whole story so far instead of
+    starting blind. Returns the sanitized profile, or None on a bad reply."""
+    config = _config(state)
+
+    scenes = "\n\n".join(str(h) for h in state.get("history", [])[-BOOTSTRAP_SCENES:])[-BOOTSTRAP_SCENES_MAX_CHARS:]
+    inputs = [
+        str(m.get("content", "")).strip()
+        for m in state.get("chat_messages", [])
+        if m.get("role") == "user" and str(m.get("content", "")).strip()
+    ]
+    inputs_block = "\n".join(f"- {i}" for i in inputs[-BOOTSTRAP_INPUTS:])[-BOOTSTRAP_INPUTS_MAX_CHARS:]
+    setting = "\n\n".join(_setting_material(state))
+
+    prompt = f"""You are joining a text RPG already in progress. Study the story so far and build an initial profile of the player: how they actually play, the story's prevailing tone, its recurring themes, and what the player seems to enjoy or avoid.
+
+{setting}
+
+STORY SO FAR (oldest to newest):
+{scenes}
+
+THE PLAYER'S OWN ACTIONS (their typed inputs, oldest to newest):
+{inputs_block or '(none recorded)'}
+
+Base the profile on demonstrated behavior, not on what the setting suggests. playstyle values are integers 0-10 for how much the player actually does each thing. tone is a few words. themes, likes and dislikes are short phrases, at most 8 each.
+
+Respond with ONLY valid JSON:
+{{"playstyle": {{"combat": 0, "diplomacy": 0, "exploration": 0, "mystery": 0, "social": 0, "intrigue": 0}}, "tone": "...", "themes": [], "likes": [], "dislikes": []}}"""
+
+    model_pref = config.get("thread_ai_model", "smartest")
+    try:
+        sdk.llm._current_module = MODULE_ID
+        raw = await sdk.llm.generate(prompt, model_preference=model_pref)
+    finally:
+        sdk.llm._current_module = ""
+
+    parsed = _parse_json_block(raw)
+    if not isinstance(parsed, dict):
+        return None
+    if isinstance(parsed.get("profile"), dict):
+        parsed = parsed["profile"]
+    profile = _clean_profile(parsed, _default_profile())
+    return None if _is_profile_empty(profile) else profile
 
 
 async def _generate_thread(state: dict, sdk, data: dict, avoid_previous_kind: bool = False) -> dict:
@@ -384,8 +453,18 @@ async def on_librarian(state: dict, sdk) -> dict | None:
 
     # No active thread (fresh save or previous thread closed): generate one.
     if thread.get("status") != "active":
+        # Joining a story already in progress with no profile yet: read the
+        # story so far once, so the first thread caters to how the player has
+        # actually been playing. Skipped for fresh stories (nothing to read)
+        # and never retried -- a failed bootstrap just means starting blind.
+        if turn >= 2 and _is_profile_empty(data.get("profile") or {}):
+            bootstrapped = await _bootstrap_profile(state, sdk)
+            if bootstrapped is not None:
+                print(f"[Plot Director] Turn {turn}: profile bootstrapped from the story so far.")
+                updates["profile"] = bootstrapped
         last_outcome = (data.get("thread_history") or [{}])[-1].get("outcome", "")
-        updates.update(await _generate_thread(state, sdk, data, avoid_previous_kind=last_outcome == "abandoned"))
+        updates.update(await _generate_thread(
+            state, sdk, {**data, **updates}, avoid_previous_kind=last_outcome == "abandoned"))
         return {"module_data": {MODULE_ID: updates}}
 
     # Deterministic expiry, checked before spending an assessment call.
