@@ -294,8 +294,18 @@ class GameSessionManager:
 
     def update_module_configs(self, module_configs: dict[str, Any]) -> dict[str, Any]:
         self._require_active_save()
-        self.state["module_configs"] = module_configs
-        self.save_manager.save_module_configs(self.active_save_id, module_configs)
+        # Reserved keys (``__active_modules__`` and friends) live alongside the
+        # per-module settings but are owned by the host, not the settings UI.
+        # The in-game settings modal only sends per-module schema values, so a
+        # naive replace would drop the reserved keys and silently re-enable
+        # every module. Carry forward any reserved key the caller omitted.
+        merged = dict(module_configs)
+        existing = self.state.get("module_configs", {})
+        for key, value in existing.items():
+            if key.startswith("__") and key.endswith("__") and key not in merged:
+                merged[key] = value
+        self.state["module_configs"] = merged
+        self.save_manager.save_module_configs(self.active_save_id, merged)
         return self.state
 
     def get_save_active_modules(self, save_id: str) -> Optional[list[str]]:

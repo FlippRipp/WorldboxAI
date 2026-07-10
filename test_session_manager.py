@@ -151,6 +151,38 @@ def test_session_manager_ignores_broken_active_marker():
     shutil.rmtree(data_dir)
 
 
+def test_update_module_configs_preserves_active_modules():
+    """The in-game settings modal only sends per-module schema values. That
+    write must not wipe the reserved ``__active_modules__`` key, or every
+    toggled-off module silently re-enables on the next reload."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(base_dir, "test_session_active_modules_data")
+
+    if os.path.exists(data_dir):
+        shutil.rmtree(data_dir)
+
+    session = GameSessionManager(data_dir)
+    session.create_save("story_one")
+
+    # User toggles a module off (persisted under the reserved key).
+    session.set_save_active_modules("story_one", ["wb_core_rpg"])
+    assert session.get_save_active_modules("story_one") == ["wb_core_rpg"]
+
+    # User then saves module settings from the in-game modal — a payload with
+    # only per-module schema values, no reserved key.
+    session.update_module_configs({"wb_core_rpg": {"progression_system": "practice"}})
+
+    # The reserved set survives, both in memory and on disk after reload.
+    assert session.get_save_active_modules("story_one") == ["wb_core_rpg"]
+    session.save_completed_turn({**session.state, "turn": 1})
+
+    reloaded = GameSessionManager(data_dir)
+    assert reloaded.get_save_active_modules("story_one") == ["wb_core_rpg"]
+    assert reloaded.state["module_configs"]["wb_core_rpg"]["progression_system"] == "practice"
+
+    shutil.rmtree(data_dir)
+
+
 def test_session_manager_refuses_turns_without_active_save():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(base_dir, "test_session_no_save_data")
@@ -176,4 +208,5 @@ if __name__ == "__main__":
     test_session_manager_save_lifecycle()
     test_session_manager_restores_last_active_save_on_boot()
     test_session_manager_ignores_broken_active_marker()
+    test_update_module_configs_preserves_active_modules()
     test_session_manager_refuses_turns_without_active_save()
