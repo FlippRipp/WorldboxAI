@@ -502,6 +502,56 @@ def test_generate_handles_empty_payload():
     assert "nothing usable" in result["message"]
 
 
+def _plot_data():
+    return {
+        "profile": {
+            "playstyle": {"combat": 2, "intrigue": 8},
+            "tone": "grim and superstitious",
+            "themes": ["forbidden knowledge", "coastal decay"],
+            "likes": [{"text": "morally grey allies", "weight": "high"}],
+            "dislikes": [{"text": "comic relief", "weight": "medium"}],
+        }
+    }
+
+
+def test_generate_hooks_into_plot_director_profile():
+    backend = _load_backend()
+    captured = {}
+    state = _state()
+    state["module_data"]["wb_plot_director"] = _plot_data()
+
+    asyncio.run(backend.on_command_npc(["generate"], state, _make_sdk(_GEN_REPLY, captured)))
+
+    prompt = captured["prompt"]
+    assert "STORY DIRECTION" in prompt
+    assert "grim and superstitious" in prompt
+    assert "forbidden knowledge" in prompt
+    assert "morally grey allies (high)" in prompt
+    assert "comic relief (medium)" in prompt
+    # The instruction that ties the character to the profile is present.
+    assert "resonate with the STORY DIRECTION" in prompt
+
+
+def test_generate_omits_plot_block_when_module_absent():
+    backend = _load_backend()
+    captured = {}
+    asyncio.run(backend.on_command_npc(["generate"], _state(), _make_sdk(_GEN_REPLY, captured)))
+    assert "STORY DIRECTION" not in captured["prompt"]
+
+
+def test_generate_omits_plot_block_when_profile_empty():
+    backend = _load_backend()
+    captured = {}
+    state = _state()
+    # Module present but nothing learned yet -> no block, no dangling instruction.
+    state["module_data"]["wb_plot_director"] = {"profile": {
+        "playstyle": {}, "tone": "", "themes": [], "likes": [], "dislikes": [],
+    }}
+    asyncio.run(backend.on_command_npc(["generate"], state, _make_sdk(_GEN_REPLY, captured)))
+    assert "STORY DIRECTION" not in captured["prompt"]
+    assert "resonate with the STORY DIRECTION" not in captured["prompt"]
+
+
 # --------------------------------------------------------------------------
 # /npc delete
 # --------------------------------------------------------------------------

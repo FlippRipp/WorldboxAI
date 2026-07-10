@@ -268,6 +268,55 @@ def _world_context(state: dict) -> str:
     return "\n".join(parts)
 
 
+def _plot_profile_block(state: dict) -> str:
+    """When the Plot Director module is present, surface its learned story
+    profile (tone, themes, and the player's weighted likes/dislikes) so newly
+    generated characters cater to the same direction. Returns "" when the module
+    is absent, unmet, or has learned nothing yet."""
+    plot = state.get("module_data", {}).get("wb_plot_director")
+    if not isinstance(plot, dict):
+        return ""
+    profile = plot.get("profile")
+    if not isinstance(profile, dict):
+        return ""
+
+    tone = str(profile.get("tone") or "").strip()
+    themes = [str(t).strip() for t in profile.get("themes", []) if str(t).strip()]
+
+    def _prefs(entries) -> list[str]:
+        out = []
+        for e in entries if isinstance(entries, list) else []:
+            if isinstance(e, dict):
+                text = str(e.get("text", "")).strip()
+                weight = e.get("weight", "medium")
+            else:
+                text, weight = str(e).strip(), "medium"
+            if text:
+                out.append(f"{text} ({weight})")
+        return out
+
+    likes = _prefs(profile.get("likes"))
+    dislikes = _prefs(profile.get("dislikes"))
+
+    if not (tone or themes or likes or dislikes):
+        return ""
+
+    lines = [
+        "STORY DIRECTION (from the Plot Director -- align this character with the story's "
+        "established tone and themes and the player's tastes; the weight in parentheses marks "
+        "how strongly the player feels):"
+    ]
+    if tone:
+        lines.append(f"Tone: {tone}")
+    if themes:
+        lines.append(f"Themes: {', '.join(themes)}")
+    if likes:
+        lines.append(f"Player enjoys (lean into these): {'; '.join(likes)}")
+    if dislikes:
+        lines.append(f"Player dislikes (steer clear of these): {'; '.join(dislikes)}")
+    return "\n".join(lines)
+
+
 async def _update_story_threads(state: dict, sdk) -> list[dict]:
     """Ask the LLM to extract active story threads from recent history, tagged with
     which existing NPCs (if any) each thread involves."""
@@ -1106,10 +1155,16 @@ async def on_librarian(state: dict, sdk) -> dict | None:
 
     needed = min(3, max_pool - unintroduced_count)
 
+    plot_block = _plot_profile_block(state)
+    plot_section = f"\n\n{plot_block}" if plot_block else ""
+    plot_rule = ("\n9. Make these characters resonate with the STORY DIRECTION above -- fit its tone "
+                 "and themes, lean into what the player enjoys, and steer clear of what they dislike."
+                 if plot_block else "")
+
     prompt = f"""You are a character designer for a text-based RPG. Create {needed} new NPC concepts for the game.
 
 WORLD CONTEXT:
-{wctx}
+{wctx}{plot_section}
 
 CURRENT STORY STATE:
 {scene}
@@ -1125,7 +1180,7 @@ INSTRUCTIONS:
 5. Characters should feel authentic to this world's genre, factions, and regions.
 6. Pitches should be 2-3 sentences -- a hook that suggests story potential.
 7. Personality should be exactly 3 keywords describing core traits.
-8. Optionally relate 0-2 new characters to EXISTING characters above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.
+8. Optionally relate 0-2 new characters to EXISTING characters above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.{plot_rule}
 
 Respond with ONLY valid JSON:
 {{"npcs": [{{"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_layer_id": "layer_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}]}}"""
@@ -1470,10 +1525,16 @@ async def _generate_random_character(state: dict, sdk) -> dict:
     wctx = _world_context(state)
     region = state.get("player_location_region", "unknown")
 
+    plot_block = _plot_profile_block(state)
+    plot_section = f"\n\n{plot_block}" if plot_block else ""
+    plot_rule = ("\n8. Make the character resonate with the STORY DIRECTION above -- fit its tone "
+                 "and themes, lean into what the player enjoys, and steer clear of what they dislike."
+                 if plot_block else "")
+
     prompt = f"""You are a character designer for a text-based RPG. Create 1 new NPC concept for the game.
 
 WORLD CONTEXT:
-{wctx}
+{wctx}{plot_section}
 
 CURRENT STORY STATE:
 {scene}
@@ -1488,7 +1549,7 @@ INSTRUCTIONS:
 4. The character should feel authentic to this world's genre, factions, and regions.
 5. The pitch should be 2-3 sentences -- a hook that suggests story potential.
 6. Personality should be exactly 3 keywords describing core traits.
-7. Optionally relate the character to an EXISTING character above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.
+7. Optionally relate the character to an EXISTING character above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.{plot_rule}
 
 Respond with ONLY valid JSON:
 {{"npc": {{"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_layer_id": "layer_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}}}"""
