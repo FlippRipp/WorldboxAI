@@ -14,8 +14,22 @@ export default function PlotDirectorWidget({ state, config }) {
   const [showLikes, setShowLikes] = useState(false);
 
   const data = state?.module_data?.wb_plot_director;
-  if (!data || data.schema !== 2) return null;
+  if (!data) return null;
   if (config?.plot_enabled === false) return null;
+
+  // Legacy v1 save: data migrates on the next turn; show the observing
+  // placeholder instead of vanishing until then.
+  if (data.schema !== 2) {
+    return (
+      <div className="bg-gray-900/70 rounded-lg border border-gray-700 p-3 space-y-3 text-sm">
+        <div className="flex items-center justify-between">
+          <span className="text-gray-300 font-semibold">Plot Thread</span>
+          <span className="text-xs text-gray-500">observing</span>
+        </div>
+        <div className="text-xs text-gray-500 italic">Observing your story…</div>
+      </div>
+    );
+  }
 
   if (data.status === 'failed') {
     return (
