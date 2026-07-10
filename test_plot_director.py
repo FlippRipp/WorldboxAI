@@ -26,46 +26,64 @@ def _make_sdk(replies, captured: dict):
     return SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
 
 
-OUTLINE_REPLY = json.dumps({
-    "premise": "A buried king stirs beneath the city.",
-    "driving_tension": "Power calls to the unworthy.",
-    "acts": [
-        {"title": "Whispers", "goal": "Surface the threat", "beats": [
-            {"description": "Rumors of tremors under the market"},
-            {"description": "A collapsed cellar reveals old stonework"},
-        ]},
-        {"title": "Descent", "goal": "Confront the depths", "beats": [
-            {"description": "A guide offers passage below"},
-            {"description": "The buried throne room is found"},
-        ]},
-        {"title": "Crown", "goal": "Resolve the king's claim", "beats": [
-            {"description": "The king demands fealty"},
-        ]},
-    ],
+THREAD_REPLY = json.dumps({
+    "title": "The Salt Baron's Ledger",
+    "hook": "A dockworker presses a stolen ledger into your hands.",
+    "challenge": "The Baron's enforcers want it back -- and know your face.",
+    "stakes": "The harbor district's independence.",
+    "appeal": "intrigue and back-alley deals",
 })
+
+SECOND_THREAD_REPLY = json.dumps({
+    "title": "Tremors Below",
+    "hook": "The ground hums at night beneath the market.",
+    "challenge": "Something old is digging upward, faster each day.",
+    "stakes": "The market quarter's foundations.",
+    "appeal": "mystery",
+})
+
+
+def _profile_reply(**overrides):
+    profile = {
+        "playstyle": {"combat": 1, "diplomacy": 4, "exploration": 2,
+                      "mystery": 3, "social": 5, "intrigue": 6},
+        "tone": "gritty",
+        "themes": ["smuggling", "harbor politics"],
+        "likes": ["back-alley deals", "haggling"],
+        "dislikes": [],
+    }
+    profile.update(overrides)
+    return profile
 
 
 def _assessment_reply(**overrides):
     reply = {
-        "beat_advanced": False,
-        "beat_completed": False,
-        "beat_summary": "",
-        "drift_detected": False,
-        "drift_note": "",
+        "thread_engaged": True,
+        "thread_resolved": False,
+        "resolution_note": "",
         "opportunity": False,
-        "nudge": "A beggar mutters about the ground humming at night.",
+        "nudge": "A beggar mutters about enforcers asking around the docks.",
         "momentum": "steady",
+        "profile": _profile_reply(),
     }
     reply.update(overrides)
     return json.dumps(reply)
 
 
-def _ready_data(backend, **overrides):
+def _active_data(backend, created_turn=1, **overrides):
     data = backend._default_data()
-    parsed = backend._normalize_outline(json.loads(OUTLINE_REPLY))
-    data.update(parsed)
-    data["status"] = "ready"
-    data["outline_created_turn"] = 1
+    data["status"] = "active"
+    data["thread"] = backend._full_thread(
+        id=f"t{created_turn}",
+        title="The Salt Baron's Ledger",
+        hook="A dockworker presses a stolen ledger into your hands.",
+        challenge="The Baron's enforcers want it back -- and know your face.",
+        stakes="The harbor district's independence.",
+        appeal="intrigue and back-alley deals",
+        status="active",
+        created_turn=created_turn,
+    )
+    data["momentum"] = "steady"
     data.update(overrides)
     return data
 
@@ -82,200 +100,312 @@ def _state(turn=3, data=None, config=None, history=None, **extra):
     return state
 
 
-def test_gather_context_seeds_skeleton_once():
+def _updates(result):
+    return result["module_data"]["wb_plot_director"]
+
+
+def test_gather_context_seeds_v2_skeleton_once():
     backend = _load_backend()
     sdk = _make_sdk([], {})
 
     first = asyncio.run(backend.on_gather_context(_state(data=None), sdk))
-    seeded = first["module_data"]["wb_plot_director"]
-    assert seeded["status"] == "pending"
-    assert seeded["position"] == {"act": 1, "beat_index": 0}
+    seeded = _updates(first)
+    assert seeded["schema"] == backend.SCHEMA_VERSION
+    assert seeded["status"] == "observing"
+    assert seeded["thread"]["status"] == "none"
+    assert seeded["profile"]["playstyle"] == {k: 0 for k in backend.PLAYSTYLE_KEYS}
+    assert seeded["profile"]["likes"] == []
 
-    second = asyncio.run(backend.on_gather_context(_state(data=seeded), sdk))
-    assert second == {}
+    again = asyncio.run(backend.on_gather_context(_state(data=seeded), sdk))
+    assert again == {}
 
 
-def test_first_librarian_generates_outline():
+def test_gather_context_migrates_legacy_save():
+    backend = _load_backend()
+    sdk = _make_sdk([], {})
+    legacy = {
+        "outline": {"premise": "A buried king stirs.", "acts": [{"beats": []}]},
+        "status": "ready",
+        "position": {"act": 2, "beat_index": 0},
+        "beats_completed": [{"id": "a1b1"}],
+        "assessment_log": [{"turn": 2}],
+        "stall_count": 2,
+        "drift_streak": 1,
+        "pending_nudge": "old nudge",
+    }
+
+    result = asyncio.run(backend.on_gather_context(_state(data=legacy), sdk))
+    update = _updates(result)
+    assert update["schema"] == backend.SCHEMA_VERSION
+    assert update["status"] == "observing"
+    # Deep-merge never deletes keys: dead legacy dicts/lists must be blanked
+    # with non-dict values so they get replaced, not merged around.
+    for key in backend.LEGACY_KEYS:
+        assert update[key] == ""
+    assert update["pending_nudge"] == ""
+
+
+def test_gather_context_emits_context_line_for_active_thread():
+    backend = _load_backend()
+    sdk = _make_sdk([], {})
+    data = _active_data(backend)
+
+    result = asyncio.run(backend.on_gather_context(_state(data=data), sdk))
+    context = result["context_string"]
+    assert "The Salt Baron's Ledger" in context
+    assert "stolen ledger" in context
+    assert "optional" in context.lower()
+
+    observing = asyncio.run(backend.on_gather_context(_state(data=backend._default_data()), sdk))
+    assert "context_string" not in observing
+
+    disabled = asyncio.run(backend.on_gather_context(
+        _state(data=data, config={"plot_enabled": False}), sdk))
+    assert "context_string" not in disabled
+
+
+def test_first_librarian_generates_thread_from_scenario():
     backend = _load_backend()
     captured = {}
-    sdk = _make_sdk([OUTLINE_REPLY], captured)
+    sdk = _make_sdk([THREAD_REPLY], captured)
     state = _state(
         turn=1,
         data=backend._default_data(),
-        scenario_data={"scenario_description": "A merchant city above forgotten ruins."},
+        history=["You arrive at the forgotten ruins."],
+        scenario_data={"scenario_description": "An expedition to the forgotten ruins."},
     )
 
     result = asyncio.run(backend.on_librarian(state, sdk))
-    data = result["module_data"]["wb_plot_director"]
+    update = _updates(result)
 
+    assert len(captured["prompts"]) == 1
     assert "forgotten ruins" in captured["prompts"][0]
     assert captured["preferences"] == ["smartest"]
-    assert data["status"] == "ready"
-    beats = data["outline"]["acts"][0]["beats"]
-    assert beats[0] == {"id": "a1b1", "description": "Rumors of tremors under the market", "status": "active"}
-    assert beats[1]["status"] == "pending"
-    assert data["position"] == {"act": 1, "beat_index": 0}
+    assert update["status"] == "active"
+    assert update["momentum"] == "building"
+    assert update["gen_attempts"] == 0
+    thread = update["thread"]
+    assert set(thread) == set(backend._empty_thread())
+    assert thread["status"] == "active"
+    assert thread["title"] == "The Salt Baron's Ledger"
+    assert thread["created_turn"] == 1
 
 
-def test_outline_works_without_scenario_and_fails_dormant():
+def test_generation_prompt_includes_profile_difficulty_and_npc_threads():
     backend = _load_backend()
-
-    # Freeform story: no scenario_data, outline distilled from history alone.
     captured = {}
-    sdk = _make_sdk([OUTLINE_REPLY], captured)
-    result = asyncio.run(backend.on_librarian(
-        _state(turn=1, data=backend._default_data(), history=["An unmarked road at dusk."]), sdk))
-    assert result["module_data"]["wb_plot_director"]["status"] == "ready"
-    assert "unmarked road" in captured["prompts"][0]
-
-    # Malformed replies: retries, then goes dormant after the attempt cap.
+    sdk = _make_sdk([THREAD_REPLY], captured)
     data = backend._default_data()
-    for attempt in range(1, backend.OUTLINE_MAX_ATTEMPTS + 1):
+    data["profile"] = _profile_reply()
+    state = _state(turn=1, data=data, config={"difficulty": 5})
+    state["module_data"]["wb_npc_system"] = {
+        "story_threads": [{"text": "The dockmaster plots against the guild.", "npc_ids": ["n1"]}],
+    }
+
+    asyncio.run(backend.on_librarian(state, sdk))
+    prompt = captured["prompts"][0]
+    assert backend.DIFFICULTY_GUIDANCE[5] in prompt
+    assert "back-alley deals" in prompt
+    assert "dockmaster plots against the guild" in prompt
+
+    # Soft-fail: no npc module data at all -> generation still runs, block omitted.
+    captured2 = {}
+    sdk2 = _make_sdk([THREAD_REPLY], captured2)
+    result = asyncio.run(backend.on_librarian(_state(turn=1, data=backend._default_data()), sdk2))
+    assert _updates(result)["status"] == "active"
+    assert "OTHER ACTIVE STORYLINES" not in captured2["prompts"][0]
+
+
+def test_generation_failure_retries_then_dormant():
+    backend = _load_backend()
+    data = backend._default_data()
+
+    for attempt in range(1, backend.GEN_MAX_ATTEMPTS + 1):
         sdk = _make_sdk(["not json"], {})
         result = asyncio.run(backend.on_librarian(_state(turn=1, data=data), sdk))
-        update = result["module_data"]["wb_plot_director"]
-        data.update(update)
-        assert update["outline_attempts"] == attempt
+        data.update(_updates(result))
+        assert data["gen_attempts"] == attempt
+
     assert data["status"] == "failed"
-    assert asyncio.run(backend.on_librarian(_state(turn=2, data=data), sdk)) is None
+    assert asyncio.run(backend.on_librarian(_state(turn=2, data=data), _make_sdk([], {}))) is None
+
+    command = asyncio.run(backend.on_command_plot([], _state(data=data), _make_sdk([], {})))
+    assert "inactive" in command["message"]
+    gathered = asyncio.run(backend.on_gather_context(_state(data=data), _make_sdk([], {})))
+    assert "context_string" not in gathered
 
 
-def test_stall_counting_arms_nudge_at_threshold():
+def test_assessment_updates_profile_and_resets_streak():
     backend = _load_backend()
-    data = _ready_data(backend)
+    captured = {}
+    wild_profile = _profile_reply(
+        playstyle={"combat": 99, "diplomacy": 4, "exploration": 2,
+                   "mystery": 3, "social": 5, "intrigue": 6},
+        likes=[f"like {i}" for i in range(12)],
+    )
+    sdk = _make_sdk([_assessment_reply(profile=wild_profile)], captured)
+    data = _active_data(backend, ignored_streak=2)
 
-    for turn in (2, 3, 4):
-        sdk = _make_sdk([_assessment_reply(momentum="stalled")], {})
-        result = asyncio.run(backend.on_librarian(_state(turn=turn, data=data), sdk))
-        data.update(result["module_data"]["wb_plot_director"])
+    result = asyncio.run(backend.on_librarian(_state(turn=3, data=data), sdk))
+    update = _updates(result)
 
-    # Default threshold 3: third no-progress check fires and resets the counter.
-    assert data["pending_nudge"] == "A beggar mutters about the ground humming at night."
-    assert data["stall_count"] == 0
-    assert data["last_nudge_turn"] == 4
+    prompt = captured["prompts"][0]
+    assert "The Salt Baron's Ledger" in prompt
+    assert "I browse the stalls." in prompt
+    assert json.dumps(data["profile"], ensure_ascii=False) in prompt
+    assert captured["preferences"] == ["balanced"]
+
+    assert update["ignored_streak"] == 0
+    assert update["profile"]["playstyle"]["combat"] == 10
+    assert len(update["profile"]["likes"]) == backend.PROFILE_LIST_CAP
+    assert update["momentum"] == "steady"
+    assert update["log"][-1]["turn"] == 3
 
 
-def test_advancement_resets_stall_and_completion_moves_position():
+def test_resolution_regenerates_immediately_with_full_replacement():
     backend = _load_backend()
-    data = _ready_data(backend, stall_count=2)
+    captured = {}
+    sdk = _make_sdk([
+        _assessment_reply(thread_resolved=True, resolution_note="The ledger reached the magistrate."),
+        SECOND_THREAD_REPLY,
+    ], captured)
+    data = _active_data(backend, ignored_streak=1)
 
-    sdk = _make_sdk([_assessment_reply(beat_advanced=True)], {})
-    result = asyncio.run(backend.on_librarian(_state(turn=2, data=data), sdk))
-    update = result["module_data"]["wb_plot_director"]
-    assert update["stall_count"] == 0
-    assert update["position"] == {"act": 1, "beat_index": 0}
+    result = asyncio.run(backend.on_librarian(_state(turn=5, data=data), sdk))
+    update = _updates(result)
 
-    # Completing the last beat of act 1 crosses the act boundary.
-    data = _ready_data(backend, position={"act": 1, "beat_index": 1})
-    data["outline"]["acts"][0]["beats"][0]["status"] = "done"
-    sdk = _make_sdk([_assessment_reply(beat_advanced=True, beat_completed=True,
-                                       beat_summary="The cellar gave way.")], {})
-    result = asyncio.run(backend.on_librarian(_state(turn=4, data=data), sdk))
-    update = result["module_data"]["wb_plot_director"]
-    assert update["position"] == {"act": 2, "beat_index": 0}
-    assert update["beats_completed"][-1]["summary"] == "The cellar gave way."
-    assert update["outline"]["acts"][0]["beats"][1]["status"] == "done"
-    assert update["outline"]["acts"][1]["beats"][0]["status"] == "active"
+    assert len(captured["prompts"]) == 2
+    closed = update["thread_history"][-1]
+    assert closed["outcome"] == "resolved"
+    assert closed["title"] == "The Salt Baron's Ledger"
+    assert closed["closed_turn"] == 5
+
+    # Full-key overwrite contract: the new thread replaces every field.
+    thread = update["thread"]
+    assert set(thread) == set(backend._empty_thread())
+    assert thread["title"] == "Tremors Below"
+    assert thread["stakes"] == "The market quarter's foundations."
+    assert thread["closed_turn"] == 0
+    assert thread["created_turn"] == 5
+    assert update["momentum"] == "building"
+    assert update["pending_nudge"] == ""
 
 
-def test_render_block_only_fires_when_armed_and_is_cleared_next_turn():
+def test_ignored_streak_nudges_then_abandons_and_records_dislike():
     backend = _load_backend()
-    sdk = _make_sdk([], {})
+    data = _active_data(backend, created_turn=1)
+    config = {}  # defaults: stall_threshold 2, abandon_after 4
+    armed_turn = None
+
+    for turn in range(2, 6):
+        replies = [_assessment_reply(thread_engaged=False)]
+        if turn == 5:
+            replies.append(SECOND_THREAD_REPLY)
+        captured = {}
+        sdk = _make_sdk(replies, captured)
+        result = asyncio.run(backend.on_librarian(_state(turn=turn, data=data, config=config), sdk))
+        update = _updates(result)
+
+        if turn == 3:  # streak hits stall_threshold (2) exactly -> nudge armed
+            assert update["pending_nudge"]
+            armed_turn = turn
+        if turn == 4:  # streak 3: past the threshold, no re-arm; streak keeps climbing
+            assert update.get("pending_nudge", "") == ""  # consume-once clear only
+            assert update["ignored_streak"] == 3
+        if turn == 5:  # streak 4 = abandon_after -> abandoned + regeneration
+            assert len(captured["prompts"]) == 2
+            assert update["thread_history"][-1]["outcome"] == "abandoned"
+            assert any(
+                "Salt Baron" in dislike for dislike in update["profile"]["dislikes"]
+            )
+            assert "DIFFERENT kind" in captured["prompts"][1]
+            assert '"The Salt Baron\'s Ledger" -- abandoned' in captured["prompts"][1]
+            assert update["thread"]["title"] == "Tremors Below"
+
+        data.update(update)
+
+    assert armed_turn == 3
+
+
+def test_expiry_by_turn_cap_skips_assessment():
+    backend = _load_backend()
+    captured = {}
+    sdk = _make_sdk([SECOND_THREAD_REPLY], captured)
+    data = _active_data(backend, created_turn=1)
+
+    result = asyncio.run(backend.on_librarian(_state(turn=13, data=data), sdk))
+    update = _updates(result)
+
+    assert len(captured["prompts"]) == 1  # generation only, no assessment spent
+    assert update["thread_history"][-1]["outcome"] == "expired"
+    assert update["thread"]["title"] == "Tremors Below"
+
+
+def test_nudge_consume_and_render_block_contract():
+    backend = _load_backend()
+    data = _active_data(backend, created_turn=1, pending_nudge="A rumor spreads.", last_nudge_turn=3)
+
     block = {"id": "plot_nudge"}
-
-    quiet = asyncio.run(backend.on_render_prompt_block(
-        block, _state(data=_ready_data(backend)), sdk))
-    assert quiet["content"] == ""
-
-    armed = _ready_data(backend, pending_nudge="A stranger asks about the tremors.", last_nudge_turn=3)
-    rendered = asyncio.run(backend.on_render_prompt_block(block, _state(data=armed), sdk))
-    assert "A stranger asks about the tremors." in rendered["content"]
+    rendered = asyncio.run(backend.on_render_prompt_block(block, _state(data=data), _make_sdk([], {})))
+    assert "A rumor spreads." in rendered["content"]
     assert "Optional" in rendered["content"]
 
-    # The next librarian pass consumes the nudge even when the assessment is
-    # frequency-gated; _deep_merge cannot delete keys, so it must return "".
+    # Frequency-gated turn still consumes the already-rendered nudge; _deep_merge
+    # cannot delete keys, so it must return an explicit "".
     result = asyncio.run(backend.on_librarian(
-        _state(turn=4, data=armed, config={"assessment_frequency": 5}), sdk))
-    assert result["module_data"]["wb_plot_director"]["pending_nudge"] == ""
+        _state(turn=4, data=data, config={"assessment_frequency": 5}), _make_sdk([], {})))
+    assert _updates(result)["pending_nudge"] == ""
+
+    quiet = asyncio.run(backend.on_render_prompt_block(
+        block, _state(data=_active_data(backend)), _make_sdk([], {})))
+    assert quiet["content"] == ""
 
 
-def test_drift_needs_two_flags_and_replan_is_rate_bounded():
+def test_opportunity_nudge_respects_toggle_and_cooldown():
     backend = _load_backend()
-    replan_reply = json.dumps({
-        "premise": "A bakery becomes the heart of a haunted quarter.",
-        "driving_tension": "Comfort against the uncanny.",
-        "acts": [
-            {"title": "Whispers", "goal": "Surface the threat", "beats": [
-                {"description": "Rumors of tremors under the market", "status": "done"},
-                {"description": "Strange customers at the new bakery"},
-            ]},
-            {"title": "Hearth", "goal": "Root the new life", "beats": [
-                {"description": "The oven wakes something below"},
-            ]},
-            {"title": "Warmth", "goal": "Settle the quarter", "beats": [
-                {"description": "The quarter chooses its guardian"},
-            ]},
-        ],
-    })
 
-    data = _ready_data(backend, beats_completed=[{"id": "a1b1", "turn": 3, "summary": "kept"}])
+    def run(config, last_nudge_turn=0):
+        data = _active_data(backend, created_turn=1, last_nudge_turn=last_nudge_turn)
+        sdk = _make_sdk([_assessment_reply(opportunity=True)], {})
+        result = asyncio.run(backend.on_librarian(_state(turn=4, data=data, config=config), sdk))
+        return _updates(result).get("pending_nudge", "")
 
-    # First drift flag: streak only, no re-plan LLM call.
-    captured = {}
-    sdk = _make_sdk([_assessment_reply(drift_detected=True, drift_note="Story turned cozy.")], captured)
-    result = asyncio.run(backend.on_librarian(_state(turn=6, data=data), sdk))
-    data.update(result["module_data"]["wb_plot_director"])
-    assert data["drift_streak"] == 1
-    assert len(captured["prompts"]) == 1
-
-    # Second consecutive flag: re-plan call runs, outline follows the player.
-    captured = {}
-    sdk = _make_sdk([_assessment_reply(drift_detected=True, drift_note="Player opened a bakery."),
-                     replan_reply], captured)
-    result = asyncio.run(backend.on_librarian(_state(turn=7, data=data), sdk))
-    data.update(result["module_data"]["wb_plot_director"])
-    assert len(captured["prompts"]) == 2
-    assert "bakery" in data["outline"]["premise"]
-    assert data["beats_completed"] == [{"id": "a1b1", "turn": 3, "summary": "kept"}]
-    assert data["outline"]["acts"][0]["beats"][0]["status"] == "done"
-    assert data["drift_streak"] == 0
-    assert data["last_replan_turn"] == 7
-    assert data["replan_count"] == 1
-
-    # Two more drift flags inside the rate window: no second re-plan call.
-    for turn in (8, 9):
-        captured = {}
-        sdk = _make_sdk([_assessment_reply(drift_detected=True, drift_note="Still cozy.")], captured)
-        result = asyncio.run(backend.on_librarian(_state(turn=turn, data=data), sdk))
-        data.update(result["module_data"]["wb_plot_director"])
-        assert len(captured["prompts"]) == 1
-    assert data["replan_count"] == 1
+    assert run({}) != ""
+    assert run({"opportunity_nudges": False}) == ""
+    assert run({}, last_nudge_turn=3) == ""  # within the 2-turn cooldown
 
 
-def test_plot_command_is_spoiler_safe():
+def test_malformed_assessment_reply_is_noop():
     backend = _load_backend()
-    sdk = _make_sdk([], {})
+    data = _active_data(backend, created_turn=1, ignored_streak=1)
 
-    pending = asyncio.run(backend.on_command_plot(
-        [], _state(data=backend._default_data()), sdk))
-    assert pending["message"] == "[Plot] The story is still finding its shape."
-
-    data = _ready_data(backend, position={"act": 2, "beat_index": 0}, momentum="steady",
-                       replan_count=1, last_replan_turn=6)
-    result = asyncio.run(backend.on_command_plot([], _state(turn=7, data=data), sdk))
-    message = result["message"]
-    assert "Act 2 of 3" in message
-    assert "new direction" in message
-    for act in data["outline"]["acts"]:
-        assert act["goal"] not in message
-        for beat in act["beats"]:
-            assert beat["description"] not in message
-
-
-def test_malformed_assessment_reply_is_a_noop():
-    backend = _load_backend()
-    data = _ready_data(backend, stall_count=1)
-    sdk = _make_sdk(["[mock llm response for: ...]"], {})
-
-    result = asyncio.run(backend.on_librarian(_state(turn=2, data=data), sdk))
+    result = asyncio.run(backend.on_librarian(
+        _state(turn=4, data=data), _make_sdk(["[mock llm response for: ...]"], {})))
     assert result is None
+
+
+def test_plot_command_shows_thread_openly():
+    backend = _load_backend()
+    data = _active_data(backend)
+    data["profile"] = _profile_reply()
+    data["thread_history"] = [
+        {"title": "The Pilgrim Road", "outcome": "abandoned", "created_turn": 2, "closed_turn": 9, "note": ""},
+    ]
+
+    result = asyncio.run(backend.on_command_plot([], _state(data=data), _make_sdk([], {})))
+    message = result["message"]
+    assert "The Salt Baron's Ledger" in message
+    assert "stolen ledger" in message
+    assert "enforcers" in message
+    assert "steady" in message
+    assert "intrigue" in message
+    assert "The Pilgrim Road" in message
+    assert result["signal"] == "end_turn"
+
+    observing = asyncio.run(backend.on_command_plot(
+        [], _state(data=backend._default_data()), _make_sdk([], {})))
+    assert "Watching how you play" in observing["message"]
+
+    disabled = asyncio.run(backend.on_command_plot(
+        [], _state(data=data, config={"plot_enabled": False}), _make_sdk([], {})))
+    assert "inactive" in disabled["message"]

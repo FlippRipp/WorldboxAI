@@ -1,28 +1,29 @@
 {
   "id": "wb_plot_director",
   "name": "Plot Director",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "icon": "🎭",
-  "description": "Quietly maintains a hidden overarching plotline. Nudges the storyteller only when the story stalls, and re-plans when the player takes the story in a new direction. Check vague progress with /plot.",
+  "description": "Watches how you play, builds a profile of the story's themes and your preferences, and weaves short plot threads that cater to them with a tunable dose of challenge. The active thread is visible in the sidebar and via /plot.",
   "dependencies": [],
   "consumes": {
     "state": "*",
-    "module_data": [],
+    "module_data": ["wb_npc_system"],
     "module_configs": [],
     "world_data": true
   },
   "produces": {
     "module_data": true,
-    "context_string": false,
+    "context_string": true,
     "messages": false
   },
+  "ui_slots": ["slot_sidebar"],
   "settings_schema": {
     "plot_enabled": {
       "type": "toggle",
       "default": true,
       "label": "Plot Direction",
       "category": "Plot Director",
-      "description": "Maintain a hidden plot outline and gently nudge the story when it stalls. One background LLM call per assessment."
+      "description": "Track the story's direction and your playstyle, and keep one short plot thread active that plays to them. One background LLM call per assessment."
     },
     "assessment_frequency": {
       "type": "slider",
@@ -31,23 +32,50 @@
       "default": 1,
       "label": "Assessment Frequency (turns)",
       "category": "Plot Director",
-      "description": "Check plot progress every N turns."
+      "description": "Check thread progress and update the story profile every N turns."
+    },
+    "difficulty": {
+      "type": "slider",
+      "min": 1,
+      "max": 5,
+      "default": 3,
+      "label": "Challenge Difficulty",
+      "category": "Plot Director",
+      "description": "How hard new plot threads push back: 1 = gentle complications, 3 = moderate opposition and real stakes, 5 = brutal opposition with lasting consequences. This is the only difficulty control — it never auto-adapts."
+    },
+    "thread_max_turns": {
+      "type": "slider",
+      "min": 6,
+      "max": 30,
+      "default": 12,
+      "label": "Thread Lifespan (turns)",
+      "category": "Plot Director",
+      "description": "A thread that has not resolved after this many turns expires and is replaced by a new one."
     },
     "stall_threshold": {
       "type": "slider",
       "min": 1,
       "max": 10,
-      "default": 3,
-      "label": "Stall Threshold (checks)",
+      "default": 2,
+      "label": "Nudge After (ignored checks)",
       "category": "Plot Director",
-      "description": "Number of consecutive no-progress checks before a subtle nudge is injected into the storyteller prompt."
+      "description": "Number of consecutive checks where the thread saw no engagement before a subtle nudge is injected into the storyteller prompt."
+    },
+    "abandon_after": {
+      "type": "slider",
+      "min": 2,
+      "max": 10,
+      "default": 4,
+      "label": "Abandon After (ignored checks)",
+      "category": "Plot Director",
+      "description": "Number of consecutive ignored checks before the thread is abandoned and a different kind of thread is generated."
     },
     "opportunity_nudges": {
       "type": "toggle",
       "default": true,
       "label": "Opportunistic Nudges",
       "category": "Plot Director",
-      "description": "Also nudge when a scene presents a natural opening for the plot, even before the stall threshold is reached."
+      "description": "Also nudge when a scene presents a natural opening for the thread, even before the stall threshold is reached."
     },
     "assessment_ai_model": {
       "type": "select",
@@ -57,17 +85,17 @@
         {"value": "smartest", "label": "Smartest"}
       ],
       "default": "balanced",
-      "label": "Assessment Model",
+      "label": "Assessment & Profile Model",
       "category": "Plot Director"
     },
-    "outline_ai_model": {
+    "thread_ai_model": {
       "type": "select",
       "options": [
         {"value": "balanced", "label": "Balanced"},
         {"value": "smartest", "label": "Smartest (default)"}
       ],
       "default": "smartest",
-      "label": "Outline / Re-plan Model",
+      "label": "Thread Generation Model",
       "category": "Plot Director"
     }
   },
@@ -75,7 +103,7 @@
     "/plot": "on_command_plot"
   },
   "command_help": {
-    "/plot": "Show the current story direction and plot threads"
+    "/plot": "Show the active plot thread, momentum, and your story profile"
   },
   "prompt_blocks": [
     {
