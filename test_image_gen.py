@@ -2157,6 +2157,24 @@ def test_character_snapshot_uses_npc_scene_presence(tmp_path):
     assert backend._character_snapshot(state)["npcs"] == []
 
 
+def test_character_snapshot_honors_manual_pin_and_npc_statuses(tmp_path):
+    backend = _load_backend(tmp_path)
+    npcs = {
+        # Just placed by the player: the roster (computed before they existed)
+        # cannot know them, but the fresh pin keeps them in.
+        "n1": _npc("Sela", id="n1", presence_pinned_turn=3),
+        "n2": _npc("Stale", id="n2", presence_pinned_turn=1),   # pin expired
+        # Real NPC-system statuses, not the fictional "dead": both dropped
+        # even with a fresh pin.
+        "n3": _npc("Gone", id="n3", status="departed", presence_pinned_turn=3),
+        "n4": _npc("Han", id="n4", status="deceased", presence_pinned_turn=3),
+    }
+    state = _char_state(npcs=npcs, history=["The pier is empty."])
+    state["module_data"]["wb_npc_system"]["scene_presence"] = {"turn": 3, "npc_ids": []}
+    snap = backend._character_snapshot(state)
+    assert [n["name"] for n in snap["npcs"]] == ["Sela"]
+
+
 def test_character_block_injected_in_both_styles(tmp_path):
     backend = _load_backend(tmp_path)
     characters = {"player": {"name": "Ash", "descriptor": "female elf; silver hair"},

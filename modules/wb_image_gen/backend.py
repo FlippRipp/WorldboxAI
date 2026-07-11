@@ -1578,14 +1578,26 @@ def _named_in(npc: dict, text: str) -> bool:
     return bool(name) and bool(re.search(rf"\b{re.escape(name)}\b", text, re.IGNORECASE))
 
 
+def _presence_pinned(npc: dict, turn) -> bool:
+    """Player-authority pin the NPC system stamps when a character is manually
+    added or activated from the browser -- honored while fresh, so a presence
+    roster computed before the character existed cannot hide them."""
+    pinned = npc.get("presence_pinned_turn")
+    try:
+        return pinned is not None and int(turn or 0) - int(pinned) <= 1
+    except (TypeError, ValueError):
+        return False
+
+
 def _character_snapshot(state: dict) -> dict | None:
     """Canonical appearances for the prompt writer and the LoRA gate, from
     whichever character modules happen to be active (both optional): the
     player tracker's characters["default_player"] and the NPC system's
     introduced bank. NPCs are the ones the NPC system judged present in the
-    scene (plus any named in the latest narration, which the roster --
-    computed before the storyteller ran -- cannot know about); without a
-    fresh roster, recently-interacted NPCs stand in. The snapshot is
+    scene (plus any named in the latest narration or freshly pinned by a
+    manual add/activation, which the roster -- computed before those
+    happened -- cannot know about); without a fresh roster,
+    recently-interacted NPCs stand in. The snapshot is
     uncapped: the prompt writer and the LoRA gate both need everyone
     present. Returns None when neither module has anything to say."""
     player_out = None
@@ -1601,12 +1613,13 @@ def _character_snapshot(state: dict) -> dict | None:
     candidates = [n for n in bank.values()
                   if isinstance(n, dict) and n.get("introduced")
                   and str(n.get("appearance") or "").strip()
-                  and n.get("status") != "dead"]
+                  and n.get("status") not in ("dead", "deceased", "departed")]
     presence = _scene_presence_ids(state)
     if presence is not None:
         latest = str((state.get("history") or [""])[-1])
         candidates = [n for n in candidates
-                      if str(n.get("id")) in presence or _named_in(n, latest)]
+                      if str(n.get("id")) in presence or _named_in(n, latest)
+                      or _presence_pinned(n, state.get("turn"))]
     candidates.sort(key=lambda n: (not n.get("traveling_with_player"),
                                    -int(n.get("last_interaction_turn") or 0)))
     npcs = []

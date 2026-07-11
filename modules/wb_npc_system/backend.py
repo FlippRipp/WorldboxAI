@@ -384,6 +384,19 @@ def _named_in_recent_story(npc: dict, state: dict) -> bool:
     return bool(re.search(rf"\b{re.escape(name)}\b", recent, re.IGNORECASE))
 
 
+def _presence_pin_fresh(npc: dict, turn) -> bool:
+    """Player-authority scene pin: stamped when a character is manually added
+    or activated from the browser, honored for the following turn so presence
+    tracking (which only knows the story so far) cannot drop a character the
+    player just placed in the scene. By the time the pin expires the character
+    has been in the storyteller's context and story-based tracking takes over."""
+    pinned = npc.get("presence_pinned_turn")
+    try:
+        return pinned is not None and int(turn or 0) - int(pinned) <= 1
+    except (TypeError, ValueError):
+        return False
+
+
 async def _llm_scene_presence(state: dict, sdk, candidates: list[dict]) -> set[str]:
     """One fast-model call deciding which candidate characters are physically
     in the current scene. Used when there is no location tracking to consult.
@@ -433,7 +446,7 @@ async def _present_npcs(state: dict, sdk) -> list[dict]:
     for npc in _get_bank(state).values():
         if not npc.get("introduced") or npc.get("status") != "active":
             continue
-        if npc.get("traveling_with_player"):
+        if npc.get("traveling_with_player") or _presence_pin_fresh(npc, state.get("turn")):
             present.append(npc)
             continue
         if location_tracked:
@@ -1430,9 +1443,34 @@ async def _apply_manual_edit(npc_id: str, payload: str, state: dict, sdk) -> dic
     if not edits:
         return {"message": f"[NPC] Nothing to change for {npc.get('name', npc_id)}.", "signal": "end_turn"}
 
+    turn = state.get("turn", 0)
     npc.update(edits)
-    _log_change(npc, state.get("turn", 0), f"Manual edit: {', '.join(edits)}", list(edits), "manual")
+    _log_change(npc, turn, f"Manual edit: {', '.join(edits)}", list(edits), "manual")
     await _refresh_profile_embedding(npc, list(edits), state, sdk)
+
+    # The status dropdown is player authority over who is in play. A character
+    # switched to active while still unintroduced is brought fully into the
+    # story, mirroring what a story introduction sets (this also heals records
+    # where only the status was flipped before this sync existed); switching
+    # back to unintroduced returns them to the hidden pool.
+    if npc.get("status") == "active" and not npc.get("introduced"):
+        npc["introduced"] = True
+        npc["met_turn"] = turn
+        npc["last_interaction_turn"] = turn
+        npc["presence_pinned_turn"] = turn
+        if npc.get("encounter_type") == "encounter":
+            npc["encounter_type"] = "location_bound"
+            npc["location_node_id"] = state.get("player_location_node_id")
+            npc["location_region"] = state.get("player_location_region")
+            npc["location_layer_id"] = state.get("player_location_layer_id")
+        if _config(state).get("embed_profiles", True):
+            await _embed_profile(npc, turn, sdk)
+        print(f"[NPC System] {npc.get('name', npc_id)} manually activated at turn {turn}")
+    elif npc.get("status") == "unintroduced" and npc.get("introduced"):
+        npc["introduced"] = False
+        npc["met_turn"] = None
+        npc["traveling_with_player"] = False
+        npc.pop("presence_pinned_turn", None)
 
     return {
         "message": f"[NPC] Updated {npc.get('name', npc_id)}: {', '.join(edits)}",
@@ -1493,6 +1531,10 @@ async def _apply_manual_add(payload: str, state: dict, sdk) -> dict:
     npc_id, record = _build_npc_record(
         npc_data, turn, bank, introduced=introduced, source="manual", location=location,
     )
+    if introduced:
+        # Player authority: a character added straight into the known cast is
+        # standing in the scene, even before the story has mentioned them.
+        record["presence_pinned_turn"] = turn
     notes = str(raw.get("notes", "")).strip()
     if notes:
         record["notes"] = notes

@@ -385,3 +385,86 @@ def test_context_and_introduction_merge_in_one_result():
     # The about-to-be-introduced character counts as present in the roster.
     presence = result["module_data"]["wb_npc_system"]["scene_presence"]
     assert sorted(presence["npc_ids"]) == ["npc_here", "npc_pending"]
+
+
+# ── Part D: manual activation from the browser ───────────────────────────────
+
+def _edit_payload(fields):
+    import urllib.parse
+    return urllib.parse.quote(json.dumps(fields))
+
+
+def test_manual_status_activation_introduces_character():
+    # The UI status dropdown is player authority: switching an unmet character
+    # to active must bring them fully into play, not just relabel them.
+    backend = _load_backend()
+    sdk, calls = _make_sdk()
+    bank = {"npc_1": _present_npc("npc_1", "Sela", introduced=False,
+                                  status="unintroduced", encounter_type="encounter",
+                                  location_node_id=None, location_region=None,
+                                  location_layer_id=None)}
+    state = _state(bank)
+
+    result = asyncio.run(backend._apply_manual_edit(
+        "npc_1", _edit_payload({"status": "active"}), state, sdk))
+    npc = _bank_from_result(result)["npc_1"]
+
+    assert npc["introduced"] is True
+    assert npc["status"] == "active"
+    assert npc["met_turn"] == 4
+    assert npc["presence_pinned_turn"] == 4
+    # Bound to the player's location, like a story introduction.
+    assert npc["encounter_type"] == "location_bound"
+    assert npc["location_node_id"] == "node_market"
+    # Profile embedded into RAG on activation.
+    assert npc["profile_embedded"] is True
+    assert any(c["tags"] == ["profile"] for c in calls["remember"])
+
+    # And the reverse: back to unintroduced returns them to the hidden pool.
+    result = asyncio.run(backend._apply_manual_edit(
+        "npc_1", _edit_payload({"status": "unintroduced"}), state, sdk))
+    npc = _bank_from_result(result)["npc_1"]
+    assert npc["introduced"] is False
+    assert npc["met_turn"] is None
+    assert "presence_pinned_turn" not in npc
+
+
+def test_presence_pin_keeps_manual_character_on_stage():
+    # A freshly pinned character has never been mentioned in the story, so
+    # both name matching and the LLM tracker would drop them; the pin wins
+    # while fresh, then expires so normal tracking takes over.
+    backend = _load_backend()
+    sdk, calls = _make_sdk(json.dumps([]))  # LLM: nobody is present
+    bank = {"npc_1": _unlocated_npc("npc_1", "Sela", presence_pinned_turn=4)}
+    state = _locationless_state(bank, ["You walk the empty pier."])
+
+    result = asyncio.run(backend.on_gather_context(state, sdk))
+    assert "Sela" in result["context_string"]
+    assert result["module_data"]["wb_npc_system"]["scene_presence"]["npc_ids"] == ["npc_1"]
+    # Pinned characters skip the LLM presence check entirely.
+    assert calls["generate_count"] == 0
+
+    # A stale pin no longer forces presence.
+    bank = {"npc_1": _unlocated_npc("npc_1", "Sela", presence_pinned_turn=1)}
+    state = _locationless_state(bank, ["You walk the empty pier."])
+    result = asyncio.run(backend.on_gather_context(state, sdk))
+    assert "context_string" not in result
+
+
+def test_manual_add_pins_presence():
+    backend = _load_backend()
+    sdk, _ = _make_sdk()
+    state = _state({})
+
+    result = asyncio.run(backend._apply_manual_add(
+        _edit_payload({"name": "Korrin", "appearance": "a wiry sailor"}), state, sdk))
+    npc = next(iter(_bank_from_result(result).values()))
+    assert npc["introduced"] is True
+    assert npc["presence_pinned_turn"] == 4
+
+    # Characters added into the hidden pool are not pinned.
+    result = asyncio.run(backend._apply_manual_add(
+        _edit_payload({"name": "Hidden", "appearance": "cloaked", "introduced": False}),
+        state, sdk))
+    npc = next(n for n in _bank_from_result(result).values() if n["name"] == "Hidden")
+    assert "presence_pinned_turn" not in npc
