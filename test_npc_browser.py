@@ -502,6 +502,43 @@ def test_generate_handles_empty_payload():
     assert "nothing usable" in result["message"]
 
 
+def test_generate_with_request_threads_brief_into_prompt():
+    backend = _load_backend()
+    captured = {}
+    request = "a grumpy dwarven blacksmith with a smuggling secret"
+    args = ["generate", urllib.parse.quote(request)]
+
+    result = asyncio.run(backend.on_command_npc(args, _state(), _make_sdk(_GEN_REPLY, captured)))
+
+    prompt = captured["prompt"]
+    assert "PLAYER REQUEST" in prompt
+    assert request in prompt
+    # The request is recorded on the new character's change log for provenance.
+    gen = next(n for n in result["module_data"]["wb_npc_system"]["characters"].values()
+               if n["name"] == "Mira Voss")
+    assert request in gen["change_log"][-1]["note"]
+
+
+def test_generate_without_request_omits_request_block():
+    backend = _load_backend()
+    captured = {}
+    asyncio.run(backend.on_command_npc(["generate"], _state(), _make_sdk(_GEN_REPLY, captured)))
+    assert "PLAYER REQUEST" not in captured["prompt"]
+
+
+def test_generate_request_is_length_capped():
+    backend = _load_backend()
+    captured = {}
+    long_request = "x" * 5000
+    args = ["generate", urllib.parse.quote(long_request)]
+
+    asyncio.run(backend.on_command_npc(args, _state(), _make_sdk(_GEN_REPLY, captured)))
+
+    # Only the capped prefix reaches the prompt, never the full 5000 chars.
+    assert "x" * backend.MAX_GEN_REQUEST_CHARS in captured["prompt"]
+    assert "x" * (backend.MAX_GEN_REQUEST_CHARS + 1) not in captured["prompt"]
+
+
 def _plot_data():
     return {
         "profile": {

@@ -190,6 +190,7 @@ export default function CharacterTab({ state, onCommand, busy }) {
   const [updatingId, setUpdatingId] = useState(null);
   const [adding, setAdding] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [genRequest, setGenRequest] = useState('');
 
   // The pending update is done once the turn stops being busy; the refreshed
   // record has already arrived via state_update by then.
@@ -247,7 +248,9 @@ export default function CharacterTab({ state, onCommand, busy }) {
   const generateCharacter = () => {
     if (!onCommand || busy) return;
     setAdding(false);
-    onCommand('/npc generate');
+    const req = genRequest.trim();
+    onCommand(req ? `/npc generate ${encodeURIComponent(req)}` : '/npc generate');
+    setGenRequest('');
   };
 
   const deleteCharacter = (npc) => {
@@ -270,16 +273,6 @@ export default function CharacterTab({ state, onCommand, busy }) {
         />
         {onCommand && (
           <button
-            onClick={generateCharacter}
-            disabled={busy}
-            title="Generate a random character and keep them hidden until you meet them"
-            className="text-xs px-3 py-2 rounded-lg border whitespace-nowrap transition-colors border-purple-500/30 bg-purple-500/15 text-purple-300 hover:bg-purple-500/25 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            ✨ Generate
-          </button>
-        )}
-        {onCommand && (
-          <button
             onClick={() => setAdding((v) => !v)}
             className={`text-xs px-3 py-2 rounded-lg border whitespace-nowrap transition-colors ${
               adding
@@ -291,6 +284,27 @@ export default function CharacterTab({ state, onCommand, busy }) {
           </button>
         )}
       </div>
+
+      {onCommand && (
+        <div className="flex items-center gap-2">
+          <input
+            className="flex-1 bg-gray-800/60 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500 disabled:opacity-50"
+            placeholder="Optional: describe the character to generate…"
+            value={genRequest}
+            disabled={busy}
+            onChange={(e) => setGenRequest(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') generateCharacter(); }}
+          />
+          <button
+            onClick={generateCharacter}
+            disabled={busy}
+            title="Generate a character (optionally matching your request) and keep them hidden until you meet them"
+            className="text-xs px-3 py-2 rounded-lg border whitespace-nowrap transition-colors border-purple-500/30 bg-purple-500/15 text-purple-300 hover:bg-purple-500/25 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            ✨ Generate
+          </button>
+        </div>
+      )}
       {onCommand && busy && (
         <p className="text-xs text-purple-300/80 animate-pulse">
           Working… a generated character will appear (hidden) when the AI finishes.

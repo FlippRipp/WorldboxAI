@@ -19,6 +19,7 @@ UPDATE_FIELDS = ("name", "appearance", "personality", "pitch", "role", "status",
 PROFILE_FIELDS = ("name", "race", "gender", "appearance", "archetype", "pitch",
                   "personality", "role")
 MAX_CHANGE_LOG = 20
+MAX_GEN_REQUEST_CHARS = 500  # cap on the free-text /npc generate brief
 DEFAULT_GENERATOR_FREQUENCY = 5
 DEFAULT_MAX_POOL = 6
 DEFAULT_TRAVEL_COOLDOWN_TURNS = 10
@@ -1513,10 +1514,13 @@ async def _apply_manual_add(payload: str, state: dict, sdk) -> dict:
     }
 
 
-async def _generate_random_character(state: dict, sdk) -> dict:
+async def _generate_random_character(state: dict, sdk, request: str = "") -> dict:
     """Generate a single random character via the LLM and drop it straight into
     the unintroduced pool, kept hidden until the player meets them in the story.
-    Triggered by the browser's "Generate Character" button (/npc generate)."""
+    Triggered by the browser's "Generate Character" button (/npc generate).
+
+    ``request`` is an optional free-text brief from the player (e.g. "a grumpy
+    dwarven blacksmith with a secret") that steers the design."""
     bank = _get_bank(state)
     turn = state.get("turn", 0)
 
@@ -1525,13 +1529,19 @@ async def _generate_random_character(state: dict, sdk) -> dict:
     wctx = _world_context(state)
     region = state.get("player_location_region", "unknown")
 
+    request = (request or "").strip()[:MAX_GEN_REQUEST_CHARS]
+    request_section = (
+        f"\n\nPLAYER REQUEST (honor this as the primary brief for the character, while keeping "
+        f"them consistent with the world's genre and tone):\n{request}" if request else ""
+    )
+
     plot_block = _plot_profile_block(state)
     plot_section = f"\n\n{plot_block}" if plot_block else ""
     plot_rule = ("\n8. Make the character resonate with the STORY DIRECTION above -- fit its tone "
                  "and themes, lean into what the player enjoys, and steer clear of what they dislike."
                  if plot_block else "")
 
-    prompt = f"""You are a character designer for a text-based RPG. Create 1 new NPC concept for the game.
+    prompt = f"""You are a character designer for a text-based RPG. Create 1 new NPC concept for the game.{request_section}
 
 WORLD CONTEXT:
 {wctx}{plot_section}
@@ -1576,7 +1586,8 @@ Respond with ONLY valid JSON:
     # LLM suggested, so the character stays a spoiler until met in the story.
     npc_id, record = _build_npc_record(npc_data, turn, bank, introduced=False, source="generated")
     name = record["name"]
-    _log_change(record, turn, f"Generated {name}", ["name"], "generated")
+    note = f"Generated {name}" + (f' (request: "{request}")' if request else "")
+    _log_change(record, turn, note, ["name"], "generated")
     bank[npc_id] = record
 
     print(f"[NPC System] Generated hidden character {name} ({npc_id}) at turn {turn}")
@@ -1628,7 +1639,8 @@ async def on_command_npc(args: list[str], state: dict, sdk) -> dict:
 
     sub = args[0].lower()
     if sub in ("generate", "gen", "random"):
-        return await _generate_random_character(state, sdk)
+        request = urllib.parse.unquote(" ".join(args[1:])).strip() if len(args) >= 2 else ""
+        return await _generate_random_character(state, sdk, request)
     if sub in ("update", "refresh") and len(args) >= 2:
         return await _update_npc_from_story(args[1], state, sdk)
     if sub == "edit" and len(args) >= 3:
