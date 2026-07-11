@@ -1339,11 +1339,6 @@ async def _update_npc_from_story(npc_id: str, state: dict, sdk) -> dict:
     npc = bank.get(npc_id)
     if not npc:
         return {"message": f"[NPC] Unknown character id: {npc_id}", "signal": "end_turn"}
-    if not npc.get("introduced"):
-        return {
-            "message": f"[NPC] {npc.get('name', npc_id)} has not appeared in the story yet -- there is nothing to update from.",
-            "signal": "end_turn",
-        }
 
     history = state.get("history", [])
     if not history:
@@ -1402,7 +1397,9 @@ Respond with ONLY valid JSON containing just the changed fields (plus change_not
     _log_change(npc, turn, change_note or f"Story update: {', '.join(changes)}", list(changes), "story")
     await _refresh_profile_embedding(npc, list(changes), state, sdk)
 
-    if change_note:
+    # Keep unmet characters out of RAG: only met characters get their change
+    # note embedded, mirroring the profile-on-introduction rule.
+    if change_note and npc.get("introduced"):
         await sdk.memory.remember(npc_id, change_note, turn, importance=6)
 
     print(f"[NPC System] {npc.get('name', npc_id)} updated from story: {', '.join(changes)}")

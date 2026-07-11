@@ -438,7 +438,7 @@ export default function CharacterTab({ state, onCommand, busy }) {
                   </div>
                 ) : (
                   <div className="flex flex-wrap gap-2 pt-1">
-                    {npc.introduced && onCommand && (
+                    {onCommand && (
                       <button
                         onClick={() => requestUpdate(npc)}
                         disabled={busy}

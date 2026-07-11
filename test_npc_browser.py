@@ -295,15 +295,38 @@ def test_update_can_mark_a_character_deceased():
     assert npc["status"] == "deceased"
 
 
-def test_update_refuses_unintroduced_npcs():
+def test_update_works_on_unintroduced_npcs():
+    # Every character gets an "Update from Story" pass, including hidden ones the
+    # player has not met yet -- the story is scanned the same way.
+    backend = _load_backend()
+    captured = {}
+    npc = _npc(introduced=False)
+    reply = json.dumps({
+        "appearance": "Silver-haired, now cloaked against the cold.",
+        "change_note": "Serah has taken to the road in a heavy cloak.",
+    })
+
+    result = asyncio.run(backend.on_command_npc(
+        ["update", npc["id"]], _state(npc=npc), _make_sdk(reply, captured),
+    ))
+
+    updated = result["module_data"]["wb_npc_system"]["characters"][npc["id"]]
+    assert "cloaked" in updated["appearance"]
+    assert updated["change_log"][-1]["source"] == "story"
+    # Still hidden -- an update pass never introduces the character.
+    assert updated["introduced"] is False
+    # And nothing about the unmet character leaks into RAG.
+    assert "memories" not in captured
+
+
+def test_update_on_unmet_npc_with_no_story_changes_is_a_noop():
     backend = _load_backend()
     npc = _npc(introduced=False)
     result = asyncio.run(backend.on_command_npc(
         ["update", npc["id"]], _state(npc=npc), _make_sdk("{}", {}),
     ))
-
     assert "module_data" not in result
-    assert "not appeared" in result["message"]
+    assert "No lasting changes" in result["message"]
 
 
 def test_update_with_unusable_or_empty_llm_reply_is_a_noop():
