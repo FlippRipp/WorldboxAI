@@ -827,8 +827,8 @@ def test_lora_condition_gate(tmp_path):
     assert captured["preferences"] == ["fastest"]
     prompt = captured["prompts"][0]
     assert "Moonlit rooftops." in prompt
-    assert "1. a battle is happening" in prompt
-    assert "2. the scene is set at night" in prompt
+    assert "1. [GATED, weight 0.7] condition: a battle is happening" in prompt
+    assert "2. [GATED, weight 0.7] condition: the scene is set at night" in prompt
     assert "ignored" not in prompt
 
     # Fail open: LLM error, unparseable reply, or no sdk keep everything.
@@ -867,7 +867,7 @@ def test_lora_condition_gets_character_sheets(tmp_path):
     assert "- Elara: female elf; silver hair" in prompt
     # The sheets sit between the scene and the adapter list.
     assert prompt.index("The sorceress") < prompt.index("CHARACTERS PRESENT")
-    assert prompt.index("CHARACTERS PRESENT") < prompt.index("1. Elara is in the scene")
+    assert prompt.index("CHARACTERS PRESENT") < prompt.index("condition: Elara is in the scene")
 
     # No snapshot (or an empty one): the block disappears entirely.
     for chars in (None, {"player": None, "npcs": []}):
@@ -911,12 +911,18 @@ def test_lora_llm_mode_weight_is_not_gated(tmp_path):
     assert sorted(by_id) == ["1", "4"]
     assert by_id["1"]["strength"] == 1.3
 
+    # Every adapter line opens with the mode label the prompt header defines.
     prompt = captured["prompts"][0]
-    assert ("1. always applies — pick the weight (default 0.7); "
+    assert ("1. [ALWAYS APPLIES, pick the weight, default 0.7] "
             "instructions: 0.2 calm, 1.5 battle") in prompt
-    assert "2. only during storms — pick the weight (default 0.7)" in prompt
-    assert "3. at night (weight 0.7)" in prompt
+    assert ("2. [GATED, pick the weight if it applies, default 0.7] "
+            "condition: only during storms") in prompt
+    assert "3. [GATED, weight 0.7] condition: at night" in prompt
     assert "4." not in prompt
+    # The header explains each label to the gate LLM.
+    assert "[GATED, weight W]" in prompt
+    assert "[ALWAYS APPLIES, pick the weight]" in prompt
+    assert "[GATED, pick the weight if it applies]" in prompt
 
     # Omitted weight-only entries fail open to the slider value.
     gated = asyncio.run(backend._apply_lora_conditions(
@@ -947,9 +953,10 @@ def test_lora_llm_weight_legacy_fields(tmp_path):
 
     # The prompt marks weight-picking adapters and lists defaults.
     prompt = captured["prompts"][0]
-    assert "1. stronger in battles — pick the weight (default 0.7)" in prompt
-    assert "2. always applies — pick the weight (default 0.7)" in prompt
-    assert "3. at night (weight 0.5)" in prompt
+    assert ("1. [GATED, pick the weight if it applies, default 0.7] "
+            "condition: stronger in battles") in prompt
+    assert "2. [ALWAYS APPLIES, pick the weight, default 0.7]" in prompt
+    assert "3. [GATED, weight 0.5] condition: at night" in prompt
     assert "4." not in prompt
 
     # A weight of 0 drops the lora for this image; conditional loras omitted
@@ -979,10 +986,11 @@ def test_lora_condition_patch_roundtrip(tmp_path):
     assert body["entry"]["condition"] == "during storms"
     assert backend._load_config()["lora_library"][0]["condition"] == "during storms"
 
-    # Overlong conditions are capped, clearing works.
+    # Long conditions are stored intact (LLM input is never capped), and
+    # clearing works.
     long = "x" * 1000
     body = client.patch("/loras/1", json={"condition": long}).json()
-    assert len(body["entry"]["condition"]) == backend.LORA_CONDITION_MAX_CHARS
+    assert body["entry"]["condition"] == long
     body = client.patch("/loras/1", json={"condition": ""}).json()
     assert body["entry"]["condition"] == ""
 

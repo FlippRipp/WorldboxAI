@@ -102,7 +102,6 @@ KEY_MASK_PREFIX = "****"
 # Novita rejects prompts over 1024 characters.
 MAX_PROMPT_CHARS = 1024
 
-LORA_CONDITION_MAX_CHARS = 300
 # Novita/SD tooling accepts weights well outside 0..1 (negative inverts the
 # adapter); sliders, API patches, and LLM-picked weights all clamp to this.
 LORA_WEIGHT_MIN = -10.0
@@ -123,9 +122,12 @@ CHAT_IMAGE_CONCEAL_MODES = ("off", "blur", "blackout")
 # multi per scene from how many tracked characters are in frame.
 BOORU_SUBJECT_MODES = ("single", "multi", "auto")
 
-LORA_CONDITION_PROMPT = """You control style adapters (LoRAs) for an AI image generator. For each numbered adapter below, decide whether its condition applies to the scene being illustrated. Be literal: a condition applies only when the scene actually shows or strongly implies it. Adapters marked "always applies" always apply. When character sheets are listed, use them to recognize characters the scene mentions indirectly (by pronoun, epithet, or description).
+LORA_CONDITION_PROMPT = """You control style adapters (LoRAs) for an AI image generator. Each numbered adapter below is labeled with how you control it:
+- [GATED, weight W]: decide whether its condition applies to the scene being illustrated. Include it only when the condition applies, echoing its listed weight W unchanged. Omit it otherwise.
+- [ALWAYS APPLIES, pick the weight]: always include it. Choose how strongly it applies from its instructions and the scene, starting from the listed default.
+- [GATED, pick the weight if it applies]: first decide whether its condition applies; omit it if not. When it applies, include it and also pick its weight from the condition text and the scene.
 
-For adapters marked "pick the weight", also choose how strongly to apply them: follow the adapter's instructions and the scene, starting from the listed default. Weights are numbers from -10 to 10 (typical range 0 to 1.5; 0 disables, negative inverts the style). For all other adapters, echo their listed weight unchanged.
+Be literal: a condition applies only when the scene actually shows or strongly implies it. Weights are numbers from -10 to 10 (typical range 0 to 1.5; 0 disables, negative inverts the style). When character sheets are listed, use them to recognize characters the scene mentions indirectly (by pronoun, epithet, or description).
 
 SCENE:
 {narration}{characters}
@@ -133,7 +135,7 @@ SCENE:
 ADAPTERS:
 {conditions}
 
-Output ONLY a JSON object mapping the number of each adapter that applies to its weight, e.g. {"1": 0.7, "3": 1.2}. Output {} if none apply."""
+Output ONLY a JSON object mapping the number of each adapter you include to its weight, e.g. {"1": 0.7, "3": 1.2}. Output {} if none apply."""
 
 POLL_INTERVAL_S = 2.0
 POLL_MAX_ITERATIONS = 240          # ~8 minutes
@@ -593,15 +595,19 @@ def _entry_llm_mode(entry: dict) -> str:
 
 
 def _condition_line(n: int, entry: dict) -> str:
+    """One adapter line for the gate prompt, opening with the mode label the
+    prompt header defines so the LLM never has to infer which regime an
+    adapter is under. The condition text is uncapped: it only feeds LLM input
+    (see CLAUDE.md -- no token caps on LLM input context)."""
     mode = _entry_llm_mode(entry)
-    cond = str(entry.get("condition") or "").strip()[:LORA_CONDITION_MAX_CHARS]
+    cond = str(entry.get("condition") or "").strip()
     weight = _clamp_lora_weight(entry.get("strength", LORA_DEFAULT_WEIGHT))
     if mode == "gate":
-        return f"{n}. {cond} (weight {weight})"
+        return f"{n}. [GATED, weight {weight}] condition: {cond}"
     if mode == "weight":
-        line = f"{n}. always applies — pick the weight (default {weight})"
-        return f"{line}; instructions: {cond}" if cond else line
-    return f"{n}. {cond} — pick the weight (default {weight})"
+        line = f"{n}. [ALWAYS APPLIES, pick the weight, default {weight}]"
+        return f"{line} instructions: {cond}" if cond else line
+    return f"{n}. [GATED, pick the weight if it applies, default {weight}] condition: {cond}"
 
 
 def _condition_character_block(characters: dict | None) -> str:
@@ -2318,7 +2324,7 @@ def get_router():
         if patch.sd_name_override is not None:
             entry["sd_name_override"] = patch.sd_name_override.strip()
         if patch.condition is not None:
-            entry["condition"] = patch.condition.strip()[:LORA_CONDITION_MAX_CHARS]
+            entry["condition"] = patch.condition.strip()
         if patch.llm_mode is not None:
             if patch.llm_mode not in LORA_LLM_MODES:
                 raise HTTPException(

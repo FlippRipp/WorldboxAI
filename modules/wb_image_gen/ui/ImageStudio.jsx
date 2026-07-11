@@ -26,6 +26,32 @@ function loraLlmMode(entry) {
 const labelCls = 'block text-xs uppercase tracking-wider text-gray-500 mb-1.5';
 const sectionCls = 'bg-gray-900/60 border border-gray-800 rounded-xl p-5 space-y-4';
 
+// Single-line-height textarea that grows with its content, so longer text
+// stays readable while typing. Modeled on the CharacterBuilder's AutoTextarea.
+function AutoGrowTextarea({ value, onChange, onBlur, onKeyDown, placeholder, className }) {
+  const ref = useRef(null);
+  const adjustHeight = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  }, []);
+  useEffect(() => { adjustHeight(); }, [value, adjustHeight]);
+  return (
+    <textarea
+      ref={ref}
+      value={value}
+      onChange={onChange}
+      onInput={adjustHeight}
+      onBlur={onBlur}
+      onKeyDown={onKeyDown}
+      placeholder={placeholder}
+      rows={1}
+      className={`${className} resize-none overflow-hidden whitespace-pre-wrap break-words`}
+    />
+  );
+}
+
 const TABS = [
   { id: 'setup', label: 'Setup' },
   { id: 'output', label: 'Output' },
@@ -595,9 +621,9 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
       )}
 
       {entry.active && (
-        <div className="flex items-center gap-2">
+        <div className="flex items-start gap-2">
           <label
-            className={`text-[10px] uppercase tracking-wider shrink-0 ${llmMode !== 'off' ? 'text-purple-400' : 'text-gray-500'}`}
+            className={`text-[10px] uppercase tracking-wider shrink-0 pt-2.5 ${llmMode !== 'off' ? 'text-purple-400' : 'text-gray-500'}`}
             title={{
               off: 'Describe when this LoRA should be used; before each image an AI reads the scene and decides. Typing here switches the LoRA to gated.',
               gate: 'Before each image an AI reads the scene and applies this LoRA only when this condition holds.',
@@ -607,12 +633,13 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
           >
             {{ off: 'Condition', gate: 'AI-gated', weight: 'Instructions', both: 'Gate + weight' }[llmMode]}
           </label>
-          <input
-            type="text"
+          <AutoGrowTextarea
             value={condition}
             onChange={(e) => setCondition(e.target.value)}
             onBlur={commitCondition}
-            onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.target.blur(); }
+            }}
             placeholder={{
               off: 'always on — describe a situation (e.g. battle scenes, at night) and an AI decides per image',
               gate: 'describe a situation (e.g. battle scenes, at night) — an AI decides per image',
@@ -620,7 +647,6 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
               both: 'when it applies and how to weight it (e.g. only in battles; 0.8 skirmish, 1.5 all-out war)',
             }[llmMode]}
             className={`${inputCls} text-xs`}
-            maxLength={300}
           />
         </div>
       )}
