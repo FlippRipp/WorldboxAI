@@ -112,11 +112,10 @@ LORA_DEFAULT_WEIGHT = 0.7
 # applies (condition text), its weight (instructions text), or both.
 LORA_LLM_MODES = ("off", "gate", "weight", "both")
 
-# Character reference roster fed to the prompt writer (appearances come from
-# the optional wb_character_tracker / wb_npc_system modules).
-CHAR_REF_MAX_NPCS = 6
-CHAR_REF_APPEARANCE_MAX = 200
-CHAR_REF_MAX_CHARS = 1200
+# Character appearances come from the optional wb_character_tracker /
+# wb_npc_system modules. The roster is deliberately uncapped: every present
+# character reaches the prompt writer and the LoRA gate in full (see
+# CLAUDE.md -- no token caps on LLM input context).
 PLAYER_IN_IMAGES_MODES = ("show", "pov")
 # How finished images appear in chat before the user clicks to reveal them.
 CHAT_IMAGE_CONCEAL_MODES = ("off", "blur", "blackout")
@@ -558,7 +557,9 @@ def _condition_line(n: int, entry: dict) -> str:
 def _condition_character_block(characters: dict | None) -> str:
     """Character sheets for the gate prompt, so conditions and weight
     instructions can reference who is present even when the narration only
-    uses pronouns or epithets. Same snapshot the prompt writer gets."""
+    uses pronouns or epithets. Same snapshot the prompt writer gets, listed
+    in full -- a per-character LoRA condition must be able to match anyone
+    in the scene."""
     if not characters:
         return ""
     lines = []
@@ -1553,7 +1554,7 @@ def _hook_sdk(sdk):
 
 def _character_descriptor(race, gender, appearance) -> str:
     ident = " ".join(p for p in (str(gender or "").strip(), str(race or "").strip()) if p)
-    look = str(appearance or "").strip()[:CHAR_REF_APPEARANCE_MAX]
+    look = str(appearance or "").strip()
     return "; ".join(p for p in (ident, look) if p)
 
 
@@ -1584,8 +1585,9 @@ def _character_snapshot(state: dict) -> dict | None:
     introduced bank. NPCs are the ones the NPC system judged present in the
     scene (plus any named in the latest narration, which the roster --
     computed before the storyteller ran -- cannot know about); without a
-    fresh roster, recently-interacted NPCs stand in. Returns None when
-    neither module has anything to say."""
+    fresh roster, recently-interacted NPCs stand in. The snapshot is
+    uncapped: the prompt writer and the LoRA gate both need everyone
+    present. Returns None when neither module has anything to say."""
     player_out = None
     player = state.get("characters", {}).get("default_player") or {}
     appearance = player.get("short_appearance") or player.get("full_appearance") or ""
@@ -1608,14 +1610,10 @@ def _character_snapshot(state: dict) -> dict | None:
     candidates.sort(key=lambda n: (not n.get("traveling_with_player"),
                                    -int(n.get("last_interaction_turn") or 0)))
     npcs = []
-    total = 0
-    for npc in candidates[:CHAR_REF_MAX_NPCS]:
+    for npc in candidates:
         descriptor = _character_descriptor(npc.get("race"), npc.get("gender"), npc.get("appearance"))
-        if total + len(descriptor) > CHAR_REF_MAX_CHARS:
-            break
         npcs.append({"name": str(npc.get("name") or "").strip() or "Unknown",
                      "descriptor": descriptor})
-        total += len(descriptor)
 
     if not player_out and not npcs:
         return None

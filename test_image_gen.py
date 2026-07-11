@@ -2109,14 +2109,20 @@ def test_character_snapshot_selects_sorts_and_caps(tmp_path):
     snap = backend._character_snapshot(state)
     assert snap["player"]["descriptor"] == "a full paragraph of looks"
 
-    # Entry cap and per-appearance truncation.
+    # No token caps on LLM input context (see CLAUDE.md): the snapshot keeps
+    # every present character with their full appearance text, and both the
+    # prompt writer and the LoRA gate list them all.
     many = {f"n{i}": _npc(f"NPC{i}", appearance="x" * 500, last_turn=i)
             for i in range(10)}
     snap = backend._character_snapshot(_char_state(player=False, npcs=many))
-    assert len(snap["npcs"]) <= backend.CHAR_REF_MAX_NPCS
-    assert all(len(n["descriptor"]) <= backend.CHAR_REF_APPEARANCE_MAX + 40
-               for n in snap["npcs"])
-    assert sum(len(n["descriptor"]) for n in snap["npcs"]) <= backend.CHAR_REF_MAX_CHARS
+    assert len(snap["npcs"]) == 10
+    assert all("x" * 500 in n["descriptor"] for n in snap["npcs"])
+
+    block = backend._character_block(backend._default_config(), snap)
+    gate = backend._condition_character_block(snap)
+    for i in range(10):
+        assert f"- NPC{i}:" in block
+        assert f"- NPC{i}:" in gate
 
 
 def test_character_snapshot_uses_npc_scene_presence(tmp_path):
