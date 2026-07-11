@@ -557,16 +557,16 @@ def _condition_line(n: int, entry: dict) -> str:
 def _condition_character_block(characters: dict | None) -> str:
     """Character sheets for the gate prompt, so conditions and weight
     instructions can reference who is present even when the narration only
-    uses pronouns or epithets. Same snapshot the prompt writer gets, listed
-    in full -- a per-character LoRA condition must be able to match anyone
-    in the scene."""
+    uses pronouns or epithets. Lists every known living character -- not just
+    those judged present in the scene -- because a per-character LoRA
+    condition must be able to match anyone the narration might involve."""
     if not characters:
         return ""
     lines = []
     player = characters.get("player")
     if player:
         lines.append(f"- {player['name']} (player character): {player['descriptor']}")
-    for npc in characters.get("npcs") or []:
+    for npc in characters.get("all_npcs") or characters.get("npcs") or []:
         lines.append(f"- {npc['name']}: {npc['descriptor']}")
     if not lines:
         return ""
@@ -1610,27 +1610,37 @@ def _character_snapshot(state: dict) -> dict | None:
         }
 
     bank = state.get("module_data", {}).get("wb_npc_system", {}).get("characters", {})
-    candidates = [n for n in bank.values()
-                  if isinstance(n, dict) and n.get("introduced")
-                  and str(n.get("appearance") or "").strip()
-                  and n.get("status") not in ("dead", "deceased", "departed")]
+    # An "active" status counts as known even when the introduced flag is
+    # stale (records activated from the browser before the flags were synced).
+    known = [n for n in bank.values()
+             if isinstance(n, dict)
+             and (n.get("introduced") or n.get("status") == "active")
+             and str(n.get("appearance") or "").strip()
+             and n.get("status") not in ("dead", "deceased", "departed")]
+    known.sort(key=lambda n: (not n.get("traveling_with_player"),
+                              -int(n.get("last_interaction_turn") or 0)))
+    candidates = known
     presence = _scene_presence_ids(state)
     if presence is not None:
         latest = str((state.get("history") or [""])[-1])
-        candidates = [n for n in candidates
+        candidates = [n for n in known
                       if str(n.get("id")) in presence or _named_in(n, latest)
                       or _presence_pinned(n, state.get("turn"))]
-    candidates.sort(key=lambda n: (not n.get("traveling_with_player"),
-                                   -int(n.get("last_interaction_turn") or 0)))
-    npcs = []
-    for npc in candidates:
-        descriptor = _character_descriptor(npc.get("race"), npc.get("gender"), npc.get("appearance"))
-        npcs.append({"name": str(npc.get("name") or "").strip() or "Unknown",
-                     "descriptor": descriptor})
 
-    if not player_out and not npcs:
+    def _sheet(npc):
+        descriptor = _character_descriptor(npc.get("race"), npc.get("gender"), npc.get("appearance"))
+        return {"name": str(npc.get("name") or "").strip() or "Unknown",
+                "descriptor": descriptor}
+
+    npcs = [_sheet(n) for n in candidates]
+    all_npcs = [_sheet(n) for n in known]
+
+    if not player_out and not all_npcs:
         return None
-    return {"player": player_out, "npcs": npcs}
+    # npcs: who is in the scene (feeds the image prompt); all_npcs: every
+    # known living character (feeds the LoRA gate, whose per-character
+    # conditions must be able to match anyone regardless of scene presence).
+    return {"player": player_out, "npcs": npcs, "all_npcs": all_npcs}
 
 
 def _snapshot_names(characters: dict | None) -> list[str]:

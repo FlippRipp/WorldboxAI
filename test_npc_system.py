@@ -468,3 +468,24 @@ def test_manual_add_pins_presence():
         state, sdk))
     npc = next(n for n in _bank_from_result(result).values() if n["name"] == "Hidden")
     assert "presence_pinned_turn" not in npc
+
+
+def test_noop_edit_heals_stale_activation():
+    # A record whose status was flipped to active before the introduction
+    # sync existed: re-saving it with no field changes repairs the flags.
+    backend = _load_backend()
+    sdk, _ = _make_sdk()
+    bank = {"npc_1": _present_npc("npc_1", "Sela", introduced=False, status="active")}
+    state = _state(bank)
+
+    result = asyncio.run(backend._apply_manual_edit(
+        "npc_1", _edit_payload({"status": "active"}), state, sdk))
+    npc = _bank_from_result(result)["npc_1"]
+    assert npc["introduced"] is True
+    assert npc["presence_pinned_turn"] == 4
+
+    # Even unhealed, an active record reaches the storyteller context --
+    # status alone decides who counts as known.
+    bank = {"npc_1": _present_npc("npc_1", "Sela", introduced=False, status="active")}
+    result = asyncio.run(backend.on_gather_context(_state(bank), sdk))
+    assert "Sela" in result["context_string"]

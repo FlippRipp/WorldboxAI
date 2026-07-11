@@ -2094,7 +2094,7 @@ def test_character_snapshot_selects_sorts_and_caps(tmp_path):
         "n1": _npc("Borin", last_turn=5),
         "n2": _npc("Kira", traveling=True, last_turn=1),
         "n3": _npc("Ghost", status="dead"),
-        "n4": _npc("Stranger", introduced=False),
+        "n4": _npc("Stranger", introduced=False, status="unintroduced"),
         "n5": _npc("Blank", appearance="  "),
         "n6": _npc("Recent", last_turn=9),
     }))
@@ -2173,6 +2173,33 @@ def test_character_snapshot_honors_manual_pin_and_npc_statuses(tmp_path):
     state["module_data"]["wb_npc_system"]["scene_presence"] = {"turn": 3, "npc_ids": []}
     snap = backend._character_snapshot(state)
     assert [n["name"] for n in snap["npcs"]] == ["Sela"]
+
+
+def test_lora_gate_sees_all_known_characters(tmp_path):
+    backend = _load_backend(tmp_path)
+    npcs = {
+        # In the scene per the roster.
+        "n1": _npc("Kira", id="n1"),
+        # Known but absent: kept for the LoRA gate, not the image prompt.
+        "n2": _npc("Borin", id="n2"),
+        # Active but never flagged introduced (activated from the browser
+        # before the flags were synced): still known.
+        "n3": _npc("Sela", id="n3", introduced=False),
+    }
+    state = _char_state(npcs=npcs, history=["The pier is empty."])
+    state["module_data"]["wb_npc_system"]["scene_presence"] = {"turn": 3, "npc_ids": ["n1"]}
+
+    snap = backend._character_snapshot(state)
+    assert [n["name"] for n in snap["npcs"]] == ["Kira"]
+    assert sorted(n["name"] for n in snap["all_npcs"]) == ["Borin", "Kira", "Sela"]
+
+    # The LoRA gate lists every known character; the prompt writer's block
+    # only those present in the scene.
+    gate = backend._condition_character_block(snap)
+    assert "- Kira:" in gate and "- Borin:" in gate and "- Sela:" in gate
+    block = backend._character_block(backend._default_config(), snap)
+    assert "- Kira:" in block
+    assert "Borin" not in block and "Sela" not in block
 
 
 def test_character_block_injected_in_both_styles(tmp_path):
