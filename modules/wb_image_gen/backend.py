@@ -167,6 +167,10 @@ LATEST SCENE (illustrate this):
 
 DEFAULT_PONY_QUALITY_TAGS = "score_9, score_8_up, score_7_up"
 
+# Tag-trained checkpoints blend features badly when asked for several distinct
+# characters, so the booru_single_subject toggle narrows the prompt to one.
+BOORU_SINGLE_SUBJECT_RULE = """SINGLE SUBJECT RULE (MANDATORY): this image model renders one character far better than several, so depict exactly ONE. Pick the most relevant subject of the latest scene -- the character the moment centers on (acting, speaking, or being acted upon) -- and tag only them: solo, one subject-count tag (1girl, 1boy, 1other), then that character's appearance, pose, and expression. Never tag a second character's count or appearance; at most, imply others through the setting (a shadow, a doorway, an empty chair). A scene with no characters at all may be pure scenery (no humans)."""
+
 _services: dict = {}
 _tasks: set = set()
 _hf_detail_cache: dict = {}   # repo_id -> (fetched_at, detail json)
@@ -206,6 +210,7 @@ def _default_config() -> dict:
         "prompt_template": DEFAULT_PROMPT_TEMPLATE,
         "prompt_template_tags": DEFAULT_PROMPT_TEMPLATE_TAGS,
         "pony_quality_tags": DEFAULT_PONY_QUALITY_TAGS,
+        "booru_single_subject": True,   # tag models: prompt one character, not a crowd
         "style_suffix": "",
         "character_reference_enabled": True,
         "player_in_images": "show",     # one of PLAYER_IN_IMAGES_MODES
@@ -350,6 +355,12 @@ def _prompt_style(cfg: dict) -> str:
 
 def _is_pony(cfg: dict) -> bool:
     return "pony" in _model_ident(cfg)
+
+
+def _single_subject(cfg: dict) -> bool:
+    """Whether prompts should focus on one character: tag models only (they
+    blend multiple characters together), unless the user turned it off."""
+    return _prompt_style(cfg) == "tags" and bool(cfg.get("booru_single_subject", True))
 
 
 # --------------------------------------------------------------------------
@@ -650,7 +661,14 @@ def _character_block(cfg: dict, characters: dict | None) -> str:
 
     parts = []
     if lines:
-        if tags:
+        if tags and _single_subject(cfg):
+            header = ("KNOWN CHARACTERS -- canonical appearances (MANDATORY): if the ONE "
+                      "subject you depict is listed below, convert their description into "
+                      "concrete booru appearance tags (hair, eyes, skin, clothing, species, "
+                      "distinctive features) and include those tags. Stay faithful to the "
+                      "description -- never invent or contradict a listed trait; a subject "
+                      "not listed may be described freely.")
+        elif tags:
             header = ("KNOWN CHARACTERS -- canonical appearances (MANDATORY): when any of these "
                       "characters appears in the scene, convert their description below into "
                       "concrete booru appearance tags (hair, eyes, skin, clothing, species, "
@@ -691,6 +709,8 @@ async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
     else:
         template = cfg.get("prompt_template") or DEFAULT_PROMPT_TEMPLATE
     prompt = _render_template(template, narration[-4000:], history[-3000:])
+    if _single_subject(cfg):
+        prompt += "\n\n" + BOORU_SINGLE_SUBJECT_RULE
     triggers = _active_trigger_words(cfg)
     if triggers:
         prompt += ("\n\nMANDATORY: weave these trigger words into the output verbatim "
@@ -1815,6 +1835,7 @@ def get_router():
         prompt_template: str | None = None
         prompt_template_tags: str | None = None
         pony_quality_tags: str | None = None
+        booru_single_subject: bool | None = None
         style_suffix: str | None = None
         character_reference_enabled: bool | None = None
         player_in_images: str | None = None

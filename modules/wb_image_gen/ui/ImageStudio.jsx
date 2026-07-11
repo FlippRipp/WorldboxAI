@@ -1242,6 +1242,7 @@ export default function ImageStudio({ onBack }) {
         prompt_template: draft.prompt_template,
         prompt_template_tags: draft.prompt_template_tags,
         pony_quality_tags: draft.pony_quality_tags,
+        booru_single_subject: draft.booru_single_subject !== false,
         style_suffix: draft.style_suffix,
         character_reference_enabled: draft.character_reference_enabled !== false,
         player_in_images: draft.player_in_images || 'show',
@@ -1690,6 +1691,19 @@ export default function ImageStudio({ onBack }) {
             <p className="text-xs text-gray-600 mt-1">
               Placeholders in both templates: <code className="text-purple-400">{'{narration}'}</code> = latest scene,{' '}
               <code className="text-purple-400">{'{history}'}</code> = earlier scenes.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Toggle
+              checked={draft.booru_single_subject !== false}
+              onChange={(v) => set('booru_single_subject', v)}
+              label="Tag models: focus on the most relevant character"
+            />
+            <p className="text-xs text-gray-600">
+              Pony / Illustrious checkpoints blend features together when prompted with
+              several distinct characters. When on, the prompt writer picks the one
+              character the scene centers on and tags only them (solo). Natural-language
+              models are unaffected.
             </p>
           </div>
           <div>

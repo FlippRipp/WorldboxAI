@@ -438,6 +438,75 @@ def test_prompt_writer_picks_template_and_pony_tags(tmp_path):
     assert prompt.endswith(", anime style")
 
 
+def test_booru_single_subject_rule_on_by_default(tmp_path):
+    backend = _load_backend(tmp_path)
+    assert backend._default_config()["booru_single_subject"] is True
+
+    # Tag models get the rule by default.
+    captured = {}
+    cfg = {**backend._default_config(), "model_base": "Pony", "model_name": "m.safetensors"}
+    asyncio.run(backend._write_image_prompt(
+        cfg, "scene", "", _make_sdk(reply="1girl", captured=captured)))
+    assert "SINGLE SUBJECT RULE" in captured["prompts"][0]
+    assert "most relevant subject" in captured["prompts"][0]
+
+    # Toggled off: no rule.
+    captured = {}
+    asyncio.run(backend._write_image_prompt(
+        {**cfg, "booru_single_subject": False}, "scene", "",
+        _make_sdk(reply="2girls", captured=captured)))
+    assert "SINGLE SUBJECT RULE" not in captured["prompts"][0]
+
+    # Natural-language models never get it, even with the toggle on.
+    captured = {}
+    flux = {**backend._default_config(), "model_base": "FLUX.1", "model_name": "m.safetensors"}
+    asyncio.run(backend._write_image_prompt(flux, "scene", "", _make_sdk(captured=captured)))
+    assert "SINGLE SUBJECT RULE" not in captured["prompts"][0]
+
+
+def test_booru_single_subject_reshapes_character_block(tmp_path):
+    backend = _load_backend(tmp_path)
+    characters = {"player": {"name": "Ash", "descriptor": "female elf; silver hair"},
+                  "npcs": [{"name": "Borin", "descriptor": "male human; tall and scarred"}]}
+    cfg = {**backend._default_config(), "model_base": "Pony", "model_name": "m.safetensors"}
+
+    # On: the roster stays (any character could be the pick) but conversion is
+    # scoped to the single chosen subject.
+    captured = {}
+    asyncio.run(backend._write_image_prompt(
+        cfg, "scene", "", _make_sdk(reply="1girl", captured=captured), characters))
+    prompt = captured["prompts"][0]
+    assert "if the ONE subject you depict is listed below" in prompt
+    assert "booru appearance tags" in prompt
+    assert "- Ash (player character): female elf; silver hair" in prompt
+    assert "- Borin: male human; tall and scarred" in prompt
+
+    # Off: the original every-character header returns.
+    captured = {}
+    asyncio.run(backend._write_image_prompt(
+        {**cfg, "booru_single_subject": False}, "scene", "",
+        _make_sdk(reply="2boys", captured=captured), characters))
+    assert "when any of these characters appears" in captured["prompts"][0]
+
+    # Natural style keeps its own header regardless of the toggle.
+    captured = {}
+    asyncio.run(backend._write_image_prompt(
+        backend._default_config(), "scene", "", _make_sdk(captured=captured), characters))
+    assert "depict them EXACTLY as described" in captured["prompts"][0]
+    assert "ONE subject" not in captured["prompts"][0]
+
+
+def test_booru_single_subject_config_roundtrip(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    assert client.get("/config").json()["booru_single_subject"] is True
+    resp = client.put("/config", json={"booru_single_subject": False})
+    assert resp.status_code == 200
+    assert resp.json()["booru_single_subject"] is False
+    assert backend._load_config()["booru_single_subject"] is False
+
+
 def test_prompt_cap_respects_novita_limit(tmp_path):
     backend = _load_backend(tmp_path)
     captured = {}
