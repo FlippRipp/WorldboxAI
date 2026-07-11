@@ -1212,9 +1212,11 @@ export default function ImageStudio({ onBack }) {
     JSON.stringify({ ...draft, api_key: '', civitai_api_key: '', lora_library: [] }) !==
       JSON.stringify({ ...config, api_key: '', civitai_api_key: '', lora_library: [] });
 
-  // Mirror of the backend's _prompt_style heuristic, live against the draft.
+  // Mirror of the backend's _prompt_style heuristic (BOORU_TAG_MODEL_MARKERS),
+  // live against the draft.
   const modelIdent = `${draft.model_base || ''} ${draft.model_name || ''}`.toLowerCase();
-  const promptStyle = modelIdent.includes('pony') || modelIdent.includes('illustrious') ? 'tags' : 'natural';
+  const promptStyle = ['pony', 'illustrious', 'noob', 'animagine'].some((m) => modelIdent.includes(m))
+    ? 'tags' : 'natural';
   const isPony = modelIdent.includes('pony');
   const checkpointFamily =
     draft.model_name === config?.flux2_model_name ? 'flux' : baseFamily(modelIdent);
@@ -1242,7 +1244,8 @@ export default function ImageStudio({ onBack }) {
         prompt_template: draft.prompt_template,
         prompt_template_tags: draft.prompt_template_tags,
         pony_quality_tags: draft.pony_quality_tags,
-        booru_single_subject: draft.booru_single_subject !== false,
+        booru_subject_mode: draft.booru_subject_mode || 'auto',
+        booru_break_separator: draft.booru_break_separator === true,
         style_suffix: draft.style_suffix,
         character_reference_enabled: draft.character_reference_enabled !== false,
         player_in_images: draft.player_in_images || 'show',
@@ -1608,7 +1611,7 @@ export default function ImageStudio({ onBack }) {
                 {promptStyle === 'tags' ? 'danbooru tag' : 'natural language'}
               </span>{' '}
               template{isPony ? ', with Pony quality tags prepended' : ''}. Detected from base model
-              {draft.model_base ? ` "${draft.model_base}"` : ' / model name'} — Flux → natural language, Pony/Illustrious → tags.
+              {draft.model_base ? ` "${draft.model_base}"` : ' / model name'} — Flux → natural language, Pony/Illustrious/NoobAI/Animagine → tags.
             </div>
           )}
           <div>
@@ -1673,7 +1676,7 @@ export default function ImageStudio({ onBack }) {
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <label className={`text-xs uppercase tracking-wider ${promptStyle === 'tags' ? 'text-purple-400' : 'text-gray-500'}`}>
-                Danbooru tag template (Pony / Illustrious){promptStyle === 'tags' ? ' — active' : ''}
+                Danbooru tag template (Pony / Illustrious / NoobAI){promptStyle === 'tags' ? ' — active' : ''}
               </label>
               <button
                 onClick={() => set('prompt_template_tags', config.default_prompt_template_tags)}
@@ -1694,17 +1697,39 @@ export default function ImageStudio({ onBack }) {
             </p>
           </div>
           <div className="space-y-2">
-            <Toggle
-              checked={draft.booru_single_subject !== false}
-              onChange={(v) => set('booru_single_subject', v)}
-              label="Tag models: focus on the most relevant character"
-            />
+            <label className={labelCls}>Tag models: characters per image</label>
+            <select
+              value={draft.booru_subject_mode || 'auto'}
+              onChange={(e) => set('booru_subject_mode', e.target.value)}
+              className={inputCls}
+            >
+              <option value="auto">Auto — solo scenes stay solo, group scenes get 2-3 characters</option>
+              <option value="single">Single — always focus on the most relevant character</option>
+              <option value="multi">Multi — always allow 2-3 characters with distinct looks</option>
+            </select>
             <p className="text-xs text-gray-600">
-              Pony / Illustrious checkpoints blend features together when prompted with
-              several distinct characters. When on, the prompt writer picks the one
-              character the scene centers on and tags only them (solo). Natural-language
-              models are unaffected.
+              Tag checkpoints blend features together when several characters share one
+              prompt. Single keeps the strongest results by tagging only the character
+              the scene centers on (solo). Multi structures the prompt instead — a
+              subject-count tag (2girls, 1boy 1girl...) and one contiguous tag group per
+              character, led by their most distinguishing traits — so each character
+              keeps their own look. Works best on Illustrious and NoobAI, less reliably
+              on Pony. Natural-language models are unaffected.
             </p>
+            {(draft.booru_subject_mode || 'auto') !== 'single' && (
+              <>
+                <Toggle
+                  checked={draft.booru_break_separator === true}
+                  onChange={(v) => set('booru_break_separator', v)}
+                  label="Insert BREAK between character tag groups"
+                />
+                <p className="text-xs text-gray-600">
+                  A1111-style prompt chunking that further isolates each character's
+                  tags. Only useful if the generation pipeline honors the BREAK
+                  keyword — leave off if unsure.
+                </p>
+              </>
+            )}
           </div>
           <div>
             <div className="flex items-center justify-between mb-1.5">

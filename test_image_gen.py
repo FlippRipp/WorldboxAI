@@ -395,8 +395,11 @@ def test_prompt_style_detection(tmp_path):
     assert backend._prompt_style(cfg("")) == "natural"
     assert backend._prompt_style(cfg("Pony")) == "tags"
     assert backend._prompt_style(cfg("Illustrious XL")) == "tags"
+    assert backend._prompt_style(cfg("NoobAI XL")) == "tags"
+    assert backend._prompt_style(cfg("Animagine XL 3.1")) == "tags"
     # sd_name fallback for configs saved before model_base existed
     assert backend._prompt_style(cfg("", "ponyDiffusionV6XL.safetensors")) == "tags"
+    assert backend._prompt_style(cfg("", "noobaiXLNAIXL_epsilon.safetensors")) == "tags"
     assert backend._is_pony(cfg("Pony"))
     assert not backend._is_pony(cfg("Illustrious XL"))
 
@@ -438,57 +441,107 @@ def test_prompt_writer_picks_template_and_pony_tags(tmp_path):
     assert prompt.endswith(", anime style")
 
 
-def test_booru_single_subject_rule_on_by_default(tmp_path):
+def test_booru_subject_mode_default_and_rules(tmp_path):
     backend = _load_backend(tmp_path)
-    assert backend._default_config()["booru_single_subject"] is True
+    assert backend._default_config()["booru_subject_mode"] == "auto"
+    assert backend._default_config()["booru_break_separator"] is False
 
-    # Tag models get the rule by default.
+    # Tag models with no roster data: auto resolves to single.
     captured = {}
     cfg = {**backend._default_config(), "model_base": "Pony", "model_name": "m.safetensors"}
     asyncio.run(backend._write_image_prompt(
         cfg, "scene", "", _make_sdk(reply="1girl", captured=captured)))
     assert "SINGLE SUBJECT RULE" in captured["prompts"][0]
     assert "most relevant subject" in captured["prompts"][0]
+    assert "MULTI-SUBJECT STRUCTURE" not in captured["prompts"][0]
 
-    # Toggled off: no rule.
+    # Multi: the structured multi rule replaces the single rule.
     captured = {}
     asyncio.run(backend._write_image_prompt(
-        {**cfg, "booru_single_subject": False}, "scene", "",
+        {**cfg, "booru_subject_mode": "multi"}, "scene", "",
         _make_sdk(reply="2girls", captured=captured)))
     assert "SINGLE SUBJECT RULE" not in captured["prompts"][0]
+    assert "MULTI-SUBJECT STRUCTURE" in captured["prompts"][0]
 
-    # Natural-language models never get it, even with the toggle on.
+    # Natural-language models get neither rule, whatever the mode says.
     captured = {}
-    flux = {**backend._default_config(), "model_base": "FLUX.1", "model_name": "m.safetensors"}
+    flux = {**backend._default_config(), "model_base": "FLUX.1",
+            "model_name": "m.safetensors", "booru_subject_mode": "multi"}
     asyncio.run(backend._write_image_prompt(flux, "scene", "", _make_sdk(captured=captured)))
     assert "SINGLE SUBJECT RULE" not in captured["prompts"][0]
+    assert "MULTI-SUBJECT STRUCTURE" not in captured["prompts"][0]
 
 
-def test_booru_single_subject_reshapes_character_block(tmp_path):
+def test_booru_multi_subject_rule_structure(tmp_path):
+    backend = _load_backend(tmp_path)
+    captured = {}
+    cfg = {**backend._default_config(), "model_base": "Illustrious XL",
+           "model_name": "m.safetensors", "booru_subject_mode": "multi"}
+    asyncio.run(backend._write_image_prompt(
+        cfg, "scene", "", _make_sdk(reply="2girls", captured=captured)))
+    prompt = captured["prompts"][0]
+    assert "MULTI-SUBJECT STRUCTURE" in prompt
+    assert "ONE CONTIGUOUS tag group" in prompt
+    assert "2girls, 1boy 1girl" in prompt          # count-combo examples
+    assert "side-by-side" in prompt                # interaction tags
+    assert "BREAK" not in prompt                   # separator is opt-in
+
+
+def test_booru_break_separator_opt_in(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = {**backend._default_config(), "model_base": "Illustrious XL",
+           "model_name": "m.safetensors", "booru_subject_mode": "multi",
+           "booru_break_separator": True}
+
+    captured = {}
+    asyncio.run(backend._write_image_prompt(
+        cfg, "scene", "", _make_sdk(reply="2girls", captured=captured)))
+    assert "uppercase word BREAK" in captured["prompts"][0]
+
+    # Single mode: no character groups to separate.
+    captured = {}
+    asyncio.run(backend._write_image_prompt(
+        {**cfg, "booru_subject_mode": "single"}, "scene", "",
+        _make_sdk(reply="1girl", captured=captured)))
+    assert "BREAK" not in captured["prompts"][0]
+
+    # Natural-language models never see it.
+    captured = {}
+    flux = {**cfg, "model_base": "FLUX.1"}
+    asyncio.run(backend._write_image_prompt(flux, "scene", "", _make_sdk(captured=captured)))
+    assert "BREAK" not in captured["prompts"][0]
+
+
+def test_booru_subject_mode_reshapes_character_block(tmp_path):
     backend = _load_backend(tmp_path)
     characters = {"player": {"name": "Ash", "descriptor": "female elf; silver hair"},
                   "npcs": [{"name": "Borin", "descriptor": "male human; tall and scarred"}]}
     cfg = {**backend._default_config(), "model_base": "Pony", "model_name": "m.safetensors"}
 
-    # On: the roster stays (any character could be the pick) but conversion is
-    # scoped to the single chosen subject.
+    # Single: the roster stays (any character could be the pick) but conversion
+    # is scoped to the single chosen subject.
     captured = {}
     asyncio.run(backend._write_image_prompt(
-        cfg, "scene", "", _make_sdk(reply="1girl", captured=captured), characters))
+        {**cfg, "booru_subject_mode": "single"}, "scene", "",
+        _make_sdk(reply="1girl", captured=captured), characters))
     prompt = captured["prompts"][0]
     assert "if the ONE subject you depict is listed below" in prompt
     assert "booru appearance tags" in prompt
     assert "- Ash (player character): female elf; silver hair" in prompt
     assert "- Borin: male human; tall and scarred" in prompt
 
-    # Off: the original every-character header returns.
+    # Multi: the per-character tag-group contract, roster lines intact.
     captured = {}
     asyncio.run(backend._write_image_prompt(
-        {**cfg, "booru_single_subject": False}, "scene", "",
+        {**cfg, "booru_subject_mode": "multi"}, "scene", "",
         _make_sdk(reply="2boys", captured=captured), characters))
-    assert "when any of these characters appears" in captured["prompts"][0]
+    prompt = captured["prompts"][0]
+    assert "their own contiguous tag group" in prompt
+    assert "Never merge two characters' traits" in prompt
+    assert "- Ash (player character): female elf; silver hair" in prompt
+    assert "- Borin: male human; tall and scarred" in prompt
 
-    # Natural style keeps its own header regardless of the toggle.
+    # Natural style keeps its own header regardless of the mode.
     captured = {}
     asyncio.run(backend._write_image_prompt(
         backend._default_config(), "scene", "", _make_sdk(captured=captured), characters))
@@ -496,15 +549,90 @@ def test_booru_single_subject_reshapes_character_block(tmp_path):
     assert "ONE subject" not in captured["prompts"][0]
 
 
-def test_booru_single_subject_config_roundtrip(tmp_path):
+def test_booru_auto_mode_resolves_by_roster(tmp_path):
+    backend = _load_backend(tmp_path)
+    player = {"name": "Ash", "descriptor": "female elf; silver hair"}
+    npc = {"name": "Borin", "descriptor": "male human; tall and scarred"}
+    cfg = {**backend._default_config(), "model_base": "Illustrious XL",
+           "model_name": "m.safetensors", "booru_subject_mode": "auto"}
+
+    # Two tracked characters in frame: multi.
+    captured = {}
+    asyncio.run(backend._write_image_prompt(
+        cfg, "scene", "", _make_sdk(reply="2girls", captured=captured),
+        {"player": player, "npcs": [npc]}))
+    assert "MULTI-SUBJECT STRUCTURE" in captured["prompts"][0]
+    assert "SINGLE SUBJECT RULE" not in captured["prompts"][0]
+
+    # One character, or no roster at all: single.
+    for chars in ({"player": player, "npcs": []}, None):
+        captured = {}
+        asyncio.run(backend._write_image_prompt(
+            cfg, "scene", "", _make_sdk(reply="1girl", captured=captured), chars))
+        assert "SINGLE SUBJECT RULE" in captured["prompts"][0]
+
+    # POV hides the player, so a player + one NPC roster counts as one.
+    captured = {}
+    asyncio.run(backend._write_image_prompt(
+        {**cfg, "player_in_images": "pov"}, "scene", "",
+        _make_sdk(reply="1boy", captured=captured), {"player": player, "npcs": [npc]}))
+    assert "SINGLE SUBJECT RULE" in captured["prompts"][0]
+
+    # Direct resolution: natural models opt out entirely; bogus stored values
+    # fall back to single.
+    flux = {**backend._default_config(), "model_base": "FLUX.1", "model_name": "m.safetensors"}
+    assert backend._subject_mode(flux) == ""
+    assert backend._subject_mode({**cfg, "booru_subject_mode": "crowd"}) == "single"
+
+
+def test_booru_subject_mode_config_roundtrip(tmp_path):
     backend = _load_backend(tmp_path)
     client = _client(backend)
 
-    assert client.get("/config").json()["booru_single_subject"] is True
-    resp = client.put("/config", json={"booru_single_subject": False})
+    body = client.get("/config").json()
+    assert body["booru_subject_mode"] == "auto"
+    assert body["booru_break_separator"] is False
+    assert body["booru_subject_modes"] == list(backend.BOORU_SUBJECT_MODES)
+
+    resp = client.put("/config", json={"booru_subject_mode": "multi",
+                                       "booru_break_separator": True})
     assert resp.status_code == 200
-    assert resp.json()["booru_single_subject"] is False
-    assert backend._load_config()["booru_single_subject"] is False
+    assert resp.json()["booru_subject_mode"] == "multi"
+    assert resp.json()["booru_break_separator"] is True
+    assert backend._load_config()["booru_subject_mode"] == "multi"
+
+    assert client.put("/config", json={"booru_subject_mode": "crowd"}).status_code == 400
+
+    # The pre-mode boolean still works as a deprecated alias...
+    assert client.put("/config", json={"booru_single_subject": True}).status_code == 200
+    assert backend._load_config()["booru_subject_mode"] == "single"
+    assert client.put("/config", json={"booru_single_subject": False}).status_code == 200
+    assert backend._load_config()["booru_subject_mode"] == "multi"
+    # ...but an explicit mode wins over it.
+    client.put("/config", json={"booru_single_subject": True, "booru_subject_mode": "auto"})
+    assert backend._load_config()["booru_subject_mode"] == "auto"
+
+
+def test_booru_subject_mode_migration(tmp_path):
+    backend = _load_backend(tmp_path)
+    path = backend._data_dir() / "config.json"
+    legacy = {k: v for k, v in backend._default_config().items()
+              if k not in ("booru_subject_mode", "booru_break_separator")}
+
+    # A stored pre-mode config keeps the choice the user made.
+    backend._atomic_write_json(path, {**legacy, "booru_single_subject": True})
+    assert backend._load_config()["booru_subject_mode"] == "single"
+    backend._atomic_write_json(path, {**legacy, "booru_single_subject": False})
+    assert backend._load_config()["booru_subject_mode"] == "multi"
+
+    # An explicit stored mode wins over a lingering legacy bool.
+    backend._atomic_write_json(
+        path, {**legacy, "booru_single_subject": False, "booru_subject_mode": "auto"})
+    assert backend._load_config()["booru_subject_mode"] == "auto"
+
+    # An unknown stored value (hand-edited config) normalizes to single.
+    backend._atomic_write_json(path, {**legacy, "booru_subject_mode": "bogus"})
+    assert backend._load_config()["booru_subject_mode"] == "single"
 
 
 def test_prompt_cap_respects_novita_limit(tmp_path):
@@ -2218,12 +2346,16 @@ def test_character_block_injected_in_both_styles(tmp_path):
     assert "- Borin: male human; tall and scarred" in prompt
     assert "POV RULE" not in prompt
 
-    # Tags template converts descriptions into booru tags.
+    # Tags template converts descriptions into booru tags. The default auto
+    # mode sees two characters in frame, so the multi contract applies and the
+    # full roster still rides along.
     captured = {}
     sdk = _make_sdk(reply="1girl", captured=captured)
     cfg = {**backend._default_config(), "model_base": "Pony", "model_name": "m.safetensors"}
     asyncio.run(backend._write_image_prompt(cfg, "scene", "", sdk, characters))
     assert "booru appearance tags" in captured["prompts"][0]
+    assert "their own contiguous tag group" in captured["prompts"][0]
+    assert "- Ash (player character): female elf; silver hair" in captured["prompts"][0]
     assert "- Borin: male human; tall and scarred" in captured["prompts"][0]
 
     # Disabled or absent roster: no block.

@@ -119,6 +119,9 @@ LORA_LLM_MODES = ("off", "gate", "weight", "both")
 PLAYER_IN_IMAGES_MODES = ("show", "pov")
 # How finished images appear in chat before the user clicks to reveal them.
 CHAT_IMAGE_CONCEAL_MODES = ("off", "blur", "blackout")
+# Tag models: how many characters a prompt may depict. "auto" picks single or
+# multi per scene from how many tracked characters are in frame.
+BOORU_SUBJECT_MODES = ("single", "multi", "auto")
 
 LORA_CONDITION_PROMPT = """You control style adapters (LoRAs) for an AI image generator. For each numbered adapter below, decide whether its condition applies to the scene being illustrated. Be literal: a condition applies only when the scene actually shows or strongly implies it. Adapters marked "always applies" always apply. When character sheets are listed, use them to recognize characters the scene mentions indirectly (by pronoun, epithet, or description).
 
@@ -167,8 +170,23 @@ LATEST SCENE (illustrate this):
 DEFAULT_PONY_QUALITY_TAGS = "score_9, score_8_up, score_7_up"
 
 # Tag-trained checkpoints blend features badly when asked for several distinct
-# characters, so the booru_single_subject toggle narrows the prompt to one.
+# characters, so booru_subject_mode "single" narrows the prompt to one.
 BOORU_SINGLE_SUBJECT_RULE = """SINGLE SUBJECT RULE (MANDATORY): this image model renders one character far better than several, so depict exactly ONE. Pick the most relevant subject of the latest scene -- the character the moment centers on (acting, speaking, or being acted upon) -- and tag only them: solo, one subject-count tag (1girl, 1boy, 1other), then that character's appearance, pose, and expression. Never tag a second character's count or appearance; at most, imply others through the setting (a shadow, a doorway, an empty chair). A scene with no characters at all may be pure scenery (no humans)."""
+
+# Danbooru-trained checkpoints (Illustrious 1.x+, NoobAI; Pony less so) can
+# hold 2-3 distinct characters IF the prompt gives a correct subject-count tag
+# combo and keeps each character's tags in one contiguous, non-interleaved
+# group. This rule teaches the prompt writer that structure.
+BOORU_MULTI_SUBJECT_RULE = """MULTI-SUBJECT STRUCTURE (MANDATORY): when the moment involves more than one character, structure the tag list so a tag-trained model keeps them distinct:
+- Start with ONE correct subject-count tag combo: 2girls, 1boy 1girl, 2boys, 3girls, 2girls 1boy, 1girl 1other... Count only the characters actually depicted, 3 at most -- if more are present, depict the 2-3 the moment centers on and fold the rest into the setting (crowd, blurry background figures).
+- Then give EACH depicted character ONE CONTIGUOUS tag group, most central character first: lead with the traits that most distinguish them from the others in the image (hair color/length/style, eye color, species features like elf ears, horns, tail, fur), then outfit, then their own pose, expression, and action. NEVER interleave one character's traits with another's -- finish a character's group completely before starting the next.
+- After the character groups, add interaction and placement tags that bind them together: side-by-side, facing another, looking at another, holding hands, hand on another's shoulder, hug, height difference...
+- Finish with setting, lighting, mood, and composition tags as usual.
+- Budget tags tightly: with several characters keep each group to roughly 6-10 tags, spending them on what tells the characters apart rather than generic detail.
+- A scene that truly centers on one character may still be solo (solo, 1girl/1boy and that character's tags); a scene with none may be pure scenery (no humans)."""
+
+BOORU_BREAK_RULE = ("- Put the single uppercase word BREAK between consecutive character tag "
+                    "groups (its own item in the list, no commas attached to it).")
 
 _services: dict = {}
 _tasks: set = set()
@@ -209,7 +227,8 @@ def _default_config() -> dict:
         "prompt_template": DEFAULT_PROMPT_TEMPLATE,
         "prompt_template_tags": DEFAULT_PROMPT_TEMPLATE_TAGS,
         "pony_quality_tags": DEFAULT_PONY_QUALITY_TAGS,
-        "booru_single_subject": True,   # tag models: prompt one character, not a crowd
+        "booru_subject_mode": "auto",   # tag models: one of BOORU_SUBJECT_MODES
+        "booru_break_separator": False, # multi mode: emit BREAK between character groups
         "style_suffix": "",
         "character_reference_enabled": True,
         "player_in_images": "show",     # one of PLAYER_IN_IMAGES_MODES
@@ -231,6 +250,7 @@ def _atomic_write_json(path: Path, payload) -> None:
 def _load_config() -> dict:
     cfg = _default_config()
     path = _data_dir() / "config.json"
+    stored = None
     if path.exists():
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -246,6 +266,14 @@ def _load_config() -> dict:
         cfg["player_in_images"] = "show"
     if cfg.get("chat_image_conceal") not in CHAT_IMAGE_CONCEAL_MODES:
         cfg["chat_image_conceal"] = "off"
+    # booru_single_subject (bool) predates booru_subject_mode; keep the choice
+    # the user made: True -> "single", False -> "multi" (they wanted several
+    # characters and now get the structured multi rule).
+    if isinstance(stored, dict) and "booru_subject_mode" not in stored \
+            and isinstance(stored.get("booru_single_subject"), bool):
+        cfg["booru_subject_mode"] = "single" if stored["booru_single_subject"] else "multi"
+    if cfg.get("booru_subject_mode") not in BOORU_SUBJECT_MODES:
+        cfg["booru_subject_mode"] = "single"
     return cfg
 
 
@@ -343,11 +371,17 @@ def _model_ident(cfg: dict) -> str:
     return f"{cfg.get('model_base', '')} {cfg.get('model_name', '')}".lower()
 
 
+# Substrings of Novita base_model / sd_name identifying danbooru-tag-trained
+# checkpoints. "noob" (not "noobai") also matches "Noob AI" spellings, like
+# _base_family below. Keep the mirror in ui/ImageStudio.jsx in sync.
+BOORU_TAG_MODEL_MARKERS = ("pony", "illustrious", "noob", "animagine")
+
+
 def _prompt_style(cfg: dict) -> str:
-    """"tags" (danbooru) for Pony/Illustrious bases, "natural" for Flux and
-    everything else."""
+    """"tags" (danbooru) for Pony/Illustrious/NoobAI/Animagine bases, "natural"
+    for Flux and everything else."""
     ident = _model_ident(cfg)
-    if "pony" in ident or "illustrious" in ident:
+    if any(marker in ident for marker in BOORU_TAG_MODEL_MARKERS):
         return "tags"
     return "natural"
 
@@ -356,10 +390,26 @@ def _is_pony(cfg: dict) -> bool:
     return "pony" in _model_ident(cfg)
 
 
-def _single_subject(cfg: dict) -> bool:
-    """Whether prompts should focus on one character: tag models only (they
-    blend multiple characters together), unless the user turned it off."""
-    return _prompt_style(cfg) == "tags" and bool(cfg.get("booru_single_subject", True))
+def _subject_mode(cfg: dict, characters: dict | None = None) -> str:
+    """Resolved subject mode for tag-style prompts: "single" or "multi", or ""
+    for natural-language models. "auto" resolves by how many tracked characters
+    the scene roster puts in frame (the player counts unless POV hides them);
+    untracked narration-only characters are invisible to it, so with no roster
+    data it falls back to "single"."""
+    if _prompt_style(cfg) != "tags":
+        return ""
+    mode = str(cfg.get("booru_subject_mode") or "single")
+    if mode not in BOORU_SUBJECT_MODES:
+        mode = "single"
+    if mode != "auto":
+        return mode
+    count = 0
+    if characters:
+        pov = str(cfg.get("player_in_images") or "show") == "pov"
+        if characters.get("player") and not pov:
+            count += 1
+        count += len(characters.get("npcs") or [])
+    return "multi" if count >= 2 else "single"
 
 
 # --------------------------------------------------------------------------
@@ -643,13 +693,16 @@ async def _apply_lora_conditions(cfg: dict, narration: str, sdk,
     return {**cfg, "lora_library": library}
 
 
-def _character_block(cfg: dict, characters: dict | None) -> str:
+def _character_block(cfg: dict, characters: dict | None,
+                     subject_mode: str | None = None) -> str:
     """Instruction block pinning known characters to their canonical
     appearances (and, in POV mode, switching to first-person only when the
     player is directly interacting with someone). Rides the prompt writer's
     INPUT, so it does not eat into the MAX_PROMPT_CHARS output cap."""
     if not characters or not cfg.get("character_reference_enabled", True):
         return ""
+    if subject_mode is None:
+        subject_mode = _subject_mode(cfg, characters)
     pov = str(cfg.get("player_in_images") or "show") == "pov"
     tags = _prompt_style(cfg) == "tags"
 
@@ -662,7 +715,7 @@ def _character_block(cfg: dict, characters: dict | None) -> str:
 
     parts = []
     if lines:
-        if tags and _single_subject(cfg):
+        if tags and subject_mode == "single":
             header = ("KNOWN CHARACTERS -- canonical appearances (MANDATORY): if the ONE "
                       "subject you depict is listed below, convert their description into "
                       "concrete booru appearance tags (hair, eyes, skin, clothing, species, "
@@ -670,12 +723,14 @@ def _character_block(cfg: dict, characters: dict | None) -> str:
                       "description -- never invent or contradict a listed trait; a subject "
                       "not listed may be described freely.")
         elif tags:
-            header = ("KNOWN CHARACTERS -- canonical appearances (MANDATORY): when any of these "
-                      "characters appears in the scene, convert their description below into "
-                      "concrete booru appearance tags (hair, eyes, skin, clothing, species, "
-                      "distinctive features) and include those tags. Stay faithful to the "
-                      "description -- never invent or contradict a listed trait; characters "
-                      "not listed may be described freely.")
+            header = ("KNOWN CHARACTERS -- canonical appearances (MANDATORY): every character "
+                      "you depict who is listed below MUST get their own contiguous tag group. "
+                      "Convert each one's description into concrete booru appearance tags "
+                      "(hair, eyes, skin, clothing, species, distinctive features), leading "
+                      "each group with the traits that most set that character apart from the "
+                      "others in the image. Never merge two characters' traits into one group. "
+                      "Stay faithful to the descriptions -- never invent or contradict a "
+                      "listed trait; characters not listed may be described freely.")
         else:
             header = ("KNOWN CHARACTERS -- canonical appearances (MANDATORY): when any of these "
                       "characters appears in the scene, depict them EXACTLY as described below. "
@@ -710,13 +765,19 @@ async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
     else:
         template = cfg.get("prompt_template") or DEFAULT_PROMPT_TEMPLATE
     prompt = _render_template(template, narration[-4000:], history[-3000:])
-    if _single_subject(cfg):
+    subject_mode = _subject_mode(cfg, characters)
+    if subject_mode == "single":
         prompt += "\n\n" + BOORU_SINGLE_SUBJECT_RULE
+    elif subject_mode == "multi":
+        rule = BOORU_MULTI_SUBJECT_RULE
+        if cfg.get("booru_break_separator"):
+            rule += "\n" + BOORU_BREAK_RULE
+        prompt += "\n\n" + rule
     triggers = _active_trigger_words(cfg)
     if triggers:
         prompt += ("\n\nMANDATORY: weave these trigger words into the output verbatim "
                    "(they activate style adapters): " + ", ".join(triggers))
-    prompt += _character_block(cfg, characters)
+    prompt += _character_block(cfg, characters, subject_mode)
     try:
         sdk.llm._current_module = MODULE_ID
         raw = await sdk.llm.generate(
@@ -1856,7 +1917,9 @@ def get_router():
         prompt_template: str | None = None
         prompt_template_tags: str | None = None
         pony_quality_tags: str | None = None
-        booru_single_subject: bool | None = None
+        booru_subject_mode: str | None = None
+        booru_break_separator: bool | None = None
+        booru_single_subject: bool | None = None   # deprecated alias for booru_subject_mode
         style_suffix: str | None = None
         character_reference_enabled: bool | None = None
         player_in_images: str | None = None
@@ -1922,6 +1985,7 @@ def get_router():
         out["civitai_sorts"] = CIVITAI_SORTS
         out["civitai_lora_types"] = CIVITAI_LORA_TYPES
         out["civitai_nsfw_modes"] = CIVITAI_NSFW_MODES
+        out["booru_subject_modes"] = BOORU_SUBJECT_MODES
         out["civitai_categories"] = CIVITAI_CATEGORIES
         out["civitai_base_models"] = CIVITAI_BASE_MODELS
         out["hf_sorts"] = HF_SORTS
@@ -1976,6 +2040,15 @@ def get_router():
                 and incoming["chat_image_conceal"] not in CHAT_IMAGE_CONCEAL_MODES):
             raise HTTPException(status_code=400,
                                 detail=f"chat_image_conceal must be one of {CHAT_IMAGE_CONCEAL_MODES}")
+        # Stale UIs still send the pre-mode boolean; honor it unless an
+        # explicit mode arrives alongside.
+        legacy_single = incoming.pop("booru_single_subject", None)
+        if legacy_single is not None and "booru_subject_mode" not in incoming:
+            incoming["booru_subject_mode"] = "single" if legacy_single else "multi"
+        if ("booru_subject_mode" in incoming
+                and incoming["booru_subject_mode"] not in BOORU_SUBJECT_MODES):
+            raise HTTPException(status_code=400,
+                                detail=f"booru_subject_mode must be one of {BOORU_SUBJECT_MODES}")
 
         cfg.update(incoming)
         _save_config(cfg)
