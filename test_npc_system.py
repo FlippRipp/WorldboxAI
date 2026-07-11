@@ -470,22 +470,29 @@ def test_manual_add_pins_presence():
     assert "presence_pinned_turn" not in npc
 
 
-def test_noop_edit_heals_stale_activation():
+def test_stale_active_record_reaches_context():
     # A record whose status was flipped to active before the introduction
-    # sync existed: re-saving it with no field changes repairs the flags.
+    # sync existed still reaches the storyteller context: _get_bank heals the
+    # flags, and the presence pass keys on status alone anyway.
     backend = _load_backend()
     sdk, _ = _make_sdk()
     bank = {"npc_1": _present_npc("npc_1", "Sela", introduced=False, status="active")}
-    state = _state(bank)
-
-    result = asyncio.run(backend._apply_manual_edit(
-        "npc_1", _edit_payload({"status": "active"}), state, sdk))
-    npc = _bank_from_result(result)["npc_1"]
-    assert npc["introduced"] is True
-    assert npc["presence_pinned_turn"] == 4
-
-    # Even unhealed, an active record reaches the storyteller context --
-    # status alone decides who counts as known.
-    bank = {"npc_1": _present_npc("npc_1", "Sela", introduced=False, status="active")}
     result = asyncio.run(backend.on_gather_context(_state(bank), sdk))
     assert "Sela" in result["context_string"]
+    assert result["module_data"]["wb_npc_system"]["scene_presence"]["npc_ids"] == ["npc_1"]
+
+
+def test_get_bank_reconciles_stale_active_records():
+    # Any code path touching the bank heals records whose status was flipped
+    # to active before the introduction sync existed.
+    backend = _load_backend()
+    state = _state({"npc_1": _present_npc("npc_1", "Sela", introduced=False,
+                                          status="active")})
+    npc = backend._get_bank(state)["npc_1"]
+    assert npc["introduced"] is True
+    assert npc["met_turn"] == 4
+
+    # Genuinely unmet characters stay hidden.
+    state = _state({"npc_2": _present_npc("npc_2", "Vex", introduced=False,
+                                          status="unintroduced")})
+    assert backend._get_bank(state)["npc_2"]["introduced"] is False

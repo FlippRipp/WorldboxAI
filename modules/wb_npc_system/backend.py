@@ -157,7 +157,17 @@ def _build_npc_record(npc_data: dict, turn: int, bank: dict, *, introduced: bool
 
 
 def _get_bank(state: dict) -> dict[str, dict]:
-    return state.get("module_data", {}).get("wb_npc_system", {}).get("characters", {})
+    bank = state.get("module_data", {}).get("wb_npc_system", {}).get("characters", {})
+    # Reconcile records whose status was manually flipped to active before the
+    # introduction sync existed: an active character is by definition known.
+    # Healing here repairs every stale save the first time any hook or command
+    # touches the bank, and the fix persists with the next state save.
+    for npc in bank.values():
+        if isinstance(npc, dict) and npc.get("status") == "active" and not npc.get("introduced"):
+            npc["introduced"] = True
+            if npc.get("met_turn") is None:
+                npc["met_turn"] = state.get("turn", 0)
+    return bank
 
 
 def _set_bank(overrides: dict, npcs: dict[str, dict]) -> dict:
@@ -1426,35 +1436,26 @@ Respond with ONLY valid JSON containing just the changed fields (plus change_not
     return {"message": "\n".join(lines), "signal": "end_turn", **_set_bank({}, bank)}
 
 
-async def _sync_introduction_with_status(npc: dict, state: dict, sdk) -> bool:
-    """The status dropdown is player authority over who is in play. A character
-    switched to active while still unintroduced is brought fully into the
-    story, mirroring what a story introduction sets (this also heals records
-    where only the status was flipped before this sync existed); switching
-    back to unintroduced returns them to the hidden pool. Returns True when
-    anything changed."""
+async def _activate_npc_manually(npc: dict, state: dict, sdk) -> None:
+    """Player authority: (re)activating a character from the browser puts them
+    in play and in the scene right now, mirroring what a story introduction
+    sets. Idempotent, so a no-change re-save of an active character simply
+    re-asserts their presence (and heals records from before this existed)."""
     turn = state.get("turn", 0)
-    if npc.get("status") == "active" and not npc.get("introduced"):
-        npc["introduced"] = True
+    npc["introduced"] = True
+    npc["status"] = "active"
+    if npc.get("met_turn") is None:
         npc["met_turn"] = turn
-        npc["last_interaction_turn"] = turn
-        npc["presence_pinned_turn"] = turn
-        if npc.get("encounter_type") == "encounter":
-            npc["encounter_type"] = "location_bound"
-            npc["location_node_id"] = state.get("player_location_node_id")
-            npc["location_region"] = state.get("player_location_region")
-            npc["location_layer_id"] = state.get("player_location_layer_id")
-        if _config(state).get("embed_profiles", True):
-            await _embed_profile(npc, turn, sdk)
-        print(f"[NPC System] {npc.get('name')} manually activated at turn {turn}")
-        return True
-    if npc.get("status") == "unintroduced" and npc.get("introduced"):
-        npc["introduced"] = False
-        npc["met_turn"] = None
-        npc["traveling_with_player"] = False
-        npc.pop("presence_pinned_turn", None)
-        return True
-    return False
+    npc["last_interaction_turn"] = turn
+    npc["presence_pinned_turn"] = turn
+    if npc.get("encounter_type") == "encounter":
+        npc["encounter_type"] = "location_bound"
+        npc["location_node_id"] = state.get("player_location_node_id")
+        npc["location_region"] = state.get("player_location_region")
+        npc["location_layer_id"] = state.get("player_location_layer_id")
+    if _config(state).get("embed_profiles", True):
+        await _embed_profile(npc, turn, sdk)
+    print(f"[NPC System] {npc.get('name')} manually activated at turn {turn}")
 
 
 async def _apply_manual_edit(npc_id: str, payload: str, state: dict, sdk) -> dict:
@@ -1474,22 +1475,23 @@ async def _apply_manual_edit(npc_id: str, payload: str, state: dict, sdk) -> dic
 
     edits = _sanitize_edits(raw, npc)
     if not edits:
-        # A save with no field changes still syncs introduction state, so
-        # re-saving a character whose status already says "active" heals a
-        # record from before the sync existed.
-        if await _sync_introduction_with_status(npc, state, sdk):
-            return {
-                "message": f"[NPC] Updated {npc.get('name', npc_id)}: introduction state",
-                "signal": "end_turn",
-                **_set_bank({}, bank),
-            }
         return {"message": f"[NPC] Nothing to change for {npc.get('name', npc_id)}.", "signal": "end_turn"}
 
     turn = state.get("turn", 0)
     npc.update(edits)
     _log_change(npc, turn, f"Manual edit: {', '.join(edits)}", list(edits), "manual")
     await _refresh_profile_embedding(npc, list(edits), state, sdk)
-    await _sync_introduction_with_status(npc, state, sdk)
+
+    if edits.get("status") == "active":
+        # Switching to active is the player asserting this character is in
+        # play, in the scene, NOW.
+        await _activate_npc_manually(npc, state, sdk)
+    elif edits.get("status") == "unintroduced":
+        # Back into the hidden pool: unmet again until the story reintroduces them.
+        npc["introduced"] = False
+        npc["met_turn"] = None
+        npc["traveling_with_player"] = False
+        npc.pop("presence_pinned_turn", None)
 
     return {
         "message": f"[NPC] Updated {npc.get('name', npc_id)}: {', '.join(edits)}",

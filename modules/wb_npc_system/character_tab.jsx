@@ -10,6 +10,10 @@ import React, { useEffect, useMemo, useState } from 'react';
 const ROLES = ['quest_giver', 'antagonist', 'ally', 'informant', 'rival', 'neutral', 'wildcard'];
 const STATUSES = ['active', 'departed', 'deceased', 'unintroduced'];
 
+// An active character is by definition known — trust the status even on
+// records saved before the backend synced the introduced flag with it.
+const isKnown = (npc) => npc.introduced || npc.status === 'active';
+
 const ROLE_COLORS = {
   quest_giver: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
   antagonist: 'bg-red-500/15 text-red-300 border-red-500/30',
@@ -204,18 +208,18 @@ export default function CharacterTab({ state, onCommand, busy }) {
     const filtered = q
       ? all.filter((n) => [n.name, n.archetype, n.role, n.race].some((v) => String(v || '').toLowerCase().includes(q)))
       : all;
-    const known = filtered.filter((n) => n.introduced).sort((a, b) => (b.met_turn ?? 0) - (a.met_turn ?? 0));
-    const hidden = filtered.filter((n) => !n.introduced).sort((a, b) => (b.created_turn ?? 0) - (a.created_turn ?? 0));
+    const known = filtered.filter((n) => isKnown(n)).sort((a, b) => (b.met_turn ?? 0) - (a.met_turn ?? 0));
+    const hidden = filtered.filter((n) => !isKnown(n)).sort((a, b) => (b.created_turn ?? 0) - (a.created_turn ?? 0));
     return [...known, ...hidden];
   }, [bank, query]);
 
-  const isSpoiler = (npc) => !npc.introduced && !revealed.has(npc.id);
+  const isSpoiler = (npc) => !isKnown(npc) && !revealed.has(npc.id);
   // A known character's relationships may point at someone the player hasn't
   // met yet — mask those names so the list itself doesn't spoil them.
   const relName = (rel) => {
     const target = bank[rel.npc_id];
     if (!target) return rel.npc_id;
-    return target.introduced || revealed.has(target.id) ? target.name : '???';
+    return isKnown(target) || revealed.has(target.id) ? target.name : '???';
   };
 
   const onCardClick = (npc) => {
@@ -392,7 +396,7 @@ export default function CharacterTab({ state, onCommand, busy }) {
                   </Field>
                 )}
                 <div className="text-xs text-gray-500">
-                  {npc.introduced ? `Met on turn ${npc.met_turn ?? '?'}` : 'Not yet met'}
+                  {isKnown(npc) ? `Met on turn ${npc.met_turn ?? '?'}` : 'Not yet met'}
                   {' · '}created turn {npc.created_turn ?? '?'}
                   {npc.source === 'story' ? ' · captured from the story' : ''}
                 </div>
