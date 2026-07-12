@@ -108,6 +108,75 @@ def test_turn_output_carries_retrieval_tracking():
     asyncio.run(_turn_output_carries_retrieval_tracking())
 
 
+async def _retrieval_query_spans_recent_messages():
+    # RAG retrieval must key off the recent player/AI exchange, not just the
+    # latest input — including empty-input (continue) turns, where the recent
+    # messages alone carry the query.
+    previous_mode = os.getenv("LLM_MODE")
+    os.environ["LLM_MODE"] = "mock"
+
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        registry = ModuleRegistry(os.path.join(base_dir, "modules"))
+        registry.load_all_modules()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = EngineGraph(registry)
+            engine.set_memory_path(os.path.join(temp_dir, "vector_index"))
+
+            try:
+                await engine.ensure_memory()
+                vector = await engine.llm.get_embedding("An earlier event")
+                engine.memory.add_memory(vector, "An earlier event", turn=0, importance=5)
+
+                chat_messages = [
+                    {"role": "user", "content": "I enter the crypt."},
+                    {"role": "ai", "content": "Dust swirls around the sarcophagus."},
+                ]
+                state = {
+                    "active_save_id": "mock_test",
+                    "input_text": "I open the lid.",
+                    "module_data": {},
+                    "module_configs": {},
+                    "characters": {},
+                    "current_context": [],
+                    "history": [],
+                    "chat_messages": chat_messages,
+                    "turn": 1,
+                }
+                result = await engine.gather_context_node(state)
+                assert result["last_context_query"].splitlines() == [
+                    "I enter the crypt.",
+                    "Dust swirls around the sarcophagus.",
+                    "I open the lid.",
+                ]
+                assert len(result["last_retrieved_memory_ids"]) > 0
+
+                # Continue turn: no input, but the recent messages still
+                # drive retrieval.
+                state["input_text"] = ""
+                result = await engine.gather_context_node(state)
+                assert result["last_context_query"].splitlines() == [
+                    "I enter the crypt.",
+                    "Dust swirls around the sarcophagus.",
+                ]
+                assert len(result["last_retrieved_memory_ids"]) > 0
+
+                # With no input and no history there is no query at all.
+                state["chat_messages"] = []
+                result = await engine.gather_context_node(state)
+                assert result["last_context_query"] == ""
+                assert result["last_retrieved_memory_ids"] == []
+            finally:
+                engine.close_memory()
+    finally:
+        set_env("LLM_MODE", previous_mode)
+
+
+def test_retrieval_query_spans_recent_messages():
+    asyncio.run(_retrieval_query_spans_recent_messages())
+
+
 async def _reader_fallback_on_malformed_json():
     previous_mode = os.getenv("LLM_MODE")
     original_acompletion = llm_module.acompletion

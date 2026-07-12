@@ -103,6 +103,13 @@ class EngineGraph:
             min=1, max=10,
         )
         self.settings.register(
+            "memory.rag_query_depth", "slider", 4,
+            label="RAG Query Depth",
+            category="Memory",
+            description="Number of recent chat messages (player inputs and AI outputs) included alongside the current input when searching memories",
+            min=0, max=20,
+        )
+        self.settings.register(
             "world.narrative_style", "text", "exploration-driven",
             label="Narrative Style",
             category="World Building",
@@ -552,6 +559,23 @@ class EngineGraph:
             state["veto_reason"] = None
         return "librarian"
 
+    def _build_context_query(self, state: WorldState) -> str:
+        """Retrieval query for RAG: the last few chat messages (player inputs
+        and AI outputs) followed by the current input, so retrieval keys off
+        the ongoing scene rather than only the latest input. On empty-input
+        continue turns the recent messages alone carry the query."""
+        depth = int(self.settings.get("memory.rag_query_depth") or 0)
+        parts = []
+        if depth > 0:
+            for message in (state.get("chat_messages") or [])[-depth:]:
+                content = (message.get("content") or "").strip()
+                if content:
+                    parts.append(content)
+        input_text = (state.get("input_text") or "").strip()
+        if input_text:
+            parts.append(input_text)
+        return "\n".join(parts)
+
     async def gather_context_node(self, state: WorldState):
         print("\n[Node: Gather Context] Collecting data from modules...")
         await self.sdk.ui.emit_status("gather_context", "Recalling memories…")
@@ -564,8 +588,9 @@ class EngineGraph:
         retrieved_world_ids = []
         last_context_query = ""
 
-        # Constant lore is injected on every turn — even empty-input continue
-        # turns that skip RAG retrieval below.
+        # Constant lore is injected on every turn — even turns with no query
+        # text at all (empty input and no chat history) that skip RAG
+        # retrieval below.
         lore_block = self._constant_lorebook_block()
         if lore_block:
             gathered_context.append(lore_block)
@@ -586,11 +611,11 @@ class EngineGraph:
                 world_entries.append(we)
                 seen_world_row_ids.add(we["id"])
 
-        input_text = state.get("input_text", "")
-        if input_text:
-            last_context_query = input_text
+        context_query = self._build_context_query(state)
+        if context_query:
+            last_context_query = context_query
             try:
-                query_vector = await self.llm.get_embedding(input_text,
+                query_vector = await self.llm.get_embedding(context_query,
                     inspector_ctx={"call_type": "embedding", "step": "gather_context_node"})
                 rag_limit = self.settings.get("memory.rag_limit")
                 memories = self.memory.search_memories(query_vector, turn, limit=rag_limit)
@@ -611,7 +636,7 @@ class EngineGraph:
                         state.get("player_location_layer_id", ""),
                     ]))
                     if location_hints:
-                        world_query_text = f"{input_text} {location_hints}".strip()
+                        world_query_text = f"{context_query}\n{location_hints}".strip()
                         world_query_vector = await self.llm.get_embedding(
                             world_query_text,
                             inspector_ctx={"call_type": "embedding", "step": "gather_context_node_world"},

@@ -513,3 +513,53 @@ def test_mock_structured_importance():
     finally:
         if previous:
             os.environ["LLM_MODE"] = previous
+
+
+def _build_query(state, depth):
+    from backend.engine.graph import EngineGraph
+    fake_engine = SimpleNamespace(settings=SimpleNamespace(get=lambda key: depth))
+    return EngineGraph._build_context_query(fake_engine, state)
+
+
+def test_context_query_includes_recent_player_and_ai_messages():
+    state = {
+        "chat_messages": [
+            {"role": "user", "content": "I enter the crypt."},
+            {"role": "ai", "content": "Dust swirls around the sarcophagus."},
+            {"role": "user", "content": "I open the lid."},
+            {"role": "ai", "content": "A ghoul lunges out."},
+        ],
+        "input_text": "I draw my sword.",
+    }
+    assert _build_query(state, depth=4).splitlines() == [
+        "I enter the crypt.",
+        "Dust swirls around the sarcophagus.",
+        "I open the lid.",
+        "A ghoul lunges out.",
+        "I draw my sword.",
+    ]
+    # Depth limits the window to the most recent messages.
+    assert _build_query(state, depth=2).splitlines() == [
+        "I open the lid.",
+        "A ghoul lunges out.",
+        "I draw my sword.",
+    ]
+    # Depth 0 restores input-only queries.
+    assert _build_query(state, depth=0) == "I draw my sword."
+
+
+def test_context_query_continue_turn_falls_back_to_recent_messages():
+    state = {
+        "chat_messages": [
+            {"role": "user", "content": "I open the lid."},
+            {"role": "ai", "content": "A ghoul lunges out."},
+        ],
+        "input_text": "",
+    }
+    # Empty (continue) input: the recent messages alone carry the query.
+    assert _build_query(state, depth=4).splitlines() == [
+        "I open the lid.",
+        "A ghoul lunges out.",
+    ]
+    # No input and no history: no query, retrieval is skipped.
+    assert _build_query({"chat_messages": [], "input_text": ""}, depth=4) == ""
