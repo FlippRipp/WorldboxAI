@@ -187,22 +187,28 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
       {records.map((r) => {
         if (r.status === 'done' && r.filename) {
           const concealed = store.conceal !== 'off' && !store.revealed.has(r.id);
+          // Frame sized from the record's aspect ratio, image fills it: the
+          // box exists before the file loads, so nothing shifts on load and
+          // the pending-placeholder swap is footprint-identical. Sizing the
+          // <img> itself via width/height attributes doesn't work — the
+          // specified width plus the max-h cap breaks the aspect ratio and
+          // stretches the image. Records without dimensions (old saves) fall
+          // back to the image's natural size, as before.
+          const hasSize = r.width > 0 && r.height > 0;
           return (
-            <div key={r.id} className="relative inline-block">
+            <div key={r.id} className="relative inline-block max-w-full">
               {/* The wrapper clips the blur's soft edges (the image is scaled
                   up slightly so blurred content still fills its own frame). */}
-              <div className="overflow-hidden rounded-lg">
+              <div
+                className={`overflow-hidden rounded-lg${hasSize ? ' h-80 max-w-full' : ''}`}
+                style={hasSize ? { aspectRatio: `${r.width} / ${r.height}` } : undefined}
+              >
                 <img
                   src={`${API_BASE}/images/file/${r.filename}`}
                   alt={concealed ? 'Hidden story illustration' : (r.image_prompt || 'Story illustration')}
                   loading="lazy"
-                  // Intrinsic dimensions so the layout reserves the final box
-                  // before the file loads — otherwise the image expands from
-                  // zero height on load and shifts the reader's scroll point.
-                  width={r.width || undefined}
-                  height={r.height || undefined}
                   onClick={() => (concealed ? reveal(r.id) : setLightbox(r))}
-                  className={`max-h-80 max-w-full rounded-lg border border-gray-700/60 shadow-lg ${
+                  className={`${hasSize ? 'w-full h-full object-cover' : 'max-h-80 max-w-full'} rounded-lg border border-gray-700/60 shadow-lg ${
                     concealed
                       ? store.conceal === 'blackout'
                         ? 'cursor-pointer brightness-0'
