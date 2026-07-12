@@ -1267,6 +1267,7 @@ export default function ImageStudio({ onBack }) {
         sampler_name: draft.sampler_name,
         negative_prompt: draft.negative_prompt,
         interval: Number(draft.interval) || 3,
+        step_retries: Math.max(0, Number(draft.step_retries) || 0),
         prompt_model_preference: draft.prompt_model_preference,
         prompt_template: draft.prompt_template,
         prompt_template_tags: draft.prompt_template_tags,
@@ -1566,6 +1567,25 @@ export default function ImageStudio({ onBack }) {
               onChange={(e) => set('interval', Number(e.target.value))}
               className="w-full accent-purple-500"
             />
+          </div>
+          <div>
+            <label className={labelCls}>
+              Retries per failed step: {draft.step_retries ?? 1}
+            </label>
+            <input
+              type="range"
+              min={0}
+              max={config?.step_retries_max ?? 5}
+              value={draft.step_retries ?? 1}
+              onChange={(e) => set('step_retries', Number(e.target.value))}
+              className="w-full accent-purple-500"
+            />
+            <p className="text-xs text-gray-600 mt-1">
+              How many extra times each generation step (prompt writing, image
+              rendering) is re-run after a transient failure before the image is
+              marked as failed. Permanent errors (bad API key, content-policy
+              refusals) are never retried.
+            </p>
           </div>
           <div>
             <label className={labelCls}>Image Size (pixels)</label>

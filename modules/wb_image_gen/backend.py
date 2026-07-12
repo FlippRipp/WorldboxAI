@@ -154,6 +154,12 @@ POLL_INTERVAL_S = 2.0
 POLL_MAX_ITERATIONS = 240          # ~8 minutes
 POLL_MAX_TRANSIENT_FAILURES = 5
 SUBMIT_RETRIES = 2
+# Pipeline-level retries: how many EXTRA times each step (prompt writing;
+# submit+poll+download as one unit, since a failed task cannot be re-polled
+# and result URLs expire) is re-run after a retryable failure.
+STEP_RETRIES_DEFAULT = 1
+STEP_RETRIES_MAX = 5
+STEP_RETRY_BASE_DELAY_S = 2.0
 INDEX_MAX_RECORDS = 500
 
 DEFAULT_PROMPT_TEMPLATE = """You write prompts for an AI image generator. Turn the scene below into ONE vivid image-generation prompt.
@@ -270,6 +276,7 @@ def _default_config() -> dict:
         "sampler_name": "DPM++ 2M Karras",
         "negative_prompt": "blurry, low quality, watermark, text, deformed",
         "interval": 3,
+        "step_retries": STEP_RETRIES_DEFAULT,
         "prompt_model_preference": "smartest",
         "prompt_template": DEFAULT_PROMPT_TEMPLATE,
         "prompt_template_tags": DEFAULT_PROMPT_TEMPLATE_TAGS,
@@ -329,6 +336,10 @@ def _load_config() -> dict:
         cfg["tag_usage_min_count"] = max(0, int(cfg.get("tag_usage_min_count")))
     except (TypeError, ValueError):
         cfg["tag_usage_min_count"] = DEFAULT_TAG_USAGE_MIN_COUNT
+    try:
+        cfg["step_retries"] = max(0, min(STEP_RETRIES_MAX, int(cfg.get("step_retries"))))
+    except (TypeError, ValueError):
+        cfg["step_retries"] = STEP_RETRIES_DEFAULT
     return cfg
 
 
@@ -1100,6 +1111,13 @@ def _flux2_payload(cfg: dict, image_prompt: str) -> dict:
     return payload
 
 
+class NonRetryableError(RuntimeError):
+    """A failure that would recur identically if the step were re-run with the
+    same input — an invalid API key, rejected request parameters, or a
+    content-policy refusal. Step retries re-raise it immediately instead of
+    burning attempts (and Novita credits) on a lost cause."""
+
+
 # Markers that identify a provider content-policy refusal (as opposed to a
 # bad-parameter or quota error) in Novita's `reason`/`message` text.
 _REFUSAL_MARKERS = (
@@ -1173,9 +1191,14 @@ async def _novita_submit(cfg: dict, image_prompt: str) -> str:
             try:
                 resp = await client.post(url, headers=_novita_headers(cfg), json=payload)
                 if resp.status_code in (401, 403):
-                    raise RuntimeError(
+                    raise NonRetryableError(
                         f"Novita rejected the request ({resp.status_code}): invalid API key")
-                if resp.status_code in (400, 402, 422, 429):
+                if resp.status_code in (400, 402, 422):
+                    raise NonRetryableError(
+                        _describe_novita_failure(_novita_error_detail(resp), resp.status_code))
+                if resp.status_code == 429:
+                    # Rate limiting clears with time, so the step retry may
+                    # succeed — unlike the parameter/quota rejections above.
                     raise RuntimeError(
                         _describe_novita_failure(_novita_error_detail(resp), resp.status_code))
                 if resp.status_code >= 500:
@@ -1227,7 +1250,10 @@ async def _novita_poll(cfg: dict, task_id: str) -> str:
                 # `failed_reason` — check both so nothing collapses to blank.
                 reason = str(task.get("reason") or task.get("failed_reason")
                              or "no reason given").strip()[:300]
-                raise RuntimeError(_describe_novita_failure(reason))
+                # A refusal would refuse the same prompt again; any other task
+                # failure (worker crash, capacity) is worth a resubmission.
+                cls = NonRetryableError if _looks_like_refusal(reason) else RuntimeError
+                raise cls(_describe_novita_failure(reason))
             # TASK_STATUS_QUEUED / TASK_STATUS_PROCESSING: keep polling.
     raise RuntimeError("Novita generation timed out")
 
@@ -2131,15 +2157,40 @@ def _spawn_generation(*, save_id: str, turn: int, narration: str, history: str,
     return record_id
 
 
+async def _retry_step(step_name: str, fn, retries: int):
+    """Run one pipeline step, re-running it up to `retries` extra times after
+    a failure (with a short growing delay between attempts). NonRetryableError
+    aborts immediately — the same input would fail the same way again."""
+    attempts = max(0, min(STEP_RETRIES_MAX, int(retries or 0))) + 1
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await fn()
+        except NonRetryableError:
+            raise
+        except Exception as e:
+            last_error = e
+            if attempt < attempts:
+                print(f"[Image Gen] {step_name} failed (attempt {attempt}/{attempts}), "
+                      f"retrying: {e}")
+                await asyncio.sleep(STEP_RETRY_BASE_DELAY_S * attempt)
+    if attempts > 1:
+        raise RuntimeError(
+            f"{step_name} failed after {attempts} attempts: {last_error}") from last_error
+    raise last_error
+
+
 async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                                history: str, sdk, prompt_override: str | None,
                                characters: dict | None = None) -> None:
     started = time.monotonic()
     lock = _get_gen_lock()
+    retries = cfg.get("step_retries", STEP_RETRIES_DEFAULT)
     try:
         async with lock:
             # Conditional LoRAs are gated first so both the trigger words fed
             # to the prompt writer and the submit payload see the final set.
+            # (No retry here — the gate already fails open on any error.)
             gated = await _apply_lora_conditions(cfg, narration, sdk, characters)
             if gated is not cfg:
                 cfg = gated
@@ -2151,12 +2202,22 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                 if sdk is None:
                     raise RuntimeError("no LLM available to write the image prompt")
                 await _patch_record(record_id, status="prompting")
-                image_prompt = await _write_image_prompt(cfg, narration, history, sdk, characters)
+                image_prompt = await _retry_step(
+                    "prompt writing",
+                    lambda: _write_image_prompt(cfg, narration, history, sdk, characters),
+                    retries)
 
             await _patch_record(record_id, status="generating", image_prompt=image_prompt)
-            task_id = await _novita_submit(cfg, image_prompt)
-            image_url = await _novita_poll(cfg, task_id)
-            data, ext = await _download(image_url)
+
+            # One retryable unit: a failed task cannot be re-polled and the
+            # presigned result URL expires, so any failure past submission
+            # recovers by resubmitting a fresh task.
+            async def _generate_once():
+                task_id = await _novita_submit(cfg, image_prompt)
+                image_url = await _novita_poll(cfg, task_id)
+                return await _download(image_url)
+
+            data, ext = await _retry_step("image generation", _generate_once, retries)
 
             filename = f"{record_id}.{ext}"
             path = _data_dir() / "images" / filename
@@ -2298,6 +2359,7 @@ def get_router():
         sampler_name: str | None = None
         negative_prompt: str | None = None
         interval: int | None = None
+        step_retries: int | None = None
         prompt_model_preference: str | None = None
         prompt_template: str | None = None
         prompt_template_tags: str | None = None
@@ -2382,6 +2444,7 @@ def get_router():
         out["checkpoint_family"] = _checkpoint_family(cfg)
         out["lora_weight_min"] = LORA_WEIGHT_MIN
         out["lora_weight_max"] = LORA_WEIGHT_MAX
+        out["step_retries_max"] = STEP_RETRIES_MAX
         return out
 
     @router.get("/config")
@@ -2414,6 +2477,9 @@ def get_router():
             incoming["guidance_scale"] = max(1.0, min(30.0, float(incoming["guidance_scale"])))
         if "interval" in incoming:
             incoming["interval"] = max(1, min(50, int(incoming["interval"])))
+        if "step_retries" in incoming:
+            incoming["step_retries"] = max(0, min(STEP_RETRIES_MAX,
+                                                  int(incoming["step_retries"])))
         if ("prompt_model_preference" in incoming
                 and incoming["prompt_model_preference"] not in ("fastest", "balanced", "smartest")):
             raise HTTPException(status_code=400, detail="prompt_model_preference must be a model slot")

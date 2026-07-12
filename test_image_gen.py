@@ -166,7 +166,8 @@ def test_pipeline_failure_marks_record_and_never_raises(tmp_path):
     _enable(backend)
 
     async def boom(cfg, prompt):
-        raise RuntimeError("Novita rejected the request (403): invalid API key")
+        raise backend.NonRetryableError(
+            "Novita rejected the request (403): invalid API key")
 
     backend._novita_submit = boom
 
@@ -183,6 +184,186 @@ def test_pipeline_failure_marks_record_and_never_raises(tmp_path):
     assert record["id"] == record_id
     assert record["status"] == "error"
     assert "403" in record["error"]
+
+
+# ---------------------------------------------------------------------------
+# Step retries
+# ---------------------------------------------------------------------------
+
+def _run_pipeline(backend):
+    async def run():
+        record_id = backend._spawn_generation(
+            save_id="mystory", turn=1, narration="a scene", history="",
+            sdk=_make_sdk(), trigger="auto")
+        assert record_id
+        await asyncio.gather(*backend._tasks)
+        return record_id
+
+    record_id = asyncio.run(run())
+    record = backend._read_index()[0]
+    assert record["id"] == record_id
+    return record
+
+
+def test_step_retry_recovers_from_transient_failures(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend.STEP_RETRY_BASE_DELAY_S = 0
+    _enable(backend, step_retries=2)
+    _fake_novita(backend)
+    calls = {"submit": 0}
+
+    async def flaky_submit(cfg, prompt):
+        calls["submit"] += 1
+        if calls["submit"] < 3:
+            raise RuntimeError("Novita server error 502")
+        return "task-1"
+
+    backend._novita_submit = flaky_submit
+
+    record = _run_pipeline(backend)
+    assert record["status"] == "done"
+    assert calls["submit"] == 3
+
+
+def test_step_retry_exhausts_configured_attempts(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend.STEP_RETRY_BASE_DELAY_S = 0
+    _enable(backend, step_retries=1)
+    calls = {"submit": 0}
+
+    async def always_boom(cfg, prompt):
+        calls["submit"] += 1
+        raise RuntimeError("Novita server error 503")
+
+    backend._novita_submit = always_boom
+
+    record = _run_pipeline(backend)
+    assert record["status"] == "error"
+    assert calls["submit"] == 2
+    assert "after 2 attempts" in record["error"]
+
+
+def test_step_retry_zero_means_single_attempt(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend.STEP_RETRY_BASE_DELAY_S = 0
+    _enable(backend, step_retries=0)
+    calls = {"submit": 0}
+
+    async def always_boom(cfg, prompt):
+        calls["submit"] += 1
+        raise RuntimeError("Novita server error 503")
+
+    backend._novita_submit = always_boom
+
+    record = _run_pipeline(backend)
+    assert record["status"] == "error"
+    assert calls["submit"] == 1
+    # A single attempt keeps the original error, no attempt-count wrapper.
+    assert "attempts" not in record["error"]
+
+
+def test_nonretryable_failure_skips_step_retries(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend.STEP_RETRY_BASE_DELAY_S = 0
+    _enable(backend, step_retries=3)
+    calls = {"submit": 0}
+
+    async def refuse(cfg, prompt):
+        calls["submit"] += 1
+        raise backend.NonRetryableError(
+            "The image provider refused this prompt (content policy): nsfw")
+
+    backend._novita_submit = refuse
+
+    record = _run_pipeline(backend)
+    assert record["status"] == "error"
+    assert calls["submit"] == 1
+    assert "content policy" in record["error"]
+
+
+def test_prompt_writing_step_retries(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend.STEP_RETRY_BASE_DELAY_S = 0
+    _enable(backend, step_retries=1)
+    _fake_novita(backend)
+    calls = {"llm": 0}
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        calls["llm"] += 1
+        if calls["llm"] == 1:
+            raise RuntimeError("LLM hiccup")
+        return "a knight rides through mist"
+
+    sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
+
+    async def run():
+        record_id = backend._spawn_generation(
+            save_id="mystory", turn=1, narration="a scene", history="",
+            sdk=sdk, trigger="auto")
+        await asyncio.gather(*backend._tasks)
+        return record_id
+
+    asyncio.run(run())
+    record = backend._read_index()[0]
+    assert record["status"] == "done"
+    assert calls["llm"] == 2
+    assert record["image_prompt"] == "a knight rides through mist"
+
+
+def test_poll_task_failure_retryability_split(tmp_path):
+    """A refused prompt must not be resubmitted; an ordinary task failure may."""
+    backend = _load_backend(tmp_path)
+
+    class _Resp:
+        def __init__(self, body):
+            self._body = body
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return self._body
+
+    def _poll_with(reason):
+        failed = {"task": {"status": "TASK_STATUS_FAILED", "reason": reason}}
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                return False
+            async def get(self, *a, **k):
+                return _Resp(failed)
+
+        import httpx
+        original = httpx.AsyncClient
+        httpx.AsyncClient = lambda **kw: _Client()
+        backend.POLL_INTERVAL_S = 0
+        try:
+            asyncio.run(backend._novita_poll({"api_key": "k"}, "task-1"))
+        except Exception as e:
+            return e
+        finally:
+            httpx.AsyncClient = original
+
+    assert isinstance(_poll_with("flagged by moderation"), backend.NonRetryableError)
+    err = _poll_with("internal worker error")
+    assert isinstance(err, RuntimeError)
+    assert not isinstance(err, backend.NonRetryableError)
+
+
+def test_step_retries_config_clamped(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    assert backend._load_config()["step_retries"] == 1  # default
+
+    assert client.put("/config", json={"step_retries": 99}).json()["step_retries"] == 5
+    assert client.put("/config", json={"step_retries": -3}).json()["step_retries"] == 0
+
+    # Garbage on disk falls back to the default instead of crashing.
+    cfg = backend._default_config()
+    cfg["step_retries"] = "lots"
+    backend._save_config(cfg)
+    assert backend._load_config()["step_retries"] == 1
 
 
 class _ErrResponse:
