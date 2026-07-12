@@ -2635,3 +2635,182 @@ def test_player_in_images_config_validation(tmp_path):
     cfg["player_in_images"] = "nonsense"
     backend._save_config(cfg)
     assert backend._load_config()["player_in_images"] == "show"
+
+
+# ---------------------------------------------------------------------------
+# Danbooru tag usage filter
+# ---------------------------------------------------------------------------
+
+_TAG_DICT = {
+    "long_hair": 500000,
+    "red_hair": 400000,
+    "1boy": 300000,
+    "forest": 200000,
+    "sword_(weapon)": 20000,
+    "boundary_tag": 100,
+    "obscure_tag": 5,
+}
+
+
+def _filter_cfg(backend, mode="soft", min_count=100):
+    return {**backend._default_config(),
+            "tag_usage_filter": mode, "tag_usage_min_count": min_count}
+
+
+def test_tag_usage_filter_modes(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend._tag_dict_cache = dict(_TAG_DICT)
+    text = "long hair, obscure_tag, made_up_tag, boundary_tag"
+
+    off = backend._filter_tags_by_usage(text, _filter_cfg(backend, "off"))
+    assert off == text
+
+    soft = backend._filter_tags_by_usage(text, _filter_cfg(backend, "soft"))
+    assert soft == "long hair, made_up_tag, boundary_tag"
+
+    hard = backend._filter_tags_by_usage(text, _filter_cfg(backend, "hard"))
+    # A tag exactly at the threshold is kept.
+    assert hard == "long hair, boundary_tag"
+
+
+def test_tag_usage_filter_normalization(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend._tag_dict_cache = {**_TAG_DICT, "old_alias": 400000}
+
+    # Spaces/case match underscore dictionary keys; escaped parens unescape;
+    # attention-weight syntax is stripped for lookup but the original token
+    # text survives in the output.
+    text = "Long Hair, sword \\(weapon\\), (red hair:1.2), forest:0.8, obscure_tag"
+    out = backend._filter_tags_by_usage(text, _filter_cfg(backend, "hard"))
+    assert out == "Long Hair, sword \\(weapon\\), (red hair:1.2), forest:0.8"
+
+    # An alias resolves to the canonical tag's count.
+    assert backend._filter_tags_by_usage(
+        "old_alias", _filter_cfg(backend, "hard")) == "old_alias"
+
+
+def test_tag_usage_filter_preserves_specials(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend._tag_dict_cache = dict(_TAG_DICT)
+    cfg = _filter_cfg(backend, "hard", min_count=10_000_000)
+
+    # BREAK standalone and embedded in a comma token both survive; the tags
+    # around an embedded BREAK are still filtered individually.
+    out = backend._filter_tags_by_usage(
+        "long hair, BREAK, red hair BREAK 1boy, obscure_tag, score_9", cfg,
+        whitelist=("long hair",))
+    assert out == "long hair, BREAK, BREAK, score_9"
+
+    # Trigger-word whitelist beats the dictionary, including phrases that
+    # contain commas (split by the comma tokenizer).
+    out = backend._filter_tags_by_usage(
+        "sparklestyle, neon glow, forest", cfg,
+        whitelist=("sparklestyle, neon glow",))
+    assert out == "sparklestyle, neon glow"
+
+
+def test_tag_usage_filter_fails_open(tmp_path):
+    backend = _load_backend(tmp_path)
+
+    # Missing dictionary file: prompt passes through unchanged.
+    backend.TAG_DICT_FILE = tmp_path / "missing.csv"
+    text = "obscure_tag, made_up_tag"
+    assert backend._filter_tags_by_usage(text, _filter_cfg(backend, "hard")) == text
+
+    # Filtering that would drop every real tag keeps the prompt unfiltered.
+    backend._tag_dict_cache = dict(_TAG_DICT)
+    assert backend._filter_tags_by_usage(text, _filter_cfg(backend, "hard")) == text
+    assert backend._filter_tags_by_usage(
+        "obscure_tag BREAK made_up_tag", _filter_cfg(backend, "hard")) \
+        == "obscure_tag BREAK made_up_tag"
+
+
+def test_tag_dict_loader(tmp_path):
+    backend = _load_backend(tmp_path)
+    csv_path = tmp_path / "danbooru.csv"
+    csv_path.write_text(
+        "long_hair,0,500000,\"/lh,longhair\"\n"
+        "malformed row without count\n"
+        "longhair,0,7\n"          # canonical row spelled like the alias above
+        "solo,0,5000954\n",
+        encoding="utf-8")
+    backend.TAG_DICT_FILE = csv_path
+
+    usage = backend._tag_usage_dict()
+    assert usage["long_hair"] == 500000
+    assert usage["/lh"] == 500000            # alias -> canonical count
+    assert usage["longhair"] == 7            # canonical row wins over alias
+    assert usage["solo"] == 5000954
+    assert "malformed" not in " ".join(usage)
+
+    # Cached for the process lifetime: deleting the file changes nothing.
+    csv_path.unlink()
+    assert backend._tag_usage_dict()["long_hair"] == 500000
+
+
+def test_prompt_writer_applies_tag_usage_filter(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend._tag_dict_cache = dict(_TAG_DICT)
+    reply = "long hair, obscure_tag, made_up_tag, forest"
+
+    cfg = {**backend._default_config(), "model_base": "Pony",
+           "tag_usage_filter": "hard", "tag_usage_min_count": 100,
+           "pony_quality_tags": "score_9, score_8_up",
+           "style_suffix": "sparklestyle glow"}   # dictionary-unknown, must survive
+    prompt = asyncio.run(backend._write_image_prompt(
+        cfg, "narration", "earlier", _make_sdk(reply=reply)))
+    assert prompt == "score_9, score_8_up, long hair, forest, sparklestyle glow"
+
+    # Natural-language models are never tag-filtered, even with the filter on.
+    cfg = {**backend._default_config(),
+           "tag_usage_filter": "hard", "tag_usage_min_count": 100}
+    prompt = asyncio.run(backend._write_image_prompt(
+        cfg, "narration", "earlier", _make_sdk(reply=reply)))
+    assert prompt == reply
+
+
+def test_clean_character_tags_usage_filter(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend._tag_dict_cache = dict(_TAG_DICT)
+    raw = "red hair, obscure_tag, scar across nose"
+
+    # Without cfg: unchanged behavior (dedupe/blacklist only).
+    assert backend._clean_character_tags(raw) == raw
+
+    cfg = _filter_cfg(backend, "soft")
+    assert backend._clean_character_tags(raw, cfg) == "red hair, scar across nose"
+    # "hard" would also drop the unknown scar tag.
+    cfg = _filter_cfg(backend, "hard")
+    assert backend._clean_character_tags(raw, cfg) == "red hair"
+    # A reply whose every tag would drop falls back to unfiltered rather
+    # than "" (which would send the backfill into a retry loop).
+    assert backend._clean_character_tags("obscure_tag", cfg) == "obscure_tag"
+
+
+def test_tag_usage_filter_config_validation(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    body = client.get("/config").json()
+    assert body["tag_usage_filter"] == "off"
+    assert body["tag_usage_min_count"] == 100
+    assert body["tag_usage_filter_modes"] == ["off", "soft", "hard"]
+
+    resp = client.put("/config", json={"tag_usage_filter": "hard",
+                                       "tag_usage_min_count": -5})
+    assert resp.status_code == 200
+    assert resp.json()["tag_usage_filter"] == "hard"
+    assert resp.json()["tag_usage_min_count"] == 0    # clamped
+    assert backend._load_config()["tag_usage_filter"] == "hard"
+
+    assert client.put("/config", json={"tag_usage_filter": "medium"}).status_code == 400
+    assert backend._load_config()["tag_usage_filter"] == "hard"
+
+    # Junk values in a hand-edited config file degrade to defaults.
+    cfg = backend._load_config()
+    cfg["tag_usage_filter"] = "nonsense"
+    cfg["tag_usage_min_count"] = "many"
+    backend._save_config(cfg)
+    cfg = backend._load_config()
+    assert cfg["tag_usage_filter"] == "off"
+    assert cfg["tag_usage_min_count"] == 100

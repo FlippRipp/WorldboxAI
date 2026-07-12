@@ -1757,6 +1757,38 @@ export default function ImageStudio({ onBack }) {
               </>
             )}
           </div>
+          <div className="space-y-2">
+            <label className={labelCls}>Tag models: rare-tag filter</label>
+            <select
+              value={draft.tag_usage_filter || 'off'}
+              onChange={(e) => set('tag_usage_filter', e.target.value)}
+              className={inputCls}
+            >
+              <option value="off">Off — keep every tag the prompt writer produces</option>
+              <option value="soft">Soft — drop known danbooru tags below the usage threshold</option>
+              <option value="hard">Hard — also drop tags not in the danbooru dictionary at all</option>
+            </select>
+            {(draft.tag_usage_filter || 'off') !== 'off' && (
+              <div>
+                <label className={labelCls}>Minimum danbooru post count</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={draft.tag_usage_min_count ?? 100}
+                  onChange={(e) => set('tag_usage_min_count', parseInt(e.target.value, 10) || 0)}
+                  className={inputCls}
+                />
+              </div>
+            )}
+            <p className="text-xs text-gray-600">
+              Prunes rare or invented tags from tag-style prompts and cached character
+              tags, using a bundled danbooru tag dictionary — tags a checkpoint barely
+              saw in training mostly add noise. Soft only removes tags the dictionary
+              knows but that fall below the threshold; Hard also removes tags it has
+              never heard of (usually hallucinated). LoRA trigger words, score_ tags,
+              and BREAK always survive. Natural-language models are unaffected.
+            </p>
+          </div>
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <label className={`text-xs uppercase tracking-wider ${isPony ? 'text-purple-400' : 'text-gray-500'}`}>

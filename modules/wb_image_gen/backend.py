@@ -12,6 +12,7 @@ Config is global (one Novita key for all stories), owned by this module and
 edited in the Image Studio main-menu screen -- not in per-save settings.
 """
 import asyncio
+import csv
 import hashlib
 import json
 import os
@@ -123,6 +124,17 @@ CHAT_IMAGE_CONCEAL_MODES = ("off", "blur", "blackout")
 # multi per scene from how many tracked characters are in frame.
 BOORU_SUBJECT_MODES = ("single", "multi", "auto")
 
+# Tag usage filter: drop LLM-produced tags that are too rare on danbooru to
+# mean anything to a tag-trained checkpoint. "soft" drops only tags the
+# bundled dictionary knows but whose post count is below the threshold;
+# "hard" also drops tags the dictionary has never heard of (typically
+# hallucinated). Trigger words, score_* tags, and BREAK always survive.
+TAG_USAGE_FILTER_MODES = ("off", "soft", "hard")
+DEFAULT_TAG_USAGE_MIN_COUNT = 100
+# Bundled snapshot of the a1111-tagcomplete danbooru dictionary:
+# tag_name,category,post_count,"alias1,alias2" per row, no header.
+TAG_DICT_FILE = Path(__file__).resolve().parent / "data" / "danbooru.csv"
+
 LORA_CONDITION_PROMPT = """You control style adapters (LoRAs) for an AI image generator. Each numbered adapter below is labeled with how you control it:
 - [GATED, weight W]: decide whether its condition applies to the scene being illustrated. Include it only when the condition applies, echoing its listed weight W unchanged. Omit it otherwise.
 - [ALWAYS APPLIES, pick the weight]: always include it. Choose how strongly it applies from its instructions and the scene, starting from the listed default.
@@ -224,6 +236,7 @@ Output ONLY the tag list, no quotes, no preamble, 5-15 tags."""
 _services: dict = {}
 _tasks: set = set()
 _hf_detail_cache: dict = {}   # repo_id -> (fetched_at, detail json)
+_tag_dict_cache: dict[str, int] | None = None   # tag/alias -> danbooru post count
 _gen_lock: asyncio.Lock | None = None
 _index_lock: asyncio.Lock | None = None
 _lora_index_lock: asyncio.Lock | None = None
@@ -263,6 +276,8 @@ def _default_config() -> dict:
         "pony_quality_tags": DEFAULT_PONY_QUALITY_TAGS,
         "booru_subject_mode": "auto",   # tag models: one of BOORU_SUBJECT_MODES
         "booru_break_separator": False, # multi mode: emit BREAK between character groups
+        "tag_usage_filter": "off",      # one of TAG_USAGE_FILTER_MODES
+        "tag_usage_min_count": DEFAULT_TAG_USAGE_MIN_COUNT,  # min danbooru posts to keep a tag
         "style_suffix": "",
         "character_reference_enabled": True,
         "player_in_images": "show",     # one of PLAYER_IN_IMAGES_MODES
@@ -308,6 +323,12 @@ def _load_config() -> dict:
         cfg["booru_subject_mode"] = "single" if stored["booru_single_subject"] else "multi"
     if cfg.get("booru_subject_mode") not in BOORU_SUBJECT_MODES:
         cfg["booru_subject_mode"] = "single"
+    if cfg.get("tag_usage_filter") not in TAG_USAGE_FILTER_MODES:
+        cfg["tag_usage_filter"] = "off"
+    try:
+        cfg["tag_usage_min_count"] = max(0, int(cfg.get("tag_usage_min_count")))
+    except (TypeError, ValueError):
+        cfg["tag_usage_min_count"] = DEFAULT_TAG_USAGE_MIN_COUNT
     return cfg
 
 
@@ -414,10 +435,11 @@ def _write_tag_cache(cache: dict) -> None:
     _atomic_write_json(_data_dir() / TAG_CACHE_FILE, cache)
 
 
-def _clean_character_tags(raw: str) -> str:
+def _clean_character_tags(raw: str, cfg: dict | None = None) -> str:
     """Normalized tag list from an LLM reply: lowercased, deduped, stripped of
-    the scene-level/quality tags a character sheet must never carry. Empty
-    when the reply is unusable (caller skips caching, so it retries later)."""
+    the scene-level/quality tags a character sheet must never carry, and (when
+    cfg enables it) of tags too rare on danbooru to render. Empty when the
+    reply is unusable (caller skips caching, so it retries later)."""
     text = _clean_image_prompt(raw).lower()
     tags: list[str] = []
     seen: set[str] = set()
@@ -428,7 +450,12 @@ def _clean_character_tags(raw: str) -> str:
             continue
         seen.add(tag)
         tags.append(tag)
-    return ", ".join(tags)
+    cleaned = ", ".join(tags)
+    if cleaned and cfg is not None:
+        # Fail-open on full drop (inside the filter) keeps this from
+        # returning "" and sending the backfill into a retry loop.
+        cleaned = _filter_tags_by_usage(cleaned, cfg)
+    return cleaned
 
 
 def set_services(services: dict) -> None:
@@ -639,6 +666,121 @@ def _clean_image_prompt(raw: str) -> str:
     text = text.strip().strip('"').strip()
     text = re.sub(r"\s+", " ", text)
     return text[:MAX_PROMPT_CHARS]
+
+
+def _tag_usage_dict() -> dict[str, int] | None:
+    """Lazy-loaded danbooru tag -> post count map from the bundled CSV,
+    with aliases resolving to their canonical tag's count. None when the
+    file is missing or unreadable (callers fail open and keep the prompt
+    unfiltered). Cached for the process lifetime, including the failure."""
+    global _tag_dict_cache
+    if _tag_dict_cache is not None:
+        return _tag_dict_cache or None
+    counts: dict[str, int] = {}
+    aliases: dict[str, int] = {}
+    try:
+        with open(TAG_DICT_FILE, "r", encoding="utf-8", newline="") as f:
+            for row in csv.reader(f):
+                try:
+                    name, count = row[0].strip(), int(row[2])
+                except (IndexError, ValueError):
+                    continue
+                if not name:
+                    continue
+                counts[name] = count
+                if len(row) > 3 and row[3]:
+                    for alias in row[3].split(","):
+                        alias = alias.strip()
+                        if alias:
+                            aliases.setdefault(alias, count)
+    except OSError as e:
+        print(f"[Image Gen] Tag dictionary unavailable, usage filter disabled: {e}")
+        _tag_dict_cache = {}
+        return None
+    # Canonical names win over any alias spelled the same way.
+    _tag_dict_cache = {**aliases, **counts}
+    return _tag_dict_cache or None
+
+
+def _normalize_tag_for_lookup(token: str) -> str:
+    """Dictionary lookup key for a prompt token: lowercased, attention-weight
+    syntax stripped ((long hair:1.2) -> long hair), escaped parens unescaped,
+    whitespace collapsed to underscores. Lookup-only -- the caller re-emits
+    the original token text. Legitimate trailing parens (sword_(weapon))
+    are kept."""
+    t = token.strip().lower().replace("\\(", "(").replace("\\)", ")")
+    m = re.fullmatch(r"\((.+?):-?\d+(?:\.\d+)?\)", t)
+    if m:
+        t = m.group(1)
+    else:
+        t = re.sub(r":-?\d+(?:\.\d+)?$", "", t)
+    return re.sub(r"\s+", "_", t.strip())
+
+
+def _filter_tags_by_usage(tag_text: str, cfg: dict,
+                          whitelist: tuple | list = ()) -> str:
+    """tag_text with low-usage danbooru tags removed per cfg's
+    tag_usage_filter mode ("soft" drops known tags below
+    tag_usage_min_count; "hard" also drops unknown tags). A tag exactly at
+    the threshold is kept. Preserves token order and original spelling,
+    BREAK separators, score_* tags, and whitelisted trigger words. Fails
+    open -- returns tag_text unchanged -- when the mode is off, the
+    dictionary is unavailable, or filtering would drop every tag."""
+    mode = cfg.get("tag_usage_filter")
+    if mode not in ("soft", "hard"):
+        return tag_text
+    usage = _tag_usage_dict()
+    if usage is None:
+        return tag_text
+    try:
+        threshold = max(0, int(cfg.get("tag_usage_min_count")))
+    except (TypeError, ValueError):
+        threshold = DEFAULT_TAG_USAGE_MIN_COUNT
+    keep_always = {_normalize_tag_for_lookup(part)
+                   for word in whitelist for part in str(word).split(",")
+                   if part.strip()}
+    kept_tokens: list[str] = []
+    dropped: list[str] = []
+    real_tags_kept = 0
+    for token in tag_text.split(","):
+        # BREAK may sit inside a comma token ("red hair BREAK 1boy");
+        # filter around it and re-emit it verbatim.
+        kept_parts: list[str] = []
+        for part in re.split(r"\b(BREAK)\b", token):
+            piece = part.strip()
+            if not piece:
+                continue
+            if piece == "BREAK":
+                kept_parts.append(piece)
+                continue
+            key = _normalize_tag_for_lookup(piece)
+            if not key:
+                continue
+            if key.startswith("score_") or key in keep_always:
+                kept_parts.append(piece)
+                real_tags_kept += 1
+                continue
+            count = usage.get(key)
+            if count is None:
+                if mode == "hard":
+                    dropped.append(piece)
+                    continue
+            elif count < threshold:
+                dropped.append(piece)
+                continue
+            kept_parts.append(piece)
+            real_tags_kept += 1
+        if kept_parts:
+            kept_tokens.append(" ".join(kept_parts))
+    if not dropped:
+        return tag_text
+    if not real_tags_kept:
+        print(f"[Image Gen] Tag filter ({mode}, min {threshold}) would drop "
+              f"every tag; keeping prompt unfiltered")
+        return tag_text
+    print(f"[Image Gen] Tag filter ({mode}, min {threshold}) dropped: "
+          f"{', '.join(dropped)}")
+    return ", ".join(kept_tokens)
 
 
 def _parse_condition_reply(raw: str) -> dict[int, float | None] | None:
@@ -899,6 +1041,8 @@ async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
     image_prompt = _clean_image_prompt(raw)
     if not image_prompt:
         raise RuntimeError("prompt writer returned an empty prompt")
+    if style == "tags":
+        image_prompt = _filter_tags_by_usage(image_prompt, cfg, whitelist=triggers)
 
     # Pony checkpoints are trained to expect score_* quality tags up front.
     prefix = str(cfg.get("pony_quality_tags") or "").strip() if _is_pony(cfg) else ""
@@ -1919,7 +2063,7 @@ async def _tag_backfill_pipeline(save_id: str, worklist: list[dict],
                     continue
                 finally:
                     sdk.llm._current_module = ""
-                tags = _clean_character_tags(raw)
+                tags = _clean_character_tags(raw, cfg)
                 if not tags:
                     print(f"[Image Gen] Unusable tag reply for {sheet['name']} "
                           f"(will retry): {raw[:200]!r}")
@@ -2160,6 +2304,8 @@ def get_router():
         pony_quality_tags: str | None = None
         booru_subject_mode: str | None = None
         booru_break_separator: bool | None = None
+        tag_usage_filter: str | None = None
+        tag_usage_min_count: int | None = None
         booru_single_subject: bool | None = None   # deprecated alias for booru_subject_mode
         style_suffix: str | None = None
         character_reference_enabled: bool | None = None
@@ -2227,6 +2373,7 @@ def get_router():
         out["civitai_lora_types"] = CIVITAI_LORA_TYPES
         out["civitai_nsfw_modes"] = CIVITAI_NSFW_MODES
         out["booru_subject_modes"] = BOORU_SUBJECT_MODES
+        out["tag_usage_filter_modes"] = TAG_USAGE_FILTER_MODES
         out["civitai_categories"] = CIVITAI_CATEGORIES
         out["civitai_base_models"] = CIVITAI_BASE_MODELS
         out["hf_sorts"] = HF_SORTS
@@ -2290,6 +2437,13 @@ def get_router():
                 and incoming["booru_subject_mode"] not in BOORU_SUBJECT_MODES):
             raise HTTPException(status_code=400,
                                 detail=f"booru_subject_mode must be one of {BOORU_SUBJECT_MODES}")
+        if ("tag_usage_filter" in incoming
+                and incoming["tag_usage_filter"] not in TAG_USAGE_FILTER_MODES):
+            raise HTTPException(status_code=400,
+                                detail=f"tag_usage_filter must be one of {TAG_USAGE_FILTER_MODES}")
+        if "tag_usage_min_count" in incoming:
+            incoming["tag_usage_min_count"] = max(0, min(10_000_000,
+                                                         int(incoming["tag_usage_min_count"])))
 
         cfg.update(incoming)
         _save_config(cfg)
