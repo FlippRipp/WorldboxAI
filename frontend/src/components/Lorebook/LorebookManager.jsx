@@ -1,5 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../../lib/api';
+import EditEntryModal, {
+  LOREBOOK_ENTRY_FIELDS,
+  lorebookEntryInitialValues,
+  lorebookEntryPatch,
+} from '../EditEntryModal';
 
 // Library of imported SillyTavern lorebooks (World Info). Entries are embedded
 // into a story's RAG index when the book is linked to the story's scenario or
@@ -19,6 +24,7 @@ export default function LorebookManager({ onBack }) {
   const [importing, setImporting] = useState(false);
   const [search, setSearch] = useState('');
   const [fullBooks, setFullBooks] = useState({}); // id -> record, for deep search in the list view
+  const [editing, setEditing] = useState(null); // {title, fields, initialValues, onSave}
   const fileInputRef = useRef(null);
 
   const refresh = () => {
@@ -119,6 +125,18 @@ export default function LorebookManager({ onBack }) {
       alert(`Failed to update entry: ${e.message}`);
     }
   };
+
+  const editEntry = (entry) => setEditing({
+    title: `Edit Entry — ${entry.title || `Entry ${entry.uid}`}`,
+    fields: LOREBOOK_ENTRY_FIELDS,
+    initialValues: lorebookEntryInitialValues(entry),
+    onSave: async (values, changed) => {
+      if (Object.keys(changed).length === 0) return;
+      const { lorebook } = await api.updateLorebookEntry(
+        selected.id, entry.uid, lorebookEntryPatch(changed));
+      cacheBook(lorebook);
+    },
+  });
 
   const saveStickyTurns = async (value) => {
     const sticky = Math.max(0, parseInt(value, 10) || 0);
@@ -285,15 +303,25 @@ export default function LorebookManager({ onBack }) {
                         <p className="text-xs text-gray-500 truncate">🔑 {entry.keys.join(', ')}</p>
                       )}
                     </div>
-                    <label className="flex items-center gap-2 text-xs text-gray-400 shrink-0 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={entry.enabled}
-                        onChange={(e) => toggleEntry(entry.uid, e.target.checked)}
-                        className="accent-purple-600"
-                      />
-                      Enabled
-                    </label>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        onClick={() => editEntry(entry)}
+                        className="text-gray-600 hover:text-purple-300 text-sm px-1"
+                        title="Edit entry"
+                        aria-label={`Edit entry ${entry.uid}`}
+                      >
+                        &#9998;
+                      </button>
+                      <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={entry.enabled}
+                          onChange={(e) => toggleEntry(entry.uid, e.target.checked)}
+                          className="accent-purple-600"
+                        />
+                        Enabled
+                      </label>
+                    </div>
                   </div>
                   <p className="text-xs text-gray-400 mt-2 whitespace-pre-wrap line-clamp-3">{entry.content}</p>
                 </div>
@@ -302,6 +330,14 @@ export default function LorebookManager({ onBack }) {
           </>
         )}
       </div>
+
+      {editing && (
+        <EditEntryModal
+          {...editing}
+          onCancel={() => setEditing(null)}
+          onDone={() => setEditing(null)}
+        />
+      )}
     </div>
   );
 }
