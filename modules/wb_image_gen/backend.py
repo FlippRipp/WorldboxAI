@@ -124,16 +124,19 @@ CHAT_IMAGE_CONCEAL_MODES = ("off", "blur", "blackout")
 # multi per scene from how many tracked characters are in frame.
 BOORU_SUBJECT_MODES = ("single", "multi", "auto")
 
-# Tag usage filter: drop LLM-produced tags that are too rare on danbooru to
-# mean anything to a tag-trained checkpoint. "soft" drops only tags the
-# bundled dictionary knows but whose post count is below the threshold;
-# "hard" also drops tags the dictionary has never heard of (typically
-# hallucinated). Trigger words, score_* tags, and BREAK always survive.
+# Tag usage filter: drop LLM-produced tags that are too rare on the booru
+# sites to mean anything to a tag-trained checkpoint. "soft" drops only tags
+# the bundled dictionaries know but whose post count is below the threshold;
+# "hard" also drops tags no dictionary has heard of (typically hallucinated).
+# Trigger words, score_* tags, and BREAK always survive.
 TAG_USAGE_FILTER_MODES = ("off", "soft", "hard")
 DEFAULT_TAG_USAGE_MIN_COUNT = 100
-# Bundled snapshot of the a1111-tagcomplete danbooru dictionary:
-# tag_name,category,post_count,"alias1,alias2" per row, no header.
-TAG_DICT_FILE = Path(__file__).resolve().parent / "data" / "danbooru.csv"
+# Bundled snapshots of the a1111-tagcomplete dictionaries (danbooru for anime
+# tags, e621 for furry tags), merged at load time by taking each tag's
+# highest count on any site. Shared format per row, no header:
+# tag_name,category,post_count,"alias1,alias2"
+TAG_DICT_FILES = (Path(__file__).resolve().parent / "data" / "danbooru.csv",
+                  Path(__file__).resolve().parent / "data" / "e621.csv")
 
 LORA_CONDITION_PROMPT = """You control style adapters (LoRAs) for an AI image generator. Each numbered adapter below is labeled with how you control it:
 - [GATED, weight W]: decide whether its condition applies to the scene being illustrated. Include it only when the condition applies, echoing its listed weight W unchanged. Omit it otherwise.
@@ -242,7 +245,7 @@ Output ONLY the tag list, no quotes, no preamble, 5-15 tags."""
 _services: dict = {}
 _tasks: set = set()
 _hf_detail_cache: dict = {}   # repo_id -> (fetched_at, detail json)
-_tag_dict_cache: dict[str, int] | None = None   # tag/alias -> danbooru post count
+_tag_dict_cache: dict[str, int] | None = None   # tag/alias -> booru post count
 _gen_lock: asyncio.Lock | None = None
 _index_lock: asyncio.Lock | None = None
 _lora_index_lock: asyncio.Lock | None = None
@@ -284,7 +287,7 @@ def _default_config() -> dict:
         "booru_subject_mode": "auto",   # tag models: one of BOORU_SUBJECT_MODES
         "booru_break_separator": False, # multi mode: emit BREAK between character groups
         "tag_usage_filter": "off",      # one of TAG_USAGE_FILTER_MODES
-        "tag_usage_min_count": DEFAULT_TAG_USAGE_MIN_COUNT,  # min danbooru posts to keep a tag
+        "tag_usage_min_count": DEFAULT_TAG_USAGE_MIN_COUNT,  # min booru posts to keep a tag
         "style_suffix": "",
         "character_reference_enabled": True,
         "player_in_images": "show",     # one of PLAYER_IN_IMAGES_MODES
@@ -449,7 +452,7 @@ def _write_tag_cache(cache: dict) -> None:
 def _clean_character_tags(raw: str, cfg: dict | None = None) -> str:
     """Normalized tag list from an LLM reply: lowercased, deduped, stripped of
     the scene-level/quality tags a character sheet must never carry, and (when
-    cfg enables it) of tags too rare on danbooru to render. Empty when the
+    cfg enables it) of tags too rare on the booru sites to render. Empty when the
     reply is unusable (caller skips caching, so it retries later)."""
     text = _clean_image_prompt(raw).lower()
     tags: list[str] = []
@@ -680,36 +683,44 @@ def _clean_image_prompt(raw: str) -> str:
 
 
 def _tag_usage_dict() -> dict[str, int] | None:
-    """Lazy-loaded danbooru tag -> post count map from the bundled CSV,
-    with aliases resolving to their canonical tag's count. None when the
-    file is missing or unreadable (callers fail open and keep the prompt
-    unfiltered). Cached for the process lifetime, including the failure."""
+    """Lazy-loaded tag -> post count map merged from the bundled booru CSVs
+    (danbooru + e621), with aliases resolving to their canonical tag's count
+    and a tag known to several sites keeping its highest count. None when no
+    file is readable (callers fail open and keep the prompt unfiltered).
+    Cached for the process lifetime, including the failure."""
     global _tag_dict_cache
     if _tag_dict_cache is not None:
         return _tag_dict_cache or None
-    counts: dict[str, int] = {}
-    aliases: dict[str, int] = {}
-    try:
-        with open(TAG_DICT_FILE, "r", encoding="utf-8", newline="") as f:
-            for row in csv.reader(f):
-                try:
-                    name, count = row[0].strip(), int(row[2])
-                except (IndexError, ValueError):
-                    continue
-                if not name:
-                    continue
-                counts[name] = count
-                if len(row) > 3 and row[3]:
-                    for alias in row[3].split(","):
-                        alias = alias.strip()
-                        if alias:
-                            aliases.setdefault(alias, count)
-    except OSError as e:
-        print(f"[Image Gen] Tag dictionary unavailable, usage filter disabled: {e}")
-        _tag_dict_cache = {}
-        return None
-    # Canonical names win over any alias spelled the same way.
-    _tag_dict_cache = {**aliases, **counts}
+    merged: dict[str, int] = {}
+    for path in TAG_DICT_FILES:
+        counts: dict[str, int] = {}
+        aliases: dict[str, int] = {}
+        try:
+            with open(path, "r", encoding="utf-8", newline="") as f:
+                for row in csv.reader(f):
+                    try:
+                        name, count = row[0].strip(), int(row[2])
+                    except (IndexError, ValueError):
+                        continue
+                    if not name:
+                        continue
+                    counts[name] = count
+                    if len(row) > 3 and row[3]:
+                        for alias in row[3].split(","):
+                            alias = alias.strip()
+                            if alias:
+                                aliases.setdefault(alias, count)
+        except OSError as e:
+            print(f"[Image Gen] Tag dictionary {path.name} unavailable: {e}")
+            continue
+        # Canonical names win over any alias spelled the same way; across
+        # sites a tag keeps its highest count.
+        for key, count in {**aliases, **counts}.items():
+            if count > merged.get(key, -1):
+                merged[key] = count
+    if not merged:
+        print("[Image Gen] No tag dictionary readable, usage filter disabled")
+    _tag_dict_cache = merged
     return _tag_dict_cache or None
 
 
@@ -730,13 +741,13 @@ def _normalize_tag_for_lookup(token: str) -> str:
 
 def _filter_tags_by_usage(tag_text: str, cfg: dict,
                           whitelist: tuple | list = ()) -> str:
-    """tag_text with low-usage danbooru tags removed per cfg's
+    """tag_text with low-usage booru tags removed per cfg's
     tag_usage_filter mode ("soft" drops known tags below
     tag_usage_min_count; "hard" also drops unknown tags). A tag exactly at
     the threshold is kept. Preserves token order and original spelling,
     BREAK separators, score_* tags, and whitelisted trigger words. Fails
     open -- returns tag_text unchanged -- when the mode is off, the
-    dictionary is unavailable, or filtering would drop every tag."""
+    dictionaries are unavailable, or filtering would drop every tag."""
     mode = cfg.get("tag_usage_filter")
     if mode not in ("soft", "hard"):
         return tag_text

@@ -1788,12 +1788,12 @@ export default function ImageStudio({ onBack }) {
               className={inputCls}
             >
               <option value="off">Off — keep every tag the prompt writer produces</option>
-              <option value="soft">Soft — drop known danbooru tags below the usage threshold</option>
-              <option value="hard">Hard — also drop tags not in the danbooru dictionary at all</option>
+              <option value="soft">Soft — drop known booru tags below the usage threshold</option>
+              <option value="hard">Hard — also drop tags neither danbooru nor e621 knows</option>
             </select>
             {(draft.tag_usage_filter || 'off') !== 'off' && (
               <div>
-                <label className={labelCls}>Minimum danbooru post count</label>
+                <label className={labelCls}>Minimum booru post count</label>
                 <input
                   type="number"
                   min={0}
@@ -1805,11 +1805,13 @@ export default function ImageStudio({ onBack }) {
             )}
             <p className="text-xs text-gray-600">
               Prunes rare or invented tags from tag-style prompts and cached character
-              tags, using a bundled danbooru tag dictionary — tags a checkpoint barely
-              saw in training mostly add noise. Soft only removes tags the dictionary
-              knows but that fall below the threshold; Hard also removes tags it has
-              never heard of (usually hallucinated). LoRA trigger words, score_ tags,
-              and BREAK always survive. Natural-language models are unaffected.
+              tags, using bundled danbooru + e621 tag dictionaries (a tag counts by its
+              highest usage on either site, so anime and furry tags both work) — tags a
+              checkpoint barely saw in training mostly add noise. Soft only removes tags
+              the dictionaries know but that fall below the threshold; Hard also removes
+              tags neither site has heard of (usually hallucinated). LoRA trigger words,
+              score_ tags, and BREAK always survive. Natural-language models are
+              unaffected.
             </p>
           </div>
           <div>

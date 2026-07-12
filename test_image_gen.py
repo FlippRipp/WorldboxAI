@@ -2893,8 +2893,8 @@ def test_tag_usage_filter_preserves_specials(tmp_path):
 def test_tag_usage_filter_fails_open(tmp_path):
     backend = _load_backend(tmp_path)
 
-    # Missing dictionary file: prompt passes through unchanged.
-    backend.TAG_DICT_FILE = tmp_path / "missing.csv"
+    # All dictionary files missing: prompt passes through unchanged.
+    backend.TAG_DICT_FILES = (tmp_path / "missing.csv", tmp_path / "missing2.csv")
     text = "obscure_tag, made_up_tag"
     assert backend._filter_tags_by_usage(text, _filter_cfg(backend, "hard")) == text
 
@@ -2908,25 +2908,41 @@ def test_tag_usage_filter_fails_open(tmp_path):
 
 def test_tag_dict_loader(tmp_path):
     backend = _load_backend(tmp_path)
-    csv_path = tmp_path / "danbooru.csv"
-    csv_path.write_text(
+    danbooru = tmp_path / "danbooru.csv"
+    danbooru.write_text(
         "long_hair,0,500000,\"/lh,longhair\"\n"
         "malformed row without count\n"
         "longhair,0,7\n"          # canonical row spelled like the alias above
-        "solo,0,5000954\n",
+        "solo,0,5000954\n"
+        "anthro,0,40\n",          # rare on danbooru, common on e621
         encoding="utf-8")
-    backend.TAG_DICT_FILE = csv_path
+    e621 = tmp_path / "e621.csv"
+    e621.write_text(
+        "anthro,0,3381927,\"anthromorph\"\n"
+        "long_hair,0,90000\n",    # lower count than danbooru: higher wins
+        encoding="utf-8")
+    backend.TAG_DICT_FILES = (danbooru, e621)
 
     usage = backend._tag_usage_dict()
-    assert usage["long_hair"] == 500000
+    assert usage["long_hair"] == 500000      # max across sites
     assert usage["/lh"] == 500000            # alias -> canonical count
     assert usage["longhair"] == 7            # canonical row wins over alias
     assert usage["solo"] == 5000954
+    assert usage["anthro"] == 3381927        # e621 count wins over danbooru's
+    assert usage["anthromorph"] == 3381927
     assert "malformed" not in " ".join(usage)
 
-    # Cached for the process lifetime: deleting the file changes nothing.
-    csv_path.unlink()
+    # Cached for the process lifetime: deleting the files changes nothing.
+    danbooru.unlink()
+    e621.unlink()
     assert backend._tag_usage_dict()["long_hair"] == 500000
+
+    # One missing file still loads the others.
+    backend2 = _load_backend(tmp_path)
+    only = tmp_path / "only.csv"
+    only.write_text("solo,0,5000954\n", encoding="utf-8")
+    backend2.TAG_DICT_FILES = (tmp_path / "gone.csv", only)
+    assert backend2._tag_usage_dict()["solo"] == 5000954
 
 
 def test_prompt_writer_applies_tag_usage_filter(tmp_path):
