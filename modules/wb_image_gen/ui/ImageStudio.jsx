@@ -354,11 +354,12 @@ function fmtCount(n) {
   return String(n);
 }
 
-// Source page link for a browse item or saved entry. NSFW Civitai models live
-// on the dedicated .red domain (same /models/{id} path), so route them there.
+// Source page link for a browse item or saved entry. Civitai models are always
+// routed to the .red domain (same /models/{id} path), regardless of NSFW
+// status, so links never bounce off civitai.com's content gating.
 function loraLink(item) {
   const url = item.page_url || item.civitai_url || '';
-  if (item.nsfw && url.startsWith('https://civitai.com/')) {
+  if (url.startsWith('https://civitai.com/')) {
     return url.replace('https://civitai.com/', 'https://civitai.red/');
   }
   return url;
