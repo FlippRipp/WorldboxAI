@@ -1311,8 +1311,23 @@ export default function ImageStudio({ onBack }) {
   // in-chat widget's per-session reveal behavior).
   const [revealed, setRevealed] = useState(() => new Set());
 
-  const [testPrompt, setTestPrompt] = useState('');
-  const [testRefine, setTestRefine] = useState(true);
+  // Persisted on every keystroke so the draft survives page reloads and
+  // Android killing the backgrounded webview (there is no reliable
+  // "about to shut down" event to save on).
+  const [testPrompt, setTestPrompt] = useState(() => {
+    try { return localStorage.getItem('wb_image_gen_test_prompt') || ''; } catch (e) { return ''; }
+  });
+  const updateTestPrompt = (value) => {
+    setTestPrompt(value);
+    try { localStorage.setItem('wb_image_gen_test_prompt', value); } catch (e) { /* ignore */ }
+  };
+  const [testRefine, setTestRefine] = useState(() => {
+    try { return localStorage.getItem('wb_image_gen_test_refine') !== 'false'; } catch (e) { return true; }
+  });
+  const updateTestRefine = (value) => {
+    setTestRefine(value);
+    try { localStorage.setItem('wb_image_gen_test_refine', String(value)); } catch (e) { /* ignore */ }
+  };
   const [testError, setTestError] = useState('');
   const [testBusy, setTestBusy] = useState(false);
   const pollRef = useRef(null);
@@ -2042,7 +2057,7 @@ export default function ImageStudio({ onBack }) {
             <input
               type="text"
               value={testPrompt}
-              onChange={(e) => setTestPrompt(e.target.value)}
+              onChange={(e) => updateTestPrompt(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && testPrompt.trim() && !generating) testGenerate(); }}
               placeholder={testRefine
                 ? 'The knight faces the dragon on the crumbling bridge at dawn'
@@ -2064,7 +2079,7 @@ export default function ImageStudio({ onBack }) {
             <input
               type="checkbox"
               checked={testRefine}
-              onChange={(e) => setTestRefine(e.target.checked)}
+              onChange={(e) => updateTestRefine(e.target.checked)}
               className="accent-purple-500"
             />
             Refine with the prompt-writer LLM (uncheck to send the text as-is)
