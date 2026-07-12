@@ -22,6 +22,11 @@ import { useRef, useState, useCallback, useLayoutEffect, useEffect } from 'react
 // streaming auto-scroll.
 export function useStickToBottom(deps, { enabled = true, threshold = 48, onUserScroll } = {}) {
   const ref = useRef(null);
+  // Optional: attach to a single wrapper around the scrollable content. A
+  // ResizeObserver on it keeps the pinned reader followed when content grows
+  // without a render — e.g. an <img> finishing its load — which the
+  // deps-driven layout effect below can't see.
+  const contentRef = useRef(null);
   const pinnedRef = useRef(true);
   const [pinned, setPinned] = useState(true);
 
@@ -126,7 +131,31 @@ export function useStickToBottom(deps, { enabled = true, threshold = 48, onUserS
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, ...deps]);
 
+  // Async content growth (image loads, module widgets resolving) changes the
+  // scroll height with no React render involved. While pinned, follow it the
+  // same way the layout effect does; while unpinned, leave the reader alone.
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!enabled || !content || typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(() => {
+      const el = ref.current;
+      if (!el || !pinnedRef.current) return;
+      const target = el.scrollHeight - el.clientHeight;
+      const dist = target - el.scrollTop;
+      if (dist <= 0) return;
+      if (dist > el.clientHeight) {
+        stopFollow();
+        el.scrollTop = target;
+        lastWriteRef.current = el.scrollTop;
+      } else {
+        startFollow();
+      }
+    });
+    ro.observe(content);
+    return () => ro.disconnect();
+  }, [enabled, startFollow, stopFollow]);
+
   useEffect(() => stopFollow, [stopFollow]);
 
-  return { ref, onScroll, pin, pinned, scrollToBottom };
+  return { ref, contentRef, onScroll, pin, pinned, scrollToBottom };
 }

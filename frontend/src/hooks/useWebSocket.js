@@ -15,6 +15,32 @@ function mapServerMessages(chatMsgs, lastTurn) {
   }));
 }
 
+// Server rebuilds (`done`, swipe/edit REST responses) replace the whole
+// transcript, but usually only the tail actually changed. Keep the previous
+// object for every message whose fields are equal so memoized MessageBlocks
+// bail out instead of re-rendering the entire feed.
+function reconcileMessages(prev, next) {
+  if (!Array.isArray(prev) || prev.length === 0) return next;
+  let changed = prev.length !== next.length;
+  const merged = next.map((m, i) => {
+    const p = prev[i];
+    if (
+      p &&
+      p.role === m.role &&
+      p.content === m.content &&
+      (p.reasoning || null) === (m.reasoning || null) &&
+      (p.turn ?? null) === (m.turn ?? null) &&
+      (p.error || false) === (m.error || false) &&
+      JSON.stringify(p.meta || null) === JSON.stringify(m.meta || null)
+    ) {
+      return p;
+    }
+    changed = true;
+    return m;
+  });
+  return changed ? merged : prev;
+}
+
 export function useWebSocket(onStateChange, onLLMCall) {
   const [isConnected, setIsConnected] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
@@ -155,7 +181,7 @@ export function useWebSocket(onStateChange, onLLMCall) {
         // veto rewrites and reasoning are all reflected in place.
         const chatMsgs = data.state?.chat_messages;
         if (Array.isArray(chatMsgs) && chatMsgs.length) {
-          setMessages(mapServerMessages(chatMsgs, data.state?.turn));
+          setMessages(prev => reconcileMessages(prev, mapServerMessages(chatMsgs, data.state?.turn)));
         } else if (streamed) {
           setMessages(msgs => [...msgs, { role: 'assistant', content: streamed, turn: data.state?.turn }]);
         }
@@ -174,7 +200,7 @@ export function useWebSocket(onStateChange, onLLMCall) {
         reasoningRef.current = '';
         const chatMsgs = data.state?.chat_messages;
         if (Array.isArray(chatMsgs)) {
-          setMessages(mapServerMessages(chatMsgs, data.state?.turn));
+          setMessages(prev => reconcileMessages(prev, mapServerMessages(chatMsgs, data.state?.turn)));
         }
         if (data.state) setSwipes(data.state.swipes || null);
         if (data.state && onStateChangeRef.current) onStateChangeRef.current(data.state);
@@ -192,7 +218,7 @@ export function useWebSocket(onStateChange, onLLMCall) {
       } else if (data.type === 'state_load') {
         const chatMessages = data.chat_messages || [];
         if (chatMessages.length > 0) {
-          setMessages(mapServerMessages(chatMessages, null));
+          setMessages(prev => reconcileMessages(prev, mapServerMessages(chatMessages, null)));
         }
       } else if (data.type === 'command_result') {
         // Slash-command output: surface it in a popup, never the transcript.
@@ -300,7 +326,7 @@ export function useWebSocket(onStateChange, onLLMCall) {
   const applyServerState = useCallback((state) => {
     if (!state) return;
     if (Array.isArray(state.chat_messages)) {
-      setMessages(mapServerMessages(state.chat_messages, state.turn));
+      setMessages(prev => reconcileMessages(prev, mapServerMessages(state.chat_messages, state.turn)));
     }
     setSwipes(state.swipes || null);
     if (onStateChangeRef.current) onStateChangeRef.current(state);

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { ModuleEventProvider } from './hooks/useModuleEventBus';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useSession } from './hooks/useSession';
@@ -360,6 +360,20 @@ function AppContent() {
   // interrupted), so that's the only case that warrants a warning.
   const generating = ws.currentStream != null || ws.postProcessing;
 
+  // A save restricts which modules are active (chosen at story start / edited
+  // later via the cog). Filter the UI to that set so disabled modules
+  // contribute no sidebar/header/settings/overlay UI. Legacy saves without the
+  // reserved key get all modules. Memoized so streaming re-renders (which
+  // happen every animation frame) pass an identity-stable list down to the
+  // memoized feed blocks.
+  const activeModuleIds = session.moduleConfigs?.__active_modules__;
+  const gameModules = useMemo(
+    () => (Array.isArray(activeModuleIds)
+      ? (modules || []).filter((m) => activeModuleIds.includes(m.id))
+      : modules),
+    [modules, activeModuleIds]
+  );
+
   const handleExitMode = useCallback(() => {
     if (currentMode === 'storyteller-game' && generating) {
       setShowExitWarning(true);
@@ -545,14 +559,6 @@ function AppContent() {
   }
 
   if (currentMode === 'storyteller-game') {
-    // A save restricts which modules are active (chosen at story start / edited
-    // later via the cog). Filter the UI to that set so disabled modules
-    // contribute no sidebar/header/settings/overlay UI. Legacy saves without the
-    // reserved key get all modules.
-    const activeModuleIds = session.moduleConfigs?.__active_modules__;
-    const gameModules = Array.isArray(activeModuleIds)
-      ? (modules || []).filter((m) => activeModuleIds.includes(m.id))
-      : modules;
     // Flatten the active modules' declared slash commands for composer autocomplete.
     const slashCommands = (gameModules || [])
       .flatMap((m) =>

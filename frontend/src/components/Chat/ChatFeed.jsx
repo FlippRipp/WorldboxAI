@@ -1,4 +1,4 @@
-import { useRef, useEffect, useLayoutEffect, useCallback, useState } from 'react';
+import { memo, useRef, useEffect, useLayoutEffect, useCallback, useState } from 'react';
 import MarkdownRenderer from '../shared/MarkdownRenderer';
 import SlotRenderer from '../Slots/SlotRenderer';
 import { useStickToBottom } from '../../hooks/useStickToBottom';
@@ -190,7 +190,12 @@ function SwipeControls({ swipes, busy, onPrev, onNext, onRegenerate }) {
   );
 }
 
-function MessageBlock({ message, index, isLastAssistant, swipes, busy, editRequest, messageTurn, onBranchMessage, onRegenerate, onSwipe, onEditMessage, onDeleteMessage, modules, slotState, moduleConfigs }) {
+// Memoized so streaming frames and transcript appends don't re-render every
+// mounted message (and its module widgets). For the bail-out to work the
+// parent must pass identity-stable props: reconciled `message` objects,
+// ref-backed handler proxies, and per-message `swipes`/`editRequest` (null
+// except on the block they target).
+const MessageBlock = memo(function MessageBlock({ message, index, isLastAssistant, swipes, busy, editRequest, messageTurn, onBranchMessage, onRegenerate, onSwipe, onEditMessage, onDeleteMessage, modules, slotState, moduleConfigs }) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system' || message.error;
   const styleKey = isSystem ? 'system' : isUser ? 'user' : 'assistant';
@@ -316,7 +321,7 @@ function MessageBlock({ message, index, isLastAssistant, swipes, busy, editReque
       </div>
     </div>
   );
-}
+});
 
 function StreamingBlock({ content, reasoning, status }) {
   if (content == null && !reasoning) return null;
@@ -360,6 +365,19 @@ export function ChatFeed({ messages, currentStream, currentReasoning, swipes, bu
   // the bottom; scrolling up cancels it until they return to the bottom.
   const feed = useStickToBottom([messages, currentStream, currentReasoning], { onUserScroll });
 
+  // Identity-stable proxies for the per-message handlers, so memoized
+  // MessageBlocks don't re-render when a parent render recreates the
+  // callbacks. The ref always holds the latest ones.
+  const handlersRef = useRef(null);
+  handlersRef.current = { onBranchMessage, onRegenerate, onSwipe, onEditMessage, onDeleteMessage };
+  const stable = useRef({
+    onBranchMessage: (turn) => handlersRef.current.onBranchMessage?.(turn),
+    onRegenerate: () => handlersRef.current.onRegenerate?.(),
+    onSwipe: (i) => handlersRef.current.onSwipe?.(i),
+    onEditMessage: (i, content) => handlersRef.current.onEditMessage?.(i, content),
+    onDeleteMessage: (i) => handlersRef.current.onDeleteMessage?.(i),
+  }).current;
+
   // Expose scroll controls to the parent (e.g. focusing the composer on mobile
   // scrolls the feed to the bottom).
   useEffect(() => {
@@ -398,6 +416,20 @@ export function ChatFeed({ messages, currentStream, currentReasoning, swipes, bu
   // normal play need no reset — the tail slice already includes new turns.
   const saveId = slotState?.active_save_id;
   useEffect(() => { setVisibleCount(INITIAL_WINDOW); }, [saveId]);
+
+  // While the reader is scrolled up, a fixed-size tail window would evict its
+  // topmost message on every append (finished stream, sent message), removing
+  // content above the viewport and yanking the feed up by that height. Grow or
+  // shrink the window by the length delta in-render (before commit) so `start`
+  // stays put. While pinned to the bottom, keep the tail window bounded — any
+  // pre-paint shift there is corrected by the stick-to-bottom layout effect
+  // and the browser's scrollTop clamping.
+  const prevLenRef = useRef(messages.length);
+  if (messages.length !== prevLenRef.current) {
+    const delta = messages.length - prevLenRef.current;
+    prevLenRef.current = messages.length;
+    if (!feed.pinned) setVisibleCount((c) => Math.max(1, c + delta));
+  }
 
   // Reveal older messages when the reader scrolls near the top. Before growing
   // the window, stash the current scrollHeight so the layout effect below can
@@ -475,39 +507,43 @@ export function ChatFeed({ messages, currentStream, currentReasoning, swipes, bu
           </div>
         )}
 
-        {hasOlder && (
-          <div className="max-w-[720px] mx-auto px-8 py-3 text-center text-xs text-gray-600">
-            Loading earlier messages…
-          </div>
-        )}
+        {/* Single wrapper so the stick-to-bottom hook can observe content
+            resizes that happen without a render (e.g. images loading). */}
+        <div ref={feed.contentRef}>
+          {hasOlder && (
+            <div className="max-w-[720px] mx-auto px-8 py-3 text-center text-xs text-gray-600">
+              Loading earlier messages…
+            </div>
+          )}
 
-        {messages.slice(start).map((msg, i) => {
-          const idx = start + i;
-          return (
-          <MessageBlock
-            key={idx}
-            message={msg}
-            index={idx}
-            isLastAssistant={idx === lastAssistantIdx && !streaming}
-            swipes={swipes}
-            busy={busy}
-            editRequest={editRequest}
-            messageTurn={messageTurns[idx]}
-            onBranchMessage={onBranchMessage}
-            onRegenerate={onRegenerate}
-            onSwipe={onSwipe}
-            onEditMessage={onEditMessage}
-            onDeleteMessage={onDeleteMessage}
-            modules={modules}
-            slotState={slotState}
-            moduleConfigs={moduleConfigs}
-          />
-          );
-        })}
+          {messages.slice(start).map((msg, i) => {
+            const idx = start + i;
+            return (
+            <MessageBlock
+              key={idx}
+              message={msg}
+              index={idx}
+              isLastAssistant={idx === lastAssistantIdx && !streaming}
+              swipes={idx === lastAssistantIdx ? swipes : null}
+              busy={busy}
+              editRequest={editRequest?.index === idx ? editRequest : null}
+              messageTurn={messageTurns[idx]}
+              onBranchMessage={stable.onBranchMessage}
+              onRegenerate={stable.onRegenerate}
+              onSwipe={stable.onSwipe}
+              onEditMessage={stable.onEditMessage}
+              onDeleteMessage={stable.onDeleteMessage}
+              modules={modules}
+              slotState={slotState}
+              moduleConfigs={moduleConfigs}
+            />
+            );
+          })}
 
-        <StreamingBlock content={currentStream} reasoning={currentReasoning} status={pipelineStatus} />
+          <StreamingBlock content={currentStream} reasoning={currentReasoning} status={pipelineStatus} />
 
-        {postProcessing && !streaming && <PostProcessingLine status={pipelineStatus} />}
+          {postProcessing && !streaming && <PostProcessingLine status={pipelineStatus} />}
+        </div>
       </div>
 
       {!feed.pinned && !isEmpty && (

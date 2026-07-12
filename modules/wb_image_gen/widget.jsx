@@ -196,8 +196,13 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
                   src={`${API_BASE}/images/file/${r.filename}`}
                   alt={concealed ? 'Hidden story illustration' : (r.image_prompt || 'Story illustration')}
                   loading="lazy"
+                  // Intrinsic dimensions so the layout reserves the final box
+                  // before the file loads — otherwise the image expands from
+                  // zero height on load and shifts the reader's scroll point.
+                  width={r.width || undefined}
+                  height={r.height || undefined}
                   onClick={() => (concealed ? reveal(r.id) : setLightbox(r))}
-                  className={`max-h-80 rounded-lg border border-gray-700/60 shadow-lg ${
+                  className={`max-h-80 max-w-full rounded-lg border border-gray-700/60 shadow-lg ${
                     concealed
                       ? store.conceal === 'blackout'
                         ? 'cursor-pointer brightness-0'
@@ -268,8 +273,15 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
             </div>
           );
         }
+        // Reserve the finished image's footprint (same max-h-80 cap, same
+        // aspect) while it generates, so the swap to the real image doesn't
+        // shift the reader's scroll point.
         return (
-          <div key={r.id} className="flex items-center gap-2">
+          <div
+            key={r.id}
+            style={{ aspectRatio: r.width > 0 && r.height > 0 ? `${r.width} / ${r.height}` : '1 / 1' }}
+            className="h-80 max-w-full rounded-lg border border-gray-700/60 bg-black/20 flex items-center justify-center gap-2"
+          >
             <span className="relative flex h-2 w-2">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" />
               <span className="relative inline-flex rounded-full h-2 w-2 bg-purple-500" />
