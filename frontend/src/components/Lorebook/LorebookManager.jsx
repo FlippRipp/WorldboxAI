@@ -5,11 +5,20 @@ import { api } from '../../lib/api';
 // into a story's RAG index when the book is linked to the story's scenario or
 // world (or attached to the save directly). This manager handles importing,
 // browsing/toggling entries, and editing scenario/world links.
+function entryMatches(entry, q) {
+  return (entry.title || '').toLowerCase().includes(q) ||
+    (entry.content || '').toLowerCase().includes(q) ||
+    (entry.keys || []).some(k => k.toLowerCase().includes(q)) ||
+    (entry.secondary_keys || []).some(k => k.toLowerCase().includes(q));
+}
+
 export default function LorebookManager({ onBack }) {
   const [lorebooks, setLorebooks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null); // full lorebook record
   const [importing, setImporting] = useState(false);
+  const [search, setSearch] = useState('');
+  const [fullBooks, setFullBooks] = useState({}); // id -> record, for deep search in the list view
   const fileInputRef = useRef(null);
 
   const refresh = () => {
@@ -21,6 +30,40 @@ export default function LorebookManager({ onBack }) {
   };
 
   useEffect(refresh, []);
+
+  const q = search.trim().toLowerCase();
+
+  // Searching in the list view also matches entry titles/keywords/content, so
+  // full records are fetched lazily the first time a query is typed.
+  useEffect(() => {
+    if (!q || selected) return;
+    const missing = lorebooks.filter((b) => !fullBooks[b.id]);
+    if (missing.length === 0) return;
+    let cancelled = false;
+    Promise.all(missing.map((b) =>
+      api.getLorebook(b.id).then((d) => [b.id, d.lorebook]).catch(() => null)
+    )).then((pairs) => {
+      if (!cancelled) {
+        setFullBooks((prev) => ({ ...prev, ...Object.fromEntries(pairs.filter(Boolean)) }));
+      }
+    });
+    return () => { cancelled = true; };
+  }, [q, selected, lorebooks]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const entryMatchCount = (bookId) => {
+    const record = fullBooks[bookId];
+    return record ? (record.entries || []).filter((e) => entryMatches(e, q)).length : 0;
+  };
+
+  const visibleBooks = !q ? lorebooks : lorebooks.filter((b) =>
+    b.name.toLowerCase().includes(q) ||
+    (b.description || '').toLowerCase().includes(q) ||
+    entryMatchCount(b.id) > 0
+  );
+
+  const visibleEntries = selected
+    ? (q ? selected.entries.filter((e) => entryMatches(e, q)) : selected.entries)
+    : [];
 
   const handleImportFile = (e) => {
     const file = e.target.files?.[0];
@@ -43,10 +86,15 @@ export default function LorebookManager({ onBack }) {
     reader.readAsText(file);
   };
 
+  const cacheBook = (lorebook) => {
+    setSelected(lorebook);
+    setFullBooks((prev) => ({ ...prev, [lorebook.id]: lorebook }));
+  };
+
   const openDetail = async (id) => {
     try {
       const { lorebook } = await api.getLorebook(id);
-      setSelected(lorebook);
+      cacheBook(lorebook);
     } catch (e) {
       alert(`Failed to load lorebook: ${e.message}`);
     }
@@ -56,6 +104,7 @@ export default function LorebookManager({ onBack }) {
     if (!window.confirm('Delete this lorebook? Stories re-sync on next load and lose its entries.')) return;
     try {
       await api.deleteLorebook(id);
+      setFullBooks((prev) => { const next = { ...prev }; delete next[id]; return next; });
       refresh();
     } catch (e) {
       alert(`Failed to delete: ${e.message}`);
@@ -65,7 +114,7 @@ export default function LorebookManager({ onBack }) {
   const toggleEntry = async (uid, enabled) => {
     try {
       const { lorebook } = await api.setLorebookEntryEnabled(selected.id, uid, enabled);
-      setSelected(lorebook);
+      cacheBook(lorebook);
     } catch (e) {
       alert(`Failed to update entry: ${e.message}`);
     }
@@ -76,7 +125,7 @@ export default function LorebookManager({ onBack }) {
     if (sticky === (selected.sticky_turns || 0)) return;
     try {
       const { lorebook } = await api.updateLorebook(selected.id, { sticky_turns: sticky });
-      setSelected(lorebook);
+      cacheBook(lorebook);
     } catch (e) {
       alert(`Failed to update lorebook: ${e.message}`);
     }
@@ -114,15 +163,30 @@ export default function LorebookManager({ onBack }) {
               <input ref={fileInputRef} type="file" accept=".json,application/json" onChange={handleImportFile} className="hidden" />
             </div>
 
+            {lorebooks.length > 0 && (
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search books and entries (title, keywords, content)…"
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 mb-4"
+                aria-label="Search lorebooks"
+              />
+            )}
+
             {loading ? (
               <div className="text-gray-500 text-center py-12">Loading...</div>
             ) : lorebooks.length === 0 ? (
               <p className="text-gray-500 text-center py-12 border border-dashed border-gray-700 rounded-lg">
                 No lorebooks yet. Import a SillyTavern World Info JSON to add lore to your stories.
               </p>
+            ) : visibleBooks.length === 0 ? (
+              <p className="text-gray-500 text-center py-12 border border-dashed border-gray-700 rounded-lg">
+                No lorebooks or entries match "{search.trim()}".
+              </p>
             ) : (
               <div className="space-y-2">
-                {lorebooks.map((b) => (
+                {visibleBooks.map((b) => (
                   <div key={b.id} className="flex items-center justify-between p-4 rounded-lg border border-gray-700 bg-gray-800/50">
                     <div className="flex items-center gap-3">
                       <span className="text-xl">📚</span>
@@ -131,6 +195,9 @@ export default function LorebookManager({ onBack }) {
                         <p className="text-xs text-gray-500">
                           {b.enabled_count}/{b.entry_count} entries enabled
                           {b.constant_count > 0 ? ` · ${b.constant_count} constant` : ''}
+                          {q && entryMatchCount(b.id) > 0 && (
+                            <span className="text-purple-400"> · {entryMatchCount(b.id)} matching {entryMatchCount(b.id) === 1 ? 'entry' : 'entries'}</span>
+                          )}
                         </p>
                       </div>
                     </div>
@@ -171,11 +238,29 @@ export default function LorebookManager({ onBack }) {
 
             <LorebookLinkEditor lorebookId={selected.id} />
 
-            <h3 className="text-lg font-semibold text-gray-200 mt-6 mb-3">
-              Entries <span className="text-sm font-normal text-gray-500">({selected.entries.length})</span>
-            </h3>
+            <div className="flex items-center justify-between gap-3 mt-6 mb-3 flex-wrap">
+              <h3 className="text-lg font-semibold text-gray-200">
+                Entries{' '}
+                <span className="text-sm font-normal text-gray-500">
+                  ({q ? `${visibleEntries.length} of ${selected.entries.length}` : selected.entries.length})
+                </span>
+              </h3>
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search entries…"
+                className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 w-64"
+                aria-label="Search entries"
+              />
+            </div>
+            {q && visibleEntries.length === 0 && (
+              <p className="text-gray-500 text-center py-8 border border-dashed border-gray-700 rounded-lg">
+                No entries match "{search.trim()}".
+              </p>
+            )}
             <div className="space-y-2">
-              {selected.entries.map((entry) => (
+              {visibleEntries.map((entry) => (
                 <div
                   key={entry.uid}
                   className={`p-3 rounded-lg border ${entry.enabled ? 'border-gray-700 bg-gray-800/50' : 'border-gray-800 bg-gray-900/50 opacity-60'}`}
