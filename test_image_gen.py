@@ -594,7 +594,7 @@ def test_prompt_writer_picks_template_and_pony_tags(tmp_path):
     cfg = {**backend._default_config(), "model_base": "Pony",
            "model_name": "m.safetensors", "style_suffix": "anime style"}
     prompt = asyncio.run(backend._write_image_prompt(cfg, "scene", "", sdk))
-    assert "DANBOORU" in captured["prompts"][0]
+    assert "BOORU-STYLE TAGS" in captured["prompts"][0]
     assert prompt == "score_9, score_8_up, score_7_up, 1girl, market square, smiling, anime style"
 
     # Illustrious: tag template, but no pony score tags.
@@ -608,7 +608,7 @@ def test_prompt_writer_picks_template_and_pony_tags(tmp_path):
     sdk = _make_sdk(reply="a bustling market at dawn", captured=captured)
     cfg = {**backend._default_config(), "model_base": "FLUX.1", "model_name": "m.safetensors"}
     prompt = asyncio.run(backend._write_image_prompt(cfg, "scene", "", sdk))
-    assert "DANBOORU" not in captured["prompts"][0]
+    assert "BOORU-STYLE TAGS" not in captured["prompts"][0]
     assert "vivid image-generation prompt" in captured["prompts"][0]
     assert prompt == "a bustling market at dawn"
 
@@ -2964,6 +2964,23 @@ def test_prompt_writer_applies_tag_usage_filter(tmp_path):
     prompt = asyncio.run(backend._write_image_prompt(
         cfg, "narration", "earlier", _make_sdk(reply=reply)))
     assert prompt == reply
+
+
+def test_legacy_tags_template_upgrades_on_load(tmp_path):
+    backend = _load_backend(tmp_path)
+
+    # A stored template equal to an old default follows the default.
+    cfg = backend._default_config()
+    cfg["prompt_template_tags"] = backend.LEGACY_PROMPT_TEMPLATES_TAGS[0]
+    backend._save_config(cfg)
+    assert backend._load_config()["prompt_template_tags"] \
+        == backend.DEFAULT_PROMPT_TEMPLATE_TAGS
+
+    # A customized template is left alone.
+    cfg["prompt_template_tags"] = "my custom template {narration} {history}"
+    backend._save_config(cfg)
+    assert backend._load_config()["prompt_template_tags"] \
+        == "my custom template {narration} {history}"
 
 
 def test_clean_character_tags_usage_filter(tmp_path):

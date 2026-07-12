@@ -178,7 +178,24 @@ EARLIER CONTEXT (for continuity only):
 LATEST SCENE (illustrate this):
 {narration}"""
 
-DEFAULT_PROMPT_TEMPLATE_TAGS = """You write prompts for an AI image generator that expects DANBOORU-STYLE TAGS. Turn the scene below into ONE comma-separated tag list depicting a single striking moment from the latest scene.
+DEFAULT_PROMPT_TEMPLATE_TAGS = """You write prompts for an AI image generator that expects BOORU-STYLE TAGS (danbooru and e621 conventions). Turn the scene below into ONE comma-separated tag list depicting a single striking moment from the latest scene.
+
+Rules:
+- Output comma-separated booru tags, most important first: subject count (1girl, 1boy, 2girls, no humans...), then appearance (hair, eyes, clothing, species), action/pose, expression, setting, lighting, mood, composition (close-up, from above, wide shot...).
+- Lowercase tag conventions: danbooru tags for human and anime-style subjects, e621 tags for anthro, feral, or creature subjects (anthro, feral, the species, fur and scale colors...). Mixing both vocabularies in one list is fine -- use whichever site's tag names the visual best.
+- Concrete visual tags only -- no story summary, no proper-noun lore the image model cannot know; describe what things LOOK like instead.
+- Output ONLY the tag list, no quotes, no preamble, 20-40 tags.
+
+EARLIER CONTEXT (for continuity only):
+{history}
+
+LATEST SCENE (illustrate this):
+{narration}"""
+
+# Earlier defaults of the tags template. A stored config still carrying one of
+# these verbatim was never customized, so it upgrades to the current default
+# on load; edited templates are left alone.
+LEGACY_PROMPT_TEMPLATES_TAGS = ("""You write prompts for an AI image generator that expects DANBOORU-STYLE TAGS. Turn the scene below into ONE comma-separated tag list depicting a single striking moment from the latest scene.
 
 Rules:
 - Output comma-separated booru tags, most important first: subject count (1girl, 1boy, 2girls, no humans...), then appearance (hair, eyes, clothing, species), action/pose, expression, setting, lighting, mood, composition (close-up, from above, wide shot...).
@@ -189,20 +206,20 @@ EARLIER CONTEXT (for continuity only):
 {history}
 
 LATEST SCENE (illustrate this):
-{narration}"""
+{narration}""",)
 
 DEFAULT_PONY_QUALITY_TAGS = "score_9, score_8_up, score_7_up"
 
 # Tag-trained checkpoints blend features badly when asked for several distinct
 # characters, so booru_subject_mode "single" narrows the prompt to one.
-BOORU_SINGLE_SUBJECT_RULE = """SINGLE SUBJECT RULE (MANDATORY): this image model renders one character far better than several, so depict exactly ONE. Pick the most relevant subject of the latest scene -- the character the moment centers on (acting, speaking, or being acted upon) -- and tag only them: solo, one subject-count tag (1girl, 1boy, 1other), then that character's appearance, pose, and expression. Never tag a second character's count or appearance; at most, imply others through the setting (a shadow, a doorway, an empty chair). A scene with no characters at all may be pure scenery (no humans)."""
+BOORU_SINGLE_SUBJECT_RULE = """SINGLE SUBJECT RULE (MANDATORY): this image model renders one character far better than several, so depict exactly ONE. Pick the most relevant subject of the latest scene -- the character the moment centers on (acting, speaking, or being acted upon) -- and tag only them: solo, one subject-count tag (1girl, 1boy, 1other -- or e621 style for anthro/feral subjects: anthro or feral plus male/female), then that character's appearance, pose, and expression. Never tag a second character's count or appearance; at most, imply others through the setting (a shadow, a doorway, an empty chair). A scene with no characters at all may be pure scenery (no humans)."""
 
 # Danbooru-trained checkpoints (Illustrious 1.x+, NoobAI; Pony less so) can
 # hold 2-3 distinct characters IF the prompt gives a correct subject-count tag
 # combo and keeps each character's tags in one contiguous, non-interleaved
 # group. This rule teaches the prompt writer that structure.
 BOORU_MULTI_SUBJECT_RULE = """MULTI-SUBJECT STRUCTURE (MANDATORY): when the moment involves more than one character, structure the tag list so a tag-trained model keeps them distinct:
-- Start with ONE correct subject-count tag combo: 2girls, 1boy 1girl, 2boys, 3girls, 2girls 1boy, 1girl 1other... Count only the characters actually depicted, 3 at most -- if more are present, depict the 2-3 the moment centers on and fold the rest into the setting (crowd, blurry background figures).
+- Start with ONE correct subject-count tag combo: 2girls, 1boy 1girl, 2boys, 3girls, 2girls 1boy, 1girl 1other... (for anthro/feral characters use e621 style instead: duo or group plus anthro/feral and male/female). Count only the characters actually depicted, 3 at most -- if more are present, depict the 2-3 the moment centers on and fold the rest into the setting (crowd, blurry background figures).
 - Then give EACH depicted character ONE CONTIGUOUS tag group, most central character first: lead with the traits that most distinguish them from the others in the image (hair color/length/style, eye color, species features like elf ears, horns, tail, fur), then outfit, then their own pose, expression, and action. NEVER interleave one character's traits with another's -- finish a character's group completely before starting the next.
 - After the character groups, add interaction and placement tags that bind them together: side-by-side, facing another, looking at another, holding hands, hand on another's shoulder, hug, height difference...
 - Finish with setting, lighting, mood, and composition tags as usual.
@@ -230,9 +247,9 @@ TAG_OUTPUT_BLACKLIST = frozenset({
     "high quality", "highres", "absurdres",
 })
 
-CHARACTER_TAG_PROMPT = """You write danbooru tags describing ONE character for an AI image generator. Distill the character sheet below into a comma-separated list of lowercase booru tags covering the character's PERMANENT PHYSICAL appearance ONLY.
+CHARACTER_TAG_PROMPT = """You write booru tags (danbooru and e621 conventions) describing ONE character for an AI image generator. Distill the character sheet below into a comma-separated list of lowercase booru tags covering the character's PERMANENT PHYSICAL appearance ONLY.
 
-Include (when stated or clearly implied): hair color, hair length and style, eye color, skin tone, species/race features (elf ears, horns, tail, wings, fur, scales, fangs), body build and height, age impression, and notable permanent marks (scars, tattoos, heterochromia, freckles).
+Include (when stated or clearly implied): hair color, hair length and style, eye color, skin tone, species/race features (elf ears, horns, tail, wings, fur, scales, fangs), body build and height, age impression, and notable permanent marks (scars, tattoos, heterochromia, freckles). For anthro or feral characters use e621 conventions: anthro or feral, the species, and fur/scale/feather colors and markings.
 STRICTLY EXCLUDE: clothing, armor, accessories, jewelry, weapons, held items, pose, expression, action, setting, lighting, quality tags (masterpiece, score_*...), and subject-count tags (1girl, 1boy, solo...).
 If the sheet does not state hair color or eye color, infer a plausible choice from the character's race and overall description instead of omitting them -- your output becomes this character's canonical look.
 
@@ -333,6 +350,10 @@ def _load_config() -> dict:
         cfg["booru_subject_mode"] = "single" if stored["booru_single_subject"] else "multi"
     if cfg.get("booru_subject_mode") not in BOORU_SUBJECT_MODES:
         cfg["booru_subject_mode"] = "single"
+    # A stored tags template that still equals an old default was never
+    # customized; keep it tracking the current default.
+    if cfg.get("prompt_template_tags") in LEGACY_PROMPT_TEMPLATES_TAGS:
+        cfg["prompt_template_tags"] = DEFAULT_PROMPT_TEMPLATE_TAGS
     if cfg.get("tag_usage_filter") not in TAG_USAGE_FILTER_MODES:
         cfg["tag_usage_filter"] = "off"
     try:

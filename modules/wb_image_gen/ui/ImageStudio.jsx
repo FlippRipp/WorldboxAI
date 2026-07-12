@@ -1657,7 +1657,7 @@ export default function ImageStudio({ onBack }) {
             <div className="text-xs text-gray-500 bg-gray-950/60 border border-gray-800 rounded-lg px-3 py-2">
               Selected model uses the{' '}
               <span className="text-purple-300 font-medium">
-                {promptStyle === 'tags' ? 'danbooru tag' : 'natural language'}
+                {promptStyle === 'tags' ? 'booru tag' : 'natural language'}
               </span>{' '}
               template{isPony ? ', with Pony quality tags prepended' : ''}. Detected from base model
               {draft.model_base ? ` "${draft.model_base}"` : ' / model name'} — Flux → natural language, Pony/Illustrious/NoobAI/Animagine → tags.
@@ -1725,7 +1725,7 @@ export default function ImageStudio({ onBack }) {
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <label className={`text-xs uppercase tracking-wider ${promptStyle === 'tags' ? 'text-purple-400' : 'text-gray-500'}`}>
-                Danbooru tag template (Pony / Illustrious / NoobAI){promptStyle === 'tags' ? ' — active' : ''}
+                Booru tag template (Pony / Illustrious / NoobAI){promptStyle === 'tags' ? ' — active' : ''}
               </label>
               <button
                 onClick={() => set('prompt_template_tags', config.default_prompt_template_tags)}
