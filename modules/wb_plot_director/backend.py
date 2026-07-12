@@ -11,6 +11,11 @@ injecting challenge scaled by the difficulty setting.
 The active thread is fully visible: a soft context line keeps the storyteller
 aware of it every turn, /plot and the sidebar widget show it to the player, and
 one-turn nudges fire only when the thread stalls or a natural opening appears.
+
+The player can suspend plot direction at any time (/plot suspend or the widget
+button): the context line, assessments, nudges, expiry, and generation all
+freeze until /plot resume, and the thread's lifespan clock shifts by the paused
+duration so it never expires the moment it wakes up.
 """
 import json
 
@@ -121,6 +126,8 @@ def _default_data() -> dict:
         "ignored_streak": 0,
         "pending_nudge": "",
         "last_nudge_turn": 0,
+        "suspended": False,
+        "suspended_turn": 0,
         "log": [],
     }
 
@@ -460,6 +467,7 @@ async def on_gather_context(state: dict, sdk) -> dict:
     thread = data.get("thread") or {}
     if (
         config.get("plot_enabled", True)
+        and not data.get("suspended")
         and data.get("status") == "active"
         and thread.get("status") == "active"
     ):
@@ -480,6 +488,10 @@ async def on_librarian(state: dict, sdk) -> dict | None:
 
     data = _own_data(state) or _default_data()
     if data.get("status") == "failed":
+        return None
+    # Suspended: freeze everything -- no assessments, no expiry, no generation.
+    # The pending nudge was cleared when the player suspended.
+    if data.get("suspended"):
         return None
 
     turn = state.get("turn", 0)
@@ -685,6 +697,51 @@ async def _command_regen(state: dict, sdk, data: dict) -> dict:
     }
 
 
+def _command_suspend(state: dict, data: dict) -> dict:
+    """Freeze plot direction: the librarian pass and the context line go quiet
+    until resume. The armed nudge is cleared -- it was written for a scene that
+    may be long gone by the time the player resumes."""
+    if not data or data.get("schema") != SCHEMA_VERSION:
+        return {"message": "[Plot] The story is still settling in -- try again next turn.", "signal": "end_turn"}
+    if data.get("suspended"):
+        return {"message": "[Plot] Plot direction is already suspended.", "signal": "end_turn"}
+    return {
+        "message": "[Plot] Plot direction suspended -- the thread is frozen until /plot resume.",
+        "signal": "end_turn",
+        "module_data": {MODULE_ID: {
+            "suspended": True,
+            "suspended_turn": state.get("turn", 0),
+            "pending_nudge": "",
+        }},
+    }
+
+
+def _command_resume(state: dict, data: dict) -> dict:
+    """Unfreeze plot direction. The active thread's creation turn shifts
+    forward by the paused duration so the expiry clock resumes where it
+    stopped instead of expiring the thread on the next librarian pass."""
+    if not data or data.get("schema") != SCHEMA_VERSION:
+        return {"message": "[Plot] The story is still settling in -- try again next turn.", "signal": "end_turn"}
+    if not data.get("suspended"):
+        return {"message": "[Plot] Plot direction is not suspended.", "signal": "end_turn"}
+
+    turn = state.get("turn", 0)
+    updates: dict = {"suspended": False, "suspended_turn": 0}
+    thread = data.get("thread") or {}
+    if thread.get("status") == "active":
+        paused = max(0, turn - int(data.get("suspended_turn", 0) or 0))
+        created = min(turn, int(thread.get("created_turn", 0) or 0) + paused)
+        updates["thread"] = _full_thread(**{
+            **{k: thread.get(k, v) for k, v in _empty_thread().items()},
+            "created_turn": created,
+        })
+    return {
+        "message": "[Plot] Plot direction resumed.",
+        "signal": "end_turn",
+        "module_data": {MODULE_ID: updates},
+    }
+
+
 PROFILE_USAGE = (
     "[Plot] Usage: /plot profile tone <text> | "
     "/plot profile themes <add|remove> <text> | "
@@ -786,7 +843,15 @@ async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
     if not config.get("plot_enabled", True):
         return {"message": "[Plot] Plot direction is inactive.", "signal": "end_turn"}
 
+    if args and args[0].lower() in ("suspend", "pause"):
+        return _command_suspend(state, data)
+
+    if args and args[0].lower() in ("resume", "unpause"):
+        return _command_resume(state, data)
+
     if args and args[0].lower() in ("regen", "reroll", "new"):
+        if data.get("suspended"):
+            return {"message": "[Plot] Plot direction is suspended -- /plot resume first.", "signal": "end_turn"}
         return await _command_regen(state, sdk, data)
 
     if args and args[0].lower() == "profile":
@@ -794,6 +859,11 @@ async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
 
     if data.get("status") == "failed":
         return {"message": "[Plot] Plot direction is inactive.", "signal": "end_turn"}
+    if data.get("suspended"):
+        return {
+            "message": f"[Plot] Suspended since turn {data.get('suspended_turn', 0)} -- /plot resume to continue.",
+            "signal": "end_turn",
+        }
     if data.get("status") != "active":
         return {"message": "[Plot] Watching how you play -- the first plot thread arrives shortly.", "signal": "end_turn"}
 

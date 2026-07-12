@@ -103,7 +103,7 @@
     "/plot": "on_command_plot"
   },
   "command_help": {
-    "/plot": "Show the active plot thread, momentum, and your story profile. '/plot regen' weaves a new thread; '/plot profile ...' edits your tone/themes/likes/dislikes."
+    "/plot": "Show the active plot thread, momentum, and your story profile. '/plot regen' weaves a new thread; '/plot suspend' freezes plot direction and '/plot resume' picks it back up; '/plot profile ...' edits your tone/themes/likes/dislikes."
   },
   "prompt_blocks": [
     {

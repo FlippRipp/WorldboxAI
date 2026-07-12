@@ -141,7 +141,10 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
   const legacy = data.schema !== 2;
   const thread = data.thread ?? {};
   const profile = data.profile ?? {};
+  const suspended = !legacy && data.suspended === true;
   const momentum = legacy ? 'observing' : (data.momentum ?? 'observing');
+  const momentumLabel = suspended ? 'suspended' : momentum;
+  const momentumStyle = suspended ? 'text-gray-500' : (MOMENTUM_STYLES[momentum] ?? 'text-gray-500');
   const hasThread = !legacy && data.status === 'active' && thread.status === 'active';
   const streak = data.ignored_streak ?? 0;
   const abandonAfter = config?.abandon_after ?? 4;
@@ -155,13 +158,15 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
     || (profile.themes ?? []).length > 0 || (profile.likes ?? []).length > 0
     || (profile.dislikes ?? []).length > 0;
 
-  const subtitle = hasThread
-    ? thread.title
-    : data.status === 'failed'
-      ? 'Inactive'
-      : legacy || data.status === 'observing'
-        ? 'Observing your story…'
-        : 'Weaving a new thread…';
+  const subtitle = suspended
+    ? (hasThread ? `⏸ ${thread.title}` : 'Suspended')
+    : hasThread
+      ? thread.title
+      : data.status === 'failed'
+        ? 'Inactive'
+        : legacy || data.status === 'observing'
+          ? 'Observing your story…'
+          : 'Weaving a new thread…';
 
   const saveTone = () => {
     if (toneDraft === null || toneDraft.trim() === tone) { setToneDraft(null); return; }
@@ -177,8 +182,8 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
       >
         <div className="flex items-center justify-between text-sm">
           <span className="text-gray-300 font-semibold">🎭 Plot</span>
-          <span className={`text-xs capitalize ${MOMENTUM_STYLES[momentum] ?? 'text-gray-500'}`}>
-            {momentum}
+          <span className={`text-xs capitalize ${momentumStyle}`}>
+            {momentumLabel}
           </span>
         </div>
         <div className="text-xs text-gray-500 truncate mt-1">{subtitle}</div>
@@ -191,8 +196,8 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
             <div className="flex items-center justify-between">
               <span className="text-gray-100 font-semibold text-base">Plot Thread</span>
               <div className="flex items-center gap-3">
-                <span className={`text-xs capitalize ${MOMENTUM_STYLES[momentum] ?? 'text-gray-500'}`}>
-                  {momentum}
+                <span className={`text-xs capitalize ${momentumStyle}`}>
+                  {momentumLabel}
                 </span>
                 <button
                   onClick={() => { setOpen(false); setEditing(false); }}
@@ -239,7 +244,7 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
                     />
                   ))}
                   <span className="text-[10px] text-gray-500 ml-1">
-                    {streak === 0 ? 'engaged' : `drifting ${streak}/${abandonAfter}`}
+                    {suspended ? 'frozen' : streak === 0 ? 'engaged' : `drifting ${streak}/${abandonAfter}`}
                   </span>
                 </div>
               </div>
@@ -310,16 +315,38 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
             )}
 
             {!legacy && data.status !== 'failed' && (
-              <div className="border-t border-gray-700 pt-3">
-                <button
-                  onClick={() => onCommand?.('/plot regen')}
-                  disabled={!onCommand}
-                  className="w-full py-2 rounded-lg bg-indigo-600/80 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-gray-100 text-xs font-semibold transition-colors"
-                >
-                  ↻ Weave a new thread
-                </button>
-                <div className="text-[10px] text-gray-600 mt-1.5 text-center">
-                  Closes the current thread and generates a fresh one from your profile.
+              <div className="border-t border-gray-700 pt-3 space-y-2">
+                {!suspended && (
+                  <div>
+                    <button
+                      onClick={() => onCommand?.('/plot regen')}
+                      disabled={!onCommand}
+                      className="w-full py-2 rounded-lg bg-indigo-600/80 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-gray-100 text-xs font-semibold transition-colors"
+                    >
+                      ↻ Weave a new thread
+                    </button>
+                    <div className="text-[10px] text-gray-600 mt-1.5 text-center">
+                      Closes the current thread and generates a fresh one from your profile.
+                    </div>
+                  </div>
+                )}
+                <div>
+                  <button
+                    onClick={() => onCommand?.(suspended ? '/plot resume' : '/plot suspend')}
+                    disabled={!onCommand}
+                    className={`w-full py-2 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold transition-colors ${
+                      suspended
+                        ? 'bg-emerald-600/80 hover:bg-emerald-500 text-gray-100'
+                        : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+                    }`}
+                  >
+                    {suspended ? '▶ Resume plot direction' : '⏸ Suspend plot direction'}
+                  </button>
+                  <div className="text-[10px] text-gray-600 mt-1.5 text-center">
+                    {suspended
+                      ? 'Picks the thread back up where it left off.'
+                      : 'Freezes the thread and all plot background calls until you resume.'}
+                  </div>
                 </div>
               </div>
             )}

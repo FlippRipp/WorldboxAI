@@ -487,6 +487,68 @@ def test_plot_regen_failure_keeps_current_thread():
     assert update["thread"]["status"] == "active"
 
 
+def test_suspend_freezes_librarian_context_and_regen():
+    backend = _load_backend()
+    data = _active_data(backend, created_turn=1, suspended=True, suspended_turn=2)
+
+    # No context line, no librarian pass (no LLM calls), no reroll.
+    gathered = asyncio.run(backend.on_gather_context(_state(data=data), _make_sdk([], {})))
+    assert "context_string" not in gathered
+
+    captured = {}
+    assert asyncio.run(backend.on_librarian(_state(turn=13, data=data), _make_sdk([], captured))) is None
+    assert captured == {}  # not even the turn-13 expiry fires while suspended
+
+    regen = asyncio.run(backend.on_command_plot(["regen"], _state(turn=6, data=data), _make_sdk([], captured)))
+    assert "suspended" in regen["message"]
+    assert "module_data" not in regen
+    assert captured == {}
+
+    status = asyncio.run(backend.on_command_plot([], _state(data=data), _make_sdk([], {})))
+    assert "Suspended since turn 2" in status["message"]
+
+
+def test_suspend_and_resume_commands():
+    backend = _load_backend()
+    data = _active_data(backend, created_turn=1, pending_nudge="A rumor spreads.")
+
+    result = asyncio.run(backend.on_command_plot(["suspend"], _state(turn=4, data=data), _make_sdk([], {})))
+    update = result["module_data"]["wb_plot_director"]
+    assert update["suspended"] is True
+    assert update["suspended_turn"] == 4
+    assert update["pending_nudge"] == ""  # stale nudge never fires after resume
+    data.update(update)
+
+    again = asyncio.run(backend.on_command_plot(["suspend"], _state(turn=5, data=data), _make_sdk([], {})))
+    assert "already suspended" in again["message"]
+    assert "module_data" not in again
+
+    # Resume 6 turns later: created_turn shifts by the paused duration, so the
+    # thread has the same remaining lifespan it had when it was frozen.
+    result = asyncio.run(backend.on_command_plot(["resume"], _state(turn=10, data=data), _make_sdk([], {})))
+    update = result["module_data"]["wb_plot_director"]
+    assert update["suspended"] is False
+    assert update["thread"]["created_turn"] == 7  # 1 + (10 - 4)
+    assert set(update["thread"]) == set(backend._empty_thread())
+    assert update["thread"]["title"] == "The Salt Baron's Ledger"
+    data.update(update)
+
+    noop = asyncio.run(backend.on_command_plot(["resume"], _state(turn=11, data=data), _make_sdk([], {})))
+    assert "not suspended" in noop["message"]
+    assert "module_data" not in noop
+
+
+def test_resume_between_threads_writes_no_thread():
+    backend = _load_backend()
+    data = backend._default_data()
+    data["suspended"] = True
+    data["suspended_turn"] = 3
+
+    result = asyncio.run(backend.on_command_plot(["resume"], _state(turn=8, data=data), _make_sdk([], {})))
+    update = result["module_data"]["wb_plot_director"]
+    assert update == {"suspended": False, "suspended_turn": 0}
+
+
 def test_ai_cannot_write_dislikes_and_contradicting_likes_are_dropped():
     backend = _load_backend()
     data = _active_data(backend)
