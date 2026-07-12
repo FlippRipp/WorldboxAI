@@ -311,6 +311,171 @@ def test_prompt_writing_step_retries(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Refusal handling (prompt-writer LLM + provider content filter)
+# ---------------------------------------------------------------------------
+
+def test_llm_refusal_detection(tmp_path):
+    backend = _load_backend(tmp_path)
+    refusals = (
+        "I'm sorry, I can't help with that.",
+        "I cannot assist with this request.",
+        "Sorry, but I can't create that image prompt.",
+        "I apologize, but this goes against my guidelines.",
+        "As an AI, I must decline.",
+        "I’m sorry, I can’t help with that.",   # curly apostrophes
+    )
+    for text in refusals:
+        assert backend._looks_like_llm_refusal(text), text
+    legit = (
+        "a knight rides through mist, moonlit forest, cinematic lighting",
+        "1girl, silver hair, green cloak, forest, from behind, wide shot",
+        # Refusal-ish words deep in a long prompt must not trip the check.
+        "a sprawling battlefield at dawn, banners torn, a soldier who cannot "
+        "help but weep over a fallen friend, dramatic light",
+    )
+    for text in legit:
+        assert not backend._looks_like_llm_refusal(text), text
+
+
+def test_writer_refusal_retried_with_fiction_reminder(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend.STEP_RETRY_BASE_DELAY_S = 0
+    _enable(backend, step_retries=1)
+    _fake_novita(backend)
+    captured = {"inputs": [], "n": 0}
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        captured["inputs"].append(prompt)
+        captured["n"] += 1
+        if captured["n"] == 1:
+            return "I'm sorry, I can't help with that."
+        return "a knight rides through mist"
+
+    sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
+
+    async def run():
+        backend._spawn_generation(
+            save_id="mystory", turn=1, narration="a scene", history="",
+            sdk=sdk, trigger="auto")
+        await asyncio.gather(*backend._tasks)
+
+    asyncio.run(run())
+    record = backend._read_index()[0]
+    assert record["status"] == "done"
+    assert record["image_prompt"] == "a knight rides through mist"
+    # First attempt runs the configured instructions untouched; only the
+    # retry after the refusal carries the fiction reminder.
+    assert captured["n"] == 2
+    assert "REMINDER" not in captured["inputs"][0]
+    assert "FICTIONAL interactive story" in captured["inputs"][1]
+
+
+def test_writer_refusal_exhausting_retries_marks_error(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend.STEP_RETRY_BASE_DELAY_S = 0
+    _enable(backend, step_retries=0)
+    _fake_novita(backend)
+
+    sdk = _make_sdk(reply="Sorry, I can't help with that request.")
+
+    async def run():
+        backend._spawn_generation(
+            save_id="mystory", turn=1, narration="a scene", history="",
+            sdk=sdk, trigger="auto")
+        await asyncio.gather(*backend._tasks)
+
+    asyncio.run(run())
+    record = backend._read_index()[0]
+    assert record["status"] == "error"
+    assert "refused" in record["error"]
+
+
+def test_provider_refusal_softens_prompt_and_retries(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend.STEP_RETRY_BASE_DELAY_S = 0
+    _enable(backend, step_retries=1)
+    _fake_novita(backend)
+    submitted = []
+    llm_inputs = []
+
+    async def submit(cfg, prompt):
+        submitted.append(prompt)
+        return "task-1"
+
+    async def poll(cfg, task_id):
+        if len(submitted) == 1:
+            raise backend.ProviderRefusal(
+                "The image provider refused this prompt (content policy): nsfw")
+        return "https://signed.example/ok.jpeg"
+
+    backend._novita_submit = submit
+    backend._novita_poll = poll
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        llm_inputs.append(prompt)
+        if "content filter" in prompt:
+            return "a tasteful moonlit duel, swords crossed"
+        return "a brutal moonlit duel"
+
+    sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
+
+    async def run():
+        backend._spawn_generation(
+            save_id="mystory", turn=1, narration="a scene", history="",
+            sdk=sdk, trigger="auto")
+        await asyncio.gather(*backend._tasks)
+
+    asyncio.run(run())
+    record = backend._read_index()[0]
+    assert record["status"] == "done"
+    # The refused submission was followed by the softened rewrite.
+    assert submitted == ["a brutal moonlit duel",
+                        "a tasteful moonlit duel, swords crossed"]
+    # The record reflects the prompt that actually produced the image.
+    assert record["image_prompt"] == "a tasteful moonlit duel, swords crossed"
+    assert record["image_prompts"] == ["a tasteful moonlit duel, swords crossed"]
+    # Writer call + softener call, nothing more.
+    assert len(llm_inputs) == 2
+    assert "content filter" in llm_inputs[1]
+    assert "a brutal moonlit duel" in llm_inputs[1]
+
+
+def test_provider_refusal_never_rewrites_verbatim_prompts(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend.STEP_RETRY_BASE_DELAY_S = 0
+    _enable(backend, step_retries=2)
+    _fake_novita(backend)
+    llm_calls = []
+
+    async def poll(cfg, task_id):
+        raise backend.ProviderRefusal(
+            "The image provider refused this prompt (content policy): nsfw")
+
+    backend._novita_poll = poll
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        llm_calls.append(prompt)
+        return "should never be used"
+
+    sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
+
+    async def run():
+        backend._spawn_generation(
+            save_id="mystory", turn=1, narration="", history="",
+            sdk=sdk, trigger="manual", prompt_override="exactly what I typed")
+        await asyncio.gather(*backend._tasks)
+
+    asyncio.run(run())
+    record = backend._read_index()[0]
+    # User-typed prompts fail immediately, untouched: no soften call, no
+    # retry burn-down, and the prompt on the record is what the user wrote.
+    assert record["status"] == "error"
+    assert "content policy" in record["error"]
+    assert record["image_prompt"] == "exactly what I typed"
+    assert llm_calls == []
+
+
+# ---------------------------------------------------------------------------
 # Parallel images (image_num)
 # ---------------------------------------------------------------------------
 
