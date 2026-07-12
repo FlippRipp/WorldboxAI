@@ -106,8 +106,11 @@ export function useWebSocket(onStateChange, onLLMCall) {
         setIsReconnecting(false);
         reconnectDelayRef.current = 3000;
         if (hadConnectedRef.current) {
-          // Reconnect: any in-flight turn died with the old socket. Drop the
-          // stale stream and ask the server to replay authoritative state.
+          // Reconnect: an in-flight turn keeps generating server-side. Drop
+          // the stale local stream and ask the server to replay authoritative
+          // state — if a turn is still running it answers with a
+          // `generation_snapshot` that repaints the stream, and live tokens
+          // resume on this socket.
           cancelFlush();
           setCurrentStream(null);
           setCurrentReasoning(null);
@@ -215,6 +218,40 @@ export function useWebSocket(onStateChange, onLLMCall) {
         reasoningRef.current = '';
         setMessages(prev => [...prev, { role: 'system', content: data.message || 'Turn failed.', error: true }]);
         if (data.onError) data.onError(data);
+      } else if (data.type === 'generation_snapshot') {
+        // A turn survived a disconnect (or page reload) and is still running
+        // server-side: repaint everything streamed so far and resume the
+        // generating UI. The turn's own `done`/`error` will land on this
+        // socket and finalize as usual.
+        cancelFlush();
+        if (data.input && data.action === 'turn') {
+          // The pending player message isn't in the saved transcript yet
+          // (it's only persisted when the turn completes), so restore its
+          // bubble unless it's already painted.
+          setMessages(prev => {
+            const last = prev[prev.length - 1];
+            if (last && last.role === 'user' && last.content === data.input) return prev;
+            return [...prev, { role: 'user', content: data.input }];
+          });
+        }
+        if (data.narration_complete) {
+          // Narration finished while we were away; reader/librarian still run.
+          streamRef.current = '';
+          reasoningRef.current = '';
+          setCurrentStream(null);
+          setCurrentReasoning(null);
+          setPostProcessing(true);
+          if (data.story) {
+            setMessages(prev => [...prev, { role: 'assistant', content: data.story, reasoning: data.reasoning || null }]);
+          }
+        } else {
+          streamRef.current = data.story || '';
+          reasoningRef.current = data.reasoning || '';
+          setCurrentStream(streamRef.current);
+          setCurrentReasoning(reasoningRef.current || null);
+          setPostProcessing(false);
+        }
+        setPipelineStatus(data.status || null);
       } else if (data.type === 'state_load') {
         const chatMessages = data.chat_messages || [];
         if (chatMessages.length > 0) {

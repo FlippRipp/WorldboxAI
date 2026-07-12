@@ -80,6 +80,144 @@ llm_inspector = LLMInspector()
 engine.llm.set_inspector(llm_inspector)
 
 
+class ChatHub:
+    """Owns the chat client socket and the running turn, independently of each
+    other. A turn must survive its socket: if the client disconnects (closed
+    tab, sleeping laptop, network blip) mid-generation, the turn keeps running
+    headless, saves normally, and the client catches up on reconnect — either
+    live (re-attached stream via `snapshot`) or from the saved transcript.
+    Single-client by design, like the rest of the app: a newer connection
+    simply replaces the socket the stream goes to.
+    """
+
+    def __init__(self):
+        self.ws: Optional[WebSocket] = None
+        self.turn_task: Optional[asyncio.Task] = None
+        self.turn_action: str = ""
+        self.turn_input: str = ""
+        self.story_parts: list[str] = []
+        self.reasoning_parts: list[str] = []
+        # Set by message_complete: narration is final but reader/librarian
+        # are still running.
+        self.narration: Optional[dict] = None
+        self.status: Optional[dict] = None
+        # Terminal payloads (error / turn_stopped) that couldn't be delivered
+        # because no client was connected. State replay can't convey these, so
+        # they're held for the next sync.
+        self.undelivered: list[dict] = []
+
+    def turn_running(self) -> bool:
+        return self.turn_task is not None and not self.turn_task.done()
+
+    def begin_turn(self, action: str, input_text: str):
+        self.turn_action = action
+        self.turn_input = input_text
+        self.story_parts = []
+        self.reasoning_parts = []
+        self.narration = None
+        self.status = None
+        self.undelivered = []
+
+    def attach(self, websocket: WebSocket):
+        self.ws = websocket
+
+    def detach(self, websocket: WebSocket):
+        # Only clear our reference if this socket is still the active one — a
+        # newer connection may already have replaced it.
+        if self.ws is websocket:
+            self.ws = None
+
+    async def send(self, payload: dict) -> bool:
+        """Best-effort send to the active client. No client (or a socket that
+        dies mid-send) is not an error — the turn keeps generating headless.
+        Never raises, so a disconnect can't kill the generation pipeline."""
+        ws = self.ws
+        if ws is None:
+            return False
+        try:
+            await ws.send_json(payload)
+            return True
+        except Exception:
+            self.detach(ws)
+            return False
+
+    async def send_or_queue(self, payload: dict):
+        if not await self.send(payload):
+            self.undelivered.append(payload)
+
+    async def flush_undelivered(self):
+        pending, self.undelivered = self.undelivered, []
+        for payload in pending:
+            await self.send(payload)
+
+    def snapshot(self) -> dict:
+        """The in-flight turn condensed into one message, so a client that
+        (re)connected mid-generation can repaint it and pick up the live
+        stream from there."""
+        if self.narration is not None:
+            story = self.narration["content"]
+            reasoning = self.narration["reasoning"]
+        else:
+            story = "".join(self.story_parts)
+            reasoning = "".join(self.reasoning_parts)
+        return {
+            "type": "generation_snapshot",
+            "action": self.turn_action,
+            "input": self.turn_input,
+            "story": story,
+            "reasoning": reasoning,
+            "narration_complete": self.narration is not None,
+            "status": self.status,
+        }
+
+
+chat_hub = ChatHub()
+
+
+async def _stream_token(token: str):
+    chat_hub.story_parts.append(token)
+    await chat_hub.send({"type": "token", "content": token})
+
+
+async def _stream_reasoning(token: str):
+    chat_hub.reasoning_parts.append(token)
+    await chat_hub.send({"type": "reasoning_token", "content": token})
+
+
+async def _stream_message_complete(content: str, reasoning: str):
+    chat_hub.narration = {"content": content, "reasoning": reasoning}
+    await chat_hub.send({
+        "type": "message_complete",
+        "content": content,
+        "reasoning": reasoning,
+    })
+
+
+async def _stream_status(stage: str, label: str):
+    chat_hub.status = {"stage": stage, "label": label}
+    await chat_hub.send({"type": "status", "stage": stage, "label": label})
+
+
+# Bound once at module level (not per connection): the pipeline resolves these
+# at call time, so a reconnect redirects the stream to the new socket simply
+# by the hub swapping which websocket it sends to.
+engine.sdk.ui.on_token = _stream_token
+engine.sdk.ui.on_reasoning_token = _stream_reasoning
+engine.sdk.ui.on_message_complete = _stream_message_complete
+engine.sdk.ui.on_status = _stream_status
+
+
+async def _broadcast_inspector_call(record):
+    try:
+        payload = llm_inspector._record_to_dict(record) if hasattr(llm_inspector, "_record_to_dict") else {}
+        await chat_hub.send({"type": "llm_call", "call": payload})
+    except Exception:
+        pass
+
+
+llm_inspector.set_ws_broadcast(_broadcast_inspector_call)
+
+
 class CreateSaveRequest(BaseModel):
     save_id: str
     world_id: Optional[str] = None
@@ -1540,36 +1678,7 @@ async def get_character_module_defaults(request: ModuleDefaultsRequest):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     print("WebSocket client connected.")
-    
-    # Setup streaming callbacks
-    async def stream_token(token: str):
-        await websocket.send_json({"type": "token", "content": token})
-
-    async def stream_reasoning(token: str):
-        await websocket.send_json({"type": "reasoning_token", "content": token})
-
-    async def stream_message_complete(content: str, reasoning: str):
-        await websocket.send_json({
-            "type": "message_complete",
-            "content": content,
-            "reasoning": reasoning,
-        })
-
-    async def stream_status(stage: str, label: str):
-        await websocket.send_json({"type": "status", "stage": stage, "label": label})
-
-    engine.sdk.ui.on_token = stream_token
-    engine.sdk.ui.on_reasoning_token = stream_reasoning
-    engine.sdk.ui.on_message_complete = stream_message_complete
-    engine.sdk.ui.on_status = stream_status
-
-    async def broadcast_inspector_call(record):
-        try:
-            await websocket.send_json({"type": "llm_call", "call": llm_inspector._record_to_dict(record) if hasattr(llm_inspector, '_record_to_dict') else {}})
-        except Exception:
-            pass
-
-    llm_inspector.set_ws_broadcast(broadcast_inspector_call)
+    chat_hub.attach(websocket)
 
     async def handle_intro():
         state = session_manager.state
@@ -1594,7 +1703,7 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 intro_result = await engine.generate_intro(
                     state,
-                    streaming_callback=stream_token,
+                    streaming_callback=_stream_token,
                 )
                 intro_text = intro_result["content"]
                 intro_reasoning = intro_result.get("reasoning", "")
@@ -1624,7 +1733,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             _json.dump(scenario_data, f, indent=2, ensure_ascii=False)
             except Exception as exc:
                 print(f"Error generating intro: {exc}")
-                await websocket.send_json({
+                await chat_hub.send_or_queue({
                     "type": "error",
                     "code": "intro_failed",
                     "message": "Failed to generate the opening scene.",
@@ -1633,12 +1742,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
                 return
         else:
-            await websocket.send_json({
+            await chat_hub.send({
                 "type": "state_load",
                 "chat_messages": state.get("chat_messages", []),
             })
+            # A client that reopened the story missed any terminal event from
+            # a turn that ended while it was gone (error, stopped turn).
+            await chat_hub.flush_undelivered()
         state["swipes"] = session_manager.swipes_meta()
-        await websocket.send_json({"type": "done", "state": state})
+        await chat_hub.send({"type": "done", "state": state})
 
     def restore_after_aborted_regenerate():
         # `prepare_regenerate` rolls the workspace back to before the last turn,
@@ -1655,7 +1767,7 @@ async def websocket_endpoint(websocket: WebSocket):
         try:
             regen_turn = session_manager.prepare_regenerate()
         except (ValueError, FileNotFoundError) as exc:
-            await websocket.send_json({
+            await chat_hub.send({
                 "type": "error", "code": "regenerate_unavailable",
                 "message": str(exc), "detail": str(exc),
                 "state": session_manager.state,
@@ -1669,13 +1781,13 @@ async def websocket_endpoint(websocket: WebSocket):
             active_state = session_manager.save_completed_turn(final_state)
             session_manager.add_regenerated_swipe()
             active_state["swipes"] = session_manager.swipes_meta()
-            await websocket.send_json({"type": "done", "state": active_state})
+            await chat_hub.send({"type": "done", "state": active_state})
         except asyncio.CancelledError:
             restore_after_aborted_regenerate()
             raise
         except LLMProviderError as exc:
             restore_after_aborted_regenerate()
-            await websocket.send_json({
+            await chat_hub.send_or_queue({
                 "type": "error", "code": "llm_provider_unavailable",
                 "message": "The AI provider is temporarily unavailable. Please try again in a moment.",
                 "detail": str(exc), "state": session_manager.state,
@@ -1683,7 +1795,7 @@ async def websocket_endpoint(websocket: WebSocket):
         except Exception as exc:
             print(f"Unexpected error during regenerate: {exc}")
             restore_after_aborted_regenerate()
-            await websocket.send_json({
+            await chat_hub.send_or_queue({
                 "type": "error", "code": "regenerate_failed",
                 "message": "Regeneration failed.", "detail": str(exc),
                 "state": session_manager.state,
@@ -1700,9 +1812,12 @@ async def websocket_endpoint(websocket: WebSocket):
             generated = await engine.generate_auto_player_action(session_manager.state, text)
             if generated:
                 text = generated
+                # The generated action is what actually enters the story, so a
+                # reconnect snapshot must echo it, not the typed guidance.
+                chat_hub.turn_input = generated
                 # Show the generated action in the client as the user message
                 # (replacing any locally echoed guidance text).
-                await websocket.send_json({"type": "player_action", "content": generated})
+                await chat_hub.send({"type": "player_action", "content": generated})
         session_manager.set_input(text)
         engine.set_memory_path(session_manager.get_memory_path())
         # ensure_memory first: after a server restart engine.memory is None and
@@ -1719,12 +1834,14 @@ async def websocket_endpoint(websocket: WebSocket):
             session_manager.begin_turn_swipes()
             active_state["swipes"] = session_manager.swipes_meta()
 
-            # Send final completion signal with the updated state
-            await websocket.send_json({"type": "done", "state": active_state})
+            # Send final completion signal with the updated state. If the
+            # client is gone this is a no-op: the turn is already saved, so a
+            # later sync replays it from authoritative state.
+            await chat_hub.send({"type": "done", "state": active_state})
         except LLMProviderError as exc:
             print(f"LLM provider error during WebSocket turn: {exc}")
             session_manager.set_input("")
-            await websocket.send_json({
+            await chat_hub.send_or_queue({
                 "type": "error",
                 "code": "llm_provider_unavailable",
                 "message": "The AI provider is temporarily unavailable. Please try again in a moment.",
@@ -1734,7 +1851,7 @@ async def websocket_endpoint(websocket: WebSocket):
         except Exception as exc:
             print(f"Unexpected error during WebSocket turn: {exc}")
             session_manager.set_input("")
-            await websocket.send_json({
+            await chat_hub.send_or_queue({
                 "type": "error",
                 "code": "turn_failed",
                 "message": "The turn failed before it could be saved.",
@@ -1826,14 +1943,16 @@ async def websocket_endpoint(websocket: WebSocket):
             session_manager.save_manager.save_turn(
                 session_manager.active_save_id, state, state.get("turn", 0)
             )
-            await websocket.send_json({
+            # Command output never enters the transcript, so state replay can't
+            # resurface it — queue it if the client is gone.
+            await chat_hub.send_or_queue({
                 "type": "command_result",
                 "command": text,
                 "name": manifest.get("name", mod_id),
                 "icon": manifest.get("icon"),
                 "message": message or "(no output)",
             })
-            await websocket.send_json({"type": "state_update", "state": dict(state)})
+            await chat_hub.send({"type": "state_update", "state": dict(state)})
             return True
 
         return False
@@ -1843,7 +1962,7 @@ async def websocket_endpoint(websocket: WebSocket):
         # Every action generates into the active save; without one there is
         # nowhere to save, so refuse instead of failing mid-pipeline.
         if session_manager.active_save_id is None:
-            await websocket.send_json({
+            await chat_hub.send({
                 "type": "error",
                 "code": "no_active_save",
                 "message": "No story is loaded. Create or load a story first.",
@@ -1865,37 +1984,32 @@ async def websocket_endpoint(websocket: WebSocket):
             # regenerate) so the client can restore the composer.
             print("Turn cancelled by client stop request.")
             session_manager.set_input("")
-            try:
-                state = dict(session_manager.state)
-                state["swipes"] = session_manager.swipes_meta()
-                await websocket.send_json({
-                    "type": "turn_stopped",
-                    "input": data.get("text", ""),
-                    "state": state,
-                })
-            except Exception:
-                pass
+            state = dict(session_manager.state)
+            state["swipes"] = session_manager.swipes_meta()
+            await chat_hub.send_or_queue({
+                "type": "turn_stopped",
+                "input": data.get("text", ""),
+                "state": state,
+            })
             raise
         except Exception as exc:
             # The handlers report their own errors, so this is reached only by
-            # failures outside their try blocks (or sends failing after a
-            # disconnect). Still tell the client — a silent task death would
-            # leave it waiting for a `done` that never comes.
+            # failures outside their try blocks. Still tell the client — a
+            # silent task death would leave it waiting for a `done` that never
+            # comes.
             print(f"Unhandled error in turn task: {exc}")
-            try:
-                await websocket.send_json({
-                    "type": "error",
-                    "code": "turn_failed",
-                    "message": "The turn failed unexpectedly.",
-                    "detail": str(exc),
-                    "state": session_manager.state,
-                })
-            except Exception:
-                pass
+            await chat_hub.send_or_queue({
+                "type": "error",
+                "code": "turn_failed",
+                "message": "The turn failed unexpectedly.",
+                "detail": str(exc),
+                "state": session_manager.state,
+            })
 
-    # Turns run as a cancellable task so the receive loop stays responsive:
-    # a {"action": "stop"} message can interrupt generation mid-stream.
-    turn_task: Optional[asyncio.Task] = None
+    # Turns run as a cancellable task (held by the hub, not this connection)
+    # so the receive loop stays responsive: a {"action": "stop"} message can
+    # interrupt generation mid-stream — and the task outlives this socket if
+    # the client drops.
     try:
         while True:
             data = await websocket.receive_json()
@@ -1904,8 +2018,8 @@ async def websocket_endpoint(websocket: WebSocket):
             action = data.get("action", "turn")
 
             if action == "stop":
-                if turn_task and not turn_task.done():
-                    turn_task.cancel()
+                if chat_hub.turn_running():
+                    chat_hub.turn_task.cancel()
                 continue
 
             if action == "sync":
@@ -1913,28 +2027,50 @@ async def websocket_endpoint(websocket: WebSocket):
                 # state without generating anything. Cheap, so it runs inline.
                 state = dict(session_manager.state)
                 state["swipes"] = session_manager.swipes_meta()
-                await websocket.send_json({
+                await chat_hub.send({
                     "type": "state_load",
                     "chat_messages": state.get("chat_messages", []),
                 })
-                await websocket.send_json({"type": "done", "state": state})
+                await chat_hub.flush_undelivered()
+                if chat_hub.turn_running():
+                    # The turn the old socket started is still generating.
+                    # Repaint it and let its live stream (already redirected
+                    # here by the hub) continue; its own done/error terminates
+                    # the client's generating state, so no `done` now.
+                    await chat_hub.send(chat_hub.snapshot())
+                else:
+                    await chat_hub.send({"type": "done", "state": state})
                 continue
 
-            if turn_task and not turn_task.done():
-                await websocket.send_json({
-                    "type": "error",
-                    "code": "busy",
-                    "message": "A turn is already in progress.",
-                })
+            if chat_hub.turn_running():
+                if action == "intro":
+                    # A page reload mid-generation boots with a quiet intro.
+                    # Answer like a sync instead of `busy`, so the client
+                    # re-attaches to the running turn instead of erroring.
+                    state = dict(session_manager.state)
+                    await chat_hub.send({
+                        "type": "state_load",
+                        "chat_messages": state.get("chat_messages", []),
+                    })
+                    await chat_hub.send(chat_hub.snapshot())
+                else:
+                    await chat_hub.send({
+                        "type": "error",
+                        "code": "busy",
+                        "message": "A turn is already in progress.",
+                    })
                 continue
 
-            turn_task = asyncio.create_task(run_action(data))
+            chat_hub.begin_turn(action, data.get("text", ""))
+            chat_hub.turn_task = asyncio.create_task(run_action(data))
 
     except WebSocketDisconnect:
         print("WebSocket client disconnected.")
     finally:
-        if turn_task and not turn_task.done():
-            turn_task.cancel()
+        # Deliberately do NOT cancel the running turn here: generation must
+        # survive a disconnect so the finished turn is saved and waiting when
+        # the client returns. Only an explicit stop cancels it.
+        chat_hub.detach(websocket)
 
 
 # === Provider Management Routes ===
