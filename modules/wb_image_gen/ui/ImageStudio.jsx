@@ -1273,6 +1273,8 @@ export default function ImageStudio({ onBack }) {
         pony_quality_tags: draft.pony_quality_tags,
         booru_subject_mode: draft.booru_subject_mode || 'auto',
         booru_break_separator: draft.booru_break_separator === true,
+        tag_usage_filter: draft.tag_usage_filter || 'off',
+        tag_usage_min_count: Number(draft.tag_usage_min_count) || 0,
         style_suffix: draft.style_suffix,
         character_reference_enabled: draft.character_reference_enabled !== false,
         player_in_images: draft.player_in_images || 'show',
