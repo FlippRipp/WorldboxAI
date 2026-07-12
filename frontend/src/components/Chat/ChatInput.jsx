@@ -3,13 +3,17 @@ import { useState, useCallback, useEffect, useRef, useLayoutEffect } from 'react
 // Grow with content up to this cap, then scroll internally. Matches max-h-32.
 const MAX_HEIGHT = 128;
 
+// Unsent composer text, mirrored to localStorage so it survives Android
+// killing the backgrounded PWA (relaunching is a full reload).
+const DRAFT_KEY = 'wb_draft';
+
 // The composer is still "typing a command name" while the text is a single
 // token that starts with "/" (no space yet). Once a space is typed the player
 // has moved on to arguments and the menu closes.
 const commandQuery = (text) => (/^\/\S*$/.test(text) ? text.toLowerCase() : null);
 
 export default function ChatInput({ commands = [], onSend, onContinue, onStop, onEditLast, onSwipePrev, onSwipeNext, onComposerFocus, restoredInput, busy, disabled }) {
-  const [inputValue, setInputValue] = useState('');
+  const [inputValue, setInputValue] = useState(() => localStorage.getItem(DRAFT_KEY) || '');
   const [dismissed, setDismissed] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const taRef = useRef(null);
@@ -34,6 +38,12 @@ export default function ChatInput({ commands = [], onSend, onContinue, onStop, o
   useEffect(() => {
     if (restoredInput?.text) setInputValue(restoredInput.text);
   }, [restoredInput]);
+
+  // Keep the draft mirror current; sending clears the value, which removes it.
+  useEffect(() => {
+    if (inputValue) localStorage.setItem(DRAFT_KEY, inputValue);
+    else localStorage.removeItem(DRAFT_KEY);
+  }, [inputValue]);
 
   // Auto-grow: follow the content height. Keyed on the value so it covers
   // typing, restored input, and the reset to one row after send.

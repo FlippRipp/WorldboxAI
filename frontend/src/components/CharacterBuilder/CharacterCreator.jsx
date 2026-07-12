@@ -4,6 +4,20 @@ import CharacterModuleForm from './CharacterModuleForm';
 import ModuleTogglePanel from '../shared/ModuleTogglePanel';
 import ModuleInline from '../shared/ModuleInline';
 
+// The in-progress form for a NEW character, mirrored to localStorage so it
+// survives Android killing the backgrounded PWA (relaunching is a full
+// reload). Editing an existing character reloads the server copy instead.
+// Cleared on save and on backing out of the editor.
+const DRAFT_KEY = 'wb_character_draft';
+
+function readCharacterDraft() {
+  try {
+    return JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null') || null;
+  } catch {
+    return null;
+  }
+}
+
 function AutoTextarea({ value, onChange, disabled, minRows = 3, placeholder }) {
   const ref = useRef(null);
   const adjustHeight = useCallback(() => {
@@ -28,6 +42,8 @@ function AutoTextarea({ value, onChange, disabled, minRows = 3, placeholder }) {
 }
 
 export default function CharacterCreator({ onBack, onSaved, editCharacterId, initialData }) {
+  // Read once per mount; only a new character restores from the draft.
+  const [draft] = useState(() => (editCharacterId ? null : readCharacterDraft()));
   const [modules, setModules] = useState([]);
   const [moduleDefaults, setModuleDefaults] = useState({});
   const [loading, setLoading] = useState(false);
@@ -38,17 +54,17 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
 
   // Generic generation context contributed by modules (e.g. wb_worldgen reports
   // { world_id }). Merged from each enabled module's character_context widget.
-  const [moduleContext, setModuleContext] = useState({});
-  const [gender, setGender] = useState('');
-  const [race, setRace] = useState('');
-  const [name, setName] = useState('');
-  const [shortAppearance, setShortAppearance] = useState('');
-  const [fullAppearance, setFullAppearance] = useState('');
-  const [concept, setConcept] = useState('');
-  const [backstory, setBackstory] = useState('');
-  const [moduleData, setModuleData] = useState({});
-  const [saveId, setSaveId] = useState('');
-  const [enabledModules, setEnabledModules] = useState(() => new Set());
+  const [moduleContext, setModuleContext] = useState(() => draft?.moduleContext || {});
+  const [gender, setGender] = useState(draft?.gender || '');
+  const [race, setRace] = useState(draft?.race || '');
+  const [name, setName] = useState(draft?.name || '');
+  const [shortAppearance, setShortAppearance] = useState(draft?.shortAppearance || '');
+  const [fullAppearance, setFullAppearance] = useState(draft?.fullAppearance || '');
+  const [concept, setConcept] = useState(draft?.concept || '');
+  const [backstory, setBackstory] = useState(draft?.backstory || '');
+  const [moduleData, setModuleData] = useState(() => draft?.moduleData || {});
+  const [saveId, setSaveId] = useState(draft?.saveId || '');
+  const [enabledModules, setEnabledModules] = useState(() => new Set(draft?.enabledModules || []));
 
   useEffect(() => {
     api.getModules()
@@ -57,13 +73,48 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
         setModules(mods);
         // Default: enable every module that contributes to character creation —
         // either a module-data form (character_creation) or a generation-context
-        // widget (character_context, e.g. the world picker).
-        setEnabledModules(new Set(
-          mods.filter(m => m.has_character_creation || m.character_context).map(m => m.id)
-        ));
+        // widget (character_context, e.g. the world picker). A restored draft
+        // keeps its own toggle choices instead.
+        if (!draft?.enabledModules) {
+          setEnabledModules(new Set(
+            mods.filter(m => m.has_character_creation || m.character_context).map(m => m.id)
+          ));
+        }
       })
       .catch(() => {});
   }, []);
+
+  // Mirror the new-character form to the draft as it changes. Written even
+  // while pristine (module defaults land immediately anyway); restoring an
+  // empty draft is indistinguishable from a fresh form, and save/back clear it.
+  useEffect(() => {
+    if (editCharacterId) return;
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({
+      moduleContext,
+      gender,
+      race,
+      name,
+      shortAppearance,
+      fullAppearance,
+      concept,
+      backstory,
+      moduleData,
+      saveId,
+      enabledModules: Array.from(enabledModules),
+    }));
+  }, [editCharacterId, moduleContext, gender, race, name, shortAppearance,
+    fullAppearance, concept, backstory, moduleData, saveId, enabledModules]);
+
+  // Backing out of an existing character's edit must not clear an unrelated
+  // new-character draft.
+  const clearDraft = () => {
+    if (!editCharacterId) localStorage.removeItem(DRAFT_KEY);
+  };
+
+  const handleBack = () => {
+    clearDraft();
+    onBack?.();
+  };
 
   const toggleModule = (modId, on) => {
     // Note: moduleData is intentionally retained when a module is disabled, so
@@ -212,6 +263,7 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
         module_data: moduleData,
       });
       if (result.saved) {
+        clearDraft();
         onSaved?.();
       }
     } catch (e) {
@@ -232,7 +284,7 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
       <div className="w-full max-w-2xl mx-auto space-y-6">
         <div className="flex items-center justify-between">
           <button
-            onClick={onBack}
+            onClick={handleBack}
             className="flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

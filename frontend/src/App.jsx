@@ -55,14 +55,59 @@ function PlaceholderMode({ title, onBack }) {
 }
 
 const ONBOARDING_DONE_KEY = 'wb_onboarding_done';
-// The save id of the story currently open, kept in sessionStorage so a page
-// reload can drop the player straight back in. Mobile browsers (Android
-// especially) discard background tabs under memory pressure; returning to the
-// tab reloads the page, which would otherwise reset to the main menu.
-const RESUME_KEY = 'wb_active_story';
+// The screen that was open when the page last unloaded, kept in localStorage
+// so the next launch can drop the player straight back in. Android kills the
+// backgrounded PWA under memory pressure, and relaunching it from the home
+// screen is a brand-new browsing session (sessionStorage comes up empty) that
+// would otherwise reset to the main menu. Shape: { mode, saveId?,
+// editCharacterId? }; removed while on the menu, so a deliberate exit still
+// lands there.
+const UI_STATE_KEY = 'wb_ui_state';
+
+// Screens that restore by just setting the mode again: they carry no client
+// context and (re)fetch everything they show from the server on mount.
+// 'storyteller-game' and 'character-create' are handled separately — they
+// need an async load before the screen can paint. Module full-screen modes
+// ('module:{modId}:{modeId}') are also plain restores.
+const PLAIN_MODES = new Set([
+  'storyteller-select',
+  'settings',
+  'model-settings',
+  'prompt-studio',
+  'scenario-manager',
+  'lorebook-manager',
+  'character-creator',
+]);
+
+// Read and validate the persisted UI state; anything unrecognized (corrupt
+// JSON, a mode this build no longer has, a game marker without a save id)
+// restores to the menu instead of a blank screen.
+function readSavedUiState() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(UI_STATE_KEY) || 'null');
+    const mode = saved?.mode;
+    if (typeof mode !== 'string') return null;
+    if (mode === 'storyteller-game') return saved.saveId ? saved : null;
+    if (mode === 'character-create') return saved.editCharacterId ? saved : null;
+    if (PLAIN_MODES.has(mode) || mode.startsWith('module:')) return { mode };
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 function AppContent() {
-  const [currentMode, setCurrentMode] = useState(null);
+  // Captured before any effect can overwrite it: the screen that was open
+  // when the page last unloaded (see UI_STATE_KEY). Plain screens restore
+  // synchronously below; the game and the character editor need data loaded
+  // first, so they go through the async-restore effect while `resuming`
+  // holds the menu back.
+  const [savedUiState] = useState(readSavedUiState);
+  const asyncRestore =
+    savedUiState?.mode === 'storyteller-game' || savedUiState?.mode === 'character-create'
+      ? savedUiState
+      : null;
+  const [currentMode, setCurrentMode] = useState(asyncRestore ? null : savedUiState?.mode ?? null);
   // First-launch onboarding: null = checking, true = show wizard, false = no.
   // Shown once, only when no AI provider is configured anywhere (fresh
   // install); a returning user whose key broke gets the menu card instead.
@@ -73,11 +118,7 @@ function AppContent() {
   const [editCharacterId, setEditCharacterId] = useState(null);
   const [editCharacterData, setEditCharacterData] = useState(null);
   const [gameState, setGameState] = useState({});
-  // Captured before any effect can clear it: the story that was open when the
-  // page last unloaded (see RESUME_KEY). Non-null means "reload mid-story" —
-  // hold the menu back and jump straight back into the game.
-  const [resumeSaveId] = useState(() => sessionStorage.getItem(RESUME_KEY));
-  const [resuming, setResuming] = useState(resumeSaveId != null);
+  const [resuming, setResuming] = useState(asyncRestore != null);
 
   const handleStateFromServer = useCallback((state) => {
     setGameState(prev => ({
@@ -256,33 +297,56 @@ function AppContent() {
     setCurrentMode('storyteller-game');
   }, [session]);
 
-  // Keep the resume marker in sync: set while a story is open (following the
-  // active save across branches), cleared when the player exits to the menu.
+  // Keep the persisted UI state in sync: which screen is open, plus the save
+  // (following the active save across branches) or character it points at.
+  // Removed when the player exits to the menu.
   useEffect(() => {
-    if (currentMode === 'storyteller-game') {
+    if (currentMode === null) {
+      localStorage.removeItem(UI_STATE_KEY);
+    } else if (currentMode === 'storyteller-game') {
       const id = session.sessionState?.active_save_id;
-      if (id) sessionStorage.setItem(RESUME_KEY, id);
-    } else if (currentMode === null) {
-      sessionStorage.removeItem(RESUME_KEY);
+      if (id) localStorage.setItem(UI_STATE_KEY, JSON.stringify({ mode: currentMode, saveId: id }));
+    } else if (currentMode === 'character-create') {
+      // A brand-new character has no id to reload from the server, so a
+      // relaunch lands on the character list instead; the editor's own draft
+      // persistence brings the form content back when it's reopened.
+      localStorage.setItem(UI_STATE_KEY, JSON.stringify(
+        editCharacterId
+          ? { mode: currentMode, editCharacterId }
+          : { mode: 'character-creator' }
+      ));
+    } else {
+      localStorage.setItem(UI_STATE_KEY, JSON.stringify({ mode: currentMode }));
     }
-  }, [currentMode, session.sessionState?.active_save_id]);
+  }, [currentMode, session.sessionState?.active_save_id, editCharacterId]);
 
-  // Auto-resume after a reload while a story was open (e.g. Android discarded
-  // the tab while the player checked another app). Mirrors SaveSelectScreen's
-  // load path: fetch the save, then enter with its state as the seed so the
-  // transcript paints instantly instead of waiting on the intro round-trip.
+  // Auto-restore after a relaunch while the game or the character editor was
+  // open (e.g. Android killed the PWA while the player checked another app).
+  // The game path mirrors SaveSelectScreen's load: fetch the save, then enter
+  // with its state as the seed so the transcript paints instantly instead of
+  // waiting on the intro round-trip.
   useEffect(() => {
-    if (!resumeSaveId) return undefined;
+    if (!asyncRestore) return undefined;
     let alive = true;
     (async () => {
       try {
-        const data = await api.loadSave(resumeSaveId);
-        if (!alive) return;
-        await handleEnterGame(resumeSaveId, data?.state);
+        if (asyncRestore.mode === 'storyteller-game') {
+          const data = await api.loadSave(asyncRestore.saveId);
+          if (!alive) return;
+          await handleEnterGame(asyncRestore.saveId, data?.state);
+        } else {
+          const data = await api.loadCharacter(asyncRestore.editCharacterId);
+          if (!alive) return;
+          setEditCharacterId(asyncRestore.editCharacterId);
+          setEditCharacterData(data);
+          setCurrentMode('character-create');
+        }
       } catch (e) {
-        // Save gone or backend restarted into a clean state — fall back to
-        // the menu rather than looping on a broken resume.
-        if (alive) sessionStorage.removeItem(RESUME_KEY);
+        if (!alive) return;
+        // Save/character gone or backend restarted into a clean state — fall
+        // back rather than looping on a broken restore.
+        if (asyncRestore.mode === 'character-create') setCurrentMode('character-creator');
+        else localStorage.removeItem(UI_STATE_KEY);
       } finally {
         if (alive) setResuming(false);
       }
@@ -392,6 +456,11 @@ function AppContent() {
   // Module-contributed full-screen modes: "module:{modId}:{modeId}".
   if (typeof currentMode === 'string' && currentMode.startsWith('module:')) {
     const [, modId, modeId] = currentMode.split(':');
+    // Restoring straight into a module screen races the module-list fetch;
+    // hold the blank frame instead of flashing the placeholder.
+    if ((modules || []).length === 0) {
+      return <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950" />;
+    }
     const mod = (modules || []).find((m) => m.id === modId);
     const mode = (mod?.modes || []).find((md) => md.id === modeId);
     if (mod && mode?.screen) {
