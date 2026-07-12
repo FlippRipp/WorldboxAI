@@ -66,19 +66,34 @@ function recordFiles(record) {
   return names.filter(Boolean);
 }
 
+// How long the slide-in / snap-back animations run.
+const SLIDE_MS = 240;
+
 // Fullscreen viewer over a flat list of finished images ({record, filename}).
 // Swipe, the arrow keys, or the on-screen arrows move between images; Esc or
-// a click/tap closes. A failed record (errorRecord) shows its error instead.
+// a click/tap closes. While a touch swipe is in progress the image follows
+// the finger (rubber-banding past the ends), and every navigation slides the
+// incoming image in from the side it came from. A failed record
+// (errorRecord) shows its error instead.
 function Lightbox({ items, index, onNavigate, onClose, errorRecord }) {
   const touchRef = useRef(null);
   const swipedRef = useRef(false);
+  // Finger-follow offset of the current image, and whether a drag is live
+  // (live drags track the finger directly, with no transition).
+  const [dragX, setDragX] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  // Which side the incoming image slides in from after a navigation.
+  const [slideFrom, setSlideFrom] = useState(null);
   const count = errorRecord ? 0 : (items ? items.length : 0);
   const safeIndex = Math.max(0, Math.min(index || 0, count - 1));
   const item = count > 0 ? items[safeIndex] : null;
 
   const go = useCallback((delta) => {
     const next = safeIndex + delta;
-    if (next >= 0 && next < count) onNavigate(next);
+    if (next >= 0 && next < count) {
+      setSlideFrom(delta > 0 ? 'right' : 'left');
+      onNavigate(next);
+    }
   }, [safeIndex, count, onNavigate]);
 
   useEffect(() => {
@@ -101,27 +116,55 @@ function Lightbox({ items, index, onNavigate, onClose, errorRecord }) {
   return (
     <div
       className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4 cursor-zoom-out"
+      style={{ touchAction: 'pan-y' }}
       onClick={() => {
-        // A horizontal swipe fires a click on release; that click must
-        // navigate (already handled), not close the viewer.
+        // A horizontal drag fires a click on release; that click must not
+        // close the viewer, whether the drag navigated or snapped back.
         if (swipedRef.current) { swipedRef.current = false; return; }
         onClose();
       }}
       onTouchStart={(e) => {
-        touchRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        touchRef.current = {
+          x: e.touches[0].clientX, y: e.touches[0].clientY, horizontal: null,
+        };
+      }}
+      onTouchMove={(e) => {
+        const start = touchRef.current;
+        if (!start || count < 2) return;
+        const dx = e.touches[0].clientX - start.x;
+        const dy = e.touches[0].clientY - start.y;
+        // Decide once, from the first clear movement, whether this touch is a
+        // horizontal swipe; vertical gestures never move the image.
+        if (start.horizontal === null && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
+          start.horizontal = Math.abs(dx) > Math.abs(dy);
+        }
+        if (!start.horizontal) return;
+        const atEdge = (dx > 0 && safeIndex === 0) || (dx < 0 && safeIndex === count - 1);
+        setDragging(true);
+        // Rubber-band: dragging past either end moves at a third the speed.
+        setDragX(atEdge ? dx / 3 : dx);
       }}
       onTouchEnd={(e) => {
         const start = touchRef.current;
         touchRef.current = null;
-        if (!start) return;
+        setDragging(false);
+        setDragX(0);
+        if (!start || !start.horizontal) return;
         const dx = e.changedTouches[0].clientX - start.x;
-        const dy = e.changedTouches[0].clientY - start.y;
-        if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 1.5) {
-          swipedRef.current = true;
-          go(dx < 0 ? 1 : -1);
-        }
+        if (Math.abs(dx) > 8) swipedRef.current = true;
+        if (Math.abs(dx) > 48) go(dx < 0 ? 1 : -1);
       }}
     >
+      <style>{`
+        @keyframes wb-lightbox-slide-right {
+          from { transform: translateX(64px); opacity: 0.25; }
+          to { transform: translateX(0); opacity: 1; }
+        }
+        @keyframes wb-lightbox-slide-left {
+          from { transform: translateX(-64px); opacity: 0.25; }
+          to { transform: translateX(0); opacity: 1; }
+        }
+      `}</style>
       {errorRecord ? (
         <div
           className="max-w-lg w-full rounded-lg border border-red-900/60 bg-gray-900/80 p-6 text-center cursor-auto"
@@ -168,6 +211,16 @@ function Lightbox({ items, index, onNavigate, onClose, errorRecord }) {
             src={`${API_BASE}/images/file/${item.filename}`}
             alt={item.record.image_prompt || 'Story illustration'}
             draggable={false}
+            onAnimationEnd={() => setSlideFrom(null)}
+            style={{
+              transform: dragX ? `translateX(${dragX}px)` : undefined,
+              // Live drags track the finger; releasing below the swipe
+              // threshold animates the snap back to center.
+              transition: dragging ? 'none' : `transform ${SLIDE_MS}ms ease`,
+              animation: slideFrom && !dragging
+                ? `wb-lightbox-slide-${slideFrom} ${SLIDE_MS}ms ease`
+                : undefined,
+            }}
             className="max-w-full max-h-[85vh] rounded-lg shadow-2xl select-none"
           />
           {item.record.image_prompt && (
