@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 
@@ -29,6 +30,7 @@ V2_LOREBOOK = {
             "content": "Eldoria is the shining capital of the realm.",
             "constant": False,
             "disable": False,
+            "sticky": 3,
             "order": 100,
         },
         "1": {
@@ -68,6 +70,7 @@ CHARACTER_BOOK = {
             "content": "Vale is a ranger who guards the northern woods.",
             "enabled": True,
             "constant": False,
+            "extensions": {"sticky": 2},
             "insertion_order": 10,
         },
         {
@@ -98,9 +101,11 @@ def test_parse_v2_lorebook():
     assert capital["secondary_keys"] == ["throne"]
     assert capital["enabled"] is True
     assert capital["constant"] is False
+    assert capital["sticky_turns"] == 3  # ST 'sticky' preserved
     assert capital["raw"]["comment"] == "Capital City"
 
     assert entries["1"]["constant"] is True
+    assert entries["1"]["sticky_turns"] is None  # no sticky → inherit book default
     assert entries["2"]["enabled"] is False  # disable: true → preserved but flagged
 
     # Sorted by ST order (magic=50 before capital=100 before disabled=200).
@@ -116,9 +121,11 @@ def test_parse_character_book_list_shape():
     vale = entries["Vale the Ranger"]
     assert vale["keys"] == ["Vale", "ranger"]
     assert vale["secondary_keys"] == ["bow"]
+    assert vale["sticky_turns"] == 2  # character books carry sticky under extensions
     oath = entries["The Oath"]
     assert oath["enabled"] is False
     assert oath["constant"] is True
+    assert oath["sticky_turns"] is None
     # insertion_order respected: oath (5) before vale (10)
     assert parsed["entries"][0]["title"] == "The Oath"
 
@@ -206,6 +213,36 @@ def test_store_update_entry_patches_fields(tmp_path):
         store.update_entry(book_id, "nope", {"title": "x"})
     with pytest.raises(ValueError):
         store.update_entry(book_id, "0", {"content": "   "})
+
+
+def test_book_sticky_setting_and_entry_override(tmp_path):
+    store = LorebookStore(str(tmp_path / "data"))
+    book_id = store.import_lorebook(V2_LOREBOOK, name="Realm Lore")["lorebook"]["id"]
+    record = store.load_lorebook(book_id)
+    assert record["sticky_turns"] == 0  # book default: sticky off
+    assert store.list_lorebooks()[0]["sticky_turns"] == 0
+
+    before = record["updated_at"]
+    fp_before = store.embed_fingerprint([book_id])
+    record = store.update_lorebook(book_id, {"sticky_turns": 2})
+    assert record["sticky_turns"] == 2
+    # The bump invalidates linked saves' embed fingerprints so the new value
+    # reaches their world indexes on the next sync.
+    assert store.embed_fingerprint([book_id]) != fp_before or record["updated_at"] != before
+
+    # Per-entry override: set and clear (None = inherit the book value again).
+    record = store.update_entry(book_id, "1", {"sticky_turns": 5})
+    assert next(e for e in record["entries"] if e["uid"] == "1")["sticky_turns"] == 5
+    record = store.update_entry(book_id, "1", {"sticky_turns": None})
+    assert next(e for e in record["entries"] if e["uid"] == "1")["sticky_turns"] is None
+
+    # Negative values clamp to zero.
+    assert store.update_lorebook(book_id, {"sticky_turns": -3})["sticky_turns"] == 0
+    record = store.update_entry(book_id, "1", {"sticky_turns": -1})
+    assert next(e for e in record["entries"] if e["uid"] == "1")["sticky_turns"] == 0
+
+    with pytest.raises(FileNotFoundError):
+        store.update_lorebook("missing_book", {"sticky_turns": 1})
 
 
 def test_store_links_roundtrip(tmp_path):
@@ -516,6 +553,111 @@ def test_story_entries_persist_across_reload(tmp_path, monkeypatch):
     # Reload with unchanged entries: the fingerprint short-circuits the sync.
     assert client.post("/api/saves/autosave/load").status_code == 200
     assert _world_db_lorebook_rows(tmp_path, "autosave") == rows
+
+
+# ── sticky turns (ST 'sticky': stay active N turns after triggered) ─────────
+
+def _sticky_db_rows(tmp_path, save_id):
+    db = tmp_path / "data" / "saves" / save_id / "world_index" / "world.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        return dict(conn.execute(
+            "SELECT source_id, COALESCE(sticky_turns, 0) FROM world_entries WHERE source_type = 'lorebook'"
+        ).fetchall())
+    finally:
+        conn.close()
+
+
+def test_sticky_api_book_setting_entry_override_and_embed(tmp_path, monkeypatch):
+    client, _, _, _ = make_client(tmp_path, monkeypatch)
+    book_id = client.post(
+        "/api/lorebooks/import", json={"data": V2_LOREBOOK, "name": "Realm Lore"}
+    ).json()["lorebook"]["id"]
+    client.put("/api/saves/autosave/lorebooks", json={"lorebook_ids": [book_id]})
+
+    # Book-level setting: the PUT re-embeds the active save with the new default.
+    resp = client.put(f"/api/lorebooks/{book_id}", json={"sticky_turns": 2})
+    assert resp.status_code == 200
+    assert resp.json()["lorebook"]["sticky_turns"] == 2
+    assert resp.json()["synced"] is True
+
+    # uid 0 keeps its imported ST sticky (3); uid 1 inherits the book default.
+    assert _sticky_db_rows(tmp_path, "autosave") == {
+        f"{book_id}:0": 3, f"{book_id}:1": 2}
+
+    # Per-entry override via the entry PUT; an explicit null clears it back to
+    # the book default.
+    client.put(f"/api/lorebooks/{book_id}/entries/0", json={"sticky_turns": 7})
+    assert _sticky_db_rows(tmp_path, "autosave")[f"{book_id}:0"] == 7
+    client.put(f"/api/lorebooks/{book_id}/entries/0", json={"sticky_turns": None})
+    assert _sticky_db_rows(tmp_path, "autosave")[f"{book_id}:0"] == 2
+
+    assert client.put("/api/lorebooks/missing_book",
+                      json={"sticky_turns": 1}).status_code == 404
+
+    # Story entries carry their own sticky value (no book to inherit from).
+    entry = client.post("/api/saves/autosave/lorebooks/entries", json={
+        "content": "The pact stone hums.", "sticky_turns": 4}).json()["entry"]
+    assert entry["sticky_turns"] == 4
+    assert _sticky_db_rows(tmp_path, "autosave")[f"{STORY_LOREBOOK_ID}:{entry['uid']}"] == 4
+
+
+def test_sticky_entries_stay_in_context_for_configured_turns(tmp_path, monkeypatch):
+    client, session_manager, _, _ = make_client(tmp_path, monkeypatch)
+    book_id = client.post(
+        "/api/lorebooks/import", json={"data": V2_LOREBOOK, "name": "Realm Lore"}
+    ).json()["lorebook"]["id"]
+    # uid 0 was imported with ST sticky 3 (see the fixture); it is the only
+    # non-constant embedded entry, so retrieval always surfaces it.
+    client.put("/api/saves/autosave/lorebooks", json={"lorebook_ids": [book_id]})
+
+    def gather(turn, input_text, sticky_state):
+        state = dict(session_manager.state)
+        state.update({"input_text": input_text, "turn": turn,
+                      "sticky_world_entries": sticky_state})
+        return asyncio.run(server.engine.gather_context_node(state))
+
+    # Turn 1: retrieval triggers the entry and opens its 3-turn window.
+    result = gather(1, "Tell me about the capital", {})
+    assert result["sticky_world_entries"] == {f"{book_id}:0": 4}  # 1 + 3
+    world_blocks = [b for b in result["current_context"] if "<world_knowledge>" in b]
+    assert len(world_blocks) == 1 and "Eldoria" in world_blocks[0]
+
+    # Through turn 4 the entry is forced into context without retrieval —
+    # even on an empty (continue) input that skips RAG entirely.
+    result = gather(4, "", {f"{book_id}:0": 4})
+    world_blocks = [b for b in result["current_context"] if "<world_knowledge>" in b]
+    assert len(world_blocks) == 1 and "Eldoria" in world_blocks[0]
+    assert len(result["last_retrieved_world_ids"]) == 1  # surfaced as active in the UI
+    assert result["sticky_world_entries"] == {f"{book_id}:0": 4}
+
+    # Turn 5: the window is over — nothing forced, record dropped.
+    result = gather(5, "", {f"{book_id}:0": 4})
+    assert not [b for b in result["current_context"] if "<world_knowledge>" in b]
+    assert result["sticky_world_entries"] == {}
+
+
+def test_sticky_state_persists_in_save_metadata_and_api(tmp_path, monkeypatch):
+    client, session_manager, _, _ = make_client(tmp_path, monkeypatch)
+    sm = session_manager
+    book_id = client.post(
+        "/api/lorebooks/import", json={"data": V2_LOREBOOK, "name": "Realm Lore"}
+    ).json()["lorebook"]["id"]
+    client.put("/api/saves/autosave/lorebooks", json={"lorebook_ids": [book_id]})
+
+    sm.state["sticky_world_entries"] = {f"{book_id}:0": 4}
+    sm.save_manager.save_turn("autosave", sm.state, 1)
+    meta = sm.save_manager.read_core_json("autosave", "metadata.json", {})
+    assert meta["sticky_world_entries"] == {f"{book_id}:0": 4}
+
+    # Reload restores the sticky window into session state.
+    assert client.post("/api/saves/autosave/load").status_code == 200
+    assert sm.state["sticky_world_entries"] == {f"{book_id}:0": 4}
+
+    # The world-entries endpoint exposes it (plus the turn) for the Active tab.
+    resp = client.get("/api/session/world-entries").json()
+    assert resp["sticky_source_ids"] == {f"{book_id}:0": 4}
+    assert resp["turn"] == 1
 
 
 def test_undo_preserves_lorebook_links_and_keeps_toggles_effective(tmp_path, monkeypatch):

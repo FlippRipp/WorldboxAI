@@ -569,6 +569,11 @@ async def get_world_entries():
         "count": len(entries),
         "active_ids": session_manager.state.get("last_retrieved_world_ids", []),
         "context_query": session_manager.state.get("last_context_query", ""),
+        # Sticky lorebook entries currently held in context: source_id -> last
+        # turn they stay active. Paired with `turn` so the UI can show how many
+        # turns each has left.
+        "sticky_source_ids": session_manager.state.get("sticky_world_entries", {}) or {},
+        "turn": session_manager.state.get("turn", 0),
     }
 
 
@@ -1117,6 +1122,12 @@ class LorebookEntryUpdateRequest(BaseModel):
     secondary_keys: Optional[list[str]] = None
     content: Optional[str] = None
     constant: Optional[bool] = None
+    # Per-entry sticky override; an explicit null clears it (inherit the book).
+    sticky_turns: Optional[int] = None
+
+
+class LorebookUpdateRequest(BaseModel):
+    sticky_turns: Optional[int] = None
 
 
 class LorebookLinksRequest(BaseModel):
@@ -1170,24 +1181,48 @@ async def delete_lorebook(lorebook_id: str):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+async def _resync_active_save_if_uses(lorebook_id: str) -> bool:
+    """Re-embed the active save now if it has this book attached, so the edit
+    applies from the next turn; other saves pick it up on load via the
+    fingerprint check."""
+    if not session_manager.active_save_id:
+        return False
+    meta = session_manager.save_manager.read_core_json(
+        session_manager.active_save_id, "metadata.json", {}) or {}
+    if lorebook_id not in (meta.get("lorebook_ids", []) or []):
+        return False
+    await _sync_lorebooks_for_save(session_manager.active_save_id)
+    return True
+
+
+@app.put("/api/lorebooks/{lorebook_id}")
+async def update_lorebook(lorebook_id: str, request: LorebookUpdateRequest):
+    """Patch book-level settings (currently sticky_turns)."""
+    patch = {k: v for k, v in request.model_dump(exclude_unset=True).items()
+             if v is not None}
+    try:
+        record = lorebook_store.update_lorebook(lorebook_id, patch)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    synced = await _resync_active_save_if_uses(lorebook_id)
+    return {"lorebook": record, "synced": synced}
+
+
 @app.put("/api/lorebooks/{lorebook_id}/entries/{uid}")
 async def update_lorebook_entry(lorebook_id: str, uid: str, request: LorebookEntryUpdateRequest):
-    patch = {k: v for k, v in request.model_dump().items() if v is not None}
+    # exclude_unset so an explicit `"sticky_turns": null` clears the per-entry
+    # override while omitted fields stay untouched.
+    raw = request.model_dump(exclude_unset=True)
+    patch = {k: v for k, v in raw.items() if v is not None or k == "sticky_turns"}
     try:
         record = lorebook_store.update_entry(lorebook_id, uid, patch)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    # If the active save uses this book, re-embed now so the edit applies from
-    # the next turn; other saves pick it up on load via the fingerprint check.
-    synced = False
-    if session_manager.active_save_id:
-        meta = session_manager.save_manager.read_core_json(
-            session_manager.active_save_id, "metadata.json", {}) or {}
-        if lorebook_id in (meta.get("lorebook_ids", []) or []):
-            await _sync_lorebooks_for_save(session_manager.active_save_id)
-            synced = True
+    synced = await _resync_active_save_if_uses(lorebook_id)
     return {"lorebook": record, "synced": synced}
 
 
@@ -1229,6 +1264,7 @@ class StoryEntryRequest(BaseModel):
     secondary_keys: Optional[list[str]] = None
     constant: Optional[bool] = None
     enabled: Optional[bool] = None
+    sticky_turns: Optional[int] = None
 
 
 def _read_story_entries(save_id: str) -> list:

@@ -34,6 +34,9 @@ _WORLD_COLUMNS = {
     "source_id": "TEXT",
     "region": "TEXT DEFAULT ''",
     "constant": "INTEGER DEFAULT 0",
+    # ST 'sticky': after this entry is triggered by retrieval it stays in
+    # context for N more turns (0 = off). Only set on lorebook rows.
+    "sticky_turns": "INTEGER DEFAULT 0",
 }
 
 
@@ -338,23 +341,27 @@ class MemoryManager:
         if self._world_conn is None:
             raise RuntimeError("World index not initialized. Call init_world_index() first.")
         self._world_conn.execute("DELETE FROM world_entries WHERE source_type = 'lorebook'")
-        pending = []  # (text, source_id, constant)
+        pending = []  # (text, source_id, constant, sticky_turns)
         for book in lorebooks:
             book_id = book.get("id", "")
+            book_sticky = int(book.get("sticky_turns") or 0)
             for entry in book.get("entries", []):
                 if not entry.get("enabled", True):
                     continue
                 text = self._lorebook_entry_text(entry)
                 if not text:
                     continue
+                # Per-entry sticky override wins; None inherits the book value.
+                override = entry.get("sticky_turns")
+                sticky = book_sticky if override is None else int(override)
                 pending.append((text, f"{book_id}:{entry.get('uid', '')}",
-                                1 if entry.get("constant") else 0))
-        vectors = await self._embed_texts([t for t, _, _ in pending], llm)
-        for (text, source_id, constant), vec in zip(pending, vectors):
+                                1 if entry.get("constant") else 0, max(0, sticky)))
+        vectors = await self._embed_texts([t for t, _, _, _ in pending], llm)
+        for (text, source_id, constant, sticky), vec in zip(pending, vectors):
             self._world_conn.execute(
-                """INSERT INTO world_entries (id, embedding, text, source_type, source_id, region, constant)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (str(uuid.uuid4()), _serialize(vec), text, "lorebook", source_id, "", constant),
+                """INSERT INTO world_entries (id, embedding, text, source_type, source_id, region, constant, sticky_turns)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (str(uuid.uuid4()), _serialize(vec), text, "lorebook", source_id, "", constant, sticky),
             )
         self._world_conn.commit()
         return len(pending)
@@ -576,11 +583,40 @@ class MemoryManager:
                 "source_type": row["source_type"] or "",
                 "source_id": row["source_id"] or "",
                 "region": row["region"] or "",
+                "sticky_turns": int(row["sticky_turns"] or 0),
             }
             if with_scores:
                 entry["dist"] = row["dist"]
             results.append(entry)
         return results
+
+    def get_world_entries_by_source_ids(self, source_ids: list[str]) -> list[dict]:
+        """Rows for the given stable source ids, in the given order — used to
+        force sticky entries into context without a vector search. Constant
+        rows are excluded (they're always injected separately)."""
+        if self._world_conn is None or not source_ids:
+            return []
+        placeholders = ", ".join("?" for _ in source_ids)
+        rows = self._world_conn.execute(
+            f"""SELECT id, text, source_type, source_id, region,
+                       COALESCE(sticky_turns, 0) AS sticky_turns
+                FROM world_entries
+                WHERE source_id IN ({placeholders}) AND COALESCE(constant, 0) = 0""",
+            list(source_ids),
+        ).fetchall()
+        by_source = {row["source_id"]: row for row in rows}
+        return [
+            {
+                "id": row["id"] or "",
+                "text": row["text"] or "",
+                "source_type": row["source_type"] or "",
+                "source_id": row["source_id"] or "",
+                "region": row["region"] or "",
+                "sticky_turns": int(row["sticky_turns"] or 0),
+            }
+            for sid in source_ids
+            if (row := by_source.get(sid)) is not None
+        ]
 
     @staticmethod
     def _format_world_row(row) -> dict:
@@ -591,6 +627,7 @@ class MemoryManager:
             "source_id": row["source_id"] or "",
             "region": row["region"] or "",
             "constant": bool(row["constant"]),
+            "sticky_turns": int(row["sticky_turns"] or 0),
         }
 
     def list_world_entries(self, limit: int = 1000) -> list[dict]:
@@ -599,7 +636,9 @@ class MemoryManager:
         if self._world_conn is None:
             return []
         rows = self._world_conn.execute(
-            """SELECT id, text, source_type, source_id, region, COALESCE(constant, 0) AS constant
+            """SELECT id, text, source_type, source_id, region,
+                      COALESCE(constant, 0) AS constant,
+                      COALESCE(sticky_turns, 0) AS sticky_turns
                FROM world_entries
                ORDER BY source_type, source_id
                LIMIT ?""",
@@ -611,7 +650,9 @@ class MemoryManager:
         if self._world_conn is None:
             return None
         row = self._world_conn.execute(
-            """SELECT id, text, source_type, source_id, region, COALESCE(constant, 0) AS constant
+            """SELECT id, text, source_type, source_id, region,
+                      COALESCE(constant, 0) AS constant,
+                      COALESCE(sticky_turns, 0) AS sticky_turns
                FROM world_entries WHERE id = ?""",
             (entry_id,),
         ).fetchone()

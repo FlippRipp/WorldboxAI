@@ -48,6 +48,18 @@ def _as_key_list(value) -> list[str]:
     return []
 
 
+def _parse_sticky(raw_entry: dict) -> int | None:
+    """ST 'sticky': once triggered, the entry stays active for N more turns.
+    Lives on the entry directly (V2 World Info) or under extensions
+    (character books). None = no per-entry value (inherit the book default)."""
+    value = raw_entry.get("sticky")
+    if value is None and isinstance(raw_entry.get("extensions"), dict):
+        value = raw_entry["extensions"].get("sticky")
+    if isinstance(value, (int, float)) and int(value) > 0:
+        return int(value)
+    return None
+
+
 def _normalize_entry(raw_entry: dict, uid, *, v2: bool) -> dict | None:
     content = str(raw_entry.get("content") or "").strip()
     if not content:
@@ -72,6 +84,7 @@ def _normalize_entry(raw_entry: dict, uid, *, v2: bool) -> dict | None:
         "content": content,
         "constant": bool(raw_entry.get("constant", False)),
         "enabled": enabled,
+        "sticky_turns": _parse_sticky(raw_entry),
         "order": int(order) if isinstance(order, (int, float)) else 100,
         "raw": raw_entry,
     }
@@ -137,7 +150,8 @@ def parse_sillytavern_lorebook(raw: dict, fallback_name: str = "") -> dict:
 # normalized to the imported-entry shape so they ride the same embed path
 # (keywords, constant injection, enabled flag, RAG retrieval).
 
-_STORY_ENTRY_FIELDS = ("title", "keys", "secondary_keys", "content", "constant", "enabled")
+_STORY_ENTRY_FIELDS = ("title", "keys", "secondary_keys", "content", "constant",
+                       "enabled", "sticky_turns")
 
 
 def make_story_entry(data: dict, uid: str | None = None) -> dict:
@@ -153,6 +167,8 @@ def make_story_entry(data: dict, uid: str | None = None) -> dict:
         "content": content,
         "constant": bool(data.get("constant", False)),
         "enabled": bool(data.get("enabled", True)),
+        # Story entries have no book to inherit from, so sticky is a plain int.
+        "sticky_turns": max(0, int(data.get("sticky_turns") or 0)),
     }
 
 
@@ -192,6 +208,9 @@ class LorebookStore:
             "id": self._unique_id(_slugify(parsed["name"])),
             "created_at": now,
             "updated_at": now,
+            # Book-level sticky default: triggered entries stay in context for
+            # this many extra turns. Entries with sticky_turns set override it.
+            "sticky_turns": 0,
             **parsed,
         }
         self.lorebooks_dir.mkdir(parents=True, exist_ok=True)
@@ -217,6 +236,7 @@ class LorebookStore:
                     "entry_count": len(entries),
                     "enabled_count": sum(1 for e in entries if e.get("enabled")),
                     "constant_count": sum(1 for e in entries if e.get("constant")),
+                    "sticky_turns": int(data.get("sticky_turns") or 0),
                     "created_at": data.get("created_at"),
                     "updated_at": data.get("updated_at"),
                 })
@@ -247,6 +267,18 @@ class LorebookStore:
         if pruned != links:
             self._write_links(pruned)
 
+    def update_lorebook(self, lorebook_id: str, patch: dict) -> dict:
+        """Patch book-level fields (currently sticky_turns) and bump
+        updated_at, which invalidates every linked save's embed fingerprint so
+        the new setting is re-embedded on the next sync."""
+        record = self.load_lorebook(lorebook_id)
+        if "sticky_turns" in patch:
+            record["sticky_turns"] = max(0, int(patch["sticky_turns"] or 0))
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        with open(self._path(lorebook_id), "w", encoding="utf-8") as f:
+            json.dump(record, f, indent=2, ensure_ascii=False)
+        return record
+
     def update_entry(self, lorebook_id: str, uid: str, patch: dict) -> dict:
         """Patch an entry's editable fields and bump updated_at, which
         invalidates every linked save's embed fingerprint so the entry is
@@ -272,6 +304,10 @@ class LorebookStore:
             entry["enabled"] = bool(patch["enabled"])
         if "constant" in patch:
             entry["constant"] = bool(patch["constant"])
+        if "sticky_turns" in patch:
+            # None clears the per-entry override (falls back to the book value).
+            value = patch["sticky_turns"]
+            entry["sticky_turns"] = None if value is None else max(0, int(value))
         record["updated_at"] = datetime.now(timezone.utc).isoformat()
         with open(self._path(lorebook_id), "w", encoding="utf-8") as f:
             json.dump(record, f, indent=2, ensure_ascii=False)

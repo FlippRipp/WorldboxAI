@@ -270,6 +270,53 @@ def test_lorebook_search_and_constant_injection(tmp_path):
     assert all(r["source_type"] == "lorebook" for r in results)
 
 
+def test_embed_lorebooks_sticky_column_book_default_and_override(tmp_path):
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    manager.init_world_index(str(tmp_path / "world_index"))
+    book = {
+        "id": "sticky_book",
+        "sticky_turns": 3,  # book-level default
+        "entries": [
+            {"uid": "0", "title": "Inherits", "keys": [], "secondary_keys": [],
+             "content": "Inherits the book default.", "constant": False, "enabled": True},
+            {"uid": "1", "title": "Override", "keys": [], "secondary_keys": [],
+             "content": "Overrides to five.", "constant": False, "enabled": True,
+             "sticky_turns": 5},
+            {"uid": "2", "title": "Opt out", "keys": [], "secondary_keys": [],
+             "content": "Explicitly not sticky.", "constant": False, "enabled": True,
+             "sticky_turns": 0},
+        ],
+    }
+    _run(manager.embed_lorebooks([book], _FakeEmbedder()))
+
+    rows = {row["source_id"]: row["sticky_turns"] for row in manager._world_conn.execute(
+        "SELECT source_id, sticky_turns FROM world_entries WHERE source_type = 'lorebook'"
+    )}
+    assert rows == {"sticky_book:0": 3, "sticky_book:1": 5, "sticky_book:2": 0}
+
+    # search_world surfaces the effective sticky value for the trigger logic.
+    results = {r["source_id"]: r["sticky_turns"] for r in
+               manager.search_world([1.0, 0.0, 0.0], limit=5)}
+    assert results == {"sticky_book:0": 3, "sticky_book:1": 5, "sticky_book:2": 0}
+
+
+def test_get_world_entries_by_source_ids(tmp_path):
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    assert manager.get_world_entries_by_source_ids(["x"]) == []  # no index yet
+
+    manager.init_world_index(str(tmp_path / "world_index"))
+    _run(manager.embed_lorebooks([_lorebook_record()], _FakeEmbedder()))
+
+    # Returns rows in the requested order; constant rows and unknown ids are
+    # skipped (constants are always injected separately).
+    rows = manager.get_world_entries_by_source_ids(
+        ["missing", "realm_lore:1", "realm_lore:0"])
+    assert [r["source_id"] for r in rows] == ["realm_lore:0"]
+    assert "dragon sleeps" in rows[0]["text"]
+    assert rows[0]["sticky_turns"] == 0
+    assert manager.get_world_entries_by_source_ids([]) == []
+
+
 def test_list_world_entries_includes_constant_rows_without_embedding(tmp_path):
     manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
     assert manager.list_world_entries() == []  # no world index yet

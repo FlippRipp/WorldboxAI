@@ -71,6 +71,17 @@ export default function LorebookManager({ onBack }) {
     }
   };
 
+  const saveStickyTurns = async (value) => {
+    const sticky = Math.max(0, parseInt(value, 10) || 0);
+    if (sticky === (selected.sticky_turns || 0)) return;
+    try {
+      const { lorebook } = await api.updateLorebook(selected.id, { sticky_turns: sticky });
+      setSelected(lorebook);
+    } catch (e) {
+      alert(`Failed to update lorebook: ${e.message}`);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center p-6">
       <div className="w-full max-w-3xl">
@@ -141,6 +152,23 @@ export default function LorebookManager({ onBack }) {
             <h2 className="text-3xl font-bold text-gray-100 mb-1">{selected.name}</h2>
             {selected.description && <p className="text-gray-500 text-sm mb-4">{selected.description}</p>}
 
+            <div className="p-4 rounded-lg border border-gray-700 bg-gray-800/30 mb-4 flex items-center gap-3 flex-wrap">
+              <label htmlFor="lorebook-sticky-turns" className="text-sm font-medium text-gray-300">Sticky turns</label>
+              <input
+                id="lorebook-sticky-turns"
+                key={selected.id}
+                type="number"
+                min="0"
+                defaultValue={selected.sticky_turns || 0}
+                onBlur={(e) => saveStickyTurns(e.target.value)}
+                className="w-20 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200"
+              />
+              <p className="text-xs text-gray-500 flex-1 min-w-[200px]">
+                Once triggered by retrieval, entries stay in context for this many extra turns (0 = off).
+                Individual entries can override this from a story's Memory browser.
+              </p>
+            </div>
+
             <LorebookLinkEditor lorebookId={selected.id} />
 
             <h3 className="text-lg font-semibold text-gray-200 mt-6 mb-3">
@@ -158,6 +186,14 @@ export default function LorebookManager({ onBack }) {
                         <span className="font-medium text-gray-200 text-sm">{entry.title || entry.keys[0] || `Entry ${entry.uid}`}</span>
                         {entry.constant && (
                           <span className="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide bg-amber-900/60 text-amber-300 border border-amber-800/50">constant</span>
+                        )}
+                        {(entry.sticky_turns ?? selected.sticky_turns ?? 0) > 0 && (
+                          <span
+                            className="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide bg-sky-900/60 text-sky-300 border border-sky-800/50"
+                            title={entry.sticky_turns != null ? 'Per-entry sticky override' : 'Inherited from the book setting'}
+                          >
+                            sticky {entry.sticky_turns ?? selected.sticky_turns}
+                          </span>
                         )}
                       </div>
                       {entry.keys.length > 0 && (

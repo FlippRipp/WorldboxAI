@@ -213,6 +213,7 @@ class GameSessionManager:
             "player_location_region": metadata.get("player_location_region"),
             "player_location_layer_id": metadata.get("player_location_layer_id"),
             "revealed_node_ids": metadata.get("revealed_node_ids", []),
+            "sticky_world_entries": metadata.get("sticky_world_entries", {}),
         }
 
         world_data = saved_state.get("world_data")
@@ -287,6 +288,7 @@ class GameSessionManager:
             "player_location_region": final_state.get("player_location_region", self.state.get("player_location_region")),
             "player_location_layer_id": final_state.get("player_location_layer_id", self.state.get("player_location_layer_id")),
             "revealed_node_ids": final_state.get("revealed_node_ids", self.state.get("revealed_node_ids", [])),
+            "sticky_world_entries": final_state.get("sticky_world_entries", self.state.get("sticky_world_entries", {})),
         }
         turn = self.state.get("turn", 0)
         self.save_manager.save_turn(self.active_save_id, self.state, turn)

@@ -116,6 +116,7 @@ export const api = {
   importLorebook:          (data, name = null) => request('/api/lorebooks/import', { method: 'POST', body: JSON.stringify({ data, name }) }),
   listLorebooks:           () => request('/api/lorebooks'),
   getLorebook:             (lorebookId) => request(`/api/lorebooks/${lorebookId}`),
+  updateLorebook:          (lorebookId, patch) => request(`/api/lorebooks/${lorebookId}`, { method: 'PUT', body: JSON.stringify(patch) }),
   deleteLorebook:          (lorebookId) => request(`/api/lorebooks/${lorebookId}`, { method: 'DELETE' }),
   setLorebookEntryEnabled: (lorebookId, uid, enabled) => request(`/api/lorebooks/${lorebookId}/entries/${encodeURIComponent(uid)}`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
   updateLorebookEntry:     (lorebookId, uid, patch) => request(`/api/lorebooks/${lorebookId}/entries/${encodeURIComponent(uid)}`, { method: 'PUT', body: JSON.stringify(patch) }),

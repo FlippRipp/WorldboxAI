@@ -570,6 +570,22 @@ class EngineGraph:
         if lore_block:
             gathered_context.append(lore_block)
 
+        # Sticky lorebook entries (ST 'sticky'): once triggered by retrieval,
+        # an entry stays in context for its configured number of turns. Tracked
+        # as source_id -> last turn it remains active, persisted with the save.
+        sticky = {
+            sid: exp for sid, exp in (state.get("sticky_world_entries") or {}).items()
+            if isinstance(exp, (int, float)) and exp >= turn
+        }
+        world_entries = []
+        seen_world_row_ids = set()
+        if sticky and self.memory.has_world_index():
+            # Force-include regardless of retrieval — even on empty-input
+            # continue turns, matching how constant entries behave.
+            for we in self.memory.get_world_entries_by_source_ids(list(sticky)):
+                world_entries.append(we)
+                seen_world_row_ids.add(we["id"])
+
         input_text = state.get("input_text", "")
         if input_text:
             last_context_query = input_text
@@ -602,16 +618,24 @@ class EngineGraph:
                         )
                     else:
                         world_query_vector = query_vector
-                    world_entries = self.memory.search_world(world_query_vector, limit=world_rag_limit)
-                    if world_entries:
-                        world_block = "<world_knowledge>\n"
-                        for we in world_entries:
-                            world_block += f"- [{we['source_type']}] {we['text']}\n"
-                            retrieved_world_ids.append(we.get("id", ""))
-                        world_block += "</world_knowledge>"
-                        gathered_context.append(world_block)
+                    for we in self.memory.search_world(world_query_vector, limit=world_rag_limit):
+                        # (Re-)trigger stickiness: retrieval starts/refreshes
+                        # the entry's active window.
+                        if we.get("sticky_turns", 0) > 0 and we.get("source_id"):
+                            sticky[we["source_id"]] = turn + int(we["sticky_turns"])
+                        if we["id"] not in seen_world_row_ids:
+                            world_entries.append(we)
+                            seen_world_row_ids.add(we["id"])
             except Exception as e:
                 print(f"Error fetching RAG memories: {e}")
+
+        if world_entries:
+            world_block = "<world_knowledge>\n"
+            for we in world_entries:
+                world_block += f"- [{we['source_type']}] {we['text']}\n"
+                retrieved_world_ids.append(we.get("id", ""))
+            world_block += "</world_knowledge>"
+            gathered_context.append(world_block)
 
         # Location/world context is contributed by modules (e.g. wb_worldgen) via
         # on_gather_context -> context_string, collected below.
@@ -636,6 +660,7 @@ class EngineGraph:
             "last_retrieved_memory_ids": retrieved_ids,
             "last_retrieved_world_ids": retrieved_world_ids,
             "last_context_query": last_context_query,
+            "sticky_world_entries": sticky,
             "module_data": accumulated.get("module_data", dict(state.get("module_data", {}))),
         }
 

@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { api } from '../lib/api';
 
 const TABS = [
+  { id: 'active', label: 'Active' },
   { id: 'memories', label: 'Memories' },
   { id: 'world', label: 'World' },
   { id: 'lorebooks', label: 'Lorebooks' },
@@ -24,7 +25,7 @@ const TYPE_COLORS = {
 const ACTIVE_CARD = 'border-purple-500/50 ring-1 ring-purple-500/20';
 
 export default function MemoryBrowser({ isOpen, onClose, saveId }) {
-  const [tab, setTab] = useState('memories');
+  const [tab, setTab] = useState('active');
   const [search, setSearch] = useState('');
 
   const [memories, setMemories] = useState([]);
@@ -32,6 +33,8 @@ export default function MemoryBrowser({ isOpen, onClose, saveId }) {
   const [contextQuery, setContextQuery] = useState('');
   const [worldEntries, setWorldEntries] = useState([]);
   const [worldActiveIds, setWorldActiveIds] = useState([]);
+  const [stickyMap, setStickyMap] = useState({}); // source_id -> last active turn
+  const [turnNo, setTurnNo] = useState(0);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -48,6 +51,8 @@ export default function MemoryBrowser({ isOpen, onClose, saveId }) {
         setContextQuery(mem.context_query || world.context_query || '');
         setWorldEntries(world.entries || []);
         setWorldActiveIds(world.active_ids || []);
+        setStickyMap(world.sticky_source_ids || {});
+        setTurnNo(world.turn || 0);
       })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
@@ -62,6 +67,8 @@ export default function MemoryBrowser({ isOpen, onClose, saveId }) {
       .then(world => {
         setWorldEntries(world.entries || []);
         setWorldActiveIds(world.active_ids || []);
+        setStickyMap(world.sticky_source_ids || {});
+        setTurnNo(world.turn || 0);
       })
       .catch(e => setError(e.message));
   };
@@ -171,11 +178,24 @@ export default function MemoryBrowser({ isOpen, onClose, saveId }) {
           {loading && <div className="text-center text-gray-400 py-8">Loading...</div>}
           {error && <div className="bg-red-900/40 border border-red-700/50 rounded p-3 text-red-200 text-sm">{error}</div>}
 
+          {!loading && tab === 'active' && (
+            <ActiveTab
+              memories={memories}
+              activeIds={activeIds}
+              worldEntries={worldEntries}
+              worldActiveIds={worldActiveIds}
+              contextQuery={contextQuery}
+              stickyMap={stickyMap}
+              turn={turnNo}
+              search={search}
+              onDeleteMemory={setDeleteId}
+              onEditMemory={editMemory}
+              onEditWorldEntry={editWorldEntry}
+            />
+          )}
           {!loading && tab === 'memories' && (
             <MemoriesTab
               memories={memories}
-              activeIds={activeIds}
-              contextQuery={contextQuery}
               search={search}
               onDelete={setDeleteId}
               onEdit={editMemory}
@@ -184,8 +204,6 @@ export default function MemoryBrowser({ isOpen, onClose, saveId }) {
           {!loading && tab === 'world' && (
             <WorldTab
               entries={worldEntries.filter(e => e.source_type !== 'lorebook')}
-              activeIds={worldActiveIds}
-              contextQuery={contextQuery}
               search={search}
               onEdit={editWorldEntry}
             />
@@ -193,8 +211,6 @@ export default function MemoryBrowser({ isOpen, onClose, saveId }) {
           {!loading && tab === 'lorebooks' && (
             <LorebooksTab
               saveId={saveId}
-              worldEntries={worldEntries}
-              worldActiveIds={worldActiveIds}
               search={search}
               setEditing={setEditing}
               onEntriesChanged={refetchWorldEntries}
@@ -229,9 +245,90 @@ export default function MemoryBrowser({ isOpen, onClose, saveId }) {
   );
 }
 
+// ── Active tab ───────────────────────────────────────────────────────────────
+// Everything currently injected into the storyteller's context, combined in
+// one place: entries retrieved last turn, sticky lorebook entries still in
+// their active window, and constant (always-on) lore.
+
+function ActiveTab({ memories, activeIds, worldEntries, worldActiveIds, contextQuery,
+                     stickyMap, turn, search, onDeleteMemory, onEditMemory, onEditWorldEntry }) {
+  const q = search.trim().toLowerCase();
+  const matches = (...texts) => !q || texts.some(t => (t || '').toLowerCase().includes(q));
+
+  // Turns an entry has left in context: its stored expiry is the last turn
+  // number it will still be injected on.
+  const stickyLeft = (sourceId) => {
+    const expires = stickyMap[sourceId];
+    return typeof expires === 'number' ? Math.max(0, expires - turn + 1) : 0;
+  };
+
+  const activeWorld = worldEntries.filter(e =>
+    worldActiveIds.includes(e.id) && matches(e.text, e.source_id));
+  const activeMemories = memories.filter(m =>
+    activeIds.includes(m.id) && matches(m.summary, m.text));
+  const constants = worldEntries.filter(e =>
+    e.source_type === 'lorebook' && e.constant && matches(e.text, e.source_id));
+
+  const total = activeWorld.length + activeMemories.length + constants.length;
+
+  return (
+    <div>
+      <p className="text-xs text-gray-500 mb-3">
+        Everything currently injected into the storyteller's context: entries retrieved last turn,
+        sticky lorebook entries still in their active window, and constant lore that is always included.
+      </p>
+
+      {total === 0 && (
+        <div className="text-center text-gray-500 py-12">
+          <div className="text-4xl mb-3">&#10024;</div>
+          <p>Nothing active{q ? ' matches the search' : ' yet'}.</p>
+          {!q && <p className="text-sm mt-1">Play a turn and the retrieved context will show up here.</p>}
+        </div>
+      )}
+
+      {(activeWorld.length > 0 || activeMemories.length > 0) && (
+        <TriggeredHeading contextQuery={contextQuery} />
+      )}
+
+      {activeWorld.length > 0 && (
+        <div className="mb-4">
+          <div className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-2">World Knowledge &amp; Lore</div>
+          {activeWorld.map(e => (
+            <WorldEntryCard
+              key={e.id}
+              entry={e}
+              isActive
+              stickyLeft={stickyLeft(e.source_id)}
+              onEdit={onEditWorldEntry}
+            />
+          ))}
+        </div>
+      )}
+
+      {activeMemories.length > 0 && (
+        <div className="mb-4">
+          <div className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-2">Memories</div>
+          {activeMemories.map(m => (
+            <MemoryCard key={m.id} memory={m} isActive onDelete={onDeleteMemory} onEdit={onEditMemory} />
+          ))}
+        </div>
+      )}
+
+      {constants.length > 0 && (
+        <div>
+          <div className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-2">Always in Context</div>
+          {constants.map(e => (
+            <WorldEntryCard key={e.id} entry={e} onEdit={onEditWorldEntry} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Memories tab ─────────────────────────────────────────────────────────────
 
-function MemoriesTab({ memories, activeIds, contextQuery, search, onDelete, onEdit }) {
+function MemoriesTab({ memories, search, onDelete, onEdit }) {
   const [filterEntity, setFilterEntity] = useState('');
   const [filterTopic, setFilterTopic] = useState('');
   const [sortBy, setSortBy] = useState('newest');
@@ -266,9 +363,6 @@ function MemoriesTab({ memories, activeIds, contextQuery, search, onDelete, onEd
     else if (sortBy === 'oldest') list.sort((a, b) => (a.turn_generated || 0) - (b.turn_generated || 0));
     return list;
   }, [memories, filterEntity, filterTopic, sortBy, search]);
-
-  const activeMemories = filtered.filter(m => activeIds.includes(m.id));
-  const inactiveMemories = filtered.filter(m => !activeIds.includes(m.id));
 
   return (
     <div>
@@ -313,25 +407,9 @@ function MemoriesTab({ memories, activeIds, contextQuery, search, onDelete, onEd
         </div>
       )}
 
-      {activeMemories.length > 0 && (
-        <div className="mb-4">
-          <TriggeredHeading contextQuery={contextQuery} />
-          {activeMemories.map(m => (
-            <MemoryCard key={m.id} memory={m} isActive onDelete={onDelete} onEdit={onEdit} />
-          ))}
-        </div>
-      )}
-
-      {inactiveMemories.length > 0 && (
-        <div>
-          {activeMemories.length > 0 && (
-            <div className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-2">All Memories</div>
-          )}
-          {inactiveMemories.map(m => (
-            <MemoryCard key={m.id} memory={m} onDelete={onDelete} onEdit={onEdit} />
-          ))}
-        </div>
-      )}
+      {filtered.map(m => (
+        <MemoryCard key={m.id} memory={m} onDelete={onDelete} onEdit={onEdit} />
+      ))}
     </div>
   );
 }
@@ -402,7 +480,7 @@ function MemoryCard({ memory, isActive, onDelete, onEdit }) {
 
 // ── World tab ────────────────────────────────────────────────────────────────
 
-function WorldTab({ entries, activeIds, contextQuery, search, onEdit }) {
+function WorldTab({ entries, search, onEdit }) {
   const [filterType, setFilterType] = useState('');
   const [filterRegion, setFilterRegion] = useState('');
 
@@ -426,9 +504,6 @@ function WorldTab({ entries, activeIds, contextQuery, search, onEdit }) {
     }
     return list;
   }, [entries, filterType, filterRegion, search]);
-
-  const active = filtered.filter(e => activeIds.includes(e.id));
-  const inactive = filtered.filter(e => !activeIds.includes(e.id));
 
   return (
     <div>
@@ -466,30 +541,14 @@ function WorldTab({ entries, activeIds, contextQuery, search, onEdit }) {
         </div>
       )}
 
-      {active.length > 0 && (
-        <div className="mb-4">
-          <TriggeredHeading contextQuery={contextQuery} />
-          {active.map(e => (
-            <WorldEntryCard key={e.id} entry={e} isActive onEdit={onEdit} />
-          ))}
-        </div>
-      )}
-
-      {inactive.length > 0 && (
-        <div>
-          {active.length > 0 && (
-            <div className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-2">All World Knowledge</div>
-          )}
-          {inactive.map(e => (
-            <WorldEntryCard key={e.id} entry={e} onEdit={onEdit} />
-          ))}
-        </div>
-      )}
+      {filtered.map(e => (
+        <WorldEntryCard key={e.id} entry={e} onEdit={onEdit} />
+      ))}
     </div>
   );
 }
 
-function WorldEntryCard({ entry, isActive, onEdit }) {
+function WorldEntryCard({ entry, isActive, stickyLeft = 0, onEdit }) {
   const [expanded, setExpanded] = useState(false);
   const text = entry.text || '';
   const badge = TYPE_COLORS[entry.source_type] || TYPE_COLORS.connection;
@@ -502,6 +561,16 @@ function WorldEntryCard({ entry, isActive, onEdit }) {
             <span className={`text-[10px] px-1.5 py-0.5 rounded border uppercase tracking-wide ${badge}`}>
               {entry.source_type}
             </span>
+            {entry.constant && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded border uppercase tracking-wide bg-amber-900/60 text-amber-300 border-amber-800/50" title="Injected into every turn, independent of retrieval">
+                always in context
+              </span>
+            )}
+            {stickyLeft > 0 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded border uppercase tracking-wide bg-sky-900/60 text-sky-300 border-sky-800/50" title="Sticky entry: stays in context after being triggered">
+                sticky · {stickyLeft} {stickyLeft === 1 ? 'turn' : 'turns'} left
+              </span>
+            )}
             {entry.region && (
               <span className="text-xs text-gray-500">{entry.region}</span>
             )}
@@ -669,11 +738,7 @@ function RagResultCard({ rank, dist, injected, children }) {
 
 // ── Lorebooks tab ────────────────────────────────────────────────────────────
 
-// Pseudo-book id the backend gives a save's free-standing entries in the
-// world index (source ids are `__story__:{uid}`).
-const STORY_BOOK_ID = '__story__';
-
-function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing, onEntriesChanged }) {
+function LorebooksTab({ saveId, search, setEditing, onEntriesChanged }) {
   const [library, setLibrary] = useState([]);
   const [attached, setAttached] = useState([]);
   const [storyEntries, setStoryEntries] = useState([]); // free-standing, this save only
@@ -694,14 +759,6 @@ function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing
       })
       .catch(e => setError(e.message));
   }, [saveId]);
-
-  // Which lorebook entries fired last turn, keyed by their stable
-  // "bookId:uid" source id (row ids change on every re-embed).
-  const activeSourceIds = useMemo(() => new Set(
-    worldEntries
-      .filter(e => e.source_type === 'lorebook' && worldActiveIds.includes(e.id))
-      .map(e => e.source_id)
-  ), [worldEntries, worldActiveIds]);
 
   const toggleAttach = async (id, on) => {
     const next = on ? [...attached, id] : attached.filter(a => a !== id);
@@ -748,6 +805,7 @@ function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing
     { key: 'content', label: 'Content', type: 'textarea', rows: 6 },
     { key: 'enabled', label: 'Enabled', type: 'checkbox' },
     { key: 'constant', label: 'Constant (always in context)', type: 'checkbox' },
+    { key: 'sticky_turns', label: 'Sticky turns (stays in context this many turns after triggered; 0 = off)', type: 'number', min: 0 },
   ];
 
   const splitKeys = (value) => value.split(',').map(k => k.trim()).filter(Boolean);
@@ -755,7 +813,7 @@ function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing
   const newStoryEntry = () => setEditing({
     title: 'New Story Entry',
     fields: STORY_ENTRY_FIELDS,
-    initialValues: { title: '', keys: '', content: '', enabled: true, constant: false },
+    initialValues: { title: '', keys: '', content: '', enabled: true, constant: false, sticky_turns: 0 },
     onSave: async (values) => {
       const { story_entries } = await api.addStoryLorebookEntry(saveId, {
         ...values, keys: splitKeys(values.keys),
@@ -774,6 +832,7 @@ function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing
       content: entry.content || '',
       enabled: !!entry.enabled,
       constant: !!entry.constant,
+      sticky_turns: entry.sticky_turns || 0,
     },
     onSave: async (values, changed) => {
       if (Object.keys(changed).length === 0) return;
@@ -813,6 +872,7 @@ function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing
       { key: 'content', label: 'Content', type: 'textarea', rows: 6 },
       { key: 'enabled', label: 'Enabled', type: 'checkbox' },
       { key: 'constant', label: 'Constant (always in context)', type: 'checkbox' },
+      { key: 'sticky_turns', label: 'Sticky turns (blank = use the book default)', type: 'text' },
     ],
     initialValues: {
       title: entry.title || '',
@@ -820,11 +880,17 @@ function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing
       content: entry.content || '',
       enabled: !!entry.enabled,
       constant: !!entry.constant,
+      sticky_turns: entry.sticky_turns ?? '',
     },
     onSave: async (values, changed) => {
       if (Object.keys(changed).length === 0) return;
       const patch = { ...changed };
       if ('keys' in patch) patch.keys = patch.keys.split(',').map(k => k.trim()).filter(Boolean);
+      if ('sticky_turns' in patch) {
+        // Blank clears the per-entry override (entry inherits the book value).
+        const raw = String(patch.sticky_turns).trim();
+        patch.sticky_turns = raw === '' ? null : Math.max(0, parseInt(raw, 10) || 0);
+      }
       const { lorebook } = await api.updateLorebookEntry(bookId, entry.uid, patch);
       setBooks(prev => ({ ...prev, [bookId]: lorebook }));
       onEntriesChanged();
@@ -879,7 +945,6 @@ function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing
             <LorebookEntryCard
               key={entry.uid}
               entry={entry}
-              isActive={activeSourceIds.has(`${STORY_BOOK_ID}:${entry.uid}`)}
               onToggle={(enabled) => toggleStoryEntry(entry.uid, enabled)}
               onEdit={() => editStoryEntry(entry)}
               onDelete={() => deleteStoryEntry(entry.uid)}
@@ -942,7 +1007,7 @@ function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing
                   <LorebookEntryCard
                     key={entry.uid}
                     entry={entry}
-                    isActive={activeSourceIds.has(`${b.id}:${entry.uid}`)}
+                    bookSticky={record.sticky_turns || 0}
                     onToggle={(enabled) => toggleEnabled(b.id, entry.uid, enabled)}
                     onEdit={() => editEntry(b.id, entry)}
                   />
@@ -956,13 +1021,14 @@ function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing
   );
 }
 
-function LorebookEntryCard({ entry, isActive, onToggle, onEdit, onDelete }) {
+function LorebookEntryCard({ entry, bookSticky = 0, onToggle, onEdit, onDelete }) {
   const [expanded, setExpanded] = useState(false);
   const content = entry.content || '';
+  const effectiveSticky = entry.sticky_turns ?? bookSticky;
 
   return (
     <div className={`p-3 rounded border transition-colors ${
-      isActive ? `bg-gray-900/60 ${ACTIVE_CARD}` : entry.enabled ? 'border-gray-700 bg-gray-900/60' : 'border-gray-800 bg-gray-900/40 opacity-60'
+      entry.enabled ? 'border-gray-700 bg-gray-900/60' : 'border-gray-800 bg-gray-900/40 opacity-60'
     }`}>
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0 flex-1">
@@ -973,9 +1039,12 @@ function LorebookEntryCard({ entry, isActive, onToggle, onEdit, onDelete }) {
                 always in context
               </span>
             )}
-            {isActive && (
-              <span className="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide bg-purple-900/60 text-purple-300 border border-purple-800/50">
-                triggered last turn
+            {effectiveSticky > 0 && (
+              <span
+                className="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide bg-sky-900/60 text-sky-300 border border-sky-800/50"
+                title={entry.sticky_turns != null ? 'Stays in context this many turns after being triggered (per-entry value)' : 'Stays in context this many turns after being triggered (book default)'}
+              >
+                sticky {effectiveSticky}
               </span>
             )}
           </div>
