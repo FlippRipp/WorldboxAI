@@ -496,3 +496,43 @@ def test_get_bank_reconciles_stale_active_records():
     state = _state({"npc_2": _present_npc("npc_2", "Vex", introduced=False,
                                           status="unintroduced")})
     assert backend._get_bank(state)["npc_2"]["introduced"] is False
+
+
+# ── Appearance prompts must pin hair and eye color ───────────────────────────
+
+def test_appearance_prompts_require_hair_and_eye_color():
+    # Every LLM prompt that writes or rewrites an NPC appearance demands hair
+    # and eye color, so image generation never has to invent them per image.
+    backend = _load_backend()
+
+    def _prompt_with(calls, marker):
+        return next(p for p in calls["prompts"] if marker in p)
+
+    # Story-character capture.
+    sdk, calls = _make_sdk(json.dumps({"npcs": []}))
+    mutation = {"story_characters": [
+        {"name": "Vex", "descriptor": "a hooded stranger", "evidence": ""}]}
+    asyncio.run(backend._capture_story_characters(mutation, _state({}), {}, sdk))
+    prompt = _prompt_with(calls, "Build a full character record")
+    assert "hair color and eye color" in prompt
+
+    # The librarian's generator agent.
+    sdk, calls = _make_sdk("{}")
+    state = _state(mutation_config={"generator_frequency": 1})
+    asyncio.run(backend.on_librarian(state, sdk))
+    prompt = _prompt_with(calls, "new NPC concepts for the game")
+    assert "hair color and eye color" in prompt
+
+    # /npc generate (random character).
+    sdk, calls = _make_sdk("{}")
+    asyncio.run(backend._generate_random_character(_state({}), sdk))
+    prompt = _prompt_with(calls, "Create 1 new NPC concept")
+    assert "hair color and eye color" in prompt
+
+    # /npc update record rewrite.
+    sdk, calls = _make_sdk("{}")
+    bank = {"npc_1": {"id": "npc_1", "name": "Borin", "personality": [],
+                      "role": "ally", "introduced": True, "status": "active"}}
+    asyncio.run(backend._update_npc_from_story("npc_1", _state(bank), sdk))
+    prompt = _prompt_with(calls, "bring one character's record up to date")
+    assert "keep hair color and eye color stated" in prompt

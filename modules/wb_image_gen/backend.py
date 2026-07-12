@@ -12,6 +12,7 @@ Config is global (one Novita key for all stories), owned by this module and
 edited in the Image Studio main-menu screen -- not in per-save settings.
 """
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -190,12 +191,43 @@ BOORU_MULTI_SUBJECT_RULE = """MULTI-SUBJECT STRUCTURE (MANDATORY): when the mome
 BOORU_BREAK_RULE = ("- Put the single uppercase word BREAK between consecutive character tag "
                     "groups (its own item in the list, no commas attached to it).")
 
+# Precomputed per-character appearance tags for tag-trained checkpoints. Each
+# known character's sheet is distilled ONCE into canonical booru tags by a
+# background LLM pass and cached (keyed by save + character, invalidated by a
+# hash of the descriptor), so the prompt writer stops re-deriving -- and
+# subtly re-inventing -- hair/eye colors on every image.
+TAG_CACHE_FILE = "character_tags.json"
+TAG_CACHE_MAX_SAVES = 20        # prune least-recently-updated saves beyond this
+TAG_BACKFILL_MAX_PER_RUN = 10   # per-run cap; the next turn resumes the rest
+
+# Scene-level and quality tags never belong in a character's canonical
+# appearance; the cleaner drops them (plus score_* prefixes) even if the LLM
+# slips, because a wrong cached tag would poison every future image.
+TAG_OUTPUT_BLACKLIST = frozenset({
+    "1girl", "1boy", "1other", "2girls", "2boys", "3girls", "3boys", "solo",
+    "multiple girls", "multiple boys", "masterpiece", "best quality",
+    "high quality", "highres", "absurdres",
+})
+
+CHARACTER_TAG_PROMPT = """You write danbooru tags describing ONE character for an AI image generator. Distill the character sheet below into a comma-separated list of lowercase booru tags covering the character's PERMANENT PHYSICAL appearance ONLY.
+
+Include (when stated or clearly implied): hair color, hair length and style, eye color, skin tone, species/race features (elf ears, horns, tail, wings, fur, scales, fangs), body build and height, age impression, and notable permanent marks (scars, tattoos, heterochromia, freckles).
+STRICTLY EXCLUDE: clothing, armor, accessories, jewelry, weapons, held items, pose, expression, action, setting, lighting, quality tags (masterpiece, score_*...), and subject-count tags (1girl, 1boy, solo...).
+If the sheet does not state hair color or eye color, infer a plausible choice from the character's race and overall description instead of omitting them -- your output becomes this character's canonical look.
+
+CHARACTER SHEET:
+Name: {name}
+{descriptor}
+
+Output ONLY the tag list, no quotes, no preamble, 5-15 tags."""
+
 _services: dict = {}
 _tasks: set = set()
 _hf_detail_cache: dict = {}   # repo_id -> (fetched_at, detail json)
 _gen_lock: asyncio.Lock | None = None
 _index_lock: asyncio.Lock | None = None
 _lora_index_lock: asyncio.Lock | None = None
+_tag_lock: asyncio.Lock | None = None
 
 
 # --------------------------------------------------------------------------
@@ -310,6 +342,13 @@ def _get_lora_index_lock() -> asyncio.Lock:
     return _lora_index_lock
 
 
+def _get_tag_lock() -> asyncio.Lock:
+    global _tag_lock
+    if _tag_lock is None:
+        _tag_lock = asyncio.Lock()
+    return _tag_lock
+
+
 def _read_index() -> list[dict]:
     path = _data_dir() / "index.json"
     if not path.exists():
@@ -342,6 +381,54 @@ async def _patch_record(record_id: str, **fields) -> None:
                 record.update(fields)
                 break
         _write_index(records)
+
+
+def _appearance_hash(descriptor: str) -> str:
+    """Cache key for a character's canonical look. Hashing the full descriptor
+    (gender + race + appearance text) means any change to any of the three
+    invalidates the cached tags for free."""
+    return hashlib.sha1(str(descriptor or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _read_tag_cache() -> dict:
+    path = _data_dir() / TAG_CACHE_FILE
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            cache = json.load(f)
+        return cache if isinstance(cache, dict) else {}
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[Image Gen] Failed to read {TAG_CACHE_FILE}: {e}")
+        return {}
+
+
+def _write_tag_cache(cache: dict) -> None:
+    if len(cache) > TAG_CACHE_MAX_SAVES:
+        def newest(entries: dict) -> str:
+            return max((str(e.get("updated_at") or "")
+                        for e in entries.values() if isinstance(e, dict)),
+                       default="")
+        keep = sorted(cache, key=lambda s: newest(cache[s]))[-TAG_CACHE_MAX_SAVES:]
+        cache = {s: cache[s] for s in keep}
+    _atomic_write_json(_data_dir() / TAG_CACHE_FILE, cache)
+
+
+def _clean_character_tags(raw: str) -> str:
+    """Normalized tag list from an LLM reply: lowercased, deduped, stripped of
+    the scene-level/quality tags a character sheet must never carry. Empty
+    when the reply is unusable (caller skips caching, so it retries later)."""
+    text = _clean_image_prompt(raw).lower()
+    tags: list[str] = []
+    seen: set[str] = set()
+    for tag in text.split(","):
+        tag = tag.strip()
+        if not tag or tag in seen or tag in TAG_OUTPUT_BLACKLIST \
+                or tag.startswith("score_"):
+            continue
+        seen.add(tag)
+        tags.append(tag)
+    return ", ".join(tags)
 
 
 def set_services(services: dict) -> None:
@@ -712,12 +799,25 @@ def _character_block(cfg: dict, characters: dict | None,
     pov = str(cfg.get("player_in_images") or "show") == "pov"
     tags = _prompt_style(cfg) == "tags"
 
+    def _line(sheet: dict, label_suffix: str = "") -> str:
+        # A sheet with precomputed appearance tags serves them ready-made;
+        # the description rides along because clothing is deliberately not
+        # part of the canonical tags.
+        label = f"{sheet['name']}{label_suffix}"
+        if tags and sheet.get("tags"):
+            return (f"- {label}: appearance tags (canonical, use verbatim): "
+                    f"{sheet['tags']} | description: {sheet['descriptor']}")
+        return f"- {label}: {sheet['descriptor']}"
+
     lines = []
+    any_tagged = False
     player = characters.get("player")
     if player and not pov:
-        lines.append(f"- {player['name']} (player character): {player['descriptor']}")
+        lines.append(_line(player, " (player character)"))
+        any_tagged = any_tagged or (tags and bool(player.get("tags")))
     for npc in characters.get("npcs") or []:
-        lines.append(f"- {npc['name']}: {npc['descriptor']}")
+        lines.append(_line(npc))
+        any_tagged = any_tagged or (tags and bool(npc.get("tags")))
 
     parts = []
     if lines:
@@ -742,6 +842,12 @@ def _character_block(cfg: dict, characters: dict | None,
                       "characters appears in the scene, depict them EXACTLY as described below. "
                       "Never invent, change, or contradict a listed trait; characters not "
                       "listed may be described freely.")
+        if any_tagged:
+            header += (" Characters listed with 'appearance tags' already have their "
+                       "permanent physical traits as ready booru tags: include those tags "
+                       "VERBATIM for that character (never re-derive, drop, or contradict "
+                       "them), and take only clothing, pose, and expression from their "
+                       "description and the scene.")
         parts.append(header + "\n" + "\n".join(lines))
     if pov:
         # The player is never depicted in POV mode. The first-person camera,
@@ -1672,6 +1778,7 @@ def _character_snapshot(state: dict) -> dict | None:
     appearance = player.get("short_appearance") or player.get("full_appearance") or ""
     if str(appearance).strip():
         player_out = {
+            "key": "player",
             "name": str(player.get("name") or "").strip() or "the player character",
             "descriptor": _character_descriptor(player.get("race"), player.get("gender"), appearance),
         }
@@ -1696,18 +1803,42 @@ def _character_snapshot(state: dict) -> dict | None:
 
     def _sheet(npc):
         descriptor = _character_descriptor(npc.get("race"), npc.get("gender"), npc.get("appearance"))
-        return {"name": str(npc.get("name") or "").strip() or "Unknown",
-                "descriptor": descriptor}
+        name = str(npc.get("name") or "").strip() or "Unknown"
+        key = str(npc.get("id") or "") or f"name:{name.lower()}"
+        return {"key": key, "name": name, "descriptor": descriptor}
 
-    npcs = [_sheet(n) for n in candidates]
-    all_npcs = [_sheet(n) for n in known]
+    # One sheet object per NPC, shared by both lists, so attached tags are
+    # visible wherever the character appears.
+    sheets = {id(n): _sheet(n) for n in known}
+    npcs = [sheets[id(n)] for n in candidates]
+    all_npcs = [sheets[id(n)] for n in known]
 
     if not player_out and not all_npcs:
         return None
     # npcs: who is in the scene (feeds the image prompt); all_npcs: every
     # known living character (feeds the LoRA gate, whose per-character
     # conditions must be able to match anyone regardless of scene presence).
-    return {"player": player_out, "npcs": npcs, "all_npcs": all_npcs}
+    out = {"player": player_out, "npcs": npcs, "all_npcs": all_npcs}
+    _attach_cached_tags(state.get("active_save_id") or "unknown", out)
+    return out
+
+
+def _attach_cached_tags(save_id: str, characters: dict) -> None:
+    """Copy each character's cached appearance tags onto their sheet -- but
+    only when the cached hash still matches the descriptor, so an edited
+    appearance instantly falls back to the description instead of serving
+    stale tags while the regeneration is in flight."""
+    entries = _read_tag_cache().get(str(save_id))
+    if not isinstance(entries, dict) or not entries:
+        return
+    sheets = list(characters.get("all_npcs") or [])
+    if characters.get("player"):
+        sheets.append(characters["player"])
+    for sheet in sheets:
+        entry = entries.get(sheet.get("key"))
+        if isinstance(entry, dict) and str(entry.get("tags") or "").strip() \
+                and entry.get("hash") == _appearance_hash(sheet["descriptor"]):
+            sheet["tags"] = str(entry["tags"])
 
 
 def _snapshot_names(characters: dict | None) -> list[str]:
@@ -1715,6 +1846,103 @@ def _snapshot_names(characters: dict | None) -> list[str]:
         return []
     names = [characters["player"]["name"]] if characters.get("player") else []
     return names + [n["name"] for n in characters.get("npcs") or []]
+
+
+def _characters_needing_tags(save_id: str, characters: dict) -> list[dict]:
+    """Sheets whose cached appearance tags are missing or hash-stale. Drawn
+    from all_npcs (every known living character), not just the scene roster,
+    so tags are ready before a character first enters frame."""
+    entries = _read_tag_cache().get(str(save_id))
+    if not isinstance(entries, dict):
+        entries = {}
+    sheets = list(characters.get("all_npcs") or [])
+    if characters.get("player"):
+        sheets.append(characters["player"])
+    needing = []
+    for sheet in sheets:
+        entry = entries.get(sheet.get("key"))
+        if not (isinstance(entry, dict)
+                and entry.get("hash") == _appearance_hash(sheet["descriptor"])):
+            needing.append(sheet)
+    return needing
+
+
+def _spawn_tag_backfill(save_id: str, characters: dict | None, sdk) -> None:
+    """Fire-and-forget precomputation of per-character appearance tags for
+    tag-style checkpoints. Never blocks or fails the caller; characters whose
+    tags aren't ready yet simply fall back to their description. Deliberately
+    not gated on cfg["enabled"]: on_librarian gates that itself, and manual
+    /image or /generate runs should warm the cache even when auto
+    illustration is off."""
+    if not characters:
+        return
+    cfg = _load_config()
+    if not cfg.get("api_key") or not cfg.get("model_name"):
+        return
+    if _prompt_style(cfg) != "tags" or not cfg.get("character_reference_enabled", True):
+        return
+    if _get_tag_lock().locked():
+        return
+    worklist = _characters_needing_tags(save_id, characters)
+    if not worklist:
+        return
+    roster_keys = {s.get("key") for s in characters.get("all_npcs") or []}
+    roster_keys.add("player")
+    task = asyncio.get_running_loop().create_task(
+        _tag_backfill_pipeline(save_id, worklist, roster_keys, cfg, _hook_sdk(sdk)))
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+
+async def _tag_backfill_pipeline(save_id: str, worklist: list[dict],
+                                 roster_keys: set, cfg: dict, sdk) -> None:
+    """Generate and cache appearance tags for each sheet, sequentially (one
+    LLM call in flight at a time -- adopting a story with many NPCs must not
+    fan out) and capped per run; the next turn's backfill resumes the rest.
+    Results are persisted incrementally, so a restart mid-run loses nothing
+    already finished. Failures only log: a missing entry retries next turn."""
+    try:
+        async with _get_tag_lock():
+            if sdk is None:
+                return
+            for sheet in worklist[:TAG_BACKFILL_MAX_PER_RUN]:
+                prompt = (CHARACTER_TAG_PROMPT
+                          .replace("{name}", sheet["name"])
+                          .replace("{descriptor}", sheet["descriptor"]))
+                try:
+                    sdk.llm._current_module = MODULE_ID
+                    raw = await sdk.llm.generate(
+                        prompt,
+                        model_preference=cfg.get("prompt_model_preference", "smartest"))
+                except Exception as e:
+                    print(f"[Image Gen] Tag generation failed for {sheet['name']}: {e}")
+                    continue
+                finally:
+                    sdk.llm._current_module = ""
+                tags = _clean_character_tags(raw)
+                if not tags:
+                    print(f"[Image Gen] Unusable tag reply for {sheet['name']} "
+                          f"(will retry): {raw[:200]!r}")
+                    continue
+                # Only this pipeline writes the cache, and _tag_lock
+                # serializes pipelines, so read-modify-write is safe here.
+                cache = _read_tag_cache()
+                entries = cache.get(str(save_id))
+                if not isinstance(entries, dict):
+                    entries = {}
+                entries[sheet["key"]] = {
+                    "hash": _appearance_hash(sheet["descriptor"]),
+                    "tags": tags,
+                    "name": sheet["name"],
+                    "updated_at": _now(),
+                }
+                # Entries whose character left the roster (dead, departed,
+                # renamed) are evicted whenever this save's section is written.
+                cache[str(save_id)] = {k: v for k, v in entries.items()
+                                       if k in roster_keys}
+                _write_tag_cache(cache)
+    except Exception as e:
+        print(f"[Image Gen] Tag backfill failed: {e}")
 
 
 def _spawn_generation(*, save_id: str, turn: int, narration: str, history: str,
@@ -1834,6 +2062,11 @@ async def on_librarian(state: dict, sdk) -> dict | None:
     count = int(_own_data(state).get("turns_since_image", 0) or 0) + 1
     interval = max(1, int(cfg.get("interval", 3) or 3))
 
+    # Every enabled turn -- not just image turns -- so a character's tags are
+    # usually ready by the time they first appear in an illustration.
+    characters = _character_snapshot(state)
+    _spawn_tag_backfill(state.get("active_save_id") or "unknown", characters, sdk)
+
     if count >= interval:
         record_id = _spawn_generation(
             save_id=state.get("active_save_id") or "unknown",
@@ -1841,7 +2074,7 @@ async def on_librarian(state: dict, sdk) -> dict | None:
             narration=str(history[-1]),
             history="\n".join(str(h) for h in history[-6:-1]),
             sdk=sdk,
-            characters=_character_snapshot(state),
+            characters=characters,
         )
         if record_id:
             print(f"[Image Gen] Turn {state.get('turn')}: auto illustration started ({record_id}).")
@@ -1874,6 +2107,8 @@ async def on_command_image(args: list[str], state: dict, sdk) -> dict:
                 "signal": "end_turn"}
 
     history = state.get("history", [])
+    characters = _character_snapshot(state)
+    _spawn_tag_backfill(state.get("active_save_id") or "unknown", characters, sdk)
     record_id = _spawn_generation(
         save_id=state.get("active_save_id") or "unknown",
         turn=state.get("turn", 0),
@@ -1881,7 +2116,7 @@ async def on_command_image(args: list[str], state: dict, sdk) -> dict:
         history="\n".join(str(h) for h in history[-6:-1]),
         sdk=sdk,
         trigger="manual",
-        characters=_character_snapshot(state),
+        characters=characters,
     )
     if record_id is None:
         return {"message": "[Image Gen] An image is already being generated — give it a moment.",
@@ -2386,6 +2621,7 @@ def get_router():
             turn = state.get("turn", 0)
             save_id = save_id or getattr(session_manager, "active_save_id", None) or "unknown"
             characters = _character_snapshot(state)
+            _spawn_tag_backfill(save_id, characters, None)
         else:
             save_id = save_id or "__studio__"
             if req.refine:

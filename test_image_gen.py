@@ -2234,7 +2234,7 @@ def test_character_snapshot_selects_sorts_and_caps(tmp_path):
         "n5": _npc("Blank", appearance="  "),
         "n6": _npc("Recent", last_turn=9),
     }))
-    assert snap["player"] == {"name": "Ash",
+    assert snap["player"] == {"key": "player", "name": "Ash",
                               "descriptor": "female elf; silver hair, green cloak"}
     # Companions first, then most recently seen; dead/unmet/undescribed dropped.
     assert [n["name"] for n in snap["npcs"]] == ["Kira", "Recent", "Borin"]
@@ -2456,6 +2456,164 @@ def test_studio_generation_carries_no_roster(tmp_path):
     assert record["status"] == "done"
     assert record["characters"] == []
     assert "KNOWN CHARACTERS" not in captured["prompts"][0]
+
+
+# ---------------------------------------------------------------------------
+# Precomputed character appearance tags (booru models)
+# ---------------------------------------------------------------------------
+
+def _tag_state(**extra):
+    return _char_state(npcs={"n1": _npc("Borin", id="n1", last_turn=5),
+                             "n2": _npc("Kira", id="n2", last_turn=1)}, **extra)
+
+
+def test_tag_backfill_generates_caches_and_invalidates(tmp_path):
+    backend = _load_backend(tmp_path)
+    # interval high enough that no image generation fires alongside.
+    _enable(backend, model_base="Pony", model_name="m.safetensors", interval=99)
+    captured = {}
+    sdk = _make_sdk(reply="silver hair, green eyes", captured=captured)
+
+    async def run():
+        await backend.on_librarian(_tag_state(), sdk)
+        await asyncio.gather(*backend._tasks)
+
+        cache = backend._read_tag_cache()["mystory"]
+        assert sorted(cache) == ["n1", "n2", "player"]
+        for entry in cache.values():
+            assert entry["tags"] == "silver hair, green eyes"
+            assert entry["hash"] and entry["updated_at"] and entry["name"]
+        assert len(captured["prompts"]) == 3
+        assert captured["preferences"] == ["smartest"] * 3
+        for prompt in captured["prompts"]:
+            assert "hair color" in prompt and "eye color" in prompt
+            assert "STRICTLY EXCLUDE: clothing" in prompt
+        assert any("female elf; silver hair, green cloak" in p
+                   for p in captured["prompts"])
+
+        # Warm cache: a second pass regenerates nothing.
+        await backend.on_librarian(_tag_state(), sdk)
+        await asyncio.gather(*backend._tasks)
+        assert len(captured["prompts"]) == 3
+
+        # The snapshot serves cached tags -- and drops them the moment the
+        # appearance no longer matches the cached hash.
+        state = _tag_state()
+        state["module_data"]["wb_npc_system"]["characters"]["n1"]["appearance"] = "now bald"
+        snap = backend._character_snapshot(state)
+        borin = next(n for n in snap["all_npcs"] if n["name"] == "Borin")
+        kira = next(n for n in snap["all_npcs"] if n["name"] == "Kira")
+        assert "tags" not in borin
+        assert kira["tags"] == "silver hair, green eyes"
+        assert snap["player"]["tags"] == "silver hair, green eyes"
+
+        # Only the changed character regenerates.
+        await backend.on_librarian(state, sdk)
+        await asyncio.gather(*backend._tasks)
+        assert len(captured["prompts"]) == 4
+        assert "now bald" in captured["prompts"][3]
+        assert backend._read_tag_cache()["mystory"]["n1"]["hash"] == \
+            backend._appearance_hash(borin["descriptor"])
+
+        # Roster pruning: a dead NPC's entry is evicted on the next write.
+        state = _tag_state()
+        bank = state["module_data"]["wb_npc_system"]["characters"]
+        bank["n2"]["status"] = "deceased"
+        bank["n1"]["appearance"] = "shaved head"  # forces a cache write
+        await backend.on_librarian(state, sdk)
+        await asyncio.gather(*backend._tasks)
+        assert "n2" not in backend._read_tag_cache()["mystory"]
+
+    asyncio.run(run())
+
+
+def test_tag_backfill_gating(tmp_path):
+    backend = _load_backend(tmp_path)
+    captured = {}
+    sdk = _make_sdk(captured=captured)
+
+    async def run():
+        snapshot = backend._character_snapshot(_tag_state())
+        # Natural-language checkpoint: no tag precomputation.
+        _enable(backend)
+        backend._spawn_tag_backfill("mystory", snapshot, sdk)
+        # Booru checkpoint but character reference disabled.
+        _enable(backend, model_base="Pony", character_reference_enabled=False)
+        backend._spawn_tag_backfill("mystory", snapshot, sdk)
+        # No API key / no model.
+        _enable(backend, model_base="Pony", api_key="")
+        backend._spawn_tag_backfill("mystory", snapshot, sdk)
+        # No characters.
+        _enable(backend, model_base="Pony")
+        backend._spawn_tag_backfill("mystory", None, sdk)
+        # A backfill already in flight: skipped, no double spawn.
+        async with backend._get_tag_lock():
+            backend._spawn_tag_backfill("mystory", snapshot, sdk)
+        await asyncio.gather(*backend._tasks)
+
+    asyncio.run(run())
+    assert "prompts" not in captured
+    assert backend._read_tag_cache() == {}
+
+
+def test_character_block_serves_ready_tags(tmp_path):
+    backend = _load_backend(tmp_path)
+    tag_cfg = {**backend._default_config(),
+               "model_base": "Pony", "model_name": "m.safetensors"}
+    characters = {
+        "player": {"key": "player", "name": "Ash",
+                   "descriptor": "female elf; silver hair",
+                   "tags": "silver hair, long hair, green eyes, pointy ears"},
+        "npcs": [{"key": "n1", "name": "Borin",
+                  "descriptor": "male human; tall and scarred"}],
+    }
+
+    block = backend._character_block(tag_cfg, characters)
+    assert ("- Ash (player character): appearance tags (canonical, use verbatim): "
+            "silver hair, long hair, green eyes, pointy ears | "
+            "description: female elf; silver hair") in block
+    # Untagged characters keep the plain descriptor line and contract.
+    assert "- Borin: male human; tall and scarred" in block
+    assert "include those tags VERBATIM" in block
+    assert "clothing, pose, and expression" in block
+
+    # With no tagged character in frame, the verbatim contract is absent.
+    untagged = {**characters,
+                "player": {k: v for k, v in characters["player"].items() if k != "tags"}}
+    assert "VERBATIM" not in backend._character_block(tag_cfg, untagged)
+
+    # Natural-language models never see tags.
+    natural = backend._character_block(backend._default_config(), characters)
+    assert "appearance tags" not in natural
+    assert "- Ash (player character): female elf; silver hair" in natural
+
+    # The LoRA gate keeps plain descriptors regardless.
+    gate = backend._condition_character_block(
+        {**characters, "all_npcs": characters["npcs"]})
+    assert "appearance tags" not in gate
+    assert "- Ash (player character): female elf; silver hair" in gate
+
+
+def test_clean_character_tags(tmp_path):
+    backend = _load_backend(tmp_path)
+    raw = "```\n1girl, Masterpiece, score_9, Red Hair, red hair, scar across nose\n```"
+    assert backend._clean_character_tags(raw) == "red hair, scar across nose"
+    assert backend._clean_character_tags("") == ""
+    # A reply of nothing but scene/quality tags is unusable.
+    assert backend._clean_character_tags("solo, highres, score_8_up") == ""
+
+
+def test_tag_cache_prunes_oldest_saves(tmp_path):
+    backend = _load_backend(tmp_path)
+    total = backend.TAG_CACHE_MAX_SAVES + 3
+    cache = {f"s{i}": {"player": {"hash": "h", "tags": "t",
+                                  "updated_at": f"2026-01-{i + 1:02d}"}}
+             for i in range(total)}
+    backend._write_tag_cache(cache)
+    stored = backend._read_tag_cache()
+    assert len(stored) == backend.TAG_CACHE_MAX_SAVES
+    assert all(f"s{i}" not in stored for i in range(3))
+    assert f"s{total - 1}" in stored
 
 
 def test_player_in_images_config_validation(tmp_path):

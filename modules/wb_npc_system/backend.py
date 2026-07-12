@@ -743,7 +743,7 @@ CHARACTERS TO PROFILE (use these exact names):
 For each character return:
 - name (exactly as given above)
 - race, gender (infer from the scene; use "unknown" if truly unclear)
-- appearance: 1-2 sentence physical description grounded in the scene
+- appearance: 1-2 sentence physical description grounded in the scene; ALWAYS state hair color and eye color (or the being's closest equivalent -- fur, scales, glow), inferring plausible ones where the scene is silent
 - archetype: short label
 - pitch: 2-3 sentence concept with a story hook
 - personality: exactly 3 trait keywords
@@ -1209,7 +1209,7 @@ INSTRUCTIONS:
 8. Optionally relate 0-2 new characters to EXISTING characters above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.{plot_rule}
 
 Respond with ONLY valid JSON:
-{{"npcs": [{{"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_layer_id": "layer_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}]}}"""
+{{"npcs": [{{"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description that always states hair color and eye color (or the being's closest equivalent)", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_layer_id": "layer_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}]}}"""
 
     try:
         result = await sdk.llm.generate(prompt, model_preference="balanced")
@@ -1392,7 +1392,8 @@ RECENT STORY (oldest to newest):
 Report ONLY durable changes this character undergoes in the story above -- new injuries or looks, a new name or title, a lasting personality shift, a changed narrative role, death or departure, or noteworthy things they did. Ignore scenes that don't involve them and momentary emotions or states.
 
 For each changed field return its NEW full value (rewrite the field in full, incorporating the change):
-- "appearance", "pitch": full rewritten text
+- "appearance": full rewritten text; keep hair color and eye color stated (updated when the change is about them, otherwise carried over from the record)
+- "pitch": full rewritten text
 - "personality": the full updated list of exactly 3 trait keywords
 - "name": only if they are now called something else
 - "role": one of {'|'.join(NPC_ROLES)} -- only if their narrative function clearly shifted
@@ -1622,7 +1623,7 @@ INSTRUCTIONS:
 7. Optionally relate the character to an EXISTING character above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.{plot_rule}
 
 Respond with ONLY valid JSON:
-{{"npc": {{"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_layer_id": "layer_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}}}"""
+{{"npc": {{"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description that always states hair color and eye color (or the being's closest equivalent)", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_layer_id": "layer_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}}}"""
 
     try:
         result = await sdk.llm.generate(prompt, model_preference="balanced")
