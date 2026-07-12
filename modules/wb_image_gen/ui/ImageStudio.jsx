@@ -1306,8 +1306,9 @@ export default function ImageStudio({ onBack }) {
   const [records, setRecords] = useState([]);
   const [pendingCount, setPendingCount] = useState(0);
   const [lightbox, setLightbox] = useState(null);
-  // Ids the user has revealed this visit, so a concealed image stays open once
-  // clicked (mirrors the in-chat widget's per-session reveal behavior).
+  // Filenames the user has revealed this visit, so a concealed image stays
+  // open once clicked without uncovering its batch siblings (mirrors the
+  // in-chat widget's per-session reveal behavior).
   const [revealed, setRevealed] = useState(() => new Set());
 
   const [testPrompt, setTestPrompt] = useState('');
@@ -1493,10 +1494,10 @@ export default function ImageStudio({ onBack }) {
           prompt: (Array.isArray(r.image_prompts) && r.image_prompts[i]) || r.image_prompt,
         }))
       : []);
-  const revealImage = (recordId) =>
+  const revealImage = (filename) =>
     setRevealed((prev) => {
       const next = new Set(prev);
-      next.add(recordId);
+      next.add(filename);
       return next;
     });
 
@@ -2102,15 +2103,22 @@ export default function ImageStudio({ onBack }) {
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
               {records.flatMap((r) => {
-                // A multi-image record gets one tile per image; deleting any
-                // of them removes the whole generation (they share a record).
+                // A multi-image record gets one tile per image (and one
+                // placeholder tile per expected image while generating);
+                // deleting any of them removes the whole generation, since
+                // they share a record. Conceal and reveal apply per image.
                 const files = r.status === 'done' ? recordFiles(r) : [];
-                const tiles = files.length > 0 ? files : [null];
-                return tiles.map((filename) => {
+                const generating = ['pending', 'prompting', 'generating'].includes(r.status);
+                const tiles = files.length > 0
+                  ? files
+                  : Array.from(
+                      { length: generating ? Math.max(1, Number(r.image_num) || 1) : 1 },
+                      () => null);
+                return tiles.map((filename, ti) => {
                   const concealed =
-                    !!filename && conceal !== 'off' && !revealed.has(r.id);
+                    !!filename && conceal !== 'off' && !revealed.has(filename);
                   return (
-                  <div key={filename ? `${r.id}:${filename}` : r.id} className="group relative bg-gray-950/60 border border-gray-800 rounded-lg overflow-hidden">
+                  <div key={filename ? `${r.id}:${filename}` : `${r.id}:${ti}`} className="group relative bg-gray-950/60 border border-gray-800 rounded-lg overflow-hidden">
                     {filename ? (
                       <div className="relative overflow-hidden">
                         <img
@@ -2119,7 +2127,7 @@ export default function ImageStudio({ onBack }) {
                           title={`${r.model_name || ''}${r.loras?.length ? ` + LoRAs: ${r.loras.join(', ')}` : ''}`}
                           loading="lazy"
                           onClick={() => (concealed
-                            ? revealImage(r.id)
+                            ? revealImage(filename)
                             : setLightbox({ index: Math.max(0, galleryItems.findIndex((it) => it.filename === filename)) }))}
                           className={`w-full h-32 ${
                             concealed
@@ -2131,7 +2139,7 @@ export default function ImageStudio({ onBack }) {
                         />
                         {concealed && (
                           <button
-                            onClick={() => revealImage(r.id)}
+                            onClick={() => revealImage(filename)}
                             aria-label="Reveal image"
                             className="absolute inset-0 flex items-center justify-center cursor-pointer"
                           >

@@ -336,6 +336,9 @@ def test_parallel_image_num_writes_all_files(tmp_path):
     record = _run_pipeline(backend)
     assert record["status"] == "done"
     assert counter["n"] == 3
+    # The expected batch size rides on the record from the moment it is
+    # created, so the UIs can render one pending placeholder per image.
+    assert record["image_num"] == 3
     assert len(record["filenames"]) == 3
     assert record["filename"] == record["filenames"][0]
     contents = {(tmp_path / MID / "images" / f).read_bytes() for f in record["filenames"]}

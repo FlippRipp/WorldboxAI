@@ -325,17 +325,24 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
     'px-2 py-1 rounded text-xs leading-none bg-black/60 text-gray-300 ' +
     'border border-white/10 hover:bg-black/80 hover:text-white transition-colors';
 
-  const reveal = (recordId) => {
-    store.revealed.add(recordId);
+  // Reveals are keyed by filename, so uncovering one image of a batch never
+  // uncovers its siblings.
+  const reveal = (filename) => {
+    store.revealed.add(filename);
     notify();
   };
+  const isHidden = (filename) => store.conceal !== 'off' && !store.revealed.has(filename);
+  const hiddenCls = (hidden) => hidden
+    ? store.conceal === 'blackout'
+      ? 'cursor-pointer brightness-0'
+      : 'cursor-pointer blur-2xl scale-110'
+    : 'cursor-zoom-in';
 
   return (
     <div className="mt-4 space-y-3">
       {records.map((r) => {
         const files = r.status === 'done' ? recordFiles(r) : [];
         if (files.length > 0) {
-          const concealed = store.conceal !== 'off' && !store.revealed.has(r.id);
           // Frame sized from the record's aspect ratio, image fills it: the
           // box exists before the file loads, so nothing shifts on load and
           // the pending-placeholder swap is footprint-identical. Sizing the
@@ -344,11 +351,7 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
           // stretches the image. Records without dimensions (old saves) fall
           // back to the image's natural size, as before.
           const hasSize = r.width > 0 && r.height > 0;
-          const concealCls = concealed
-            ? store.conceal === 'blackout'
-              ? 'cursor-pointer brightness-0'
-              : 'cursor-pointer blur-2xl scale-110'
-            : 'cursor-zoom-in';
+          const hidden0 = isHidden(files[0]);
           return (
             <div
               key={r.id}
@@ -359,22 +362,37 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
               {files.length > 1 ? (
                 // A parallel batch: two-up grid of equal frames; the lightbox
                 // (click any of them) swipes through the full-size versions.
+                // Conceal and reveal apply per image, not per batch.
                 <div className="grid grid-cols-2 gap-2">
-                  {files.map((filename) => (
-                    <div
-                      key={filename}
-                      className="overflow-hidden rounded-lg"
-                      style={{ aspectRatio: hasSize ? `${r.width} / ${r.height}` : '1 / 1' }}
-                    >
-                      <img
-                        src={`${API_BASE}/images/file/${filename}`}
-                        alt={concealed ? 'Hidden story illustration' : (r.image_prompt || 'Story illustration')}
-                        loading="lazy"
-                        onClick={() => (concealed ? reveal(r.id) : openAt(filename))}
-                        className={`w-full h-full object-cover rounded-lg border border-gray-700/60 shadow-lg ${concealCls}`}
-                      />
-                    </div>
-                  ))}
+                  {files.map((filename) => {
+                    const hidden = isHidden(filename);
+                    return (
+                      <div
+                        key={filename}
+                        className="relative overflow-hidden rounded-lg"
+                        style={{ aspectRatio: hasSize ? `${r.width} / ${r.height}` : '1 / 1' }}
+                      >
+                        <img
+                          src={`${API_BASE}/images/file/${filename}`}
+                          alt={hidden ? 'Hidden story illustration' : (r.image_prompt || 'Story illustration')}
+                          loading="lazy"
+                          onClick={() => (hidden ? reveal(filename) : openAt(filename))}
+                          className={`w-full h-full object-cover rounded-lg border border-gray-700/60 shadow-lg ${hiddenCls(hidden)}`}
+                        />
+                        {hidden && (
+                          <button
+                            onClick={() => reveal(filename)}
+                            aria-label="Reveal illustration"
+                            className="absolute inset-0 flex items-center justify-center cursor-pointer"
+                          >
+                            <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 border border-white/10 text-[10px] text-gray-300">
+                              <span aria-hidden="true">👁</span> Reveal
+                            </span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               ) : (
                 <div
@@ -383,16 +401,16 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
                 >
                   <img
                     src={`${API_BASE}/images/file/${files[0]}`}
-                    alt={concealed ? 'Hidden story illustration' : (r.image_prompt || 'Story illustration')}
+                    alt={hidden0 ? 'Hidden story illustration' : (r.image_prompt || 'Story illustration')}
                     loading="lazy"
-                    onClick={() => (concealed ? reveal(r.id) : openAt(files[0]))}
-                    className={`${hasSize ? 'w-full h-full object-cover' : 'max-h-80 max-w-full'} rounded-lg border border-gray-700/60 shadow-lg ${concealCls}`}
+                    onClick={() => (hidden0 ? reveal(files[0]) : openAt(files[0]))}
+                    className={`${hasSize ? 'w-full h-full object-cover' : 'max-h-80 max-w-full'} rounded-lg border border-gray-700/60 shadow-lg ${hiddenCls(hidden0)}`}
                   />
                 </div>
               )}
-              {concealed && (
+              {files.length === 1 && hidden0 && (
                 <button
-                  onClick={() => reveal(r.id)}
+                  onClick={() => reveal(files[0])}
                   aria-label="Reveal illustration"
                   className="absolute inset-0 flex items-center justify-center rounded-lg cursor-pointer"
                 >
@@ -456,19 +474,41 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
             </div>
           );
         }
-        // Reserve the finished image's footprint (same max-h-80 cap, same
-        // aspect) while it generates, so the swap to the real image doesn't
-        // shift the reader's scroll point.
+        // Reserve the finished images' footprint while they generate (same
+        // layout the done record will use: single box, or a two-up grid with
+        // one cell per expected image), so the swap doesn't shift the
+        // reader's scroll point.
+        const expected = Math.max(1, Number(r.image_num) || 1);
+        const pendingAspect = r.width > 0 && r.height > 0 ? `${r.width} / ${r.height}` : '1 / 1';
+        const spinner = (
+          <span className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-purple-500" />
+          </span>
+        );
+        if (expected > 1) {
+          return (
+            <div key={r.id} className="grid grid-cols-2 gap-2 max-w-2xl">
+              {Array.from({ length: expected }, (_, i) => (
+                <div
+                  key={i}
+                  style={{ aspectRatio: pendingAspect }}
+                  className="rounded-lg border border-gray-700/60 bg-black/20 flex items-center justify-center gap-2"
+                >
+                  {spinner}
+                  <span className="text-xs text-gray-500 animate-pulse">🎨 Illustrating…</span>
+                </div>
+              ))}
+            </div>
+          );
+        }
         return (
           <div
             key={r.id}
-            style={{ aspectRatio: r.width > 0 && r.height > 0 ? `${r.width} / ${r.height}` : '1 / 1' }}
+            style={{ aspectRatio: pendingAspect }}
             className="h-80 max-w-full rounded-lg border border-gray-700/60 bg-black/20 flex items-center justify-center gap-2"
           >
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-purple-500" />
-            </span>
+            {spinner}
             <span className="text-xs text-gray-500 animate-pulse">🎨 Illustrating scene…</span>
           </div>
         );

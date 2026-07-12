@@ -2193,6 +2193,9 @@ def _spawn_generation(*, save_id: str, turn: int, narration: str, history: str,
 
     cfg = _load_config()
     record_id = f"{_slug(save_id)}_{int(turn or 0)}_{uuid.uuid4().hex[:8]}"
+    # Stamped on the record so the UIs can show one in-progress placeholder
+    # per expected image while the batch generates.
+    image_num = max(1, min(IMAGE_NUM_MAX, int(cfg.get("image_num", 1) or 1)))
     record = {
         "id": record_id,
         "save_id": save_id,
@@ -2209,6 +2212,7 @@ def _spawn_generation(*, save_id: str, turn: int, narration: str, history: str,
         "characters": _snapshot_names(characters),
         "width": cfg.get("width"),
         "height": cfg.get("height"),
+        "image_num": image_num,
         "error": None,
         "created_at": _now(),
         "completed_at": None,
