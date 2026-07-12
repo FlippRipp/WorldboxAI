@@ -342,6 +342,116 @@ def test_parallel_image_num_writes_all_files(tmp_path):
     assert len(contents) == 3   # three distinct tasks, three distinct files
 
 
+def test_parallel_prompts_written_separately(tmp_path):
+    """Each image in a batch gets its own prompt-writer call (with a variation
+    hint past slot 0), and image_prompts stays aligned with filenames."""
+    backend = _load_backend(tmp_path)
+    _enable(backend, image_num=3)
+    captured = {"inputs": [], "n": 0}
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        captured["inputs"].append(prompt)
+        captured["n"] += 1
+        return f"scene take {captured['n']}"
+
+    sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
+
+    # Thread each image prompt through submit -> poll -> download, so the
+    # bytes on disk reveal which prompt produced which file.
+    async def submit(cfg, prompt):
+        return prompt
+
+    async def poll(cfg, task_id):
+        return task_id
+
+    async def download(url):
+        return url.encode(), "jpg"
+
+    backend._novita_submit = submit
+    backend._novita_poll = poll
+    backend._download = download
+
+    async def run():
+        record_id = backend._spawn_generation(
+            save_id="mystory", turn=1, narration="a scene", history="",
+            sdk=sdk, trigger="auto")
+        await asyncio.gather(*backend._tasks)
+        return record_id
+
+    record_id = asyncio.run(run())
+    record = backend._read_index()[0]
+    assert record["id"] == record_id
+    assert record["status"] == "done"
+
+    # Three independent writer calls: slot 0 canonical, the rest nudged.
+    assert captured["n"] == 3
+    assert "VARIATION:" not in captured["inputs"][0]
+    assert all("VARIATION:" in p for p in captured["inputs"][1:])
+
+    # Three distinct prompts, aligned with the files they produced.
+    assert record["image_prompts"] == ["scene take 1", "scene take 2", "scene take 3"]
+    assert record["image_prompt"] == record["image_prompts"][0]
+    for filename, prompt in zip(record["filenames"], record["image_prompts"]):
+        assert (tmp_path / MID / "images" / filename).read_bytes() == prompt.encode()
+
+
+def test_parallel_prompt_failure_borrows_sibling_prompt(tmp_path):
+    """A failed writer slot reuses a surviving sibling's prompt instead of
+    losing its image; only all slots failing sinks the record."""
+    backend = _load_backend(tmp_path)
+    backend.STEP_RETRY_BASE_DELAY_S = 0
+    _enable(backend, image_num=3, step_retries=0)
+    _fake_novita(backend)
+    calls = {"n": 0}
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("LLM unavailable")
+        return f"scene take {calls['n']}"
+
+    sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
+
+    async def run():
+        record_id = backend._spawn_generation(
+            save_id="mystory", turn=1, narration="a scene", history="",
+            sdk=sdk, trigger="auto")
+        await asyncio.gather(*backend._tasks)
+        return record_id
+
+    record_id = asyncio.run(run())
+    record = backend._read_index()[0]
+    assert record["id"] == record_id
+    assert record["status"] == "done"
+    assert len(record["filenames"]) == 3
+    # Slot 0's writer failed, so it borrowed the first surviving prompt.
+    assert record["image_prompts"] == ["scene take 2", "scene take 2", "scene take 3"]
+
+
+def test_all_prompt_writers_failing_marks_error(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend.STEP_RETRY_BASE_DELAY_S = 0
+    _enable(backend, image_num=2, step_retries=0)
+    _fake_novita(backend)
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        raise RuntimeError("LLM unavailable")
+
+    sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
+
+    async def run():
+        record_id = backend._spawn_generation(
+            save_id="mystory", turn=1, narration="a scene", history="",
+            sdk=sdk, trigger="auto")
+        await asyncio.gather(*backend._tasks)
+        return record_id
+
+    asyncio.run(run())
+    record = backend._read_index()[0]
+    assert record["status"] == "error"
+    assert "LLM unavailable" in record["error"]
+
+
 def test_parallel_partial_failure_keeps_survivors(tmp_path):
     backend = _load_backend(tmp_path)
     backend.STEP_RETRY_BASE_DELAY_S = 0
@@ -422,16 +532,19 @@ def test_delete_and_retry_remove_all_parallel_files(tmp_path):
     assert client.delete("/images/mystory_3_00000001").status_code == 200
     assert all(not (images / f).exists() for f in files)
 
-    # Regenerating a batch record also clears every file it owned.
+    # Regenerating a batch record also clears every file it owned. The
+    # pipeline task lives on the client's portal loop; keep the portal open
+    # while polling or the loop is torn down mid-generation.
     files = _make_batch_record("mystory_3_00000002")
-    resp = client.post("/generate", json={"retry_record_id": "mystory_3_00000002"})
-    assert resp.status_code == 200
-    record_id = resp.json()["record_id"]
-    for _ in range(100):
-        record = next((r for r in backend._read_index() if r["id"] == record_id), None)
-        if record and record["status"] in ("done", "error"):
-            break
-        time.sleep(0.02)
+    with _client(backend) as client:
+        resp = client.post("/generate", json={"retry_record_id": "mystory_3_00000002"})
+        assert resp.status_code == 200
+        record_id = resp.json()["record_id"]
+        for _ in range(100):
+            record = next((r for r in backend._read_index() if r["id"] == record_id), None)
+            if record and record["status"] in ("done", "error"):
+                break
+            time.sleep(0.02)
     assert record["status"] == "done"
     assert all(not (images / f).exists() for f in files)
 
@@ -2138,19 +2251,21 @@ def test_generate_endpoint_refine_runs_prompt_writer(tmp_path):
     sdk = _make_sdk(reply="a refined moonlit castle", captured=captured)
     backend.set_services({"data_dir": str(tmp_path),
                           "engine": SimpleNamespace(sdk=sdk)})
-    client = _client(backend)
 
-    resp = client.post("/generate", json={"prompt_override": "castle by the sea",
-                                          "refine": True})
-    assert resp.status_code == 200
-    record_id = resp.json()["record_id"]
+    # The pipeline task lives on the client's portal loop; keep the portal
+    # open while polling or the loop is torn down mid-generation.
+    with _client(backend) as client:
+        resp = client.post("/generate", json={"prompt_override": "castle by the sea",
+                                              "refine": True})
+        assert resp.status_code == 200
+        record_id = resp.json()["record_id"]
 
-    for _ in range(100):
-        record = next((r for r in backend._read_index() if r["id"] == record_id), None)
-        if record and record["status"] in ("done", "error"):
-            break
-        import time as _t
-        _t.sleep(0.02)
+        for _ in range(100):
+            record = next((r for r in backend._read_index() if r["id"] == record_id), None)
+            if record and record["status"] in ("done", "error"):
+                break
+            import time as _t
+            _t.sleep(0.02)
     assert record["status"] == "done"
     # The typed text became the scene; the LLM's output became the prompt.
     assert record["narration_excerpt"] == "castle by the sea"
@@ -2749,17 +2864,19 @@ def test_studio_generation_carries_no_roster(tmp_path):
     sdk = _make_sdk(reply="a castle", captured=captured)
     backend.set_services({"data_dir": str(tmp_path),
                           "engine": SimpleNamespace(sdk=sdk)})
-    client = _client(backend)
 
-    resp = client.post("/generate", json={"prompt_override": "castle by the sea",
-                                          "refine": True})
-    assert resp.status_code == 200
-    record_id = resp.json()["record_id"]
-    for _ in range(100):
-        record = next((r for r in backend._read_index() if r["id"] == record_id), None)
-        if record and record["status"] in ("done", "error"):
-            break
-        time.sleep(0.02)
+    # The pipeline task lives on the client's portal loop; keep the portal
+    # open while polling or the loop is torn down mid-generation.
+    with _client(backend) as client:
+        resp = client.post("/generate", json={"prompt_override": "castle by the sea",
+                                              "refine": True})
+        assert resp.status_code == 200
+        record_id = resp.json()["record_id"]
+        for _ in range(100):
+            record = next((r for r in backend._read_index() if r["id"] == record_id), None)
+            if record and record["status"] in ("done", "error"):
+                break
+            time.sleep(0.02)
     assert record["status"] == "done"
     assert record["characters"] == []
     assert "KNOWN CHARACTERS" not in captured["prompts"][0]

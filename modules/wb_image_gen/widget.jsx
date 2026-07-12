@@ -209,7 +209,7 @@ function Lightbox({ items, index, onNavigate, onClose, errorRecord }) {
           <img
             key={item.filename}
             src={`${API_BASE}/images/file/${item.filename}`}
-            alt={item.record.image_prompt || 'Story illustration'}
+            alt={item.prompt || item.record.image_prompt || 'Story illustration'}
             draggable={false}
             onAnimationEnd={() => setSlideFrom(null)}
             style={{
@@ -223,9 +223,9 @@ function Lightbox({ items, index, onNavigate, onClose, errorRecord }) {
             }}
             className="max-w-full max-h-[85vh] rounded-lg shadow-2xl select-none"
           />
-          {item.record.image_prompt && (
+          {(item.prompt || item.record.image_prompt) && (
             <p className="mt-3 max-w-2xl text-center text-xs text-gray-400 line-clamp-4">
-              {item.record.image_prompt}
+              {item.prompt || item.record.image_prompt}
             </p>
           )}
         </>
@@ -275,9 +275,16 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
   if (records.length === 0) return null;
 
   // Flat list of every finished image under this message — the lightbox
-  // swipes across all of them, spanning multi-image records.
+  // swipes across all of them, spanning multi-image records. Each image in a
+  // batch has its own prompt (image_prompts aligns with filenames).
   const galleryItems = records.flatMap((r) =>
-    r.status === 'done' ? recordFiles(r).map((filename) => ({ record: r, filename })) : []);
+    r.status === 'done'
+      ? recordFiles(r).map((filename, i) => ({
+          record: r,
+          filename,
+          prompt: (Array.isArray(r.image_prompts) && r.image_prompts[i]) || r.image_prompt,
+        }))
+      : []);
   const openAt = (filename) =>
     setLightbox({ index: Math.max(0, galleryItems.findIndex((it) => it.filename === filename)) });
 

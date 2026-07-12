@@ -250,7 +250,7 @@ function Lightbox({ items, index, onNavigate, onClose, errorRecord }) {
           <img
             key={item.filename}
             src={`${API_BASE}/images/file/${item.filename}`}
-            alt={item.record.image_prompt || 'Generated image'}
+            alt={item.prompt || item.record.image_prompt || 'Generated image'}
             draggable={false}
             onAnimationEnd={() => setSlideFrom(null)}
             style={{
@@ -264,8 +264,10 @@ function Lightbox({ items, index, onNavigate, onClose, errorRecord }) {
             }}
             className="max-w-full max-h-[85vh] rounded-lg shadow-2xl select-none"
           />
-          {item.record.image_prompt && (
-            <p className="mt-3 max-w-2xl text-center text-xs text-gray-400">{item.record.image_prompt}</p>
+          {(item.prompt || item.record.image_prompt) && (
+            <p className="mt-3 max-w-2xl text-center text-xs text-gray-400">
+              {item.prompt || item.record.image_prompt}
+            </p>
           )}
         </>
       )}
@@ -1481,9 +1483,16 @@ export default function ImageStudio({ onBack }) {
   // conceals story illustrations in chat (Output tab).
   const conceal = draft.chat_image_conceal || 'off';
   // Flat list of every finished image in the library; the fullscreen viewer
-  // swipes across all of them, spanning multi-image records.
+  // swipes across all of them, spanning multi-image records. Each image in a
+  // batch has its own prompt (image_prompts aligns with filenames).
   const galleryItems = records.flatMap((r) =>
-    r.status === 'done' ? recordFiles(r).map((filename) => ({ record: r, filename })) : []);
+    r.status === 'done'
+      ? recordFiles(r).map((filename, i) => ({
+          record: r,
+          filename,
+          prompt: (Array.isArray(r.image_prompts) && r.image_prompts[i]) || r.image_prompt,
+        }))
+      : []);
   const revealImage = (recordId) =>
     setRevealed((prev) => {
       const next = new Set(prev);
@@ -1720,10 +1729,11 @@ export default function ImageStudio({ onBack }) {
               className="w-full accent-purple-500"
             />
             <p className="text-xs text-gray-600 mt-1">
-              Renders this many variations of every illustration in parallel
-              (each is its own Novita generation, so cost scales with the
-              count). Swipe or use the arrow keys in the fullscreen viewer to
-              flip through them.
+              Each image gets its own AI-written prompt — a different angle,
+              beat, or focus of the same scene — and its own Novita
+              generation, all run in parallel (cost scales with the count).
+              Swipe or use the arrow keys in the fullscreen viewer to flip
+              through them.
             </p>
           </div>
           <div>

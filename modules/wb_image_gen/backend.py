@@ -167,6 +167,27 @@ STEP_RETRY_BASE_DELAY_S = 2.0
 # task, submitted and polled concurrently, so a batch takes roughly as long
 # as a single image (but costs one generation per image).
 IMAGE_NUM_MAX = 4
+
+# Each image in a batch gets its own prompt-writer call, so the images differ
+# in content, not just seed. Identical writer input tends to converge on the
+# same obvious shot, so every slot past the first also carries one of these
+# nudges (slot 0 stays the canonical take).
+PROMPT_VARIATION_HINTS = (
+    "Favor a different camera angle or distance than the obvious choice: a "
+    "close-up, a wide establishing shot, from above, or from behind.",
+    "Favor a different beat of the scene than the obvious choice: the moment "
+    "just before or just after the peak of the action.",
+    "Favor a different focus than the obvious choice: another character "
+    "present, a telling detail, or the setting itself.",
+)
+
+
+def _variation_hint(slot: int, total: int) -> str:
+    if total <= 1 or slot == 0:
+        return ""
+    return PROMPT_VARIATION_HINTS[(slot - 1) % len(PROMPT_VARIATION_HINTS)]
+
+
 INDEX_MAX_RECORDS = 500
 
 DEFAULT_PROMPT_TEMPLATE = """You write prompts for an AI image generator. Turn the scene below into ONE vivid image-generation prompt.
@@ -1064,7 +1085,8 @@ def _character_block(cfg: dict, characters: dict | None,
 
 
 async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
-                              characters: dict | None = None) -> str:
+                              characters: dict | None = None,
+                              variation_hint: str = "") -> str:
     style = _prompt_style(cfg)
     if style == "tags":
         template = cfg.get("prompt_template_tags") or DEFAULT_PROMPT_TEMPLATE_TAGS
@@ -1084,6 +1106,10 @@ async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
         prompt += ("\n\nMANDATORY: weave these trigger words into the output verbatim "
                    "(they activate style adapters): " + ", ".join(triggers))
     prompt += _character_block(cfg, characters, subject_mode)
+    if variation_hint:
+        prompt += ("\n\nVARIATION: several prompts are being written "
+                   "independently for this same scene, and this one must "
+                   "stand apart. " + variation_hint)
     try:
         sdk.llm._current_module = MODULE_ID
         raw = await sdk.llm.generate(
@@ -2176,6 +2202,7 @@ def _spawn_generation(*, save_id: str, turn: int, narration: str, history: str,
         "filename": None,
         "filenames": [],
         "image_prompt": prompt_override or "",
+        "image_prompts": [],
         "narration_excerpt": (narration or "")[:200],
         "model_name": cfg.get("model_name", ""),
         "loras": _applied_lora_names(cfg),
@@ -2238,34 +2265,55 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                 cfg = gated
                 await _patch_record(record_id, loras=_applied_lora_names(cfg))
 
+            image_num = max(1, min(IMAGE_NUM_MAX, int(cfg.get("image_num", 1) or 1)))
+
             if prompt_override:
-                image_prompt = _clean_image_prompt(prompt_override)
+                # A verbatim prompt (retry, unrefined studio text) cannot be
+                # re-varied; the batch shares it and differs by seed only.
+                prompts = [_clean_image_prompt(prompt_override)] * image_num
             else:
                 if sdk is None:
                     raise RuntimeError("no LLM available to write the image prompt")
                 await _patch_record(record_id, status="prompting")
-                image_prompt = await _retry_step(
-                    "prompt writing",
-                    lambda: _write_image_prompt(cfg, narration, history, sdk, characters),
-                    retries)
+                # One writer call per image, run concurrently: separate calls
+                # (plus a per-slot variation hint) give each image its own
+                # take on the scene instead of N seeds of one prompt.
+                prompt_results = await asyncio.gather(
+                    *(_retry_step(
+                        "prompt writing",
+                        lambda hint=_variation_hint(slot, image_num):
+                            _write_image_prompt(cfg, narration, history, sdk,
+                                                characters, variation_hint=hint),
+                        retries)
+                      for slot in range(image_num)),
+                    return_exceptions=True)
+                good = [p for p in prompt_results if not isinstance(p, BaseException)]
+                if not good:
+                    raise prompt_results[0]
+                # A failed writer slot borrows a sibling's prompt (seed still
+                # varies) rather than sinking its image or the whole batch.
+                prompts = [p if not isinstance(p, BaseException) else good[0]
+                           for p in prompt_results]
 
-            await _patch_record(record_id, status="generating", image_prompt=image_prompt)
+            await _patch_record(record_id, status="generating",
+                                image_prompt=prompts[0], image_prompts=prompts)
 
             # One retryable unit: a failed task cannot be re-polled and the
             # presigned result URL expires, so any failure past submission
             # recovers by resubmitting a fresh task.
-            async def _generate_once():
+            async def _generate_once(image_prompt):
                 task_id = await _novita_submit(cfg, image_prompt)
                 image_url = await _novita_poll(cfg, task_id)
                 return await _download(image_url)
 
-            image_num = max(1, min(IMAGE_NUM_MAX, int(cfg.get("image_num", 1) or 1)))
             results = await asyncio.gather(
-                *(_retry_step("image generation", _generate_once, retries)
-                  for _ in range(image_num)),
+                *(_retry_step("image generation",
+                              lambda p=prompt: _generate_once(p), retries)
+                  for prompt in prompts),
                 return_exceptions=True)
 
             filenames = []
+            kept_prompts = []
             for slot, result in enumerate(results):
                 if isinstance(result, BaseException):
                     continue
@@ -2279,6 +2327,7 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                     f.write(data)
                 os.replace(tmp, path)
                 filenames.append(filename)
+                kept_prompts.append(prompts[slot])
 
             failures = [r for r in results if isinstance(r, BaseException)]
             if not filenames:
@@ -2289,8 +2338,11 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                 print(f"[Image Gen] {record_id}: {len(failures)}/{image_num} "
                       f"parallel images failed: {failures[0]}")
 
+            # image_prompts stays aligned with filenames, so the viewer can
+            # caption each image with the prompt that produced it.
             await _patch_record(
                 record_id, status="done", filename=filenames[0], filenames=filenames,
+                image_prompt=kept_prompts[0], image_prompts=kept_prompts,
                 completed_at=_now(), duration_s=round(time.monotonic() - started, 1))
             print(f"[Image Gen] {record_id} done in {round(time.monotonic() - started, 1)}s")
     except Exception as e:
