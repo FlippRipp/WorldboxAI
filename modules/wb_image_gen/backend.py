@@ -113,6 +113,27 @@ LORA_DEFAULT_WEIGHT = 0.7
 # applies (condition text), its weight (instructions text), or both.
 LORA_LLM_MODES = ("off", "gate", "weight", "both")
 
+# Profiles: named per-model setups switched in Image Studio. A profile owns
+# everything checkpoint-specific (PROFILE_FIELDS) plus each LoRA's usage
+# state (LORA_STATE_FIELDS); the LoRA catalog itself and account/behavior
+# settings (GLOBAL_FIELDS) are shared by all profiles. The three tuples
+# together cover every key of _default_config() except lora_library.
+PROFILE_FIELDS = (
+    "model_name", "model_base", "width", "height", "image_num", "steps",
+    "guidance_scale", "sampler_name", "negative_prompt", "style_suffix",
+    "pony_quality_tags", "booru_subject_mode", "booru_break_separator",
+    "tag_usage_filter", "tag_usage_min_count", "prompt_template",
+    "prompt_template_tags",
+)
+GLOBAL_FIELDS = (
+    "enabled", "api_key", "civitai_api_key", "hf_api_key", "interval",
+    "step_retries", "prompt_model_preference", "character_reference_enabled",
+    "player_in_images", "chat_image_conceal", "civitai_nsfw",
+)
+LORA_STATE_FIELDS = ("active", "strength", "llm_mode", "condition")
+PROFILES_MAX = 20
+PROFILE_NAME_MAX = 60
+
 # Character appearances come from the optional wb_character_tracker /
 # wb_npc_system modules. The roster is deliberately uncapped: every present
 # character reaches the prompt writer and the LoRA gate in full (see
@@ -349,18 +370,120 @@ def _atomic_write_json(path: Path, payload) -> None:
     os.replace(tmp, path)
 
 
-def _load_config() -> dict:
-    cfg = _default_config()
+def _default_profile(name: str = "Default") -> dict:
+    defaults = _default_config()
+    return {"name": name, "lora_state": {},
+            **{f: defaults[f] for f in PROFILE_FIELDS}}
+
+
+def _default_store() -> dict:
+    defaults = _default_config()
+    return {
+        "version": 2,
+        **{f: defaults[f] for f in GLOBAL_FIELDS},
+        "lora_library": [],
+        "active_profile": "default",
+        "profiles": {"default": _default_profile()},
+    }
+
+
+def _migrate_flat_store(stored: dict) -> dict:
+    """v2 store from a pre-profile flat config: globals lift straight over,
+    everything model-specific becomes the single "Default" profile, and each
+    LoRA entry splits into shared metadata plus the profile's usage state.
+    llm_mode is baked via _entry_llm_mode so pre-mode entries (condition text
+    / legacy llm_weight flag) keep gating once the compose default of "off"
+    exists."""
+    store = _default_store()
+    store.update({k: stored[k] for k in GLOBAL_FIELDS if k in stored})
+    profile = store["profiles"]["default"]
+    profile.update({k: stored[k] for k in PROFILE_FIELDS if k in stored})
+    # booru_single_subject (bool) predates booru_subject_mode; keep the choice
+    # the user made: True -> "single", False -> "multi" (they wanted several
+    # characters and now get the structured multi rule).
+    if "booru_subject_mode" not in stored \
+            and isinstance(stored.get("booru_single_subject"), bool):
+        profile["booru_subject_mode"] = \
+            "single" if stored["booru_single_subject"] else "multi"
+    library = []
+    for entry in stored.get("lora_library") or []:
+        if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        profile["lora_state"][str(entry["id"])] = {
+            "active": bool(entry.get("active")),
+            "strength": _clamp_lora_weight(entry.get("strength", LORA_DEFAULT_WEIGHT)),
+            "llm_mode": _entry_llm_mode(entry),
+            "condition": str(entry.get("condition") or ""),
+        }
+        library.append({k: v for k, v in entry.items()
+                        if k not in LORA_STATE_FIELDS and k != "llm_weight"})
+    store["lora_library"] = library
+    return store
+
+
+def _load_store() -> dict:
+    """The raw on-disk store: globals + shared lora_library + profiles.
+    Pre-profile flat files migrate in memory only (first save persists v2,
+    same pattern as the legacy value migrations in _effective_config)."""
     path = _data_dir() / "config.json"
     stored = None
     if path.exists():
         try:
             with open(path, "r", encoding="utf-8") as f:
                 stored = json.load(f)
-            if isinstance(stored, dict):
-                cfg.update({k: v for k, v in stored.items() if k in cfg})
         except (json.JSONDecodeError, OSError) as e:
             print(f"[Image Gen] Failed to read config.json: {e}")
+    if not isinstance(stored, dict):
+        return _default_store()
+    if not isinstance(stored.get("profiles"), dict) or not stored["profiles"]:
+        return _migrate_flat_store(stored)
+
+    store = _default_store()
+    store.update({k: stored[k] for k in GLOBAL_FIELDS if k in stored})
+    if isinstance(stored.get("lora_library"), list):
+        store["lora_library"] = stored["lora_library"]
+    profiles = {}
+    for pid, raw in stored["profiles"].items():
+        if not isinstance(raw, dict):
+            continue
+        profile = _default_profile(str(raw.get("name") or pid))
+        profile.update({k: raw[k] for k in PROFILE_FIELDS if k in raw})
+        if isinstance(raw.get("lora_state"), dict):
+            profile["lora_state"] = raw["lora_state"]
+        profiles[str(pid)] = profile
+    if not profiles:
+        profiles = {"default": _default_profile()}
+    store["profiles"] = profiles
+    active = str(stored.get("active_profile") or "")
+    store["active_profile"] = active if active in profiles else next(iter(profiles))
+    return store
+
+
+def _save_store(store: dict) -> None:
+    _atomic_write_json(_data_dir() / "config.json", store)
+
+
+def _effective_config(store: dict) -> dict:
+    """The flat config every consumer reads: globals + the active profile's
+    fields, with lora_library entries overlaid with that profile's usage
+    state. Entries are copies -- endpoints mutate them in place before
+    _save_config decomposes the result back into the store."""
+    cfg = _default_config()
+    cfg.update({k: store[k] for k in GLOBAL_FIELDS if k in store})
+    pid = store["active_profile"]
+    profile = store["profiles"][pid]
+    cfg.update({k: profile[k] for k in PROFILE_FIELDS if k in profile})
+    cfg["active_profile"] = pid
+    lora_state = profile.get("lora_state") or {}
+    cfg["lora_library"] = [
+        {**entry,
+         "active": False, "strength": LORA_DEFAULT_WEIGHT,
+         "llm_mode": "off", "condition": "",
+         **{k: v for k, v in (lora_state.get(str(entry.get("id"))) or {}).items()
+            if k in LORA_STATE_FIELDS}}
+        for entry in store.get("lora_library") or []
+        if isinstance(entry, dict)
+    ]
     # civitai_nsfw was a bool before it became a mode string.
     if cfg.get("civitai_nsfw") not in CIVITAI_NSFW_MODES:
         cfg["civitai_nsfw"] = "include" if cfg.get("civitai_nsfw") is True else "off"
@@ -368,12 +491,6 @@ def _load_config() -> dict:
         cfg["player_in_images"] = "show"
     if cfg.get("chat_image_conceal") not in CHAT_IMAGE_CONCEAL_MODES:
         cfg["chat_image_conceal"] = "off"
-    # booru_single_subject (bool) predates booru_subject_mode; keep the choice
-    # the user made: True -> "single", False -> "multi" (they wanted several
-    # characters and now get the structured multi rule).
-    if isinstance(stored, dict) and "booru_subject_mode" not in stored \
-            and isinstance(stored.get("booru_single_subject"), bool):
-        cfg["booru_subject_mode"] = "single" if stored["booru_single_subject"] else "multi"
     if cfg.get("booru_subject_mode") not in BOORU_SUBJECT_MODES:
         cfg["booru_subject_mode"] = "single"
     # A stored tags template that still equals an old default was never
@@ -397,8 +514,46 @@ def _load_config() -> dict:
     return cfg
 
 
+def _load_config() -> dict:
+    return _effective_config(_load_store())
+
+
 def _save_config(cfg: dict) -> None:
-    _atomic_write_json(_data_dir() / "config.json", cfg)
+    """Decompose an effective config back into the store: globals to the top
+    level, profile fields to the profile the cfg was loaded under, lora usage
+    state to that profile's lora_state, shared entry metadata to the library.
+    active_profile itself is never written here -- only the activate endpoint
+    moves it, so a writer holding a cfg loaded before a concurrent switch
+    can't flip profiles (its edits still land in the profile it loaded).
+    Never save a pipeline copy (e.g. _apply_lora_conditions output): its
+    pruned lora_library would delete LoRAs from the shared catalog."""
+    store = _load_store()
+    pid = cfg.get("active_profile")
+    if pid not in store["profiles"]:
+        pid = store["active_profile"]
+    profile = store["profiles"][pid]
+    store.update({k: cfg[k] for k in GLOBAL_FIELDS if k in cfg})
+    profile.update({k: cfg[k] for k in PROFILE_FIELDS if k in cfg})
+    if isinstance(cfg.get("lora_library"), list):
+        library = []
+        lora_state = profile.get("lora_state")
+        if not isinstance(lora_state, dict):
+            lora_state = profile["lora_state"] = {}
+        for entry in cfg["lora_library"]:
+            if not isinstance(entry, dict):
+                continue
+            library.append({k: v for k, v in entry.items()
+                            if k not in LORA_STATE_FIELDS})
+            lora_state[str(entry.get("id"))] = {
+                k: entry[k] for k in LORA_STATE_FIELDS if k in entry}
+        store["lora_library"] = library
+        # Deleted LoRAs leave every profile's state, not just the active one.
+        ids = {str(e.get("id")) for e in library}
+        for other in store["profiles"].values():
+            state = other.get("lora_state")
+            if isinstance(state, dict):
+                other["lora_state"] = {i: s for i, s in state.items() if i in ids}
+    _save_store(store)
 
 
 def _mask_key(key: str) -> str:
@@ -2651,6 +2806,13 @@ def get_router():
     class KeySubmit(BaseModel):
         api_key: str
 
+    class ProfileCreate(BaseModel):
+        name: str
+        duplicate_from: str | None = None
+
+    class ProfileRename(BaseModel):
+        name: str
+
     def _public_config(cfg: dict) -> dict:
         out = dict(cfg)
         out["api_key"] = _mask_key(cfg.get("api_key", ""))
@@ -2679,6 +2841,10 @@ def get_router():
         out["lora_weight_max"] = LORA_WEIGHT_MAX
         out["step_retries_max"] = STEP_RETRIES_MAX
         out["image_num_max"] = IMAGE_NUM_MAX
+        store = _load_store()
+        out["active_profile"] = cfg.get("active_profile") or store["active_profile"]
+        out["profiles"] = [{"id": pid, "name": p.get("name") or pid}
+                           for pid, p in store["profiles"].items()]
         return out
 
     @router.get("/config")
@@ -2750,6 +2916,71 @@ def get_router():
         cfg.update(incoming)
         _save_config(cfg)
         return _public_config(cfg)
+
+    def _valid_profile_name(store: dict, name: str, exclude: str | None = None) -> str:
+        name = str(name or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Profile name can't be empty")
+        if len(name) > PROFILE_NAME_MAX:
+            raise HTTPException(status_code=400,
+                                detail=f"Profile name is too long (max {PROFILE_NAME_MAX} chars)")
+        for pid, profile in store["profiles"].items():
+            if pid != exclude and str(profile.get("name") or "").lower() == name.lower():
+                raise HTTPException(status_code=409,
+                                    detail=f"A profile named {name!r} already exists")
+        return name
+
+    @router.post("/profiles")
+    async def create_profile(body: ProfileCreate):
+        store = _load_store()
+        name = _valid_profile_name(store, body.name)
+        if len(store["profiles"]) >= PROFILES_MAX:
+            raise HTTPException(status_code=400,
+                                detail=f"Profile limit reached ({PROFILES_MAX})")
+        if body.duplicate_from is not None:
+            source = store["profiles"].get(body.duplicate_from)
+            if source is None:
+                raise HTTPException(status_code=404, detail="Profile to duplicate not found")
+            profile = json.loads(json.dumps(source))
+            profile["name"] = name
+        else:
+            profile = _default_profile(name)
+        pid = uuid.uuid4().hex[:8]
+        store["profiles"][pid] = profile
+        store["active_profile"] = pid  # create-and-configure flow
+        _save_store(store)
+        return _public_config(_load_config())
+
+    @router.post("/profiles/{pid}/activate")
+    async def activate_profile(pid: str):
+        store = _load_store()
+        if pid not in store["profiles"]:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        store["active_profile"] = pid
+        _save_store(store)
+        return _public_config(_load_config())
+
+    @router.patch("/profiles/{pid}")
+    async def rename_profile(pid: str, body: ProfileRename):
+        store = _load_store()
+        if pid not in store["profiles"]:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        store["profiles"][pid]["name"] = _valid_profile_name(store, body.name, exclude=pid)
+        _save_store(store)
+        return _public_config(_load_config())
+
+    @router.delete("/profiles/{pid}")
+    async def delete_profile(pid: str):
+        store = _load_store()
+        if pid not in store["profiles"]:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        if len(store["profiles"]) == 1:
+            raise HTTPException(status_code=400, detail="Can't delete the last profile")
+        del store["profiles"][pid]
+        if store["active_profile"] == pid:
+            store["active_profile"] = next(iter(store["profiles"]))
+        _save_store(store)
+        return _public_config(_load_config())
 
     @router.post("/keys/{provider}")
     async def submit_key(provider: str, body: KeySubmit):

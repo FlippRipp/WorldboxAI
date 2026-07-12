@@ -472,6 +472,96 @@ function KeyField({ provider, label, placeholder, saved, savedMask, onSaved, chi
   );
 }
 
+// Named per-model setups. Everything checkpoint-specific (model, output,
+// prompting, LoRA on/off + weights) lives in the active profile; API keys and
+// behavior settings are shared. Switching/creating/deleting all round-trip
+// through the backend and hand back the full effective config via onApply.
+function ProfileBar({ config, dirty, onApply, onError }) {
+  const [busy, setBusy] = useState(false);
+  const profiles = config.profiles || [];
+  const current = profiles.find((p) => p.id === config.active_profile);
+
+  const call = async (path, options = {}) => {
+    setBusy(true);
+    onError('');
+    try {
+      const res = await fetch(`${API_BASE}${path}`, {
+        headers: { 'Content-Type': 'application/json' },
+        ...options,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      onApply(data);
+    } catch (e) {
+      onError(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Switching (and create/duplicate, which activate the new profile) replaces
+  // the whole settings draft, so unsaved edits need an explicit go-ahead.
+  const confirmDiscard = () =>
+    !dirty || window.confirm('Discard unsaved changes and switch profile?');
+
+  const switchTo = (id) => {
+    if (id === config.active_profile || !confirmDiscard()) return;
+    call(`/profiles/${id}/activate`, { method: 'POST' });
+  };
+  const create = (duplicate) => {
+    const suggestion = duplicate ? `${current?.name || 'Profile'} copy` : '';
+    const name = window.prompt(
+      duplicate ? 'Name for the duplicated profile:' : 'New profile name:', suggestion);
+    if (name == null || !name.trim() || !confirmDiscard()) return;
+    call('/profiles', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: name.trim(),
+        duplicate_from: duplicate ? config.active_profile : null,
+      }),
+    });
+  };
+  const rename = () => {
+    const name = window.prompt('Rename profile:', current?.name || '');
+    if (name == null || !name.trim() || name.trim() === current?.name) return;
+    call(`/profiles/${config.active_profile}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name: name.trim() }),
+    });
+  };
+  const remove = () => {
+    if (!window.confirm(`Delete profile "${current?.name}"? Its model, settings and LoRA states are lost. The LoRA library itself is shared and stays.`)) return;
+    call(`/profiles/${config.active_profile}`, { method: 'DELETE' });
+  };
+
+  const btnCls = 'px-2.5 py-1.5 rounded-lg bg-gray-900 border border-gray-800 text-xs text-gray-400 hover:text-gray-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0';
+  return (
+    <div className="bg-gray-900/60 border border-gray-800 rounded-xl px-4 py-3 flex items-center gap-2 flex-wrap">
+      <span className="text-xs uppercase tracking-wide text-gray-500 shrink-0">Profile</span>
+      <select
+        value={config.active_profile || ''}
+        onChange={(e) => switchTo(e.target.value)}
+        disabled={busy}
+        className="bg-gray-900 border border-gray-800 rounded-lg px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus:border-purple-500 min-w-[10rem]"
+      >
+        {profiles.map((p) => (
+          <option key={p.id} value={p.id}>{p.name}</option>
+        ))}
+      </select>
+      <div className="flex gap-1.5 flex-wrap">
+        <button onClick={() => create(false)} disabled={busy} className={btnCls}>+ New</button>
+        <button onClick={() => create(true)} disabled={busy} className={btnCls}>Duplicate</button>
+        <button onClick={rename} disabled={busy} className={btnCls}>Rename</button>
+        {profiles.length > 1 && (
+          <button onClick={remove} disabled={busy} className={`${btnCls} hover:text-red-300`}>
+            Delete
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // Mirror of the backend's _base_family heuristic.
 function baseFamily(base) {
   const ident = String(base || '').toLowerCase();
@@ -1345,13 +1435,16 @@ export default function ImageStudio({ onBack }) {
     try { localStorage.setItem('wb_image_gen_tab', id); } catch (e) { /* ignore */ }
   };
 
-  const loadConfig = useCallback(async () => {
-    const res = await fetch(`${API_BASE}/config`);
-    const data = await res.json();
+  const applyConfig = useCallback((data) => {
     setConfig(data);
     setDraft(data);
     setLibrary(data.lora_library || []);
   }, []);
+
+  const loadConfig = useCallback(async () => {
+    const res = await fetch(`${API_BASE}/config`);
+    applyConfig(await res.json());
+  }, [applyConfig]);
 
   const loadImages = useCallback(async () => {
     try {
@@ -1444,10 +1537,7 @@ export default function ImageStudio({ onBack }) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${res.status}`);
       }
-      const data = await res.json();
-      setConfig(data);
-      setDraft(data);
-      setLibrary(data.lora_library || []);
+      applyConfig(await res.json());
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 2000);
     } catch (e) {
@@ -1561,6 +1651,8 @@ export default function ImageStudio({ onBack }) {
             Story illustrations via the Novita AI API. Auto-generates every N turns; use /image in-game for on-demand shots.
           </p>
         </div>
+
+        <ProfileBar config={config} dirty={dirty} onApply={applyConfig} onError={setSaveError} />
 
         <div className="flex gap-1 overflow-x-auto pb-1">
           {TABS.map((t) => {

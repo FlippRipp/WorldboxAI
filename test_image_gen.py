@@ -3439,3 +3439,226 @@ def test_tag_usage_filter_config_validation(tmp_path):
     cfg = backend._load_config()
     assert cfg["tag_usage_filter"] == "off"
     assert cfg["tag_usage_min_count"] == 100
+
+
+# ---------------------------------------------------------------------------
+# Profiles: migration, CRUD, per-profile settings and LoRA state
+# ---------------------------------------------------------------------------
+
+def test_flat_config_migrates_to_default_profile(tmp_path):
+    backend = _load_backend(tmp_path)
+    flat = {**backend._default_config(),
+            "api_key": "secret123", "steps": 40, "model_name": "dreamshaper_8.safetensors",
+            "lora_library": [
+                _lora(id="1", active=True, strength=0.9, condition="a battle",
+                      llm_mode="gate"),
+                # Pre-mode entry: condition text but no llm_mode -> derived gate.
+                {**_lora(id="2", active=True, condition="at night"),
+                 "sd_name_override": "manual.safetensors"},
+            ]}
+    flat["lora_library"][1].pop("llm_mode", None)
+    with open(backend._data_dir() / "config.json", "w", encoding="utf-8") as f:
+        json.dump(flat, f)
+
+    cfg = backend._load_config()
+    assert cfg["api_key"] == "secret123"
+    assert cfg["steps"] == 40
+    assert cfg["active_profile"] == "default"
+    entries = {e["id"]: e for e in cfg["lora_library"]}
+    assert entries["1"]["active"] is True
+    assert entries["1"]["strength"] == 0.9
+    assert entries["1"]["condition"] == "a battle"
+    # The pre-mode entry keeps gating: llm_mode was baked in during migration.
+    assert backend._entry_llm_mode(entries["2"]) == "gate"
+    assert entries["2"]["sd_name_override"] == "manual.safetensors"
+
+    client = _client(backend)
+    body = client.get("/config").json()
+    assert body["profiles"] == [{"id": "default", "name": "Default"}]
+    assert body["active_profile"] == "default"
+
+    # First write persists the v2 shape: shared entries carry no usage state.
+    assert client.put("/config", json={"interval": 5}).status_code == 200
+    with open(backend._data_dir() / "config.json", encoding="utf-8") as f:
+        stored = json.load(f)
+    assert stored["version"] == 2
+    assert set(stored["profiles"]) == {"default"}
+    for entry in stored["lora_library"]:
+        assert not set(entry) & set(backend.LORA_STATE_FIELDS)
+        assert "llm_weight" not in entry
+    state = stored["profiles"]["default"]["lora_state"]
+    assert state["1"] == {"active": True, "strength": 0.9,
+                          "llm_mode": "gate", "condition": "a battle"}
+    assert state["2"]["llm_mode"] == "gate"
+
+    # Loading the migrated file is a fixpoint.
+    assert backend._load_config() == backend._load_config()
+    assert backend._load_config()["steps"] == 40
+
+
+def test_config_missing_creates_default_profile(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+    body = client.get("/config").json()
+    assert body["active_profile"] == "default"
+    assert body["profiles"] == [{"id": "default", "name": "Default"}]
+
+
+def test_profile_crud(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend, steps=40)
+    client = _client(backend)
+
+    # Create: new profile gets per-profile defaults and becomes active.
+    body = client.post("/profiles", json={"name": "Flux"}).json()
+    assert len(body["profiles"]) == 2
+    flux_id = body["active_profile"]
+    assert flux_id != "default"
+    assert body["steps"] == 28          # fresh defaults, not Default's 40
+    assert body["api_key"] == "****t123"  # globals shared
+
+    # Rename.
+    body = client.patch(f"/profiles/{flux_id}", json={"name": "Flux 2"}).json()
+    assert {"id": flux_id, "name": "Flux 2"} in body["profiles"]
+
+    # Validation.
+    assert client.post("/profiles", json={"name": "   "}).status_code == 400
+    assert client.post("/profiles", json={"name": "flux 2"}).status_code == 409
+    assert client.post("/profiles", json={"name": "x" * 61}).status_code == 400
+    assert client.patch(f"/profiles/{flux_id}", json={"name": "Default"}).status_code == 409
+    assert client.patch(f"/profiles/{flux_id}", json={"name": "Flux 2"}).status_code == 200
+    assert client.post("/profiles/nope/activate").status_code == 404
+    assert client.patch("/profiles/nope", json={"name": "X"}).status_code == 404
+    assert client.delete("/profiles/nope").status_code == 404
+
+    # Deleting the active profile activates a survivor; last one is protected.
+    body = client.delete(f"/profiles/{flux_id}").json()
+    assert body["active_profile"] == "default"
+    assert len(body["profiles"]) == 1
+    assert client.delete("/profiles/default").status_code == 400
+
+
+def test_profile_create_respects_limit(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+    for i in range(backend.PROFILES_MAX - 1):
+        assert client.post("/profiles", json={"name": f"P{i}"}).status_code == 200
+    assert client.post("/profiles", json={"name": "One too many"}).status_code == 400
+
+
+def test_profile_duplicate_copies_settings_and_lora_state(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend, steps=42, model_name="ponyDiffusionV6XL.safetensors",
+            model_base="Pony", lora_library=[_lora(id="1", active=True, strength=0.9)])
+    client = _client(backend)
+
+    body = client.post("/profiles",
+                       json={"name": "Copy", "duplicate_from": "default"}).json()
+    copy_id = body["active_profile"]
+    assert body["steps"] == 42
+    assert body["model_name"] == "ponyDiffusionV6XL.safetensors"
+    entry = body["lora_library"][0]
+    assert entry["active"] is True and entry["strength"] == 0.9
+
+    # The copy is independent: mutating it leaves the source untouched.
+    client.put("/config", json={"steps": 10})
+    client.patch("/loras/1", json={"active": False, "strength": 0.3})
+    body = client.post("/profiles/default/activate").json()
+    assert body["steps"] == 42
+    assert body["lora_library"][0]["active"] is True
+    assert body["lora_library"][0]["strength"] == 0.9
+
+    assert client.post(
+        "/profiles", json={"name": "X", "duplicate_from": "nope"}).status_code == 404
+
+
+def test_profile_switch_changes_payloads(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend, width=1216, height=832,
+            model_name="sd_xl_base_1.0.safetensors", model_base="SDXL 1.0",
+            lora_library=[_lora(id="1", active=True)])
+    client = _client(backend)
+
+    client.post("/profiles", json={"name": "Flux"})
+    client.put("/config", json={"model_name": backend.FLUX2_MODEL_NAME,
+                                "model_base": "", "width": 768, "height": 768})
+
+    cfg = backend._load_config()
+    assert backend._checkpoint_family(cfg) == "flux"
+    assert backend._sd_payload_loras(cfg) == []   # SDXL lora doesn't fit flux
+    payload = backend._flux2_payload(cfg, "a castle")
+    assert payload["size"] == "768*768"
+
+    client.post("/profiles/default/activate")
+    cfg = backend._load_config()
+    payload = backend._novita_payload(cfg, "a castle")
+    assert payload["request"]["width"] == 1216
+    assert payload["request"]["height"] == 832
+    assert payload["request"]["loras"] == [
+        {"model_name": "detail_tweaker_123456.safetensors", "strength": 0.7}]
+
+
+def test_lora_usage_state_isolated_per_profile_but_metadata_shared(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend, lora_library=[_lora(id="1", active=False)])
+    client = _client(backend)
+
+    client.patch("/loras/1", json={"active": True, "strength": 1.2,
+                                   "condition": "a battle", "llm_mode": "gate"})
+
+    # A fresh profile sees the LoRA with default usage state.
+    body = client.post("/profiles", json={"name": "B"}).json()
+    entry = body["lora_library"][0]
+    assert entry["active"] is False
+    assert entry["strength"] == backend.LORA_DEFAULT_WEIGHT
+    assert entry["llm_mode"] == "off"
+    assert entry["condition"] == ""
+
+    # Shared metadata edits made under B are visible under Default.
+    client.patch("/loras/1", json={"sd_name_override": "manual.safetensors",
+                                   "trained_words": ["glowing"]})
+    body = client.post("/profiles/default/activate").json()
+    entry = body["lora_library"][0]
+    assert entry["sd_name_override"] == "manual.safetensors"
+    assert entry["trained_words"] == ["glowing"]
+    assert entry["active"] is True          # Default's own state survived
+    assert entry["strength"] == 1.2
+
+    # Deleting a LoRA removes it and its state from every profile.
+    client.delete("/loras/1")
+    with open(backend._data_dir() / "config.json", encoding="utf-8") as f:
+        stored = json.load(f)
+    assert stored["lora_library"] == []
+    for profile in stored["profiles"].values():
+        assert profile["lora_state"] == {}
+
+
+def test_save_config_roundtrip_preserves_other_profiles(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend, steps=42, lora_library=[_lora(id="1", active=True, strength=0.9)])
+    client = _client(backend)
+    client.post("/profiles", json={"name": "B", "duplicate_from": "default"})
+    client.put("/config", json={"steps": 15})
+    client.post("/profiles/default/activate")
+
+    # A plain load->save under Default must not disturb B.
+    backend._save_config(backend._load_config())
+    body = client.get("/config").json()
+    b_id = next(p["id"] for p in body["profiles"] if p["name"] == "B")
+    body = client.post(f"/profiles/{b_id}/activate").json()
+    assert body["steps"] == 15
+    assert body["lora_library"][0]["active"] is True
+    assert body["lora_library"][0]["strength"] == 0.9
+
+
+def test_put_config_routes_global_vs_profile_fields(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend)
+    client = _client(backend)
+    client.put("/config", json={"interval": 7, "steps": 42,
+                                "chat_image_conceal": "blur"})
+
+    body = client.post("/profiles", json={"name": "B"}).json()
+    assert body["interval"] == 7                  # global: carried over
+    assert body["chat_image_conceal"] == "blur"   # global: carried over
+    assert body["steps"] == 28                    # per-profile: B's default
