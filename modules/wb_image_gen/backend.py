@@ -163,6 +163,10 @@ SUBMIT_RETRIES = 2
 STEP_RETRIES_DEFAULT = 1
 STEP_RETRIES_MAX = 5
 STEP_RETRY_BASE_DELAY_S = 2.0
+# How many images one generation may render. Each image is its own Novita
+# task, submitted and polled concurrently, so a batch takes roughly as long
+# as a single image (but costs one generation per image).
+IMAGE_NUM_MAX = 4
 INDEX_MAX_RECORDS = 500
 
 DEFAULT_PROMPT_TEMPLATE = """You write prompts for an AI image generator. Turn the scene below into ONE vivid image-generation prompt.
@@ -291,6 +295,7 @@ def _default_config() -> dict:
         "model_base": "",               # the picked model's base_model metadata (drives prompt style)
         "width": 1024,
         "height": 1024,
+        "image_num": 1,                 # parallel images per generation, 1..IMAGE_NUM_MAX
         "steps": 28,
         "guidance_scale": 7.0,
         "sampler_name": "DPM++ 2M Karras",
@@ -364,6 +369,10 @@ def _load_config() -> dict:
         cfg["step_retries"] = max(0, min(STEP_RETRIES_MAX, int(cfg.get("step_retries"))))
     except (TypeError, ValueError):
         cfg["step_retries"] = STEP_RETRIES_DEFAULT
+    try:
+        cfg["image_num"] = max(1, min(IMAGE_NUM_MAX, int(cfg.get("image_num"))))
+    except (TypeError, ValueError):
+        cfg["image_num"] = 1
     return cfg
 
 
@@ -2165,6 +2174,7 @@ def _spawn_generation(*, save_id: str, turn: int, narration: str, history: str,
         "status": "pending",
         "trigger": trigger,
         "filename": None,
+        "filenames": [],
         "image_prompt": prompt_override or "",
         "narration_excerpt": (narration or "")[:200],
         "model_name": cfg.get("model_name", ""),
@@ -2249,17 +2259,38 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                 image_url = await _novita_poll(cfg, task_id)
                 return await _download(image_url)
 
-            data, ext = await _retry_step("image generation", _generate_once, retries)
+            image_num = max(1, min(IMAGE_NUM_MAX, int(cfg.get("image_num", 1) or 1)))
+            results = await asyncio.gather(
+                *(_retry_step("image generation", _generate_once, retries)
+                  for _ in range(image_num)),
+                return_exceptions=True)
 
-            filename = f"{record_id}.{ext}"
-            path = _data_dir() / "images" / filename
-            tmp = path.with_suffix(path.suffix + ".tmp")
-            with open(tmp, "wb") as f:
-                f.write(data)
-            os.replace(tmp, path)
+            filenames = []
+            for slot, result in enumerate(results):
+                if isinstance(result, BaseException):
+                    continue
+                data, ext = result
+                # Slot 0 keeps the pre-batch single-image name, so one-image
+                # records look exactly like they always did.
+                filename = f"{record_id}.{ext}" if slot == 0 else f"{record_id}_{slot}.{ext}"
+                path = _data_dir() / "images" / filename
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, path)
+                filenames.append(filename)
+
+            failures = [r for r in results if isinstance(r, BaseException)]
+            if not filenames:
+                raise failures[0]
+            if failures:
+                # Part of the batch made it: keep the survivors rather than
+                # failing the whole record over a missing sibling image.
+                print(f"[Image Gen] {record_id}: {len(failures)}/{image_num} "
+                      f"parallel images failed: {failures[0]}")
 
             await _patch_record(
-                record_id, status="done", filename=filename,
+                record_id, status="done", filename=filenames[0], filenames=filenames,
                 completed_at=_now(), duration_s=round(time.monotonic() - started, 1))
             print(f"[Image Gen] {record_id} done in {round(time.monotonic() - started, 1)}s")
     except Exception as e:
@@ -2372,6 +2403,24 @@ async def on_command_image(args: list[str], state: dict, sdk) -> dict:
 _FILENAME_RE = re.compile(r"[A-Za-z0-9_\-]{1,120}\.(jpg|jpeg|png|webp)")
 
 
+def _record_files(record: dict) -> list[str]:
+    """Every image filename a record owns: multi-image records carry
+    `filenames`, records from before the batch feature only `filename`."""
+    names = [n for n in (record.get("filenames") or []) if isinstance(n, str)]
+    single = record.get("filename")
+    if isinstance(single, str) and single and single not in names:
+        names.insert(0, single)
+    return [n for n in names if _FILENAME_RE.fullmatch(n)]
+
+
+def _delete_record_files(record: dict) -> None:
+    for filename in _record_files(record):
+        try:
+            (_data_dir() / "images" / filename).unlink(missing_ok=True)
+        except OSError as e:
+            print(f"[Image Gen] Could not delete {filename}: {e}")
+
+
 def get_router():
     from fastapi import APIRouter, HTTPException
     from fastapi.responses import FileResponse, RedirectResponse
@@ -2386,6 +2435,7 @@ def get_router():
         model_base: str | None = None
         width: int | None = None
         height: int | None = None
+        image_num: int | None = None
         steps: int | None = None
         guidance_scale: float | None = None
         sampler_name: str | None = None
@@ -2477,6 +2527,7 @@ def get_router():
         out["lora_weight_min"] = LORA_WEIGHT_MIN
         out["lora_weight_max"] = LORA_WEIGHT_MAX
         out["step_retries_max"] = STEP_RETRIES_MAX
+        out["image_num_max"] = IMAGE_NUM_MAX
         return out
 
     @router.get("/config")
@@ -2503,6 +2554,8 @@ def get_router():
         for side in ("width", "height"):
             if side in incoming:
                 incoming[side] = max(128, min(2048, (int(incoming[side]) // 8) * 8))
+        if "image_num" in incoming:
+            incoming["image_num"] = max(1, min(IMAGE_NUM_MAX, int(incoming["image_num"])))
         if "steps" in incoming:
             incoming["steps"] = max(1, min(100, int(incoming["steps"])))
         if "guidance_scale" in incoming:
@@ -2902,12 +2955,8 @@ def get_router():
                     _write_index([r for r in records if r.get("id") != req.retry_record_id])
                 else:
                     old = None
-            filename = (old or {}).get("filename")
-            if filename and _FILENAME_RE.fullmatch(filename):
-                try:
-                    (_data_dir() / "images" / filename).unlink(missing_ok=True)
-                except OSError as e:
-                    print(f"[Image Gen] Could not delete {filename}: {e}")
+            if old is not None:
+                _delete_record_files(old)
         return {"record_id": record_id}
 
     @router.delete("/images/{record_id}")
@@ -2919,13 +2968,7 @@ def get_router():
                 raise HTTPException(status_code=404, detail="Record not found")
             records = [r for r in records if r.get("id") != record_id]
             _write_index(records)
-        filename = record.get("filename")
-        if filename and _FILENAME_RE.fullmatch(filename):
-            path = _data_dir() / "images" / filename
-            try:
-                path.unlink(missing_ok=True)
-            except OSError as e:
-                print(f"[Image Gen] Could not delete {filename}: {e}")
+        _delete_record_files(record)
         return {"ok": True}
 
     return router

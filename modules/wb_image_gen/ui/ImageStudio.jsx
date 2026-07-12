@@ -98,16 +98,72 @@ function StatusBadge({ status }) {
   );
 }
 
-function Lightbox({ record, onClose }) {
-  // Failed generations have no image file — open them to read the failure
-  // reason (e.g. a provider content-policy refusal) instead of an image.
-  const failed = record.status === 'error' || !record.filename;
+// Every image file a finished record owns. Multi-image records (parallel
+// generation) carry `filenames`; older single-image records only `filename`.
+function recordFiles(record) {
+  const names = Array.isArray(record.filenames) && record.filenames.length
+    ? record.filenames
+    : record.filename ? [record.filename] : [];
+  return names.filter(Boolean);
+}
+
+// Fullscreen viewer over a flat list of finished images ({record, filename}).
+// Swipe, the arrow keys, or the on-screen arrows move between images; Esc or
+// a click/tap closes. A failed record (errorRecord) shows its error instead.
+function Lightbox({ items, index, onNavigate, onClose, errorRecord }) {
+  const touchRef = useRef(null);
+  const swipedRef = useRef(false);
+  const count = errorRecord ? 0 : (items ? items.length : 0);
+  const safeIndex = Math.max(0, Math.min(index || 0, count - 1));
+  const item = count > 0 ? items[safeIndex] : null;
+
+  const go = useCallback((delta) => {
+    const next = safeIndex + delta;
+    if (next >= 0 && next < count) onNavigate(next);
+  }, [safeIndex, count, onNavigate]);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') onClose();
+      else if (e.key === 'ArrowLeft') go(-1);
+      else if (e.key === 'ArrowRight') go(1);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [go, onClose]);
+
+  if (!errorRecord && !item) return null;
+
+  const navBtn =
+    'absolute top-1/2 -translate-y-1/2 z-10 h-11 w-11 flex items-center justify-center ' +
+    'rounded-full bg-black/50 border border-white/10 text-2xl leading-none text-gray-300 ' +
+    'hover:bg-black/80 hover:text-white transition-colors cursor-pointer';
+
   return (
     <div
       className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4 cursor-zoom-out"
-      onClick={onClose}
+      onClick={() => {
+        // A horizontal swipe fires a click on release; that click must
+        // navigate (already handled), not close the viewer.
+        if (swipedRef.current) { swipedRef.current = false; return; }
+        onClose();
+      }}
+      onTouchStart={(e) => {
+        touchRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      }}
+      onTouchEnd={(e) => {
+        const start = touchRef.current;
+        touchRef.current = null;
+        if (!start) return;
+        const dx = e.changedTouches[0].clientX - start.x;
+        const dy = e.changedTouches[0].clientY - start.y;
+        if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+          swipedRef.current = true;
+          go(dx < 0 ? 1 : -1);
+        }
+      }}
     >
-      {failed ? (
+      {errorRecord ? (
         <div
           className="max-w-lg w-full rounded-lg border border-red-900/60 bg-gray-900/80 p-6 text-center cursor-auto"
           onClick={(e) => e.stopPropagation()}
@@ -115,23 +171,48 @@ function Lightbox({ record, onClose }) {
           <div className="text-3xl mb-3" aria-hidden="true">🚫</div>
           <p className="text-sm font-semibold text-red-300 mb-2">Image generation failed</p>
           <p className="text-xs text-gray-300 whitespace-pre-wrap break-words">
-            {record.error || 'unknown error'}
+            {errorRecord.error || 'unknown error'}
           </p>
-          {record.image_prompt && (
+          {errorRecord.image_prompt && (
             <p className="mt-4 text-[11px] text-gray-500 whitespace-pre-wrap break-words">
-              <span className="text-gray-600">Prompt: </span>{record.image_prompt}
+              <span className="text-gray-600">Prompt: </span>{errorRecord.image_prompt}
             </p>
           )}
         </div>
       ) : (
         <>
+          {count > 1 && (
+            <span className="absolute top-4 left-1/2 -translate-x-1/2 px-2.5 py-1 rounded-full bg-black/60 border border-white/10 text-xs text-gray-300">
+              {safeIndex + 1} / {count}
+            </span>
+          )}
+          {safeIndex > 0 && (
+            <button
+              onClick={(e) => { e.stopPropagation(); go(-1); }}
+              aria-label="Previous image"
+              className={`${navBtn} left-3`}
+            >
+              ‹
+            </button>
+          )}
+          {safeIndex < count - 1 && (
+            <button
+              onClick={(e) => { e.stopPropagation(); go(1); }}
+              aria-label="Next image"
+              className={`${navBtn} right-3`}
+            >
+              ›
+            </button>
+          )}
           <img
-            src={`${API_BASE}/images/file/${record.filename}`}
-            alt={record.image_prompt || 'Generated image'}
-            className="max-w-full max-h-[85vh] rounded-lg shadow-2xl"
+            key={item.filename}
+            src={`${API_BASE}/images/file/${item.filename}`}
+            alt={item.record.image_prompt || 'Generated image'}
+            draggable={false}
+            className="max-w-full max-h-[85vh] rounded-lg shadow-2xl select-none"
           />
-          {record.image_prompt && (
-            <p className="mt-3 max-w-2xl text-center text-xs text-gray-400">{record.image_prompt}</p>
+          {item.record.image_prompt && (
+            <p className="mt-3 max-w-2xl text-center text-xs text-gray-400">{item.record.image_prompt}</p>
           )}
         </>
       )}
@@ -1262,6 +1343,7 @@ export default function ImageStudio({ onBack }) {
         model_base: draft.model_base ?? '',
         width: Number(draft.width) || 1024,
         height: Number(draft.height) || 1024,
+        image_num: Math.max(1, Number(draft.image_num) || 1),
         steps: Number(draft.steps) || 28,
         guidance_scale: Number(draft.guidance_scale) || 7,
         sampler_name: draft.sampler_name,
@@ -1345,6 +1427,10 @@ export default function ImageStudio({ onBack }) {
   // How finished images appear in the library until clicked — same setting that
   // conceals story illustrations in chat (Output tab).
   const conceal = draft.chat_image_conceal || 'off';
+  // Flat list of every finished image in the library; the fullscreen viewer
+  // swipes across all of them, spanning multi-image records.
+  const galleryItems = records.flatMap((r) =>
+    r.status === 'done' ? recordFiles(r).map((filename) => ({ record: r, filename })) : []);
   const revealImage = (recordId) =>
     setRevealed((prev) => {
       const next = new Set(prev);
@@ -1567,6 +1653,25 @@ export default function ImageStudio({ onBack }) {
               onChange={(e) => set('interval', Number(e.target.value))}
               className="w-full accent-purple-500"
             />
+          </div>
+          <div>
+            <label className={labelCls}>
+              Images per generation: {draft.image_num || 1}
+            </label>
+            <input
+              type="range"
+              min={1}
+              max={config?.image_num_max ?? 4}
+              value={draft.image_num || 1}
+              onChange={(e) => set('image_num', Number(e.target.value))}
+              className="w-full accent-purple-500"
+            />
+            <p className="text-xs text-gray-600 mt-1">
+              Renders this many variations of every illustration in parallel
+              (each is its own Novita generation, so cost scales with the
+              count). Swipe or use the arrow keys in the fullscreen viewer to
+              flip through them.
+            </p>
           </div>
           <div>
             <label className={labelCls}>
@@ -1933,80 +2038,95 @@ export default function ImageStudio({ onBack }) {
             <p className="text-sm text-gray-600 italic">No images yet.</p>
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-              {records.map((r) => {
-                const concealed =
-                  r.status === 'done' && !!r.filename &&
-                  conceal !== 'off' && !revealed.has(r.id);
-                return (
-                <div key={r.id} className="group relative bg-gray-950/60 border border-gray-800 rounded-lg overflow-hidden">
-                  {r.status === 'done' && r.filename ? (
-                    <div className="relative overflow-hidden">
-                      <img
-                        src={`${API_BASE}/images/file/${r.filename}`}
-                        alt={concealed ? 'Hidden image' : (r.image_prompt || '')}
-                        title={`${r.model_name || ''}${r.loras?.length ? ` + LoRAs: ${r.loras.join(', ')}` : ''}`}
-                        loading="lazy"
-                        onClick={() => (concealed ? revealImage(r.id) : setLightbox(r))}
-                        className={`w-full h-32 ${
-                          concealed
-                            ? conceal === 'blackout'
-                              ? 'object-cover cursor-pointer brightness-0'
-                              : 'object-cover cursor-pointer blur-2xl scale-110'
-                            : 'object-contain cursor-zoom-in'
-                        }`}
-                      />
-                      {concealed && (
-                        <button
-                          onClick={() => revealImage(r.id)}
-                          aria-label="Reveal image"
-                          className="absolute inset-0 flex items-center justify-center cursor-pointer"
-                        >
-                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 border border-white/10 text-[10px] text-gray-300">
-                            <span aria-hidden="true">👁</span> Click to reveal
-                          </span>
-                        </button>
-                      )}
+              {records.flatMap((r) => {
+                // A multi-image record gets one tile per image; deleting any
+                // of them removes the whole generation (they share a record).
+                const files = r.status === 'done' ? recordFiles(r) : [];
+                const tiles = files.length > 0 ? files : [null];
+                return tiles.map((filename) => {
+                  const concealed =
+                    !!filename && conceal !== 'off' && !revealed.has(r.id);
+                  return (
+                  <div key={filename ? `${r.id}:${filename}` : r.id} className="group relative bg-gray-950/60 border border-gray-800 rounded-lg overflow-hidden">
+                    {filename ? (
+                      <div className="relative overflow-hidden">
+                        <img
+                          src={`${API_BASE}/images/file/${filename}`}
+                          alt={concealed ? 'Hidden image' : (r.image_prompt || '')}
+                          title={`${r.model_name || ''}${r.loras?.length ? ` + LoRAs: ${r.loras.join(', ')}` : ''}`}
+                          loading="lazy"
+                          onClick={() => (concealed
+                            ? revealImage(r.id)
+                            : setLightbox({ index: Math.max(0, galleryItems.findIndex((it) => it.filename === filename)) }))}
+                          className={`w-full h-32 ${
+                            concealed
+                              ? conceal === 'blackout'
+                                ? 'object-cover cursor-pointer brightness-0'
+                                : 'object-cover cursor-pointer blur-2xl scale-110'
+                              : 'object-contain cursor-zoom-in'
+                          }`}
+                        />
+                        {concealed && (
+                          <button
+                            onClick={() => revealImage(r.id)}
+                            aria-label="Reveal image"
+                            className="absolute inset-0 flex items-center justify-center cursor-pointer"
+                          >
+                            <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 border border-white/10 text-[10px] text-gray-300">
+                              <span aria-hidden="true">👁</span> Click to reveal
+                            </span>
+                          </button>
+                        )}
+                      </div>
+                    ) : r.status === 'error' ? (
+                      <button
+                        onClick={() => setLightbox({ record: r })}
+                        title="Open to see why it failed"
+                        className="w-full h-32 flex flex-col items-center justify-center gap-1 px-2 text-center text-xs text-red-300/80 cursor-pointer hover:bg-red-950/20 transition-colors"
+                      >
+                        <span className="text-lg" aria-hidden="true">🚫</span>
+                        <span className="line-clamp-3">{r.error || 'failed'}</span>
+                      </button>
+                    ) : (
+                      <div className="w-full h-32 flex items-center justify-center text-xs text-gray-600 px-2 text-center">
+                        generating…
+                      </div>
+                    )}
+                    <div className="px-2 py-1.5 flex items-center justify-between gap-1">
+                      <div className="min-w-0">
+                        <StatusBadge status={r.status} />
+                        <span className="ml-1.5 text-[10px] text-gray-600 truncate">
+                          {r.save_id === '__studio__' ? 'studio' : `${r.save_id} · t${r.turn}`}
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => deleteRecord(r.id)}
+                        className="text-gray-600 hover:text-red-400 transition-colors shrink-0"
+                        title={files.length > 1 ? `Delete generation (${files.length} images)` : 'Delete'}
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
                     </div>
-                  ) : r.status === 'error' ? (
-                    <button
-                      onClick={() => setLightbox(r)}
-                      title="Open to see why it failed"
-                      className="w-full h-32 flex flex-col items-center justify-center gap-1 px-2 text-center text-xs text-red-300/80 cursor-pointer hover:bg-red-950/20 transition-colors"
-                    >
-                      <span className="text-lg" aria-hidden="true">🚫</span>
-                      <span className="line-clamp-3">{r.error || 'failed'}</span>
-                    </button>
-                  ) : (
-                    <div className="w-full h-32 flex items-center justify-center text-xs text-gray-600 px-2 text-center">
-                      generating…
-                    </div>
-                  )}
-                  <div className="px-2 py-1.5 flex items-center justify-between gap-1">
-                    <div className="min-w-0">
-                      <StatusBadge status={r.status} />
-                      <span className="ml-1.5 text-[10px] text-gray-600 truncate">
-                        {r.save_id === '__studio__' ? 'studio' : `${r.save_id} · t${r.turn}`}
-                      </span>
-                    </div>
-                    <button
-                      onClick={() => deleteRecord(r.id)}
-                      className="text-gray-600 hover:text-red-400 transition-colors shrink-0"
-                      title="Delete"
-                    >
-                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
-                    </button>
                   </div>
-                </div>
-                );
+                  );
+                });
               })}
             </div>
           )}
         </section>
         )}
       </div>
-      {lightbox && <Lightbox record={lightbox} onClose={() => setLightbox(null)} />}
+      {lightbox && (
+        <Lightbox
+          items={galleryItems}
+          index={lightbox.index ?? 0}
+          errorRecord={lightbox.record || null}
+          onNavigate={(i) => setLightbox({ index: i })}
+          onClose={() => setLightbox(null)}
+        />
+      )}
     </div>
   );
 }

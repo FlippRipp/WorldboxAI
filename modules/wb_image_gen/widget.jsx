@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 
 // Shared across every mounted footer instance (the module loader evaluates
 // this file once): a single index cache and a single poller, so N messages
@@ -57,16 +57,72 @@ function ensurePolling() {
   }
 }
 
-function Lightbox({ record, onClose }) {
-  // A failed generation has no image file — open it to read why (e.g. a
-  // provider content-policy refusal) rather than a broken image frame.
-  const failed = record.status === 'error' || !record.filename;
+// Every image file a finished record owns. Multi-image records (parallel
+// generation) carry `filenames`; older single-image records only `filename`.
+function recordFiles(record) {
+  const names = Array.isArray(record.filenames) && record.filenames.length
+    ? record.filenames
+    : record.filename ? [record.filename] : [];
+  return names.filter(Boolean);
+}
+
+// Fullscreen viewer over a flat list of finished images ({record, filename}).
+// Swipe, the arrow keys, or the on-screen arrows move between images; Esc or
+// a click/tap closes. A failed record (errorRecord) shows its error instead.
+function Lightbox({ items, index, onNavigate, onClose, errorRecord }) {
+  const touchRef = useRef(null);
+  const swipedRef = useRef(false);
+  const count = errorRecord ? 0 : (items ? items.length : 0);
+  const safeIndex = Math.max(0, Math.min(index || 0, count - 1));
+  const item = count > 0 ? items[safeIndex] : null;
+
+  const go = useCallback((delta) => {
+    const next = safeIndex + delta;
+    if (next >= 0 && next < count) onNavigate(next);
+  }, [safeIndex, count, onNavigate]);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') onClose();
+      else if (e.key === 'ArrowLeft') go(-1);
+      else if (e.key === 'ArrowRight') go(1);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [go, onClose]);
+
+  if (!errorRecord && !item) return null;
+
+  const navBtn =
+    'absolute top-1/2 -translate-y-1/2 z-10 h-11 w-11 flex items-center justify-center ' +
+    'rounded-full bg-black/50 border border-white/10 text-2xl leading-none text-gray-300 ' +
+    'hover:bg-black/80 hover:text-white transition-colors cursor-pointer';
+
   return (
     <div
       className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4 cursor-zoom-out"
-      onClick={onClose}
+      onClick={() => {
+        // A horizontal swipe fires a click on release; that click must
+        // navigate (already handled), not close the viewer.
+        if (swipedRef.current) { swipedRef.current = false; return; }
+        onClose();
+      }}
+      onTouchStart={(e) => {
+        touchRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      }}
+      onTouchEnd={(e) => {
+        const start = touchRef.current;
+        touchRef.current = null;
+        if (!start) return;
+        const dx = e.changedTouches[0].clientX - start.x;
+        const dy = e.changedTouches[0].clientY - start.y;
+        if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+          swipedRef.current = true;
+          go(dx < 0 ? 1 : -1);
+        }
+      }}
     >
-      {failed ? (
+      {errorRecord ? (
         <div
           className="max-w-lg w-full rounded-lg border border-red-900/60 bg-gray-900/80 p-6 text-center cursor-auto"
           onClick={(e) => e.stopPropagation()}
@@ -74,24 +130,49 @@ function Lightbox({ record, onClose }) {
           <div className="text-3xl mb-3" aria-hidden="true">🚫</div>
           <p className="text-sm font-semibold text-red-300 mb-2">Image generation failed</p>
           <p className="text-xs text-gray-300 whitespace-pre-wrap break-words">
-            {record.error || 'unknown error'}
+            {errorRecord.error || 'unknown error'}
           </p>
-          {record.image_prompt && (
+          {errorRecord.image_prompt && (
             <p className="mt-4 text-[11px] text-gray-500 whitespace-pre-wrap break-words">
-              <span className="text-gray-600">Prompt: </span>{record.image_prompt}
+              <span className="text-gray-600">Prompt: </span>{errorRecord.image_prompt}
             </p>
           )}
         </div>
       ) : (
         <>
+          {count > 1 && (
+            <span className="absolute top-4 left-1/2 -translate-x-1/2 px-2.5 py-1 rounded-full bg-black/60 border border-white/10 text-xs text-gray-300">
+              {safeIndex + 1} / {count}
+            </span>
+          )}
+          {safeIndex > 0 && (
+            <button
+              onClick={(e) => { e.stopPropagation(); go(-1); }}
+              aria-label="Previous image"
+              className={`${navBtn} left-3`}
+            >
+              ‹
+            </button>
+          )}
+          {safeIndex < count - 1 && (
+            <button
+              onClick={(e) => { e.stopPropagation(); go(1); }}
+              aria-label="Next image"
+              className={`${navBtn} right-3`}
+            >
+              ›
+            </button>
+          )}
           <img
-            src={`${API_BASE}/images/file/${record.filename}`}
-            alt={record.image_prompt || 'Story illustration'}
-            className="max-w-full max-h-[85vh] rounded-lg shadow-2xl"
+            key={item.filename}
+            src={`${API_BASE}/images/file/${item.filename}`}
+            alt={item.record.image_prompt || 'Story illustration'}
+            draggable={false}
+            className="max-w-full max-h-[85vh] rounded-lg shadow-2xl select-none"
           />
-          {record.image_prompt && (
+          {item.record.image_prompt && (
             <p className="mt-3 max-w-2xl text-center text-xs text-gray-400 line-clamp-4">
-              {record.image_prompt}
+              {item.record.image_prompt}
             </p>
           )}
         </>
@@ -140,6 +221,13 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
   });
   if (records.length === 0) return null;
 
+  // Flat list of every finished image under this message — the lightbox
+  // swipes across all of them, spanning multi-image records.
+  const galleryItems = records.flatMap((r) =>
+    r.status === 'done' ? recordFiles(r).map((filename) => ({ record: r, filename })) : []);
+  const openAt = (filename) =>
+    setLightbox({ index: Math.max(0, galleryItems.findIndex((it) => it.filename === filename)) });
+
   // Retry an error or regenerate a done image: same endpoint, the backend
   // removes the record being replaced. Same prompt, fresh seed.
   const regenerate = async (recordId) => {
@@ -185,7 +273,8 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
   return (
     <div className="mt-4 space-y-3">
       {records.map((r) => {
-        if (r.status === 'done' && r.filename) {
+        const files = r.status === 'done' ? recordFiles(r) : [];
+        if (files.length > 0) {
           const concealed = store.conceal !== 'off' && !store.revealed.has(r.id);
           // Frame sized from the record's aspect ratio, image fills it: the
           // box exists before the file loads, so nothing shifts on load and
@@ -195,28 +284,52 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
           // stretches the image. Records without dimensions (old saves) fall
           // back to the image's natural size, as before.
           const hasSize = r.width > 0 && r.height > 0;
+          const concealCls = concealed
+            ? store.conceal === 'blackout'
+              ? 'cursor-pointer brightness-0'
+              : 'cursor-pointer blur-2xl scale-110'
+            : 'cursor-zoom-in';
           return (
-            <div key={r.id} className="relative inline-block max-w-full">
+            <div
+              key={r.id}
+              className={files.length > 1 ? 'relative block max-w-2xl' : 'relative inline-block max-w-full'}
+            >
               {/* The wrapper clips the blur's soft edges (the image is scaled
                   up slightly so blurred content still fills its own frame). */}
-              <div
-                className={`overflow-hidden rounded-lg${hasSize ? ' h-80 max-w-full' : ''}`}
-                style={hasSize ? { aspectRatio: `${r.width} / ${r.height}` } : undefined}
-              >
-                <img
-                  src={`${API_BASE}/images/file/${r.filename}`}
-                  alt={concealed ? 'Hidden story illustration' : (r.image_prompt || 'Story illustration')}
-                  loading="lazy"
-                  onClick={() => (concealed ? reveal(r.id) : setLightbox(r))}
-                  className={`${hasSize ? 'w-full h-full object-cover' : 'max-h-80 max-w-full'} rounded-lg border border-gray-700/60 shadow-lg ${
-                    concealed
-                      ? store.conceal === 'blackout'
-                        ? 'cursor-pointer brightness-0'
-                        : 'cursor-pointer blur-2xl scale-110'
-                      : 'cursor-zoom-in'
-                  }`}
-                />
-              </div>
+              {files.length > 1 ? (
+                // A parallel batch: two-up grid of equal frames; the lightbox
+                // (click any of them) swipes through the full-size versions.
+                <div className="grid grid-cols-2 gap-2">
+                  {files.map((filename) => (
+                    <div
+                      key={filename}
+                      className="overflow-hidden rounded-lg"
+                      style={{ aspectRatio: hasSize ? `${r.width} / ${r.height}` : '1 / 1' }}
+                    >
+                      <img
+                        src={`${API_BASE}/images/file/${filename}`}
+                        alt={concealed ? 'Hidden story illustration' : (r.image_prompt || 'Story illustration')}
+                        loading="lazy"
+                        onClick={() => (concealed ? reveal(r.id) : openAt(filename))}
+                        className={`w-full h-full object-cover rounded-lg border border-gray-700/60 shadow-lg ${concealCls}`}
+                      />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div
+                  className={`overflow-hidden rounded-lg${hasSize ? ' h-80 max-w-full' : ''}`}
+                  style={hasSize ? { aspectRatio: `${r.width} / ${r.height}` } : undefined}
+                >
+                  <img
+                    src={`${API_BASE}/images/file/${files[0]}`}
+                    alt={concealed ? 'Hidden story illustration' : (r.image_prompt || 'Story illustration')}
+                    loading="lazy"
+                    onClick={() => (concealed ? reveal(r.id) : openAt(files[0]))}
+                    className={`${hasSize ? 'w-full h-full object-cover' : 'max-h-80 max-w-full'} rounded-lg border border-gray-700/60 shadow-lg ${concealCls}`}
+                  />
+                </div>
+              )}
               {concealed && (
                 <button
                   onClick={() => reveal(r.id)}
@@ -231,7 +344,9 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
               <div className="absolute top-2 right-2 flex gap-1">
                 <button
                   onClick={() => regenerate(r.id)}
-                  title="Regenerate (same prompt, new image)"
+                  title={files.length > 1
+                    ? 'Regenerate (same prompt, new batch of images)'
+                    : 'Regenerate (same prompt, new image)'}
                   aria-label="Regenerate illustration"
                   className={overlayBtn}
                 >
@@ -239,7 +354,9 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
                 </button>
                 <button
                   onClick={() => remove(r.id)}
-                  title="Remove this illustration"
+                  title={files.length > 1
+                    ? `Remove these ${files.length} illustrations`
+                    : 'Remove this illustration'}
                   aria-label="Remove illustration"
                   className={armed === r.id
                     ? 'px-2 py-1 rounded text-xs leading-none bg-red-900/80 text-red-200 border border-red-500/50'
@@ -255,7 +372,7 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
           return (
             <div key={r.id} className="flex items-center gap-2 text-xs text-gray-500">
               <button
-                onClick={() => setLightbox(r)}
+                onClick={() => setLightbox({ record: r })}
                 title="Open to see why it failed"
                 className="flex items-center gap-2 min-w-0 text-left hover:text-gray-300 transition-colors"
               >
@@ -297,7 +414,15 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
         );
       })}
       {notice && <p className="text-xs text-amber-400/80">{notice}</p>}
-      {lightbox && <Lightbox record={lightbox} onClose={() => setLightbox(null)} />}
+      {lightbox && (
+        <Lightbox
+          items={galleryItems}
+          index={lightbox.index ?? 0}
+          errorRecord={lightbox.record || null}
+          onNavigate={(i) => setLightbox({ index: i })}
+          onClose={() => setLightbox(null)}
+        />
+      )}
     </div>
   );
 }

@@ -310,6 +310,132 @@ def test_prompt_writing_step_retries(tmp_path):
     assert record["image_prompt"] == "a knight rides through mist"
 
 
+# ---------------------------------------------------------------------------
+# Parallel images (image_num)
+# ---------------------------------------------------------------------------
+
+def test_parallel_image_num_writes_all_files(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend, image_num=3)
+    counter = {"n": 0}
+
+    async def submit(cfg, prompt):
+        counter["n"] += 1
+        return f"task-{counter['n']}"
+
+    async def poll(cfg, task_id):
+        return f"https://signed.example/{task_id}.jpeg"
+
+    async def download(url):
+        return url.encode(), "jpg"
+
+    backend._novita_submit = submit
+    backend._novita_poll = poll
+    backend._download = download
+
+    record = _run_pipeline(backend)
+    assert record["status"] == "done"
+    assert counter["n"] == 3
+    assert len(record["filenames"]) == 3
+    assert record["filename"] == record["filenames"][0]
+    contents = {(tmp_path / MID / "images" / f).read_bytes() for f in record["filenames"]}
+    assert len(contents) == 3   # three distinct tasks, three distinct files
+
+
+def test_parallel_partial_failure_keeps_survivors(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend.STEP_RETRY_BASE_DELAY_S = 0
+    _enable(backend, image_num=3, step_retries=0)
+    _fake_novita(backend)
+    calls = {"n": 0}
+
+    async def flaky_submit(cfg, prompt):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise backend.NonRetryableError("refused: content policy")
+        return "task-ok"
+
+    backend._novita_submit = flaky_submit
+
+    record = _run_pipeline(backend)
+    assert record["status"] == "done"
+    assert len(record["filenames"]) == 2
+    assert record["filename"] == record["filenames"][0]
+    for f in record["filenames"]:
+        assert (tmp_path / MID / "images" / f).read_bytes() == b"fakepng"
+
+
+def test_parallel_all_fail_marks_error(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend.STEP_RETRY_BASE_DELAY_S = 0
+    _enable(backend, image_num=2, step_retries=0)
+
+    async def always_boom(cfg, prompt):
+        raise backend.NonRetryableError("refused: content policy")
+
+    backend._novita_submit = always_boom
+
+    record = _run_pipeline(backend)
+    assert record["status"] == "error"
+    assert "content policy" in record["error"]
+    assert list((tmp_path / MID / "images").iterdir()) == []
+
+
+def test_image_num_config_clamped(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    body = client.get("/config").json()
+    assert body["image_num"] == 1
+    assert body["image_num_max"] == backend.IMAGE_NUM_MAX
+
+    assert client.put("/config", json={"image_num": 99}).json()["image_num"] == backend.IMAGE_NUM_MAX
+    assert client.put("/config", json={"image_num": 0}).json()["image_num"] == 1
+
+    # A hand-edited config normalizes on load.
+    cfg = backend._load_config()
+    cfg["image_num"] = "bogus"
+    backend._save_config(cfg)
+    assert backend._load_config()["image_num"] == 1
+
+
+def test_delete_and_retry_remove_all_parallel_files(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend)
+    _fake_novita(backend)
+    client = _client(backend)
+    images = backend._data_dir() / "images"
+
+    def _make_batch_record(rid):
+        files = [f"{rid}.jpg", f"{rid}_1.jpg", f"{rid}_2.jpg"]
+        for f in files:
+            (images / f).write_bytes(b"oldimage")
+        asyncio.run(backend._append_record({
+            "id": rid, "save_id": "mystory", "turn": 3, "status": "done",
+            "narration_excerpt": "A merchant waves you over.",
+            "image_prompt": "a smiling merchant",
+            "filename": files[0], "filenames": files,
+        }))
+        return files
+
+    files = _make_batch_record("mystory_3_00000001")
+    assert client.delete("/images/mystory_3_00000001").status_code == 200
+    assert all(not (images / f).exists() for f in files)
+
+    # Regenerating a batch record also clears every file it owned.
+    files = _make_batch_record("mystory_3_00000002")
+    resp = client.post("/generate", json={"retry_record_id": "mystory_3_00000002"})
+    assert resp.status_code == 200
+    record_id = resp.json()["record_id"]
+    for _ in range(100):
+        record = next((r for r in backend._read_index() if r["id"] == record_id), None)
+        if record and record["status"] in ("done", "error"):
+            break
+        time.sleep(0.02)
+    assert record["status"] == "done"
+    assert all(not (images / f).exists() for f in files)
+
+
 def test_poll_task_failure_retryability_split(tmp_path):
     """A refused prompt must not be resubmitted; an ordinary task failure may."""
     backend = _load_backend(tmp_path)
