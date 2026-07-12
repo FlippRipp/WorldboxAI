@@ -25,6 +25,7 @@ import SettingsScreen from './components/Settings/SettingsScreen';
 import ModuleScreen from './components/shared/ModuleScreen';
 import ScenarioManager from './components/Scenario/ScenarioManager';
 import LorebookManager from './components/Lorebook/LorebookManager';
+import ServerLogScreen from './components/Logs/ServerLogScreen';
 import { useToasts, ToastStack } from './components/shared/Toasts';
 import { LLMInspectorProvider, useLLMInspectorActions } from './hooks/useLLMInspector';
 import { ThemeProvider, useTheme } from './hooks/useTheme';
@@ -77,6 +78,7 @@ const PLAIN_MODES = new Set([
   'scenario-manager',
   'lorebook-manager',
   'character-creator',
+  'server-logs',
 ]);
 
 // Read and validate the persisted UI state; anything unrecognized (corrupt
@@ -519,6 +521,10 @@ function AppContent() {
 
   if (currentMode === 'lorebook-manager') {
     return <LorebookManager onBack={() => setCurrentMode(null)} />;
+  }
+
+  if (currentMode === 'server-logs') {
+    return <ServerLogScreen onBack={() => setCurrentMode(null)} />;
   }
 
   if (currentMode === 'character-creator') {

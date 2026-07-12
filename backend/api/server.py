@@ -5,6 +5,7 @@ from backend.engine.registry import ModuleRegistry
 from backend.engine.graph import EngineGraph, CHARACTER_UPDATE_FIELDS
 from backend.engine.llm import LLMProviderError
 from backend.engine.llm_inspector import LLMInspector
+from backend.engine.log_store import LogStore, install_log_capture
 from backend.engine.session import GameSessionManager
 from backend.engine.settings_registry import SettingsRegistry
 from backend.engine.character_builder import CharacterBuilder
@@ -34,6 +35,13 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 logger = logging.getLogger(__name__)
+
+# Capture everything the server emits (logging, print(), tracebacks) into an
+# in-memory ring buffer that /api/logs serves to the frontend log viewer.
+# Installed before the module registry and engine are constructed below so
+# their startup output is captured too.
+log_store = LogStore()
+install_log_capture(log_store)
 from typing import Any, Optional
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
@@ -666,6 +674,17 @@ async def get_llm_inspector_calls(since_id: str = "", limit: int = 50):
 @app.delete("/api/llm-inspector/calls")
 async def clear_llm_inspector_calls():
     llm_inspector.clear()
+    return {"cleared": True}
+
+
+@app.get("/api/logs")
+async def get_logs(since_id: int = 0, level: str = "", limit: int = 1000):
+    return {"logs": log_store.get_logs(since_id=since_id, level=level, limit=limit)}
+
+
+@app.delete("/api/logs")
+async def clear_logs():
+    log_store.clear()
     return {"cleared": True}
 
 

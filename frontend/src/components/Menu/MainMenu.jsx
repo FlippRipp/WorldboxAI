@@ -39,6 +39,12 @@ const CORE_MODES = [
     description: 'AI providers, models, and appearance / theme',
     icon: '⚙️',
   },
+  {
+    id: 'server-logs',
+    label: 'Server Log',
+    description: 'View backend server logs and filter for errors',
+    icon: '📋',
+  },
 ];
 
 export default function MainMenu({ onSelectMode, modules, onModulesLoaded }) {

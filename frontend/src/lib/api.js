@@ -91,6 +91,13 @@ export const api = {
     return request(`/api/llm-inspector/calls${qs}`);
   },
   clearLLMInspectorCalls: () => request('/api/llm-inspector/calls', { method: 'DELETE' }),
+  getServerLogs:          (sinceId = 0, level = '', limit = 1000) => {
+    const params = new URLSearchParams({ limit });
+    if (sinceId) params.set('since_id', sinceId);
+    if (level) params.set('level', level);
+    return request(`/api/logs?${params}`);
+  },
+  clearServerLogs:        () => request('/api/logs', { method: 'DELETE' }),
   getSettings:            (scope = 'story') => request(`/api/settings?scope=${scope}`),
   updateSettings:         (updates, scope = 'story') => request('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: updates, scope }) }),
   getWidget:              (modId) => fetch(`${API}/widgets/${modId}/widget.jsx?_ts=${Date.now()}`),
