@@ -669,9 +669,14 @@ function RagResultCard({ rank, dist, injected, children }) {
 
 // ── Lorebooks tab ────────────────────────────────────────────────────────────
 
+// Pseudo-book id the backend gives a save's free-standing entries in the
+// world index (source ids are `__story__:{uid}`).
+const STORY_BOOK_ID = '__story__';
+
 function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing, onEntriesChanged }) {
   const [library, setLibrary] = useState([]);
   const [attached, setAttached] = useState([]);
+  const [storyEntries, setStoryEntries] = useState([]); // free-standing, this save only
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [books, setBooks] = useState({});      // id -> full record
@@ -685,6 +690,7 @@ function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing
       .then(([lib, save]) => {
         setLibrary(lib.lorebooks || []);
         setAttached(save.lorebook_ids || []);
+        setStoryEntries(save.story_entries || []);
       })
       .catch(e => setError(e.message));
   }, [saveId]);
@@ -734,6 +740,71 @@ function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing
     }
   };
 
+  // ── free-standing story entries (persisted on the save) ────────────────────
+
+  const STORY_ENTRY_FIELDS = [
+    { key: 'title', label: 'Title', type: 'text' },
+    { key: 'keys', label: 'Keywords (comma-separated)', type: 'text' },
+    { key: 'content', label: 'Content', type: 'textarea', rows: 6 },
+    { key: 'enabled', label: 'Enabled', type: 'checkbox' },
+    { key: 'constant', label: 'Constant (always in context)', type: 'checkbox' },
+  ];
+
+  const splitKeys = (value) => value.split(',').map(k => k.trim()).filter(Boolean);
+
+  const newStoryEntry = () => setEditing({
+    title: 'New Story Entry',
+    fields: STORY_ENTRY_FIELDS,
+    initialValues: { title: '', keys: '', content: '', enabled: true, constant: false },
+    onSave: async (values) => {
+      const { story_entries } = await api.addStoryLorebookEntry(saveId, {
+        ...values, keys: splitKeys(values.keys),
+      });
+      setStoryEntries(story_entries);
+      onEntriesChanged();
+    },
+  });
+
+  const editStoryEntry = (entry) => setEditing({
+    title: `Edit Story Entry — ${entry.title || `Entry ${entry.uid}`}`,
+    fields: STORY_ENTRY_FIELDS,
+    initialValues: {
+      title: entry.title || '',
+      keys: (entry.keys || []).join(', '),
+      content: entry.content || '',
+      enabled: !!entry.enabled,
+      constant: !!entry.constant,
+    },
+    onSave: async (values, changed) => {
+      if (Object.keys(changed).length === 0) return;
+      const patch = { ...changed };
+      if ('keys' in patch) patch.keys = splitKeys(patch.keys);
+      const { story_entries } = await api.updateStoryLorebookEntry(saveId, entry.uid, patch);
+      setStoryEntries(story_entries);
+      onEntriesChanged();
+    },
+  });
+
+  const toggleStoryEntry = async (uid, enabled) => {
+    try {
+      const { story_entries } = await api.updateStoryLorebookEntry(saveId, uid, { enabled });
+      setStoryEntries(story_entries);
+      onEntriesChanged();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const deleteStoryEntry = async (uid) => {
+    try {
+      const { story_entries } = await api.deleteStoryLorebookEntry(saveId, uid);
+      setStoryEntries(story_entries);
+      onEntriesChanged();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
   const editEntry = (bookId, entry) => setEditing({
     title: `Edit Lorebook Entry — ${entry.title || `Entry ${entry.uid}`}`,
     fields: [
@@ -777,9 +848,45 @@ function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing
     return list;
   };
 
+  const filteredStoryEntries = filterEntries(storyEntries);
+
   return (
     <div className="space-y-4">
       {error && <div className="bg-red-900/40 border border-red-700/50 rounded p-3 text-red-200 text-sm">{error}</div>}
+
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs text-gray-500 font-semibold uppercase tracking-wide">Story Entries</span>
+          <button
+            onClick={newStoryEntry}
+            className="text-xs text-purple-300 hover:text-purple-200 border border-purple-800/50 bg-purple-900/30 rounded px-2 py-1"
+            aria-label="Add story entry"
+          >
+            + New Entry
+          </button>
+        </div>
+        <div className="bg-gray-900/60 rounded border border-gray-700 p-3 space-y-2">
+          {storyEntries.length === 0 && (
+            <p className="text-sm text-gray-500">
+              No story entries yet. Story entries are free-standing lore that belongs to this story only —
+              they behave exactly like lorebook entries (keywords, constant, enabled) without needing an imported lorebook.
+            </p>
+          )}
+          {storyEntries.length > 0 && filteredStoryEntries.length === 0 && (
+            <p className="text-sm text-gray-500">No story entries match.</p>
+          )}
+          {filteredStoryEntries.map(entry => (
+            <LorebookEntryCard
+              key={entry.uid}
+              entry={entry}
+              isActive={activeSourceIds.has(`${STORY_BOOK_ID}:${entry.uid}`)}
+              onToggle={(enabled) => toggleStoryEntry(entry.uid, enabled)}
+              onEdit={() => editStoryEntry(entry)}
+              onDelete={() => deleteStoryEntry(entry.uid)}
+            />
+          ))}
+        </div>
+      </div>
 
       <div>
         <div className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-2">Attached Lorebooks</div>
@@ -802,7 +909,7 @@ function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing
         </div>
       </div>
 
-      {attachedBooks.length > 0 && (
+      {(attachedBooks.length > 0 || storyEntries.length > 0) && (
         <div className="flex items-center gap-4">
           <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
             <input type="checkbox" checked={enabledOnly} onChange={e => setEnabledOnly(e.target.checked)} className="accent-purple-600" />
@@ -849,7 +956,7 @@ function LorebooksTab({ saveId, worldEntries, worldActiveIds, search, setEditing
   );
 }
 
-function LorebookEntryCard({ entry, isActive, onToggle, onEdit }) {
+function LorebookEntryCard({ entry, isActive, onToggle, onEdit, onDelete }) {
   const [expanded, setExpanded] = useState(false);
   const content = entry.content || '';
 
@@ -886,6 +993,16 @@ function LorebookEntryCard({ entry, isActive, onToggle, onEdit }) {
           />
           Enabled
         </label>
+        {onDelete && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            className="text-gray-600 hover:text-red-400 text-sm shrink-0 px-1"
+            title="Remove this entry from the story"
+            aria-label={`Remove story entry ${entry.uid}`}
+          >
+            &#128465;
+          </button>
+        )}
       </div>
       <p
         className={`text-xs text-gray-400 mt-2 whitespace-pre-wrap cursor-pointer ${expanded ? '' : 'line-clamp-3'}`}

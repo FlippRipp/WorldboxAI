@@ -22,10 +22,15 @@ import hashlib
 import json
 import logging
 import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Reserved pseudo-book id for a save's free-standing story entries. Imported
+# books can never claim it: _slugify strips leading/trailing underscores.
+STORY_LOREBOOK_ID = "__story__"
 
 
 def _slugify(name: str) -> str:
@@ -123,6 +128,47 @@ def parse_sillytavern_lorebook(raw: dict, fallback_name: str = "") -> dict:
         "entries": entries,
         "stats": {"total": len(items), "imported": len(entries), "skipped": skipped},
     }
+
+
+# ── free-standing story entries ──────────────────────────────────────────────
+#
+# A save can carry lorebook entries of its own, not belonging to any imported
+# book. They live in the save's metadata (``story_lorebook_entries``) and are
+# normalized to the imported-entry shape so they ride the same embed path
+# (keywords, constant injection, enabled flag, RAG retrieval).
+
+_STORY_ENTRY_FIELDS = ("title", "keys", "secondary_keys", "content", "constant", "enabled")
+
+
+def make_story_entry(data: dict, uid: str | None = None) -> dict:
+    """Normalize a free-standing story entry; raises ValueError on empty content."""
+    content = str(data.get("content") or "").strip()
+    if not content:
+        raise ValueError("Lorebook entry content cannot be empty.")
+    return {
+        "uid": str(uid) if uid else uuid.uuid4().hex[:8],
+        "title": str(data.get("title") or "").strip(),
+        "keys": _as_key_list(data.get("keys")),
+        "secondary_keys": _as_key_list(data.get("secondary_keys")),
+        "content": content,
+        "constant": bool(data.get("constant", False)),
+        "enabled": bool(data.get("enabled", True)),
+    }
+
+
+def patch_story_entry(entry: dict, patch: dict) -> dict:
+    """Apply a partial edit to a story entry, keeping its uid and re-normalizing."""
+    merged = dict(entry)
+    for field in _STORY_ENTRY_FIELDS:
+        if field in patch:
+            merged[field] = patch[field]
+    return make_story_entry(merged, uid=entry.get("uid"))
+
+
+def story_entries_book(entries: list[dict]) -> dict:
+    """Wrap a save's story entries as a pseudo-lorebook for the embed path,
+    giving them world-index source ids of ``__story__:{uid}``."""
+    return {"id": STORY_LOREBOOK_ID, "name": "Story Entries", "entries": list(entries or [])}
 
 
 class LorebookStore:
@@ -293,9 +339,11 @@ class LorebookStore:
                 logger.warning("Save references missing lorebook '%s'; skipping.", lid)
         return out
 
-    def embed_fingerprint(self, lorebook_ids: list[str]) -> str:
-        """Changes whenever the linked set changes or any linked book is edited
-        (updated_at bumps) — the trigger for re-embedding a save's lore rows."""
+    def embed_fingerprint(self, lorebook_ids: list[str],
+                          story_entries: list[dict] | None = None) -> str:
+        """Changes whenever the linked set changes, any linked book is edited
+        (updated_at bumps), or the save's free-standing story entries change —
+        the trigger for re-embedding a save's lore rows."""
         parts = []
         for lid in sorted(set(lorebook_ids or [])):
             try:
@@ -303,7 +351,11 @@ class LorebookStore:
                 parts.append([lid, record.get("updated_at", "")])
             except (FileNotFoundError, ValueError):
                 continue
-        payload = json.dumps(parts, sort_keys=True)
+        # Story entries carry no updated_at, so their full payload is hashed —
+        # any edit or toggle re-embeds. Without them the payload keeps its
+        # historical shape so existing saves don't re-embed on next load.
+        payload_obj = [parts, story_entries] if story_entries else parts
+        payload = json.dumps(payload_obj, sort_keys=True)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _unique_id(self, base: str) -> str:

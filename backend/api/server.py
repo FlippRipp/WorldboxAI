@@ -9,7 +9,7 @@ from backend.engine.session import GameSessionManager
 from backend.engine.settings_registry import SettingsRegistry
 from backend.engine.character_builder import CharacterBuilder
 from backend.engine.scenario import ScenarioStore
-from backend.engine.lorebook import LorebookStore
+from backend.engine.lorebook import LorebookStore, make_story_entry, patch_story_entry, story_entries_book
 from backend.engine.provider_manager import ProviderManager
 from backend.engine.prompt_library import PromptLibrary, get_default_library_path
 from backend.engine.prompt_pipeline import AVAILABLE_MACROS, default_prompt_pipeline, ALLOWED_ROLES, ALLOWED_PLACEMENTS, ALLOWED_BLOCK_TYPES, DEFAULT_CONTINUE_PROMPT
@@ -1079,10 +1079,11 @@ async def _sync_lorebooks_for_save(save_id: str):
     for the active save — engine.memory is bound to the active save's paths."""
     meta = session_manager.save_manager.read_core_json(save_id, "metadata.json", {}) or {}
     lorebook_ids = meta.get("lorebook_ids", []) or []
-    if not lorebook_ids and "lorebook_embed_fingerprint" not in meta:
+    story_entries = meta.get("story_lorebook_entries", []) or []
+    if not lorebook_ids and not story_entries and "lorebook_embed_fingerprint" not in meta:
         # Never had lorebooks: don't create a world index for nothing.
         return
-    fingerprint = lorebook_store.embed_fingerprint(lorebook_ids)
+    fingerprint = lorebook_store.embed_fingerprint(lorebook_ids, story_entries)
     if meta.get("lorebook_embed_fingerprint") == fingerprint:
         return
     engine.set_memory_path(session_manager.get_memory_path())
@@ -1090,6 +1091,8 @@ async def _sync_lorebooks_for_save(save_id: str):
     world_index_path = session_manager.data_dir / "saves" / save_id / "world_index"
     engine.memory.init_world_index(str(world_index_path))
     books = lorebook_store.resolve_save_lorebooks(lorebook_ids)
+    if story_entries:
+        books.append(story_entries_book(story_entries))
     count = await engine.memory.embed_lorebooks(books, engine.llm)
     session_manager.save_manager.update_metadata(
         save_id, {"lorebook_embed_fingerprint": fingerprint}
@@ -1193,7 +1196,10 @@ async def get_save_lorebooks(save_id: str):
     meta = session_manager.save_manager.read_core_json(save_id, "metadata.json", None)
     if meta is None:
         raise HTTPException(status_code=404, detail=f"Save '{save_id}' not found.")
-    return {"lorebook_ids": meta.get("lorebook_ids", [])}
+    return {
+        "lorebook_ids": meta.get("lorebook_ids", []),
+        "story_entries": meta.get("story_lorebook_entries", []) or [],
+    }
 
 
 @app.put("/api/saves/{save_id}/lorebooks")
@@ -1208,6 +1214,82 @@ async def set_save_lorebooks(save_id: str, request: LorebookLinksRequest):
     if save_id == session_manager.active_save_id:
         await _sync_lorebooks_for_save(save_id)
     return {"lorebook_ids": ids}
+
+
+# ── free-standing story entries ──────────────────────────────────────────────
+# Lorebook entries that belong to a single save rather than an imported book.
+# Stored in the save's metadata; embedded via the same path as book entries
+# (source ids '__story__:{uid}'), so keywords, constant injection, and the
+# enabled flag behave identically.
+
+class StoryEntryRequest(BaseModel):
+    content: Optional[str] = None
+    title: Optional[str] = None
+    keys: Optional[list[str]] = None
+    secondary_keys: Optional[list[str]] = None
+    constant: Optional[bool] = None
+    enabled: Optional[bool] = None
+
+
+def _read_story_entries(save_id: str) -> list:
+    meta = session_manager.save_manager.read_core_json(save_id, "metadata.json", None)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"Save '{save_id}' not found.")
+    return list(meta.get("story_lorebook_entries", []) or [])
+
+
+async def _write_story_entries(save_id: str, entries: list) -> None:
+    session_manager.save_manager.update_metadata(
+        save_id, {"story_lorebook_entries": entries})
+    # Embedding only works for the active save; inactive saves re-embed on
+    # next load via the fingerprint check.
+    if save_id == session_manager.active_save_id:
+        await _sync_lorebooks_for_save(save_id)
+
+
+@app.post("/api/saves/{save_id}/lorebooks/entries")
+async def add_story_lorebook_entry(save_id: str, request: StoryEntryRequest):
+    entries = _read_story_entries(save_id)
+    data = {k: v for k, v in request.model_dump().items() if v is not None}
+    try:
+        entry = make_story_entry(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    entries.append(entry)
+    await _write_story_entries(save_id, entries)
+    return {"entry": entry, "story_entries": entries}
+
+
+@app.put("/api/saves/{save_id}/lorebooks/entries/{uid}")
+async def update_story_lorebook_entry(save_id: str, uid: str, request: StoryEntryRequest):
+    entries = _read_story_entries(save_id)
+    patch = {k: v for k, v in request.model_dump().items() if v is not None}
+    for i, entry in enumerate(entries):
+        if str(entry.get("uid")) == uid:
+            try:
+                entries[i] = patch_story_entry(entry, patch)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            updated = entries[i]
+            break
+    else:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Story entry '{uid}' not found in save '{save_id}'.")
+    await _write_story_entries(save_id, entries)
+    return {"entry": updated, "story_entries": entries}
+
+
+@app.delete("/api/saves/{save_id}/lorebooks/entries/{uid}")
+async def delete_story_lorebook_entry(save_id: str, uid: str):
+    entries = _read_story_entries(save_id)
+    remaining = [e for e in entries if str(e.get("uid")) != uid]
+    if len(remaining) == len(entries):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Story entry '{uid}' not found in save '{save_id}'.")
+    await _write_story_entries(save_id, remaining)
+    return {"story_entries": remaining, "deleted": True}
 
 
 

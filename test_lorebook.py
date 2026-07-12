@@ -5,7 +5,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 import backend.api.server as server
-from backend.engine.lorebook import LorebookStore, parse_sillytavern_lorebook
+from backend.engine.lorebook import (
+    STORY_LOREBOOK_ID,
+    LorebookStore,
+    make_story_entry,
+    parse_sillytavern_lorebook,
+    patch_story_entry,
+    story_entries_book,
+)
 from backend.engine.scenario import ScenarioStore
 from backend.engine.session import GameSessionManager
 
@@ -217,6 +224,58 @@ def test_store_links_roundtrip(tmp_path):
     assert len(store.resolve_save_lorebooks([a, "missing_book"])) == 1
 
 
+# ── free-standing story entries ──────────────────────────────────────────────
+
+def test_make_and_patch_story_entry():
+    entry = make_story_entry({
+        "title": "The Pact",
+        "keys": "pact, oath",  # comma strings accepted like hand-edited files
+        "content": "The rivers obey whoever holds the pact stone.",
+        "constant": True,
+    })
+    assert entry["uid"]
+    assert entry["keys"] == ["pact", "oath"]
+    assert entry["secondary_keys"] == []
+    assert entry["enabled"] is True
+    assert entry["constant"] is True
+
+    patched = patch_story_entry(entry, {"enabled": False, "keys": ["pact"]})
+    assert patched["uid"] == entry["uid"]  # uid survives edits
+    assert patched["enabled"] is False
+    assert patched["keys"] == ["pact"]
+    assert patched["content"] == entry["content"]  # untouched fields preserved
+
+    with pytest.raises(ValueError):
+        make_story_entry({"content": "   "})
+    with pytest.raises(ValueError):
+        patch_story_entry(entry, {"content": ""})
+
+    book = story_entries_book([entry])
+    assert book["id"] == STORY_LOREBOOK_ID
+    assert book["entries"] == [entry]
+
+
+def test_fingerprint_includes_story_entries(tmp_path):
+    store = LorebookStore(str(tmp_path / "data"))
+    book_id = store.import_lorebook(V2_LOREBOOK, name="Realm Lore")["lorebook"]["id"]
+    entry = make_story_entry({"content": "Lantern light keeps the mists at bay."},
+                             uid="e1")
+
+    # Back-compat: no story entries → the historical fingerprint, so existing
+    # saves don't re-embed on their next load.
+    base = store.embed_fingerprint([book_id])
+    assert base == store.embed_fingerprint([book_id], [])
+
+    with_entry = store.embed_fingerprint([book_id], [entry])
+    assert with_entry != base
+    assert with_entry == store.embed_fingerprint([book_id], [dict(entry)])  # stable
+    # Any edit — including an enabled toggle — changes the fingerprint.
+    assert store.embed_fingerprint(
+        [book_id], [patch_story_entry(entry, {"enabled": False})]) != with_entry
+    # Story entries alone (no imported books) also fingerprint.
+    assert store.embed_fingerprint([], [entry]) != store.embed_fingerprint([])
+
+
 # ── API + save inheritance ───────────────────────────────────────────────────
 
 def make_client(tmp_path, monkeypatch):
@@ -374,6 +433,89 @@ def test_attach_detach_lorebooks_on_save(tmp_path, monkeypatch):
     # Detach: rows are removed on the follow-up sync.
     client.put("/api/saves/autosave/lorebooks", json={"lorebook_ids": []})
     assert _world_db_lorebook_rows(tmp_path, "autosave") == []
+
+
+def test_story_entries_api_add_toggle_edit_remove(tmp_path, monkeypatch):
+    client, session_manager, _, _ = make_client(tmp_path, monkeypatch)
+
+    # A story entry needs no imported lorebook at all.
+    resp = client.post("/api/saves/autosave/lorebooks/entries", json={
+        "title": "The Pact",
+        "keys": ["pact", "oath"],
+        "content": "The rivers obey whoever holds the pact stone.",
+        "constant": True,
+    })
+    assert resp.status_code == 200
+    entry = resp.json()["entry"]
+    uid = entry["uid"]
+    assert entry["enabled"] is True
+
+    rows = _world_db_lorebook_rows(tmp_path, "autosave")
+    assert [r[0] for r in rows] == [f"{STORY_LOREBOOK_ID}:{uid}"]
+    assert rows[0][1] == 1  # constant flag carried into the world index
+    assert "keywords: pact, oath" in rows[0][2]
+
+    # Persisted on the save and surfaced by the GET.
+    meta = session_manager.save_manager.read_core_json("autosave", "metadata.json", {})
+    assert meta["story_lorebook_entries"] == [entry]
+    got = client.get("/api/saves/autosave/lorebooks").json()
+    assert got["story_entries"] == [entry]
+
+    # Toggle off: the state persists and the row is un-embedded.
+    resp = client.put(f"/api/saves/autosave/lorebooks/entries/{uid}",
+                      json={"enabled": False})
+    assert resp.json()["entry"]["enabled"] is False
+    assert _world_db_lorebook_rows(tmp_path, "autosave") == []
+    meta = session_manager.save_manager.read_core_json("autosave", "metadata.json", {})
+    assert meta["story_lorebook_entries"][0]["enabled"] is False
+
+    # Toggle back on, then edit: re-embedded with the new text.
+    client.put(f"/api/saves/autosave/lorebooks/entries/{uid}", json={"enabled": True})
+    resp = client.put(f"/api/saves/autosave/lorebooks/entries/{uid}",
+                      json={"content": "The pact stone shattered at dawn."})
+    assert resp.status_code == 200
+    rows = _world_db_lorebook_rows(tmp_path, "autosave")
+    assert "The pact stone shattered at dawn." in rows[0][2]
+
+    # Story entries coexist with attached lorebooks.
+    book_id = client.post(
+        "/api/lorebooks/import", json={"data": CHARACTER_BOOK, "name": "Vale Book"}
+    ).json()["lorebook"]["id"]
+    client.put("/api/saves/autosave/lorebooks", json={"lorebook_ids": [book_id]})
+    assert {r[0] for r in _world_db_lorebook_rows(tmp_path, "autosave")} == {
+        f"{STORY_LOREBOOK_ID}:{uid}", f"{book_id}:0"}
+
+    # Remove: the entry and its row are gone; the attached book is untouched.
+    resp = client.delete(f"/api/saves/autosave/lorebooks/entries/{uid}")
+    assert resp.json() == {"story_entries": [], "deleted": True}
+    assert [r[0] for r in _world_db_lorebook_rows(tmp_path, "autosave")] == [f"{book_id}:0"]
+
+    # Validation: empty content, unknown uid, unknown save.
+    assert client.post("/api/saves/autosave/lorebooks/entries",
+                       json={"content": "  "}).status_code == 400
+    assert client.put(f"/api/saves/autosave/lorebooks/entries/{uid}",
+                      json={"enabled": True}).status_code == 404
+    assert client.delete(f"/api/saves/autosave/lorebooks/entries/{uid}").status_code == 404
+    assert client.post("/api/saves/nope/lorebooks/entries",
+                       json={"content": "x"}).status_code == 404
+
+
+def test_story_entries_persist_across_reload(tmp_path, monkeypatch):
+    client, session_manager, lorebook_store, _ = make_client(tmp_path, monkeypatch)
+
+    uid = client.post("/api/saves/autosave/lorebooks/entries", json={
+        "content": "Lantern light keeps the mists at bay.",
+    }).json()["entry"]["uid"]
+    rows = _world_db_lorebook_rows(tmp_path, "autosave")
+    assert [r[0] for r in rows] == [f"{STORY_LOREBOOK_ID}:{uid}"]
+
+    meta = session_manager.save_manager.read_core_json("autosave", "metadata.json", {})
+    assert meta["lorebook_embed_fingerprint"] == lorebook_store.embed_fingerprint(
+        [], meta["story_lorebook_entries"])
+
+    # Reload with unchanged entries: the fingerprint short-circuits the sync.
+    assert client.post("/api/saves/autosave/load").status_code == 200
+    assert _world_db_lorebook_rows(tmp_path, "autosave") == rows
 
 
 def test_undo_preserves_lorebook_links_and_keeps_toggles_effective(tmp_path, monkeypatch):

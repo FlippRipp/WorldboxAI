@@ -123,6 +123,10 @@ export const api = {
   setLorebookLinks:        (kind, targetId, lorebookIds) => request(`/api/lorebooks/links/${kind}/${targetId}`, { method: 'PUT', body: JSON.stringify({ lorebook_ids: lorebookIds }) }),
   getSaveLorebooks:        (saveId) => request(`/api/saves/${saveId}/lorebooks`),
   setSaveLorebooks:        (saveId, lorebookIds) => request(`/api/saves/${saveId}/lorebooks`, { method: 'PUT', body: JSON.stringify({ lorebook_ids: lorebookIds }) }),
+  // Free-standing entries owned by one save (not part of any imported book)
+  addStoryLorebookEntry:    (saveId, entry) => request(`/api/saves/${saveId}/lorebooks/entries`, { method: 'POST', body: JSON.stringify(entry) }),
+  updateStoryLorebookEntry: (saveId, uid, patch) => request(`/api/saves/${saveId}/lorebooks/entries/${encodeURIComponent(uid)}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  deleteStoryLorebookEntry: (saveId, uid) => request(`/api/saves/${saveId}/lorebooks/entries/${encodeURIComponent(uid)}`, { method: 'DELETE' }),
 
   // World Builder
   getWorldPipeline:       () => request('/api/world/pipeline'),
