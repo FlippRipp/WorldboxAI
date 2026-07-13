@@ -64,6 +64,10 @@ class Character:
     practice_counters: dict[str, int] = field(default_factory=dict)
     stat_usage: dict[str, int] = field(default_factory=lambda: {s: 0 for s in STAT_NAMES})
     action_assessment: dict = field(default_factory=dict)
+    unspent_attribute_points: int = 0
+    unspent_skill_points: int = 0
+    pending_evolutions: list = field(default_factory=list)
+    level_up_history: list = field(default_factory=list)
 
     def recalc_hp(self, hp_per_con: int = 7, hp_per_level: int = 2):
         self.max_hp = (self.stats.get("vitality", 10) * hp_per_con) + (self.level * hp_per_level)
@@ -84,6 +88,10 @@ class Character:
             "practice_counters": dict(self.practice_counters),
             "stat_usage": dict(self.stat_usage),
             "action_assessment": dict(self.action_assessment),
+            "unspent_attribute_points": self.unspent_attribute_points,
+            "unspent_skill_points": self.unspent_skill_points,
+            "pending_evolutions": list(self.pending_evolutions),
+            "level_up_history": list(self.level_up_history),
         }
 
     @classmethod
@@ -96,12 +104,26 @@ class Character:
         c.skills = {}
         for name, data in d.get("skills", {}).items():
             if isinstance(data, dict):
-                c.skills[name] = {
+                skill = {
                     "rating": data.get("rating", 1),
                     "description": data.get("description", ""),
                     "trigger_words": data.get("trigger_words", []),
                     "type": data.get("type", "active"),
                 }
+                # Evolution fields must survive the per-turn round-trip.
+                try:
+                    tier = int(data.get("tier", 1))
+                except (TypeError, ValueError):
+                    tier = 1
+                if tier > 1:
+                    skill["tier"] = tier
+                lineage = data.get("lineage")
+                if isinstance(lineage, list) and lineage:
+                    skill["lineage"] = [str(x) for x in lineage]
+                theme = data.get("evolution_theme")
+                if theme:
+                    skill["evolution_theme"] = str(theme)
+                c.skills[name] = skill
             else:
                 c.skills[name] = {"rating": max(1, min(10, int(data))), "description": "", "trigger_words": [], "type": "active"}
         c.backstory = d.get("backstory", "")
@@ -121,6 +143,18 @@ class Character:
         c.action_assessment = d.get("action_assessment", {})
         if not isinstance(c.action_assessment, dict):
             c.action_assessment = {}
+        try:
+            c.unspent_attribute_points = max(0, int(d.get("unspent_attribute_points", 0)))
+        except (TypeError, ValueError):
+            c.unspent_attribute_points = 0
+        try:
+            c.unspent_skill_points = max(0, int(d.get("unspent_skill_points", 0)))
+        except (TypeError, ValueError):
+            c.unspent_skill_points = 0
+        pending = d.get("pending_evolutions", [])
+        c.pending_evolutions = [e for e in pending if isinstance(e, dict) and e.get("skill")] if isinstance(pending, list) else []
+        history = d.get("level_up_history", [])
+        c.level_up_history = [e for e in history if isinstance(e, dict)] if isinstance(history, list) else []
         return c
 
 
@@ -212,7 +246,7 @@ async def on_gather_context(state: dict, sdk) -> dict:
         active_skills = {n: d for n, d in char.skills.items() if d.get("type", "active") == "active"}
         if active_skills:
             model_pref = config.get("practice_ai_model", "fastest")
-            skill_names = [f"{n} ({d['rating']}/10)" for n, d in active_skills.items()]
+            skill_names = [f"{_skill_prompt_label(n, d)} ({d['rating']}/10)" for n, d in active_skills.items()]
             prompt = (
                 f"The player just performed: \"{input_text}\"\n\n"
                 f"Character skills: {', '.join(skill_names)}\n\n"
@@ -245,12 +279,17 @@ async def _assess_action(input_text: str, char: Character, config: dict, sdk, mo
     skill_lines = []
     if active_skills:
         skill_lines.append("Active skills: " + ", ".join(
-            f'{n} ({d["rating"]}/10): {d.get("description", "")}' for n, d in active_skills.items()
+            f'{_skill_prompt_label(n, d)} ({d["rating"]}/10): {d.get("description", "")}' for n, d in active_skills.items()
         ))
     if passive_skills:
         skill_lines.append("Passive skills: " + ", ".join(
-            f'{n} ({d["rating"]}/10): {d.get("description", "")}' for n, d in passive_skills.items()
+            f'{_skill_prompt_label(n, d)} ({d["rating"]}/10): {d.get("description", "")}' for n, d in passive_skills.items()
         ))
+    if any(_skill_tier(d) > 1 for d in char.skills.values()):
+        skill_lines.append(
+            "Note: skills marked [Tier N] are evolved forms - markedly more powerful "
+            "than a Tier 1 skill at the same rating; each tier is a major step up in capability."
+        )
     if curse_skills:
         for n, d in curse_skills.items():
             triggers = d.get("trigger_words", [])
@@ -456,7 +495,7 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
             char.xp += xp_gained
             steepness = config.get("xp_curve_steepness", 2)
             while total_xp_for_level(char.level + 1, steepness) <= char.xp:
-                _apply_level_up(char, char.level + 1)
+                _apply_level_up(char, char.level + 1, config)
             updated = True
 
     elif progression == "practice":
@@ -472,14 +511,13 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
 
     elif progression == "milestone":
         if abs(hp_change) > 20 or (isinstance(stat_changes, dict) and len(stat_changes) >= 3):
-            _apply_level_up(char, char.level + 1)
-            char.recalc_hp(hp_per_con)
-            char.hp = char.max_hp
+            _apply_level_up(char, char.level + 1, config)
             updated = True
 
     if updated:
         if char.max_hp == 0:
             char.recalc_hp(hp_per_con)
+        _check_evolution_ready(char)
         return {"module_data": {"wb_core_rpg": char.to_dict()}}
     return {}
 
@@ -528,7 +566,7 @@ async def on_librarian(state: dict, sdk) -> dict | None:
     earlier_block = f"EARLIER NARRATION (context only):\n{earlier}\n\n" if earlier else ""
 
     if char.skills:
-        skill_lines = ", ".join(f"{n} ({d['rating']}/10, {d.get('type', 'active')})" for n, d in char.skills.items())
+        skill_lines = ", ".join(f"{_skill_prompt_label(n, d)} ({d['rating']}/10, {d.get('type', 'active')})" for n, d in char.skills.items())
     else:
         skill_lines = "(none)"
 
@@ -607,6 +645,7 @@ Respond with ONLY valid JSON:
             print(f"[RPG] External event altered skill '{key}' -> {char.skills[key]['rating']}/10")
 
     if updated:
+        _check_evolution_ready(char)
         return {"module_data": {"wb_core_rpg": char.to_dict()}}
     return None
 
@@ -630,7 +669,10 @@ async def on_command_skills(args, state, sdk):
     lines = ["[Skills]"]
     for name, data in sorted(char.skills.items(), key=lambda x: -x[1]["rating"]):
         bar = "\u2588" * data["rating"] + "\u2591" * (10 - data["rating"])
-        lines.append(f"  {name.title()}: {bar} ({data['rating']}/10)")
+        tier = _skill_tier(data)
+        tier_tag = f" [T{tier}]" if tier > 1 else ""
+        theme = f" ({data['evolution_theme']})" if data.get("evolution_theme") else ""
+        lines.append(f"  {name.title()}{tier_tag}{theme}: {bar} ({data['rating']}/10)")
         if data.get("description"):
             lines.append(f"    {data['description']}")
         if data.get("trigger_words"):
@@ -712,12 +754,22 @@ def _render_character_sheet(char: Character, config: dict) -> str:
     curse_skills = {n: d for n, d in char.skills.items() if d.get("type") == "curse"}
 
     if active_skills:
-        abilities = [d.get("description") or f"proficient in {n}" for n, d in active_skills.items()]
+        abilities = []
+        for n, d in active_skills.items():
+            desc = d.get("description") or f"proficient in {n}"
+            tier = _skill_tier(d)
+            if tier > 1:
+                desc = f"[Tier {tier} evolved ability, far beyond its ordinary form] {desc}"
+            abilities.append(desc)
         lines.append("Abilities: " + "; ".join(abilities) + ".")
 
     passive_parts = []
     for n, d in passive_skills.items():
-        passive_parts.append(d.get("description") or n)
+        desc = d.get("description") or n
+        tier = _skill_tier(d)
+        if tier > 1:
+            desc = f"[Tier {tier} evolved] {desc}"
+        passive_parts.append(desc)
     if passive_parts:
         lines.append("Passives: " + "; ".join(passive_parts) + ".")
 
@@ -790,18 +842,62 @@ def _build_action_feasibility_prompt(char: Character, input_text: str, config: d
     return "\n".join(lines)
 
 
-def _apply_level_up(char: Character, new_level: int):
+def _apply_level_up(char: Character, new_level: int, config: dict | None = None):
+    """Level up: bank player-spendable attribute/skill points (allocated later
+    via the level-up popup -> POST /levelup/spend), refresh HP, full heal."""
+    config = config or {}
     char.level = new_level
-    # Pick the 2 most-used stats since last level-up (context-aware)
-    ranked = sorted(char.stat_usage.items(), key=lambda x: -x[1])
-    improved = [ranked[0][0], ranked[1][0]]
-    for stat in improved:
-        if char.stats[stat] < 20:
-            char.stats[stat] += 1
+    attr_points = config.get("attribute_points_per_level", 2)
+    skill_points = config.get("skill_points_per_level", 1)
+    char.unspent_attribute_points += attr_points if isinstance(attr_points, int) and attr_points >= 0 else 2
+    char.unspent_skill_points += skill_points if isinstance(skill_points, int) and skill_points >= 0 else 1
+    char.level_up_history.append({"level": new_level})
+    char.level_up_history = char.level_up_history[-10:]
     # Reset usage counters after level-up
     char.stat_usage = {s: 0 for s in STAT_NAMES}
-    char.recalc_hp()
+    char.recalc_hp(config.get("hp_per_vitality", config.get("hp_per_constitution", 7)))
     char.hp = char.max_hp
+
+
+# Curses don't evolve: evolution is a reward the player steers, which would
+# invert a curse's role as an unwanted affliction. Librarian events already
+# escalate curses narratively.
+EVOLVABLE_TYPES = ("active", "passive")
+MAX_SKILL_RATING = 10
+EVOLVED_RESET_RATING = 5
+
+
+def _skill_tier(data: dict) -> int:
+    try:
+        return max(1, int(data.get("tier", 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _skill_prompt_label(name: str, data: dict) -> str:
+    tier = _skill_tier(data)
+    return f"{name} [Tier {tier}]" if tier > 1 else name
+
+
+def _check_evolution_ready(char: Character) -> None:
+    """Keep pending_evolutions in sync with the skill list: enqueue any
+    evolvable skill that reached max rating, prune entries whose skill no
+    longer exists or dropped below max (deferred entries survive as long as
+    the skill still qualifies)."""
+    char.pending_evolutions = [
+        e for e in char.pending_evolutions
+        if e.get("skill") in char.skills
+        and char.skills[e["skill"]].get("rating") == MAX_SKILL_RATING
+        and char.skills[e["skill"]].get("type", "active") in EVOLVABLE_TYPES
+    ]
+    queued = {e["skill"] for e in char.pending_evolutions}
+    for name, data in char.skills.items():
+        if (
+            data.get("rating") == MAX_SKILL_RATING
+            and data.get("type", "active") in EVOLVABLE_TYPES
+            and name not in queued
+        ):
+            char.pending_evolutions.append({"skill": name, "options": None, "status": "pending"})
 
 
 PHYSICAL_ACTION_KEYWORDS = [
@@ -1031,6 +1127,10 @@ async def on_character_get_defaults(state: dict, world_context: dict) -> dict:
         "xp": 0,
         "hp": max_hp,
         "max_hp": max_hp,
+        "unspent_attribute_points": 0,
+        "unspent_skill_points": 0,
+        "pending_evolutions": [],
+        "level_up_history": [],
     }
 
 
@@ -1051,6 +1151,9 @@ async def on_character_validate(character_data: dict, state: dict) -> str | None
         rating = skill_data.get("rating", 0)
         if not isinstance(rating, (int, float)) or rating < 1 or rating > 10:
             return f"Skill '{skill_name}' rating must be between 1 and 10."
+        tier = skill_data.get("tier", 1)
+        if not isinstance(tier, int) or tier < 1:
+            return f"Skill '{skill_name}' tier must be a positive integer."
 
     hp = character_data.get("hp", 85)
     max_hp = character_data.get("max_hp", 85)
