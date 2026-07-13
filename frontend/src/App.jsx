@@ -584,6 +584,7 @@ function AppContent() {
           modules={gameModules}
           gameState={gameState}
           onCommand={handleSend}
+          generating={generating}
           drawerOpen={drawerOpen}
           onCloseDrawer={() => setDrawerOpen(false)}
           onOpenSettings={() => setIsSettingsOpen(true)}

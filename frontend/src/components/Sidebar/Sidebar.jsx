@@ -4,7 +4,7 @@ import SlotRenderer from '../Slots/SlotRenderer';
 // lives in the Header so it never overlaps other header controls). On mobile
 // the drawer also hosts the nav actions that don't fit in the slim header bar.
 export default function Sidebar({
-  session, modules, gameState, onCommand,
+  session, modules, gameState, onCommand, generating,
   drawerOpen, onCloseDrawer,
   onOpenCharacter, onOpenMemories, onOpenHealth, onOpenSettings,
 }) {
@@ -32,7 +32,7 @@ export default function Sidebar({
         modules={modules}
         state={gameState}
         config={gameState?.module_configs}
-        slotProps={{ onCommand }}
+        slotProps={{ onCommand, generating }}
       />
     </div>
   );

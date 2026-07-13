@@ -135,7 +135,466 @@ function statBarColor(val, max) {
   return 'bg-slate-500';
 }
 
-export default function CoreRpgWidget({ state, config }) {
+// Custom keyframes live in a module-local <style> tag: Tailwind scans module
+// JSX for utility classes but cannot synthesize keyframes from here. Names
+// are wbrpg-prefixed to avoid global collisions.
+const WBRPG_CSS = `
+@keyframes wbrpg-burst { 0% { transform: scale(0.5); opacity: 0; } 60% { transform: scale(1.1); opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
+@keyframes wbrpg-glow { 0%, 100% { box-shadow: 0 0 14px 2px rgba(168, 85, 247, 0.35); } 50% { box-shadow: 0 0 42px 12px rgba(168, 85, 247, 0.75); } }
+@keyframes wbrpg-rise { 0% { transform: translateY(0) scale(1); opacity: 0; } 15% { opacity: 1; } 100% { transform: translateY(-110px) scale(0.3); opacity: 0; } }
+@keyframes wbrpg-shimmer { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+@keyframes wbrpg-dissolve { 0% { opacity: 1; filter: blur(0); } 100% { opacity: 0.15; filter: blur(5px); transform: translateY(-6px); } }
+.wbrpg-burst { animation: wbrpg-burst 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+.wbrpg-glow { animation: wbrpg-glow 1.2s ease-in-out infinite; }
+.wbrpg-rise { animation: wbrpg-rise 1.8s ease-out infinite; }
+.wbrpg-shimmer { animation: wbrpg-shimmer 1.4s ease-in-out infinite; }
+.wbrpg-dissolve { animation: wbrpg-dissolve 2s ease-in forwards; }
+`;
+
+function TierChip({ data }) {
+  const tier = data?.tier ?? 1;
+  if (tier <= 1) return null;
+  return (
+    <span
+      className="text-[9px] px-1 py-px rounded border bg-amber-500/20 text-amber-400 border-amber-500/30 font-semibold"
+      title={data.evolution_theme ? `Tier ${tier} evolution — ${data.evolution_theme} path` : `Tier ${tier} evolution`}
+    >
+      T{tier}
+    </span>
+  );
+}
+
+function EvolutionParticles() {
+  return (
+    <div className="absolute inset-0 overflow-hidden pointer-events-none rounded-xl">
+      {[8, 22, 37, 52, 66, 81, 93].map((left, i) => (
+        <span
+          key={i}
+          className="wbrpg-rise absolute bottom-1 w-1.5 h-1.5 rounded-full bg-purple-400"
+          style={{ left: `${left}%`, animationDelay: `${i * 0.26}s` }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function LevelUpModal({ rpg, config, generating, onClose, onApplied }) {
+  const stats = rpg.stats || {};
+  const skills = rpg.skills || {};
+  const attrPts = rpg.unspent_attribute_points ?? 0;
+  const skillPts = rpg.unspent_skill_points ?? 0;
+  const maxStat = config?.max_stat_value ?? 20;
+  const newSkillCost = config?.new_skill_cost ?? 3;
+
+  const [pendingStats, setPendingStats] = useState({});
+  const [pendingSkills, setPendingSkills] = useState({});
+  const [newSkill, setNewSkill] = useState(null); // {name, type, description}
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    function onKey(e) { if (e.key === 'Escape') onClose(); }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const statSpent = Object.values(pendingStats).reduce((a, b) => a + b, 0);
+  const skillSpent = Object.values(pendingSkills).reduce((a, b) => a + b, 0) + (newSkill ? newSkillCost : 0);
+  const attrLeft = attrPts - statSpent;
+  const skillLeft = skillPts - skillSpent;
+
+  const bump = (setter) => (key, delta) =>
+    setter((prev) => {
+      const next = { ...prev };
+      const v = (next[key] || 0) + delta;
+      if (v <= 0) delete next[key];
+      else next[key] = v;
+      return next;
+    });
+  const bumpStat = bump(setPendingStats);
+  const bumpSkill = bump(setPendingSkills);
+
+  const raisableSkills = Object.entries(skills).filter(([, d]) => d.type !== 'curse');
+  const anythingSpent = statSpent > 0 || skillSpent > 0;
+  const canConfirm = anythingSpent && !saving && !generating && attrLeft >= 0 && skillLeft >= 0
+    && (!newSkill || newSkill.name.trim());
+
+  async function confirm() {
+    setSaving(true);
+    setError('');
+    try {
+      const payload = {};
+      if (statSpent > 0) payload.stat_allocations = pendingStats;
+      if (Object.keys(pendingSkills).length > 0) payload.skill_allocations = pendingSkills;
+      if (newSkill) {
+        payload.new_skill = {
+          name: newSkill.name.trim(),
+          type: newSkill.type || 'active',
+          description: newSkill.description || '',
+        };
+      }
+      const res = await fetch(`${API_BASE}/levelup/spend`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `Save failed (HTTP ${res.status})`);
+      onApplied(data);
+    } catch (e) {
+      setError(e.message);
+      setSaving(false);
+    }
+  }
+
+  const plusMinus = (onMinus, onPlus, minusDisabled, plusDisabled) => (
+    <span className="flex items-center gap-1">
+      <button
+        onClick={onMinus}
+        disabled={minusDisabled}
+        className="w-6 h-6 flex items-center justify-center text-sm rounded bg-gray-800 border border-gray-700 text-gray-300 hover:bg-gray-700 disabled:opacity-30 transition-colors"
+      >
+        {'−'}
+      </button>
+      <button
+        onClick={onPlus}
+        disabled={plusDisabled}
+        className="w-6 h-6 flex items-center justify-center text-sm rounded bg-indigo-600/50 border border-indigo-500/50 text-indigo-200 hover:bg-indigo-600/80 disabled:opacity-30 transition-colors"
+      >
+        +
+      </button>
+    </span>
+  );
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ backgroundColor: 'rgba(0,0,0,0.75)' }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <style>{WBRPG_CSS}</style>
+      <div
+        className="bg-gray-900 border border-amber-500/40 rounded-xl w-full max-w-lg max-h-[85vh] overflow-y-auto shadow-2xl wbrpg-burst"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-5 pt-6 pb-4 text-center border-b border-gray-800">
+          <div className="text-3xl font-extrabold tracking-wide text-amber-300 wbrpg-burst">{'⭐'} LEVEL UP!</div>
+          <div className="text-sm text-gray-300 mt-1">You reached <span className="text-amber-300 font-semibold">Level {rpg.level}</span></div>
+          <div className="flex items-center justify-center gap-2 mt-3 text-xs">
+            <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-mono">
+              {attrLeft} attribute point{attrLeft === 1 ? '' : 's'}
+            </span>
+            <span className="px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30 font-mono">
+              {skillLeft} skill point{skillLeft === 1 ? '' : 's'}
+            </span>
+          </div>
+        </div>
+
+        <div className="p-5 space-y-5">
+          {attrPts > 0 && (
+            <section>
+              <h3 className="text-xs uppercase tracking-wider text-gray-500 mb-2">Attributes</h3>
+              <div className="space-y-1.5">
+                {Object.entries(stats).map(([stat, value]) => {
+                  const added = pendingStats[stat] || 0;
+                  return (
+                    <div key={stat} className="flex items-center justify-between text-sm bg-gray-800/40 rounded px-3 py-1.5 border border-gray-700/50">
+                      <span className="text-gray-300 capitalize">{stat}</span>
+                      <span className="flex items-center gap-3">
+                        <span className="font-mono text-gray-200">
+                          {value}
+                          {added > 0 && <span className="text-emerald-400"> +{added}</span>}
+                        </span>
+                        {plusMinus(
+                          () => bumpStat(stat, -1),
+                          () => bumpStat(stat, 1),
+                          added === 0 || saving,
+                          attrLeft <= 0 || value + added >= maxStat || saving,
+                        )}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+          {skillPts > 0 && (
+            <section>
+              <h3 className="text-xs uppercase tracking-wider text-gray-500 mb-2">Skills</h3>
+              <div className="space-y-1.5">
+                {raisableSkills.map(([name, data]) => {
+                  const added = pendingSkills[name] || 0;
+                  return (
+                    <div key={name} className="flex items-center justify-between text-sm bg-gray-800/40 rounded px-3 py-1.5 border border-gray-700/50">
+                      <span className="text-gray-300 capitalize flex items-center gap-1.5 truncate">
+                        {name} <TierChip data={data} />
+                      </span>
+                      <span className="flex items-center gap-3">
+                        <span className="font-mono text-gray-200">
+                          {data.rating}
+                          {added > 0 && <span className="text-emerald-400"> +{added}</span>}
+                          <span className="text-gray-500">/10</span>
+                        </span>
+                        {plusMinus(
+                          () => bumpSkill(name, -1),
+                          () => bumpSkill(name, 1),
+                          added === 0 || saving,
+                          skillLeft <= 0 || data.rating + added >= 10 || saving,
+                        )}
+                      </span>
+                    </div>
+                  );
+                })}
+
+                {newSkill ? (
+                  <div className="bg-gray-800/60 rounded-lg border border-purple-500/40 p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-purple-300 font-semibold">New skill {'—'} {newSkillCost} point{newSkillCost === 1 ? '' : 's'}</span>
+                      <button onClick={() => setNewSkill(null)} className="text-gray-500 hover:text-gray-200 text-sm leading-none">{'✕'}</button>
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        value={newSkill.name}
+                        onChange={(e) => setNewSkill({ ...newSkill, name: e.target.value })}
+                        placeholder="Skill name"
+                        className="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm text-gray-200 focus:border-purple-500 focus:outline-none"
+                      />
+                      <select
+                        value={newSkill.type}
+                        onChange={(e) => setNewSkill({ ...newSkill, type: e.target.value })}
+                        className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm text-gray-200 focus:border-purple-500 focus:outline-none"
+                      >
+                        <option value="active">Active</option>
+                        <option value="passive">Passive</option>
+                      </select>
+                    </div>
+                    <textarea
+                      value={newSkill.description}
+                      onChange={(e) => setNewSkill({ ...newSkill, description: e.target.value })}
+                      placeholder="What the skill does, how it manifests, its limits…"
+                      rows={2}
+                      className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 leading-relaxed resize-y focus:border-purple-500 focus:outline-none"
+                    />
+                    <div className="text-[10px] text-gray-500">Starts at rating {Math.min(10, newSkillCost)}.</div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setNewSkill({ name: '', type: 'active', description: '' })}
+                    disabled={skillLeft < newSkillCost || saving}
+                    className="w-full py-1.5 px-3 text-xs text-purple-300 bg-purple-500/10 hover:bg-purple-500/20 disabled:opacity-40 border border-dashed border-purple-500/40 rounded-lg transition-colors"
+                  >
+                    + Learn a new skill ({newSkillCost} pt{newSkillCost === 1 ? '' : 's'})
+                  </button>
+                )}
+              </div>
+            </section>
+          )}
+
+          {error && <div className="text-xs text-red-400">{error}</div>}
+          {generating && (
+            <div className="text-xs text-amber-400/80">Waiting for the current turn to finish{'…'}</div>
+          )}
+
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              onClick={confirm}
+              disabled={!canConfirm}
+              className="flex-1 py-2 text-sm font-semibold text-amber-100 bg-amber-600/70 hover:bg-amber-600/90 disabled:opacity-40 border border-amber-500/50 rounded-lg transition-colors"
+            >
+              {saving ? 'Applying…' : 'Confirm'}
+            </button>
+            <button
+              onClick={onClose}
+              disabled={saving}
+              className="px-4 py-2 text-sm text-gray-400 hover:text-gray-200 bg-gray-800 border border-gray-700 rounded-lg transition-colors"
+            >
+              Save for later
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SkillEvolutionModal({ skillName, rpg, generating, onDeferred, onEvolved }) {
+  const skill = (rpg.skills || {})[skillName] || {};
+  const tier = skill.tier ?? 1;
+
+  const [phase, setPhase] = useState('loading'); // loading | choose | evolving | reveal
+  const [options, setOptions] = useState(null);
+  const [error, setError] = useState('');
+  const [chosenTheme, setChosenTheme] = useState(null);
+  const [result, setResult] = useState(null); // {rpg, evolved}
+  const [deferring, setDeferring] = useState(false);
+
+  async function loadOptions() {
+    setPhase('loading');
+    setError('');
+    try {
+      const res = await fetch(`${API_BASE}/skills/${encodeURIComponent(skillName)}/evolution-options`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `Failed to prepare options (HTTP ${res.status})`);
+      setOptions(data.options || []);
+      setPhase('choose');
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  useEffect(() => { loadOptions(); }, [skillName]);
+
+  async function choose(theme) {
+    setChosenTheme(theme);
+    setPhase('evolving');
+    setError('');
+    // The evolve request runs WHILE the animation plays; the reveal waits for
+    // both so the animation never gets cut short.
+    const minDelay = new Promise((resolve) => setTimeout(resolve, 2500));
+    try {
+      const request = fetch(`${API_BASE}/skills/${encodeURIComponent(skillName)}/evolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ theme }),
+      }).then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `Evolution failed (HTTP ${res.status})`);
+        return data;
+      });
+      const [data] = await Promise.all([request, minDelay]);
+      setResult(data);
+      setPhase('reveal');
+    } catch (e) {
+      setError(e.message);
+      setPhase('choose');
+    }
+  }
+
+  async function defer() {
+    if (deferring) return;
+    setDeferring(true);
+    try {
+      const res = await fetch(`${API_BASE}/skills/${encodeURIComponent(skillName)}/evolution`, { method: 'DELETE' });
+      const data = await res.json().catch(() => ({}));
+      onDeferred(res.ok ? data : null);
+    } catch {
+      onDeferred(null);
+    }
+  }
+
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key !== 'Escape') return;
+      if (phase === 'reveal' && result) onEvolved(result.rpg);
+      else if (phase !== 'evolving') defer();
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [phase, result]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ backgroundColor: 'rgba(0,0,0,0.8)' }}
+    >
+      <style>{WBRPG_CSS}</style>
+      <div
+        className={`relative bg-gray-900 border rounded-xl w-full max-w-md shadow-2xl wbrpg-burst ${phase === 'evolving' ? 'border-purple-500/70 wbrpg-glow' : 'border-purple-500/40'}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {phase === 'evolving' && <EvolutionParticles />}
+
+        <div className="px-5 pt-6 pb-4 text-center">
+          <div className="text-2xl font-extrabold tracking-wide text-purple-300">{'✦'} LEVEL UP {'✦'}</div>
+          <div className="text-sm text-gray-300 mt-1">
+            <span className="capitalize font-semibold text-gray-100">{skillName}</span> has reached its peak
+            {tier > 1 ? ` (Tier ${tier})` : ''} and can evolve.
+          </div>
+        </div>
+
+        <div className="px-5 pb-6 space-y-4">
+          {phase === 'loading' && !error && (
+            <div className="text-center py-6">
+              <div className="text-sm text-purple-300 wbrpg-shimmer">Preparing skill progression options{'…'}</div>
+              <div className="text-[11px] text-gray-500 mt-2">The fates are weighing where this power could go.</div>
+            </div>
+          )}
+
+          {phase === 'loading' && error && (
+            <div className="text-center py-4 space-y-3">
+              <div className="text-xs text-red-400">{error}</div>
+              <button
+                onClick={loadOptions}
+                className="px-4 py-1.5 text-xs text-purple-200 bg-purple-600/50 hover:bg-purple-600/70 border border-purple-500/50 rounded transition-colors"
+              >
+                Try again
+              </button>
+            </div>
+          )}
+
+          {phase === 'choose' && (
+            <>
+              <div className="text-xs text-gray-400 text-center">Choose the path this skill will take:</div>
+              <div className="space-y-2">
+                {(options || []).map((opt) => (
+                  <button
+                    key={opt.theme}
+                    onClick={() => choose(opt.theme)}
+                    disabled={generating}
+                    className="w-full text-left px-4 py-3 rounded-lg bg-gray-800/60 border border-gray-700 hover:border-purple-500/60 hover:bg-purple-500/10 disabled:opacity-50 transition-colors group"
+                  >
+                    <div className="text-sm font-bold text-purple-300 group-hover:text-purple-200">{opt.theme}</div>
+                    {opt.summary && <div className="text-[11px] text-gray-500 mt-0.5">{opt.summary}</div>}
+                  </button>
+                ))}
+              </div>
+              {error && <div className="text-xs text-red-400 text-center">{error}</div>}
+              {generating && <div className="text-xs text-amber-400/80 text-center">Waiting for the current turn to finish{'…'}</div>}
+              <button
+                onClick={defer}
+                disabled={deferring}
+                className="w-full py-1.5 text-xs text-gray-500 hover:text-gray-300 transition-colors"
+              >
+                {deferring ? 'Saving…' : 'Decide later'}
+              </button>
+            </>
+          )}
+
+          {phase === 'evolving' && (
+            <div className="text-center py-8 space-y-3">
+              <div className="text-lg font-bold text-gray-200 capitalize wbrpg-dissolve">{skillName}</div>
+              <div className="text-sm text-purple-300 wbrpg-shimmer">
+                Evolving down the <span className="font-semibold">{chosenTheme}</span> path{'…'}
+              </div>
+            </div>
+          )}
+
+          {phase === 'reveal' && result && (
+            <div className="text-center py-4 space-y-3">
+              <div className="text-xs text-gray-500 capitalize line-through">{result.evolved.old_name}</div>
+              <div className="text-xl font-extrabold text-amber-300 capitalize wbrpg-burst">{result.evolved.new_name}</div>
+              <div className="text-xs text-purple-300 font-semibold">
+                Tier {result.evolved.tier} {'•'} {result.evolved.theme} path
+              </div>
+              {result.evolved.description && (
+                <div className="text-[11px] text-gray-400 leading-relaxed px-2">{result.evolved.description}</div>
+              )}
+              <button
+                onClick={() => onEvolved(result.rpg)}
+                className="mt-2 px-6 py-2 text-sm font-semibold text-purple-100 bg-purple-600/70 hover:bg-purple-600/90 border border-purple-500/50 rounded-lg transition-colors"
+              >
+                Continue
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function CoreRpgWidget({ state, config, generating }) {
   const [showStats, setShowStats] = useState(true);
   const [showSkills, setShowSkills] = useState(true);
   const [showFullSheet, setShowFullSheet] = useState(false);
@@ -149,8 +608,15 @@ export default function CoreRpgWidget({ state, config }) {
   const [saveError, setSaveError] = useState('');
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
-  const serverSkills = state?.module_data?.wb_core_rpg?.skills;
-  useEffect(() => { setSkillsOverride(null); }, [serverSkills]);
+  // Level-up popup + skill evolution flow. API responses are mirrored into
+  // rpgOverride until the next server state refresh carries them back.
+  const [rpgOverride, setRpgOverride] = useState(null);
+  const [showLevelUp, setShowLevelUp] = useState(false);
+  const [evolvingSkill, setEvolvingSkill] = useState(null); // skill key
+  const prevLevelRef = React.useRef(null);
+
+  const serverRpg = state?.module_data?.wb_core_rpg;
+  useEffect(() => { setSkillsOverride(null); setRpgOverride(null); }, [serverRpg]);
 
   useEffect(() => {
     if (!showFullSheet) return;
@@ -163,7 +629,33 @@ export default function CoreRpgWidget({ state, config }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [showFullSheet, editingSkill]);
 
-  const rpg = state?.module_data?.wb_core_rpg;
+  const rpg = rpgOverride ?? serverRpg;
+
+  const liveLevel = rpg?.level ?? 1;
+  const attrPts = rpg?.unspent_attribute_points ?? 0;
+  const skillPts = rpg?.unspent_skill_points ?? 0;
+  const pendingEvos = (rpg?.pending_evolutions ?? []).filter((e) => e && e.skill);
+  const nextPendingEvo = pendingEvos.find((e) => e.status === 'pending');
+  const pendingEvoSkills = new Set(pendingEvos.map((e) => e.skill));
+
+  // Auto-open the level-up popup on a live level increase (server state
+  // arrives over the websocket after the turn). Banked points also keep a
+  // persistent banner visible, so a reload never loses the reward.
+  useEffect(() => {
+    if (!rpg) return;
+    if (prevLevelRef.current !== null && liveLevel > prevLevelRef.current && attrPts + skillPts > 0) {
+      setShowLevelUp(true);
+    }
+    prevLevelRef.current = liveLevel;
+  }, [liveLevel, rpg ? 1 : 0]);
+
+  // Auto-open the evolution flow for the first pending skill once nothing
+  // else is on screen; deferred entries only reopen via their Evolve badge.
+  useEffect(() => {
+    if (!nextPendingEvo || generating || showLevelUp || showFullSheet || evolvingSkill) return;
+    setEvolvingSkill(nextPendingEvo.skill);
+  }, [nextPendingEvo?.skill, generating, showLevelUp, showFullSheet, evolvingSkill]);
+
   if (!rpg) return null;
 
   function startEdit(name, data) {
@@ -278,6 +770,15 @@ export default function CoreRpgWidget({ state, config }) {
           )}
         </div>
 
+        {attrPts + skillPts > 0 && (
+          <button
+            onClick={() => setShowLevelUp(true)}
+            className="w-full py-1.5 px-3 text-xs font-semibold text-amber-300 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 rounded animate-pulse transition-colors"
+          >
+            {'⭐'} Level Up! {attrPts + skillPts} point{attrPts + skillPts === 1 ? '' : 's'} to spend
+          </button>
+        )}
+
         <div>
           <div className="flex justify-between text-xs mb-1">
             <span className="text-gray-400">HP</span>
@@ -349,9 +850,21 @@ export default function CoreRpgWidget({ state, config }) {
                     <div className="flex items-center justify-between text-xs">
                       <span className="text-gray-300 truncate flex items-center gap-1.5">
                         <span className="capitalize">{name}</span>
+                        <TierChip data={data} />
                         <span className={`text-[9px] px-1 py-px rounded border ${TYPE_STYLES[data.type] || TYPE_STYLES.active}`}>{TYPE_LABELS[data.type] || TYPE_LABELS.active}</span>
                       </span>
-                      <span className="text-purple-400 font-mono ml-2">{data.rating}/10</span>
+                      <span className="flex items-center gap-1.5 ml-2">
+                        {pendingEvoSkills.has(name) && (
+                          <button
+                            onClick={() => setEvolvingSkill(name)}
+                            className="text-[9px] px-1.5 py-px rounded border bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/35 animate-pulse transition-colors"
+                            title="This skill is ready to evolve"
+                          >
+                            {'⬆'} Evolve
+                          </button>
+                        )}
+                        <span className="text-purple-400 font-mono">{data.rating}/10</span>
+                      </span>
                     </div>
                     <div className="w-full h-1 bg-gray-700/50 rounded-full overflow-hidden mt-0.5">
                       <div
@@ -393,6 +906,14 @@ export default function CoreRpgWidget({ state, config }) {
                 <span className="text-xs px-2 py-0.5 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 rounded-full font-mono">
                   Level {level}
                 </span>
+                {attrPts + skillPts > 0 && (
+                  <button
+                    onClick={() => setShowLevelUp(true)}
+                    className="text-xs px-2 py-0.5 bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded-full hover:bg-amber-500/30 transition-colors"
+                  >
+                    {attrPts + skillPts} unspent point{attrPts + skillPts === 1 ? '' : 's'}
+                  </button>
+                )}
               </div>
               <button
                 onClick={() => setShowFullSheet(false)}
@@ -501,9 +1022,18 @@ export default function CoreRpgWidget({ state, config }) {
                         <div className="flex items-center justify-between mb-1">
                           <span className="text-gray-200 font-medium flex items-center gap-1.5 text-sm">
                             <span className="capitalize">{name}</span>
+                            <TierChip data={data} />
                             <span className={`text-[10px] px-1.5 py-0.5 rounded border ${TYPE_STYLES[data.type] || TYPE_STYLES.active}`}>{TYPE_LABELS[data.type] || TYPE_LABELS.active}</span>
                           </span>
                           <span className="flex items-center gap-2">
+                            {pendingEvoSkills.has(name) && (
+                              <button
+                                onClick={() => setEvolvingSkill(name)}
+                                className="text-[10px] px-1.5 py-0.5 rounded border bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/35 transition-colors"
+                              >
+                                {'⬆'} Evolve
+                              </button>
+                            )}
                             <span className="text-purple-400 font-mono font-bold text-sm">{data.rating}/10</span>
                             <button
                               onClick={() => startEdit(name, data)}
@@ -520,6 +1050,11 @@ export default function CoreRpgWidget({ state, config }) {
                             style={{ width: `${(data.rating / 10) * 100}%` }}
                           />
                         </div>
+                        {(data.tier ?? 1) > 1 && data.evolution_theme && (
+                          <div className="text-[10px] text-amber-400/80 mb-1">
+                            Tier {data.tier} evolution {'•'} {data.evolution_theme} path
+                          </div>
+                        )}
                         {data.description && (
                           <div className="text-[11px] text-gray-400 leading-relaxed">{data.description}</div>
                         )}
@@ -557,6 +1092,26 @@ export default function CoreRpgWidget({ state, config }) {
             </div>
           </div>
         </div>
+      )}
+
+      {showLevelUp && (
+        <LevelUpModal
+          rpg={rpg}
+          config={config}
+          generating={generating}
+          onClose={() => setShowLevelUp(false)}
+          onApplied={(newRpg) => { setRpgOverride(newRpg); setSkillsOverride(null); setShowLevelUp(false); }}
+        />
+      )}
+
+      {evolvingSkill && rpg.skills?.[evolvingSkill] && (
+        <SkillEvolutionModal
+          skillName={evolvingSkill}
+          rpg={rpg}
+          generating={generating}
+          onDeferred={(newRpg) => { if (newRpg) { setRpgOverride(newRpg); setSkillsOverride(null); } setEvolvingSkill(null); }}
+          onEvolved={(newRpg) => { setRpgOverride(newRpg); setSkillsOverride(null); setEvolvingSkill(null); }}
+        />
       )}
     </>
   );

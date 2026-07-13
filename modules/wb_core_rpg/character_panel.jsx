@@ -89,6 +89,11 @@ export default function CharacterPanel({ state, config }) {
         <span className="text-xs px-2 py-0.5 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 rounded-full font-mono">
           Level {level}
         </span>
+        {(rpg.unspent_attribute_points ?? 0) + (rpg.unspent_skill_points ?? 0) > 0 && (
+          <span className="text-xs px-2 py-0.5 bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded-full">
+            {(rpg.unspent_attribute_points ?? 0) + (rpg.unspent_skill_points ?? 0)} unspent point{(rpg.unspent_attribute_points ?? 0) + (rpg.unspent_skill_points ?? 0) === 1 ? '' : 's'}
+          </span>
+        )}
         {unconscious && <span className="text-red-400 text-xs animate-pulse">UNCONSCIOUS</span>}
       </div>
 
@@ -152,6 +157,11 @@ export default function CharacterPanel({ state, config }) {
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-gray-200 font-medium flex items-center gap-1.5 text-sm">
                     <span className="capitalize">{name}</span>
+                    {(data.tier ?? 1) > 1 && (
+                      <span className="text-[9px] px-1 py-px rounded border bg-amber-500/20 text-amber-400 border-amber-500/30 font-semibold">
+                        T{data.tier}
+                      </span>
+                    )}
                     <span className={`text-[10px] px-1.5 py-0.5 rounded border ${TYPE_STYLES[data.type] || TYPE_STYLES.active}`}>{TYPE_LABELS[data.type] || TYPE_LABELS.active}</span>
                   </span>
                   <span className="text-purple-400 font-mono font-bold text-sm">{data.rating}/10</span>
@@ -159,6 +169,9 @@ export default function CharacterPanel({ state, config }) {
                 <div className="w-full h-2 bg-gray-700 rounded-full overflow-hidden mb-1.5">
                   <div className="h-full bg-purple-500 rounded-full transition-all" style={{ width: `${(data.rating / 10) * 100}%` }} />
                 </div>
+                {(data.tier ?? 1) > 1 && data.evolution_theme && (
+                  <div className="text-[10px] text-amber-400/80 mb-1">Tier {data.tier} evolution {'•'} {data.evolution_theme} path</div>
+                )}
                 {data.description && <div className="text-[11px] text-gray-400 leading-relaxed">{data.description}</div>}
                 {data.trigger_words && data.trigger_words.length > 0 && (
                   <div className="flex flex-wrap gap-1 mt-1.5">
