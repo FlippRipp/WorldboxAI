@@ -182,7 +182,9 @@ def test_difficulty_tier_reaches_the_prompt_as_a_label_not_a_scale():
 
     assert 'Difficulty is set to "Brutal"' in captured["prompt"]
     assert "success is almost impossible" in captured["prompt"]
-    assert "1-5 = the attempt outright fails; 6-8 = partial success at a cost; 9-10 = success" in captured["prompt"]
+    # Brutal has no plain-failure band: every failing score worsens the situation.
+    assert "1-5 = the attempt fails and the situation worsens; 6-8 = partial success at a cost; 9-10 = success" in captured["prompt"]
+    assert "= the attempt fails;" not in captured["prompt"]
     # Brutal is exempt from the merely-unlikely guardrail the lower tiers carry.
     assert "Never rate a merely unlikely attempt" not in captured["prompt"]
     assert "Strictness" not in captured["prompt"]
@@ -190,25 +192,39 @@ def test_difficulty_tier_reaches_the_prompt_as_a_label_not_a_scale():
     state["module_configs"] = {"wb_core_rpg": {"action_rating_strictness": 1}}
     asyncio.run(backend.on_gather_context(state, sdk))
     assert 'Difficulty is set to "Power Fantasy"' in captured["prompt"]
-    assert "1 = the attempt outright fails; 2-4 = partial success at a cost; 5-10 = success" in captured["prompt"]
+    # Power Fantasy never worsens a failure: no fails-and-worsens band.
+    assert "1 = the attempt fails; 2-4 = partial success at a cost; 5-10 = success" in captured["prompt"]
+    assert "the situation worsens" not in captured["prompt"]
 
 
 def test_brutal_widens_the_failure_band_for_ruling_and_xp():
     backend = _load_backend()
     brutal = {"action_rating_strictness": 10}
     balanced = {"action_rating_strictness": 5}
-    char = backend.Character.from_dict({"action_assessment": {
-        "feasibility": 5, "difficulty": "moderate",
-        "failure_reason": "the sheer cliff face offers no holds",
-    }})
 
-    # Feasibility 5 fails outright on Brutal but is a costly partial on Balanced.
-    assert "the attempt fails" in backend._build_action_feasibility_prompt(char, "I scale the cliff", brutal)
-    assert "partial success" in backend._build_action_feasibility_prompt(char, "I scale the cliff", balanced)
+    def char_at(feasibility):
+        return backend.Character.from_dict({"action_assessment": {
+            "feasibility": feasibility, "difficulty": "moderate",
+            "failure_reason": "the sheer cliff face offers no holds",
+        }})
+
+    # Feasibility 5 fails on Brutal - and every Brutal failure worsens the
+    # situation - but the same score is a costly partial on Balanced.
+    for feasibility in (2, 5):
+        ruling = backend._build_action_feasibility_prompt(char_at(feasibility), "I scale the cliff", brutal)
+        assert "the attempt fails" in ruling
+        assert "the situation worsens" in ruling
+    assert "partial success" in backend._build_action_feasibility_prompt(char_at(5), "I scale the cliff", balanced)
+
+    # On Balanced only a 1 worsens; a 2 is a plain failure.
+    balanced_two = backend._build_action_feasibility_prompt(char_at(2), "I scale the cliff", balanced)
+    assert "the attempt fails" in balanced_two
+    assert "the situation worsens" not in balanced_two
+    assert "the situation worsens" in backend._build_action_feasibility_prompt(char_at(1), "I scale the cliff", balanced)
 
     # Success-conditioned XP follows the same band: no reward for a Brutal failure.
-    assert backend._xp_from_assessment(char, brutal) == 0
-    assert backend._xp_from_assessment(char, balanced) > 0
+    assert backend._xp_from_assessment(char_at(5), brutal) == 0
+    assert backend._xp_from_assessment(char_at(5), balanced) > 0
 
     # On Brutal, outright success starts at 9.
     char8 = backend.Character.from_dict({"action_assessment": {"feasibility": 8, "difficulty": "hard"}})

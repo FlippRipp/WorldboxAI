@@ -54,32 +54,42 @@ SKILL_ACTION_KEYWORDS = {
 }
 
 # Each action_rating_strictness value maps to a difficulty tier:
-# (label, judge guidance, fail_max, success_min). The prompt gets ONLY the
-# chosen tier, never the 1-10 scale. Feasibility scores 1..fail_max resolve as
-# outright failure, fail_max+1..success_min-1 as partial success at a cost,
-# and success_min..10 as success — so higher tiers widen the failure band
-# (Brutal fails everything up to 5) as well as harshening the scoring. The
-# same thresholds drive the storyteller ruling and success-conditioned XP.
+# (label, judge guidance, no_and_max, fail_max, success_min). The prompt gets
+# ONLY the chosen tier, never the 1-10 scale. Feasibility scores resolve into
+# four outcomes (the DM's "no and / no / yes but / yes"):
+#   1..no_and_max               fails, and the situation worsens
+#   no_and_max+1..fail_max      fails
+#   fail_max+1..success_min-1   partial success at a cost
+#   success_min..10             success
+# Higher tiers widen the failure side (Brutal fails everything up to 5).
+# Either failure band may be empty: no_and_max of 0 means the tier never
+# worsens a failure (Power Fantasy); no_and_max == fail_max means every
+# failure worsens the situation (Brutal). The same thresholds drive the
+# storyteller ruling and success-conditioned XP.
 STRICTNESS_TIERS = {
-    1: ("Power Fantasy", "the player is the unstoppable protagonist of this story. Practically anything they attempt succeeds, and succeeds with flair; reserve outright failure for the truly impossible. Never rate a merely unlikely attempt as an outright failure.", 1, 5),
-    2: ("Cinematic", "rule-of-cool cinema. Lean very generous - style, momentum, and daring carry attempts that mundane logic would question; when torn between two scores, pick the higher. Never rate a merely unlikely attempt as an outright failure.", 2, 6),
-    3: ("Heroic", "the player is the hero. Favor them in any doubt; success is the default for anything plausibly within reach. Never rate a merely unlikely attempt as an outright failure.", 2, 6),
-    4: ("Favorable", "the wind is at the player's back. Read attempts charitably, but let real overreach still fall short. Never rate a merely unlikely attempt as an outright failure.", 2, 7),
-    5: ("Balanced", "judge each attempt on its merits - success and failure are both live outcomes, decided by capability and circumstance. Never rate a merely unlikely attempt as an outright failure.", 2, 7),
-    6: ("Gritty", "the world has teeth. Read attempts realistically and let sloppy or lazy plans underperform. Never rate a merely unlikely attempt as an outright failure.", 3, 7),
-    7: ("Demanding", "capabilities are judged strictly. An attempt needs a genuine, demonstrated edge to succeed outright; ambition without preparation lands in the costly middle at best. Never rate a merely unlikely attempt as an outright failure.", 3, 7),
-    8: ("Harsh", "overreach is punished. Score ambitious attempts well below what they would otherwise earn; even sound plans succeed at a cost, and only well-prepared attempts squarely within ability succeed outright. Never rate a merely unlikely attempt as an outright failure.", 4, 8),
-    9: ("Merciless", "assume the least favorable plausible reading of every attempt. Anything beyond the character's proven, demonstrated ability fails outright; success requires overwhelming advantage; most attempts fail or scrape by at a heavy price.", 4, 8),
-    10: ("Brutal", "success is almost impossible. Only trivial actions or an overwhelming, established advantage succeed outright; solid attempts within proven ability scrape by at a cost at best; anything ambitious, uncertain, or beyond proven ability simply fails. The world is actively hostile - even a merely unlikely action may fail outright.", 5, 9),
+    1: ("Power Fantasy", "the player is the unstoppable protagonist of this story. Practically anything they attempt succeeds, and succeeds with flair; reserve outright failure for the truly impossible. Never rate a merely unlikely attempt as an outright failure.", 0, 1, 5),
+    2: ("Cinematic", "rule-of-cool cinema. Lean very generous - style, momentum, and daring carry attempts that mundane logic would question; when torn between two scores, pick the higher. Never rate a merely unlikely attempt as an outright failure.", 1, 2, 6),
+    3: ("Heroic", "the player is the hero. Favor them in any doubt; success is the default for anything plausibly within reach. Never rate a merely unlikely attempt as an outright failure.", 1, 2, 6),
+    4: ("Favorable", "the wind is at the player's back. Read attempts charitably, but let real overreach still fall short. Never rate a merely unlikely attempt as an outright failure.", 1, 2, 7),
+    5: ("Balanced", "judge each attempt on its merits - success and failure are both live outcomes, decided by capability and circumstance. Never rate a merely unlikely attempt as an outright failure.", 1, 2, 7),
+    6: ("Gritty", "the world has teeth. Read attempts realistically and let sloppy or lazy plans underperform. Never rate a merely unlikely attempt as an outright failure.", 2, 3, 7),
+    7: ("Demanding", "capabilities are judged strictly. An attempt needs a genuine, demonstrated edge to succeed outright; ambition without preparation lands in the costly middle at best. Never rate a merely unlikely attempt as an outright failure.", 2, 3, 7),
+    8: ("Harsh", "overreach is punished. Score ambitious attempts well below what they would otherwise earn; even sound plans succeed at a cost, and only well-prepared attempts squarely within ability succeed outright. Never rate a merely unlikely attempt as an outright failure.", 2, 4, 8),
+    9: ("Merciless", "assume the least favorable plausible reading of every attempt. Anything beyond the character's proven, demonstrated ability fails outright; success requires overwhelming advantage; most attempts fail or scrape by at a heavy price.", 3, 4, 8),
+    10: ("Brutal", "success is almost impossible. Only trivial actions or an overwhelming, established advantage succeed outright; solid attempts within proven ability scrape by at a cost at best; anything ambitious, uncertain, or beyond proven ability fails and makes things worse. The world is actively hostile - even a merely unlikely action may fail outright.", 5, 5, 9),
 }
 
 
-def _strictness_tier(config: dict) -> tuple[str, str, int, int]:
+def _strictness_tier(config: dict) -> tuple[str, str, int, int, int]:
     try:
         strictness = int(config.get("action_rating_strictness", 5))
     except (TypeError, ValueError):
         strictness = 5
     return STRICTNESS_TIERS[max(1, min(10, strictness))]
+
+
+def _score_span(lo: int, hi: int) -> str:
+    return str(lo) if lo == hi else f"{lo}-{hi}"
 
 
 # Status effects are temporary conditions (broken leg, poisoned, blessed,
@@ -281,8 +291,9 @@ def _xp_from_assessment(char: "Character", config: dict) -> int:
 
     difficulty = str(assessment.get("difficulty", "moderate")).lower()
     # The difficulty tier's failure band decides what counts as a hard failure
-    # (1-2 at Balanced, up to 1-5 at Brutal).
-    succeeded = feasibility > _strictness_tier(config)[2]
+    # (1-2 at Balanced, up to 1-5 at Brutal). Both failure bands earn nothing.
+    _, _, _, fail_max, _ = _strictness_tier(config)
+    succeeded = feasibility > fail_max
 
     if condition == "successful_action" and not succeeded:
         return 0
@@ -364,9 +375,16 @@ async def on_gather_context(state: dict, sdk) -> dict:
 
 async def _assess_action(input_text: str, char: Character, config: dict, sdk, model_pref: str = "fastest", world_data: dict = None, recent_story: list = None) -> dict:
     tier_list = config.get("stat_tiers", DEFAULT_STAT_TIERS) or DEFAULT_STAT_TIERS
-    difficulty_label, difficulty_guidance, fail_max, success_min = _strictness_tier(config)
-    fail_span = "1" if fail_max == 1 else f"1-{fail_max}"
-    mid_span = str(fail_max + 1) if fail_max + 1 == success_min - 1 else f"{fail_max + 1}-{success_min - 1}"
+    difficulty_label, difficulty_guidance, no_and_max, fail_max, success_min = _strictness_tier(config)
+    outcome_parts = []
+    if no_and_max >= 1:
+        outcome_parts.append(f"{_score_span(1, no_and_max)} = the attempt fails and the situation worsens")
+    if fail_max > no_and_max:
+        outcome_parts.append(f"{_score_span(no_and_max + 1, fail_max)} = the attempt fails")
+    outcome_parts.append(f"{_score_span(fail_max + 1, success_min - 1)} = partial success at a cost")
+    outcome_parts.append(f"{_score_span(success_min, 10)} = success")
+    outcome_mapping = "; ".join(outcome_parts)
+    fail_span = _score_span(1, fail_max)
 
     active_skills = {n: d for n, d in char.skills.items() if d.get("type") == "active"}
     passive_skills = {n: d for n, d in char.skills.items() if d.get("type") == "passive"}
@@ -425,7 +443,7 @@ Feasibility scale (rate the attempt, not the ambition):
   7-8: within the character's demonstrated abilities.
   9-10: near-certain success.
 
-Outcome mapping at this difficulty: {fail_span} = the attempt outright fails; {mid_span} = partial success at a cost; {success_min}-10 = success.
+Outcome mapping at this difficulty: {outcome_mapping}.
 
 Judging guidelines:
 - Social actions: the outcome depends on the TARGET's likely disposition as shown in the recent story and world context, not on the player's stats. A bold ask to a receptive, bored, curious, or amused character is plausible even for a weak character. Only rate a social action 1-2 if the target's established nature makes acceptance truly impossible.
@@ -972,7 +990,9 @@ def _build_action_feasibility_prompt(char: Character, input_text: str, config: d
     except (TypeError, ValueError):
         return ""
 
-    _, _, fail_max, success_min = _strictness_tier(config)
+    _, _, no_and_max, fail_max, success_min = _strictness_tier(config)
+    reason = str(assessment.get("failure_reason", "")).strip()
+    because = f" because {reason.rstrip('.')}" if reason else ""
     if feasibility >= success_min:
         ruling = "the attempt succeeds."
     elif feasibility > fail_max:
@@ -981,12 +1001,16 @@ def _build_action_feasibility_prompt(char: Character, input_text: str, config: d
             "price, or twist that moves the story forward. Never a flat refusal "
             "or dead end."
         )
-    else:
-        reason = str(assessment.get("failure_reason", "")).strip()
-        because = f" because {reason.rstrip('.')}" if reason else ""
+    elif feasibility > no_and_max:
         ruling = (
             f"the attempt fails{because}. Show what the failed attempt visibly "
             "reveals or provokes - the world reacts; it is not a silent dead end."
+        )
+    else:
+        ruling = (
+            f"the attempt fails{because}, and the situation worsens: on top of "
+            "the failure, add a concrete extra cost, threat, or complication. "
+            "The world reacts; it is not a silent dead end."
         )
 
     difficulty = assessment.get("difficulty", "moderate")
