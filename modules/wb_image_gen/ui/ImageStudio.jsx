@@ -1021,22 +1021,31 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
   );
 }
 
+// The browser's last state (filters, fetched results, scroll offset), mirrored
+// to localStorage so it reopens where it was — across tab switches, page
+// reloads, and Android killing the backgrounded webview.
+const LORA_BROWSER_KEY = 'wb_image_gen_lora_browser';
+function loadLoraBrowserState() {
+  try { return JSON.parse(localStorage.getItem(LORA_BROWSER_KEY)) || null; } catch (e) { return null; }
+}
+
 // LoRA browser (Civitai + Hugging Face) + local library. Browsing is proxied
 // through the module backend (which injects the Civitai key for NSFW); saving
 // stores metadata only — no file ever touches this device.
 function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily }) {
-  const [source, setSource] = useState('civitai');
-  const [novitaOnly, setNovitaOnly] = useState(false);
-  const [query, setQuery] = useState('');
-  const [baseModel, setBaseModel] = useState('');
-  const [loraType, setLoraType] = useState('LORA');
-  const [category, setCategory] = useState('');
-  const [sort, setSort] = useState('Most Downloaded');
-  const [items, setItems] = useState([]);
-  const [nextCursor, setNextCursor] = useState('');
+  const [saved] = useState(loadLoraBrowserState);
+  const [source, setSource] = useState(saved?.source || 'civitai');
+  const [novitaOnly, setNovitaOnly] = useState(!!saved?.novitaOnly);
+  const [query, setQuery] = useState(saved?.query || '');
+  const [baseModel, setBaseModel] = useState(saved?.baseModel || '');
+  const [loraType, setLoraType] = useState(saved?.loraType || 'LORA');
+  const [category, setCategory] = useState(saved?.category || '');
+  const [sort, setSort] = useState(saved?.sort || 'Most Downloaded');
+  const [items, setItems] = useState(saved?.items || []);
+  const [nextCursor, setNextCursor] = useState(saved?.nextCursor || '');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(!!saved?.open);
   const [recheckBusy, setRecheckBusy] = useState(false);
   const [myLoras, setMyLoras] = useState(null); // null = not fetched yet
   const [maxSlots, setMaxSlots] = useState(5);
@@ -1044,6 +1053,13 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   const seqRef = useRef(0);
   const myLorasRef = useRef(false);
   const autoRecheckRef = useRef(false);
+  // Restored results render as-is: the first auto-search is skipped so it
+  // doesn't reset the list (and the scroll offset) back to page one.
+  const skipSearchRef = useRef(!!(saved?.open && saved?.items?.length));
+  const gridRef = useRef(null);
+  const pendingScrollRef = useRef(saved?.scrollTop || 0);
+  const scrollTopRef = useRef(saved?.scrollTop || 0);
+  const scrollSaveRef = useRef(null);
 
   // Hugging Face browsing is public, so the NSFW filter needs no key there;
   // Civitai requires its key for anything beyond SFW.
@@ -1104,10 +1120,53 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
 
   useEffect(() => {
     if (!open) return undefined;
+    if (skipSearchRef.current) {
+      skipSearchRef.current = false;
+      return undefined;
+    }
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => search(), 400);
     return () => clearTimeout(debounceRef.current);
   }, [open, search]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LORA_BROWSER_KEY, JSON.stringify({
+        open, source, query, baseModel, loraType, category, sort, novitaOnly,
+        items, nextCursor, scrollTop: scrollTopRef.current,
+      }));
+    } catch (e) { /* storage unavailable or full */ }
+  }, [open, source, query, baseModel, loraType, category, sort, novitaOnly, items, nextCursor]);
+
+  // Put the results grid back where it was once the restored items render.
+  // Thumbnails have fixed heights, so the offset is valid before they load.
+  useEffect(() => {
+    if (!open || !pendingScrollRef.current || !gridRef.current) return;
+    gridRef.current.scrollTop = pendingScrollRef.current;
+    pendingScrollRef.current = 0;
+  }, [open, items.length]);
+
+  const saveScrollTop = () => {
+    try {
+      const state = JSON.parse(localStorage.getItem(LORA_BROWSER_KEY)) || {};
+      state.scrollTop = scrollTopRef.current;
+      localStorage.setItem(LORA_BROWSER_KEY, JSON.stringify(state));
+    } catch (e) { /* storage unavailable or full */ }
+  };
+
+  const onGridScroll = () => {
+    scrollTopRef.current = gridRef.current ? gridRef.current.scrollTop : 0;
+    if (scrollSaveRef.current) clearTimeout(scrollSaveRef.current);
+    scrollSaveRef.current = setTimeout(saveScrollTop, 250);
+  };
+
+  // Flush a pending scroll save when the section unmounts (tab switch).
+  useEffect(() => () => {
+    if (scrollSaveRef.current) {
+      clearTimeout(scrollSaveRef.current);
+      saveScrollTop();
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const callLibrary = async (path, options) => {
     setError('');
@@ -1298,7 +1357,11 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
 
           {error && <p className="text-xs text-red-400">{error}</p>}
 
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-96 overflow-y-auto pr-1">
+          <div
+            ref={gridRef}
+            onScroll={onGridScroll}
+            className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-96 overflow-y-auto pr-1"
+          >
             {visibleItems.map((item) => {
               const pageUrl = loraLink(item);
               const badge = browseAvailability(item);
