@@ -1744,6 +1744,12 @@ def _flatten_civitai_model(model: dict) -> dict | None:
     }
 
 
+class SearchOverloadedError(RuntimeError):
+    """The upstream search service answered 503 (temporarily overloaded).
+    The browse endpoints forward this as HTTP 503 so the UI knows to keep a
+    spinner up and retry, instead of showing a terminal error."""
+
+
 async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
                                 lora_type: str, sort: str, nsfw_mode: str,
                                 cursor: str, limit: int,
@@ -1789,6 +1795,9 @@ async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
             if resp.status_code != 200:
                 if raw_items:
                     break
+                if resp.status_code == 503:
+                    raise SearchOverloadedError(
+                        f"Civitai search failed (503): {resp.text[:300]}")
                 raise RuntimeError(f"Civitai search failed ({resp.status_code}): "
                                    f"{resp.text[:300]}")
             body = resp.json()
@@ -2174,6 +2183,9 @@ async def _hf_search_loras(cfg: dict, *, query: str, base_model: str,
             raise RuntimeError(f"Hugging Face search failed: {e}")
     if resp.status_code == 401:
         raise RuntimeError("Hugging Face rejected the request: invalid token")
+    if resp.status_code == 503:
+        raise SearchOverloadedError(
+            f"Hugging Face search failed (503): {resp.text[:300]}")
     if resp.status_code != 200:
         raise RuntimeError(f"Hugging Face search failed ({resp.status_code}): "
                            f"{resp.text[:300]}")
@@ -3280,6 +3292,8 @@ def get_router():
                 lora_type=lora_type, sort=sort, nsfw_mode=nsfw,
                 category=category.strip().lower(),
                 cursor=cursor.strip(), limit=limit)
+        except SearchOverloadedError as e:
+            raise HTTPException(status_code=503, detail=str(e))
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))
         _annotate_novita_availability(cfg, result["items"])
@@ -3298,6 +3312,8 @@ def get_router():
                 sort=sort, nsfw_mode=nsfw, cursor=cursor.strip(),
                 limit=max(1, min(100, limit)))
             await _hf_enrich_items(cfg, result["items"])
+        except SearchOverloadedError as e:
+            raise HTTPException(status_code=503, detail=str(e))
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))
         _annotate_novita_availability(cfg, result["items"])

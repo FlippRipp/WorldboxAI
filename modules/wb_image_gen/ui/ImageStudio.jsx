@@ -1050,6 +1050,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   const [items, setItems] = useState(saved?.items || []);
   const [nextCursor, setNextCursor] = useState(saved?.nextCursor || '');
   const [loading, setLoading] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState('');
   const [open, setOpen] = useState(!!saved?.open);
   const [recheckBusy, setRecheckBusy] = useState(false);
@@ -1100,7 +1101,18 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
       }
       if (baseModel) params.set('base_model', baseModel);
       if (cursor) params.set('cursor', cursor);
-      const res = await fetch(`${API_BASE}/${source === 'hf' ? 'hf' : 'civitai'}/loras?${params}`);
+      const url = `${API_BASE}/${source === 'hf' ? 'hf' : 'civitai'}/loras?${params}`;
+      let res = await fetch(url);
+      // 503 = the source is temporarily overloaded, not a real failure: keep
+      // the spinner up and retry every second (a newer search supersedes via
+      // seq, and after a minute of no luck the error surfaces normally).
+      for (let attempt = 0; res.status === 503 && attempt < 60; attempt++) {
+        if (seq !== seqRef.current) return;
+        setRetrying(true);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        if (seq !== seqRef.current) return;
+        res = await fetch(url);
+      }
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${res.status}`);
@@ -1112,7 +1124,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
     } catch (e) {
       if (seq === seqRef.current) setError(String(e.message || e));
     } finally {
-      if (seq === seqRef.current) setLoading(false);
+      if (seq === seqRef.current) { setLoading(false); setRetrying(false); }
     }
   }, [source, query, baseModel, loraType, category, sort, nsfwMode]);
 
@@ -1434,7 +1446,13 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
               );
             })}
           </div>
-          {loading && <p className="text-xs text-gray-500 animate-pulse">Searching {source === 'hf' ? 'Hugging Face' : 'Civitai'}…</p>}
+          {loading && (
+            <p className="text-xs text-gray-500 animate-pulse">
+              {retrying
+                ? `${source === 'hf' ? 'Hugging Face' : 'Civitai'} search is overloaded — retrying…`
+                : `Searching ${source === 'hf' ? 'Hugging Face' : 'Civitai'}…`}
+            </p>
+          )}
           {!loading && novitaOnly && items.length > visibleItems.length && (
             <p className="text-xs text-gray-600">
               {items.length - visibleItems.length} of {items.length} results hidden (not on Novita)

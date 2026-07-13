@@ -2,6 +2,8 @@ import asyncio
 import importlib.util
 import json
 import time
+
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2124,6 +2126,61 @@ def test_civitai_loras_endpoint_gates_nsfw(tmp_path):
     # Unknown mode values degrade to off instead of erroring (or bypassing the gate).
     assert client.get("/civitai/loras?nsfw=true").status_code == 200
     assert captured["nsfw_mode"] == "off"
+
+
+def test_lora_search_overload_maps_to_503(tmp_path):
+    # An upstream 503 ("temporarily overloaded") must reach the UI as HTTP 503
+    # so it keeps a spinner up and retries, unlike terminal failures (502).
+    backend = _load_backend(tmp_path)
+
+    class FakeResponse:
+        status_code = 503
+        text = '{"error":"Model search is temporarily overloaded"}'
+        links = {}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def get(self, url, headers=None, params=None):
+            return FakeResponse()
+
+    import httpx
+    original = httpx.AsyncClient
+    httpx.AsyncClient = FakeClient
+    try:
+        with pytest.raises(backend.SearchOverloadedError):
+            asyncio.run(backend._civitai_search_loras(
+                backend._default_config(), query="", base_model="",
+                lora_type="LORA", sort="Most Downloaded", nsfw_mode="off",
+                cursor="", limit=24))
+        with pytest.raises(backend.SearchOverloadedError):
+            asyncio.run(backend._hf_search_loras(
+                backend._default_config(), query="", base_model="",
+                sort="Most Downloaded", nsfw_mode="off", cursor="", limit=24))
+    finally:
+        httpx.AsyncClient = original
+
+    client = _client(backend)
+
+    async def overloaded(cfg, **kwargs):
+        raise backend.SearchOverloadedError("Civitai search failed (503): busy")
+
+    async def broken(cfg, **kwargs):
+        raise RuntimeError("Civitai search failed (500): down")
+
+    backend._civitai_search_loras = overloaded
+    backend._hf_search_loras = overloaded
+    assert client.get("/civitai/loras").status_code == 503
+    assert client.get("/hf/loras").status_code == 503
+
+    backend._civitai_search_loras = broken
+    backend._hf_search_loras = broken
+    assert client.get("/civitai/loras").status_code == 502
+    assert client.get("/hf/loras").status_code == 502
 
 
 def test_civitai_search_nsfw_modes(tmp_path):
