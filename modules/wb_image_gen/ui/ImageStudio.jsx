@@ -1996,15 +1996,6 @@ export default function ImageStudio({ onBack }) {
               ))}
             </select>
           </div>
-          <div>
-            <label className={labelCls}>Negative Prompt</label>
-            <AutoGrowTextarea
-              value={draft.negative_prompt || ''}
-              onChange={(e) => set('negative_prompt', e.target.value)}
-              placeholder="blurry, low quality, watermark, text"
-              className={inputCls}
-            />
-          </div>
         </section>
         )}
 
@@ -2218,6 +2209,15 @@ export default function ImageStudio({ onBack }) {
               value={draft.style_suffix || ''}
               onChange={(e) => set('style_suffix', e.target.value)}
               placeholder="e.g. digital painting, dramatic lighting, fantasy concept art"
+              className={inputCls}
+            />
+          </div>
+          <div>
+            <label className={labelCls}>Negative Prompt</label>
+            <AutoGrowTextarea
+              value={draft.negative_prompt || ''}
+              onChange={(e) => set('negative_prompt', e.target.value)}
+              placeholder="blurry, low quality, watermark, text"
               className={inputCls}
             />
           </div>
