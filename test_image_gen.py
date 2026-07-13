@@ -4576,3 +4576,323 @@ def test_annotate_local_availability_unknown_without_scan(tmp_path):
     items = [{"id": "x", "base_model": "SDXL 1.0", "sha256": "a" * 64}]
     backend._annotate_local_availability(cfg, items)
     assert items[0]["local_available"] is None
+
+
+# ---------------------------------------------------------------------------
+# Install flow: version picker + download manager
+# ---------------------------------------------------------------------------
+
+CIVITAI_MODEL_FIXTURE = {
+    "id": 555, "name": "Ink Style", "type": "LORA", "nsfw": False,
+    "creator": {"username": "artist"}, "tags": ["style"],
+    "stats": {"downloadCount": 10, "thumbsUpCount": 5},
+    "modelVersions": [
+        {"id": 901, "name": "v2.0", "baseModel": "Illustrious",
+         "trainedWords": ["inkwash"], "publishedAt": "2026-01-02",
+         "files": [{"primary": True, "sizeKB": 100,
+                    "hashes": {"SHA256": "A" * 64},
+                    "downloadUrl": "https://civitai.com/api/download/models/901"}],
+         "images": [{"url": "https://img/2.jpg", "type": "image"}]},
+        {"id": 900, "name": "v1.0", "baseModel": "SDXL 1.0",
+         "files": [{"primary": True, "sizeKB": 90,
+                    "hashes": {"SHA256": "B" * 64},
+                    "downloadUrl": "https://civitai.com/api/download/models/900"}]},
+        {"id": 899, "name": "broken", "files": []},   # no download: dropped
+    ],
+}
+
+
+def test_civitai_model_versions_maps_every_version(tmp_path):
+    import httpx
+    backend = _load_backend(tmp_path)
+
+    original = httpx.AsyncClient
+    httpx.AsyncClient = lambda **kw: _LocalClient(_LocalResp(CIVITAI_MODEL_FIXTURE))
+    try:
+        versions = asyncio.run(backend._civitai_model_versions(
+            backend._default_config(), 555))
+    finally:
+        httpx.AsyncClient = original
+
+    assert [v["id"] for v in versions] == ["901", "900"]
+    v2 = versions[0]
+    assert v2["version_name"] == "v2.0"
+    assert v2["base_model"] == "Illustrious"
+    assert v2["sha256"] == "a" * 64
+    assert v2["all_hashes"] == ["a" * 64]     # this version only, not all ten
+    assert v2["trained_words"] == ["inkwash"]
+    assert v2["name"] == "Ink Style"
+    # The flattener still aggregates hashes across versions for matching.
+    flat = backend._flatten_civitai_model(CIVITAI_MODEL_FIXTURE)
+    assert flat["id"] == "901" and flat["all_hashes"] == ["a" * 64, "b" * 64]
+
+
+class _StreamResp:
+    def __init__(self, chunks, status_code=200, headers=None):
+        self._chunks = chunks
+        self.status_code = status_code
+        self.headers = headers or {}
+
+    async def aiter_bytes(self, chunk_size):
+        for chunk in self._chunks:
+            await asyncio.sleep(0)
+            yield chunk
+
+
+class _StreamCtx:
+    def __init__(self, resp):
+        self._resp = resp
+
+    async def __aenter__(self):
+        return self._resp
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _StreamClient:
+    def __init__(self, resp, captured=None):
+        self._resp = resp
+        self.captured = captured if captured is not None else {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    def stream(self, method, url):
+        self.captured["url"] = url
+        return _StreamCtx(self._resp)
+
+
+def _run_download_pipeline(backend, tmp_path, resp, expected_hashes=None,
+                           lora_id=None, url="https://civitai.com/api/download/models/901"):
+    """Drive _download_file_pipeline against a fake streaming client."""
+    import httpx
+    dest = tmp_path / "Lora"
+    dest.mkdir(exist_ok=True)
+    posted = []
+
+    async def fake_post(cfg, path, timeout=None):
+        posted.append(path)
+
+    backend._local_post = fake_post
+    dl_id = "dl_test"
+    backend._downloads[dl_id] = {
+        "id": dl_id, "kind": "lora", "label": "Ink Style", "filename": "",
+        "dest_dir": str(dest), "url": url, "total_bytes": 0,
+        "received_bytes": 0, "status": "downloading", "error": None,
+        "lora_id": lora_id, "started_at": "now", "completed_at": None,
+    }
+    captured = {}
+    original = httpx.AsyncClient
+    httpx.AsyncClient = lambda **kw: _StreamClient(resp, captured)
+    try:
+        asyncio.run(backend._download_file_pipeline(
+            dl_id, url, dest, "Ink Style", expected_hashes or [],
+            "/sdapi/v1/refresh-loras", lora_id, backend._load_config()))
+    finally:
+        httpx.AsyncClient = original
+    return backend._downloads[dl_id], dest, posted, captured
+
+
+def test_download_pipeline_streams_verifies_links_and_refreshes(tmp_path):
+    import hashlib
+    backend = _load_backend(tmp_path)
+    cfg = _enable_local(backend, local_lora_dir=str(tmp_path / "Lora"))
+    cfg["lora_library"] = [_local_lora_entry(id="901", local=None)]
+    cfg["lora_library"][0].pop("local")
+    backend._save_config(cfg)
+
+    chunks = [b"chunk-one-", b"chunk-two"]
+    sha = hashlib.sha256(b"".join(chunks)).hexdigest()
+    resp = _StreamResp(chunks, headers={
+        "content-disposition": 'attachment; filename="ink_style_v2.safetensors"',
+        "content-length": str(sum(len(c) for c in chunks)),
+    })
+    status, dest, posted, _ = _run_download_pipeline(
+        backend, tmp_path, resp, expected_hashes=[sha], lora_id="901")
+
+    assert status["status"] == "done", status["error"]
+    assert status["filename"] == "ink_style_v2.safetensors"
+    assert status["received_bytes"] == status["total_bytes"] == 19
+    assert (dest / "ink_style_v2.safetensors").read_bytes() == b"chunk-one-chunk-two"
+    assert not list(dest.glob("*.part"))
+    assert posted == ["/sdapi/v1/refresh-loras"]
+    # The library entry linked up and the hash cache learned the file.
+    entry = backend._load_config()["lora_library"][0]
+    assert entry["local"] == {"name": "ink_style_v2", "source": "install"}
+    assert backend._local_hash_index(backend._read_local_hash_cache()) == {
+        sha: "ink_style_v2"}
+
+
+def test_download_pipeline_rejects_bad_hash_and_bad_names(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable_local(backend, local_lora_dir=str(tmp_path / "Lora"))
+
+    resp = _StreamResp([b"evil"], headers={
+        "content-disposition": 'attachment; filename="ink.safetensors"'})
+    status, dest, posted, _ = _run_download_pipeline(
+        backend, tmp_path, resp, expected_hashes=["f" * 64])
+    assert status["status"] == "error"
+    assert "SHA256" in status["error"]
+    assert not list(dest.iterdir())          # no final file, no .part
+    assert posted == []                      # no refresh for a failed install
+
+    # Traversal-y and wrong-extension names collapse to the safe fallback.
+    resp = _StreamResp([b"data"], headers={
+        "content-disposition": 'attachment; filename="../../evil.exe"'})
+    status, dest, _, _ = _run_download_pipeline(backend, tmp_path, resp)
+    assert status["status"] == "done"
+    assert status["filename"] == "Ink Style.safetensors"
+    assert (dest / "Ink Style.safetensors").read_bytes() == b"data"
+
+    # A 401 from Civitai reads as the key hint, not a bare status code.
+    status, _, _, _ = _run_download_pipeline(
+        backend, tmp_path, _StreamResp([], status_code=401))
+    assert status["status"] == "error"
+    assert "API key" in status["error"]
+
+
+def test_install_endpoint_validation_and_dedupe(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _enable_local(backend)   # no lora dir yet
+    cfg["lora_library"] = [
+        _local_lora_entry(id="901", local=None),
+        _local_lora_entry(id="902", gated=True, source="hf",
+                          download_url="https://huggingface.co/x/blob.safetensors"),
+    ]
+    cfg["lora_library"][0].pop("local")
+    backend._save_config(cfg)
+    client = _client(backend)
+
+    resp = client.post("/local/downloads", json={"lora_id": "901"})
+    assert resp.status_code == 400 and "folder" in resp.json()["detail"].lower()
+
+    lora_dir = tmp_path / "Lora"
+    lora_dir.mkdir()
+    cfg = backend._load_config()
+    cfg["local_lora_dir"] = str(lora_dir)
+    backend._save_config(cfg)
+
+    assert client.post("/local/downloads",
+                       json={"lora_id": "902"}).status_code == 400   # gated
+    assert client.post("/local/downloads",
+                       json={"lora_id": "missing"}).status_code == 404
+    assert client.post("/local/downloads", json={}).status_code == 400
+
+    # Keep the fake pipeline pending so the dedupe path is observable.
+    async def stuck_pipeline(*a, **k):
+        return None
+
+    backend._download_file_pipeline = stuck_pipeline
+    first = client.post("/local/downloads", json={"lora_id": "901"}).json()["download"]
+    second = client.post("/local/downloads", json={"lora_id": "901"}).json()["download"]
+    assert first["id"] == second["id"]
+    assert first["status"] == "downloading"
+    assert "url" not in first                 # the Civitai token must not leak
+    listing = client.get("/local/downloads").json()["downloads"]
+    assert [d["id"] for d in listing] == [first["id"]]
+    assert all("url" not in d for d in listing)
+
+
+def test_install_from_item_saves_and_downloads(tmp_path):
+    import hashlib
+    backend = _load_backend(tmp_path)
+    lora_dir = tmp_path / "Lora"
+    lora_dir.mkdir()
+    _enable_local(backend, local_lora_dir=str(lora_dir),
+                  civitai_api_key="civ-token")
+
+    payload = b"lora-bytes"
+    sha = hashlib.sha256(payload).hexdigest()
+    resp = _StreamResp([payload], headers={
+        "content-disposition": 'attachment; filename="ink_style_v2.safetensors"'})
+    captured = {}
+
+    import httpx
+    original_client = httpx.AsyncClient
+    posted = []
+
+    async def fake_post(cfg, path, timeout=None):
+        posted.append(path)
+
+    backend._local_post = fake_post
+    httpx.AsyncClient = lambda **kw: _StreamClient(resp, captured)
+    try:
+        with _client(backend) as client:
+            item = {"id": "901", "model_id": 555, "name": "Ink Style",
+                    "version_name": "v2.0", "base_model": "Illustrious",
+                    "sha256": sha, "all_hashes": [sha],
+                    "download_url": "https://civitai.com/api/download/models/901",
+                    "source": "civitai"}
+            body = client.post("/local/downloads", json={"item": item}).json()
+            dl_id = body["download"]["id"]
+            assert body["download"]["lora_id"] == "901"
+            for _ in range(200):
+                download = next(d for d in client.get("/local/downloads")
+                                .json()["downloads"] if d["id"] == dl_id)
+                if download["status"] != "downloading":
+                    break
+                time.sleep(0.02)
+    finally:
+        httpx.AsyncClient = original_client
+
+    assert download["status"] == "done", download["error"]
+    # The Civitai token rode the download URL (server-side only).
+    assert captured["url"].endswith("?token=civ-token")
+    # Saved to the library AND linked to the installed file in one action.
+    entry = backend._load_config()["lora_library"][0]
+    assert entry["id"] == "901" and entry["name"] == "Ink Style"
+    assert entry["local"] == {"name": "ink_style_v2", "source": "install"}
+    assert (lora_dir / "ink_style_v2.safetensors").read_bytes() == payload
+    assert posted == ["/sdapi/v1/refresh-loras"]
+
+
+def test_download_pipeline_cancel_cleans_up(tmp_path):
+    import httpx
+    backend = _load_backend(tmp_path)
+    _enable_local(backend, local_lora_dir=str(tmp_path / "Lora"))
+    dest = tmp_path / "Lora"
+    dest.mkdir(exist_ok=True)
+
+    started = asyncio.Event()
+
+    class _SlowResp(_StreamResp):
+        async def aiter_bytes(self, chunk_size):
+            yield b"first"
+            started.set()
+            await asyncio.sleep(30)
+            yield b"never"
+
+    resp = _SlowResp([], headers={
+        "content-disposition": 'attachment; filename="slow.safetensors"'})
+
+    async def run():
+        backend._downloads["dl_slow"] = {
+            "id": "dl_slow", "kind": "lora", "label": "Slow", "filename": "",
+            "dest_dir": str(dest), "url": "https://x/f", "total_bytes": 0,
+            "received_bytes": 0, "status": "downloading", "error": None,
+            "lora_id": None, "started_at": "now", "completed_at": None,
+        }
+        original = httpx.AsyncClient
+        httpx.AsyncClient = lambda **kw: _StreamClient(resp)
+        try:
+            task = asyncio.get_running_loop().create_task(
+                backend._download_file_pipeline(
+                    "dl_slow", "https://x/f", dest, "Slow", [],
+                    "/sdapi/v1/refresh-loras", None, backend._load_config()))
+            await started.wait()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        finally:
+            httpx.AsyncClient = original
+
+    asyncio.run(run())
+    status = backend._downloads["dl_slow"]
+    assert status["status"] == "error" and status["error"] == "cancelled"
+    assert not list(dest.iterdir())          # .part removed

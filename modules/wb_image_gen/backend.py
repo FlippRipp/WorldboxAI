@@ -1911,6 +1911,123 @@ def _annotate_local_availability(cfg: dict, items: list[dict]) -> None:
             item["local_name"] = stem
 
 
+# --------------------------------------------------------------------------
+# Local installs: download Civitai/HF files into the WebUI's model folders
+# --------------------------------------------------------------------------
+
+_downloads: dict[str, dict] = {}                 # id -> pollable status dict
+_download_tasks: dict[str, "asyncio.Task"] = {}
+DOWNLOAD_CHUNK = 1 << 20
+DOWNLOADS_KEEP_FINISHED = 20
+LOCAL_INSTALL_EXTS = (".safetensors", ".ckpt")
+_CONTENT_DISPOSITION_RE = re.compile(r'filename\*?="?([^";]+)"?')
+
+
+def _safe_install_filename(raw: str, fallback: str) -> str:
+    """A bare, whitelisted-extension filename that cannot escape the install
+    folder. `raw` usually comes from Content-Disposition; the fallback is the
+    slugged entry name."""
+    name = Path(str(raw or "").strip().replace("\\", "/")).name
+    name = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip(" .")
+    if not name or not name.lower().endswith(LOCAL_INSTALL_EXTS):
+        base = re.sub(r"[^A-Za-z0-9._ -]+", "_", str(fallback or "model")).strip(" .")
+        name = (base or "model") + ".safetensors"
+    return name
+
+
+def _prune_downloads() -> None:
+    finished = sorted(
+        (d for d in _downloads.values() if d["status"] != "downloading"),
+        key=lambda d: str(d.get("completed_at") or ""))
+    for stale in finished[:-DOWNLOADS_KEEP_FINISHED] if len(finished) > DOWNLOADS_KEEP_FINISHED else []:
+        _downloads.pop(stale["id"], None)
+        _download_tasks.pop(stale["id"], None)
+
+
+async def _link_installed_lora(lora_id: str, stem: str) -> None:
+    """Stamp the library entry with its just-installed local name (save_lora's
+    reload-then-save pattern, since the download awaited across config
+    writes)."""
+    cfg = _load_config()
+    for entry in cfg.get("lora_library") or []:
+        if isinstance(entry, dict) and entry.get("id") == lora_id:
+            entry["local"] = {"name": stem, "source": "install"}
+            entry["local_checked_at"] = _now()
+            _save_config(cfg)
+            return
+
+
+async def _download_file_pipeline(dl_id: str, url: str, dest_dir: Path,
+                                  fallback_name: str, expected_hashes: list[str],
+                                  refresh_path: str, lora_id: str | None,
+                                  cfg: dict) -> None:
+    """Stream one file into the WebUI's model folder with byte progress and a
+    running SHA256, then refresh the WebUI and link the library entry. Only
+    ever marks its own status dict — never raises to the caller."""
+    import httpx
+    status = _downloads[dl_id]
+    part_path: Path | None = None
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=15.0),
+                                     follow_redirects=True) as client:
+            async with client.stream("GET", url) as resp:
+                if resp.status_code == 401 and "civitai.com" in url:
+                    raise RuntimeError("Civitai requires an API key for this "
+                                       "download — add one in Image Studio")
+                if resp.status_code != 200:
+                    raise RuntimeError(f"Download failed (HTTP {resp.status_code})")
+                disposition = resp.headers.get("content-disposition", "")
+                match = _CONTENT_DISPOSITION_RE.search(disposition)
+                filename = _safe_install_filename(
+                    match.group(1) if match else "", fallback_name)
+                final_path = (dest_dir / filename).resolve()
+                if dest_dir.resolve() not in final_path.parents:
+                    raise RuntimeError("Refusing a filename outside the install folder")
+                status["filename"] = filename
+                status["total_bytes"] = int(resp.headers.get("content-length") or 0)
+
+                part_path = final_path.with_suffix(final_path.suffix + ".part")
+                digest = hashlib.sha256()
+                received = 0
+                with open(part_path, "wb") as f:
+                    async for chunk in resp.aiter_bytes(DOWNLOAD_CHUNK):
+                        f.write(chunk)
+                        digest.update(chunk)
+                        received += len(chunk)
+                        status["received_bytes"] = received
+
+        if expected_hashes and digest.hexdigest().lower() not in expected_hashes:
+            raise RuntimeError("Downloaded file failed its SHA256 check — "
+                               "the source may have served the wrong file")
+        os.replace(part_path, final_path)
+        part_path = None
+        if lora_id:
+            _register_local_lora_file(final_path)
+            await _link_installed_lora(lora_id, final_path.stem)
+        try:
+            await _local_post(cfg, refresh_path, timeout=60.0)
+        except RuntimeError as e:
+            # The file is in place; the WebUI just hasn't rescanned yet.
+            print(f"[Image Gen] Post-install refresh failed: {e}")
+        status["status"] = "done"
+    except asyncio.CancelledError:
+        status["status"] = "error"
+        status["error"] = "cancelled"
+        raise
+    except Exception as e:
+        status["status"] = "error"
+        status["error"] = str(e)[:300]
+        print(f"[Image Gen] Install {dl_id} failed: {e}")
+    finally:
+        status["completed_at"] = _now()
+        if part_path is not None:
+            try:
+                part_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        _prune_downloads()
+
+
 def _local_payload(cfg: dict, image_prompt: str) -> dict:
     prompt = image_prompt
     lora_tags = _local_prompt_lora_tags(cfg)
@@ -2105,24 +2222,15 @@ def _civitai_headers(cfg: dict) -> dict:
     return headers
 
 
-def _flatten_civitai_model(model: dict) -> dict | None:
-    """Reduce a Civitai /models hit to the library-entry shape (latest version,
-    primary file). Returns None for hits without a downloadable version."""
-    versions = model.get("modelVersions") or []
-    version = versions[0] if versions else {}
+def _civitai_version_to_entry(model: dict, version: dict,
+                              all_hashes: list[str] | None = None) -> dict | None:
+    """Reduce one Civitai model version (with its parent model's metadata) to
+    the library-entry shape. Returns None for versions without an id."""
     if not version.get("id"):
         return None
     files = version.get("files") or []
     file = next((f for f in files if f.get("primary")), files[0] if files else {})
-    # Novita may mirror an older version, so keep every version's file hash
-    # for availability matching (latest first, like modelVersions).
-    all_hashes: list[str] = []
-    for v in versions[:10]:
-        vfiles = v.get("files") or []
-        vfile = next((f for f in vfiles if f.get("primary")), vfiles[0] if vfiles else {})
-        vhash = str((vfile.get("hashes") or {}).get("SHA256") or "").lower()
-        if vhash and vhash not in all_hashes:
-            all_hashes.append(vhash)
+    sha256 = str((file.get("hashes") or {}).get("SHA256") or "").lower()
     thumb = next(
         (i.get("url") for i in (version.get("images") or [])
          if i.get("url") and i.get("type") != "video"),
@@ -2136,8 +2244,9 @@ def _flatten_civitai_model(model: dict) -> dict | None:
         "creator": str((model.get("creator") or {}).get("username") or ""),
         "type": str(model.get("type") or "LORA"),
         "base_model": str(version.get("baseModel") or ""),
-        "sha256": str((file.get("hashes") or {}).get("SHA256") or "").lower(),
-        "all_hashes": all_hashes,
+        "sha256": sha256,
+        "all_hashes": all_hashes if all_hashes is not None
+        else ([sha256] if sha256 else []),
         "download_url": str(file.get("downloadUrl") or version.get("downloadUrl") or ""),
         "size_kb": file.get("sizeKB"),
         "trained_words": [str(w) for w in (version.get("trainedWords") or [])],
@@ -2157,6 +2266,47 @@ class SearchOverloadedError(RuntimeError):
     """The upstream search service answered 503 (temporarily overloaded).
     The browse endpoints forward this as HTTP 503 so the UI knows to keep a
     spinner up and retry, instead of showing a terminal error."""
+
+
+def _flatten_civitai_model(model: dict) -> dict | None:
+    """Reduce a Civitai /models hit to the library-entry shape (latest version,
+    primary file). Returns None for hits without a downloadable version."""
+    versions = model.get("modelVersions") or []
+    version = versions[0] if versions else {}
+    # Novita may mirror an older version, so keep every version's file hash
+    # for availability matching (latest first, like modelVersions).
+    all_hashes: list[str] = []
+    for v in versions[:10]:
+        vfiles = v.get("files") or []
+        vfile = next((f for f in vfiles if f.get("primary")), vfiles[0] if vfiles else {})
+        vhash = str((vfile.get("hashes") or {}).get("SHA256") or "").lower()
+        if vhash and vhash not in all_hashes:
+            all_hashes.append(vhash)
+    return _civitai_version_to_entry(model, version, all_hashes)
+
+
+async def _civitai_model_versions(cfg: dict, model_id: int) -> list[dict]:
+    """Every downloadable version of one Civitai model in the library-entry
+    shape (newest first, as Civitai orders them) — the Install button's
+    version picker."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+            resp = await client.get(f"{CIVITAI_BASE}/models/{int(model_id)}",
+                                    headers=_civitai_headers(cfg))
+    except httpx.TransportError as e:
+        raise RuntimeError(f"Could not reach Civitai: {e}")
+    if resp.status_code == 404:
+        raise RuntimeError("Civitai model not found")
+    if resp.status_code != 200:
+        raise RuntimeError(f"Civitai answered with HTTP {resp.status_code}")
+    model = resp.json() or {}
+    entries = []
+    for version in model.get("modelVersions") or []:
+        entry = _civitai_version_to_entry(model, version)
+        if entry and entry["download_url"]:
+            entries.append(entry)
+    return entries
 
 
 async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
@@ -3336,6 +3486,18 @@ def get_router():
         llm_mode: str | None = None
         trained_words: list[str] | None = None
 
+    class InstallRequest(BaseModel):
+        # LoRA installs: an already-saved entry (lora_id) or a browse/version-
+        # picker item (saved to the library first). Checkpoint installs: a
+        # direct URL.
+        lora_id: str | None = None
+        item: LoraSave | None = None
+        kind: str = "lora"                 # "lora" | "checkpoint"
+        url: str = ""
+        filename: str = ""
+        sha256: str = ""
+        label: str = ""
+
     class KeySubmit(BaseModel):
         api_key: str
 
@@ -3807,6 +3969,115 @@ def get_router():
         return {"lora_library": cfg["lora_library"], "matched": matched,
                 "checked": checked, "files": len(cache.get("files", {}))}
 
+    def _public_download(status: dict) -> dict:
+        # The raw URL may carry the user's Civitai token — never expose it.
+        return {k: v for k, v in status.items() if k != "url"}
+
+    @router.post("/local/downloads")
+    async def start_install(req: InstallRequest):
+        """One-click install: stream a Civitai/HF file into the WebUI's model
+        folder, then refresh the WebUI and link the library entry. Returns a
+        pollable status; GET /local/downloads tracks progress."""
+        cfg = _load_config()
+        kind = req.kind if req.kind in ("lora", "checkpoint") else "lora"
+        folder_label = "LoRA" if kind == "lora" else "checkpoint"
+        dest_key = "local_lora_dir" if kind == "lora" else "local_checkpoint_dir"
+        refresh_path = ("/sdapi/v1/refresh-loras" if kind == "lora"
+                        else "/sdapi/v1/refresh-checkpoints")
+        dest = str(cfg.get(dest_key) or "").strip()
+        if not dest:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Set your WebUI's {folder_label} folder in Setup first")
+        dest_dir = Path(dest)
+        if not dest_dir.is_dir():
+            raise HTTPException(status_code=400,
+                                detail=f"{folder_label} folder not found: {dest}")
+
+        lora_id = (req.lora_id or "").strip() or None
+        label = (req.label or "").strip()
+        if kind == "lora":
+            if req.item is not None:
+                entry = await _intake_lora(req.item)
+                lora_id = str(entry.get("id"))
+                cfg = _load_config()   # the intake may have written config
+            elif lora_id:
+                entry = _find_lora(cfg, lora_id)
+            else:
+                raise HTTPException(status_code=400,
+                                    detail="Pass lora_id or item to install a LoRA")
+            if entry.get("gated"):
+                raise HTTPException(status_code=400,
+                                    detail="Gated Hugging Face repos can't be "
+                                           "downloaded automatically")
+            url = _lora_download_link(entry, cfg)
+            if not url:
+                raise HTTPException(status_code=404,
+                                    detail="No download link for this LoRA")
+            version = str(entry.get("version_name") or "").strip()
+            label = label or " — ".join(
+                p for p in (str(entry.get("name") or "LoRA"), version) if p)
+            fallback_name = str(entry.get("name") or "lora")
+            expected_hashes = _entry_hashes(entry)
+        else:
+            url = (req.url or "").strip()
+            if not url.startswith(("http://", "https://")):
+                raise HTTPException(status_code=400,
+                                    detail="Checkpoint installs need an http(s) URL")
+            if "civitai.com" in url:
+                key = str(cfg.get("civitai_api_key") or "").strip()
+                if key:
+                    url += ("&" if "?" in url else "?") + "token=" + key
+            fallback_name = (req.filename or "").strip() or label or "checkpoint"
+            label = label or fallback_name
+            sha = (req.sha256 or "").strip().lower()
+            expected_hashes = [sha] if sha else []
+            lora_id = None
+
+        # A second click while the same file is in flight returns the
+        # existing download instead of racing it.
+        for d in _downloads.values():
+            if d["status"] == "downloading" and (
+                    (lora_id and d.get("lora_id") == lora_id)
+                    or d.get("url") == url):
+                return {"download": _public_download(d)}
+
+        dl_id = uuid.uuid4().hex[:12]
+        _downloads[dl_id] = {
+            "id": dl_id, "kind": kind, "label": label, "filename": "",
+            "dest_dir": str(dest_dir), "url": url,
+            "total_bytes": 0, "received_bytes": 0,
+            "status": "downloading", "error": None, "lora_id": lora_id,
+            "started_at": _now(), "completed_at": None,
+        }
+        task = asyncio.get_running_loop().create_task(
+            _download_file_pipeline(dl_id, url, dest_dir, fallback_name,
+                                    expected_hashes, refresh_path, lora_id, cfg))
+        _download_tasks[dl_id] = task
+        _tasks.add(task)
+        task.add_done_callback(_tasks.discard)
+        return {"download": _public_download(_downloads[dl_id])}
+
+    @router.get("/local/downloads")
+    async def list_installs():
+        items = sorted(_downloads.values(),
+                       key=lambda d: str(d.get("started_at") or ""), reverse=True)
+        return {"downloads": [_public_download(d) for d in items]}
+
+    @router.delete("/local/downloads/{dl_id}")
+    async def cancel_install(dl_id: str):
+        status = _downloads.get(dl_id)
+        if status is None:
+            raise HTTPException(status_code=404, detail="No such download")
+        task = _download_tasks.get(dl_id)
+        if status["status"] == "downloading" and task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        return {"download": _public_download(_downloads[dl_id])}
+
     @router.get("/local/samplers")
     async def local_samplers():
         """The WebUI's own sampler list; the static Novita list on any error
@@ -3861,6 +4132,19 @@ def get_router():
             _annotate_novita_availability(cfg, result["items"])
         return result
 
+    @router.get("/civitai/model-versions/{model_id}")
+    async def civitai_model_versions(model_id: int):
+        """Every downloadable version of a Civitai model, for the Install
+        button's version picker (browse hits carry only the latest)."""
+        cfg = _load_config()
+        try:
+            versions = await _civitai_model_versions(cfg, model_id)
+        except RuntimeError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        if _provider(cfg) == "local":
+            _annotate_local_availability(cfg, versions)
+        return {"versions": versions}
+
     @router.get("/hf/loras")
     async def hf_loras(query: str = "", base_model: str = "",
                        sort: str = "Most Downloaded", nsfw: str = "off",
@@ -3891,12 +4175,16 @@ def get_router():
             raise HTTPException(status_code=404, detail="LoRA not in library")
         return entry
 
-    @router.post("/loras")
-    async def save_lora(item: LoraSave):
+    async def _intake_lora(item: LoraSave) -> dict:
+        """Normalize a browse item, match availability, and append it to the
+        library. An id already in the library returns its existing entry, so
+        the Install flow can reuse this without save_lora's 409."""
         cfg = _load_config()
         library = cfg.get("lora_library") or []
-        if any(isinstance(e, dict) and e.get("id") == item.id for e in library):
-            raise HTTPException(status_code=409, detail="Already in library")
+        existing = next((e for e in library
+                         if isinstance(e, dict) and e.get("id") == item.id), None)
+        if existing is not None:
+            return existing
         if len(library) >= LORA_LIBRARY_MAX:
             raise HTTPException(status_code=400,
                                 detail=f"Library is full ({LORA_LIBRARY_MAX} LoRAs)")
@@ -3931,7 +4219,16 @@ def get_router():
             library.append(entry)
         cfg["lora_library"] = library
         _save_config(cfg)
-        return {"entry": entry, "lora_library": library}
+        return entry
+
+    @router.post("/loras")
+    async def save_lora(item: LoraSave):
+        cfg = _load_config()
+        if any(isinstance(e, dict) and e.get("id") == item.id
+               for e in cfg.get("lora_library") or []):
+            raise HTTPException(status_code=409, detail="Already in library")
+        entry = await _intake_lora(item)
+        return {"entry": entry, "lora_library": _load_config()["lora_library"]}
 
     @router.post("/loras/match_all")
     async def rematch_all_loras():
