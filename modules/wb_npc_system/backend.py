@@ -1,4 +1,5 @@
 """NPC System -- background character generation and introduction management."""
+import asyncio
 import json
 import re
 import urllib.parse
@@ -501,12 +502,18 @@ def _present_characters_context(state: dict, present: list[dict]) -> str:
 async def on_gather_context(state: dict, sdk) -> dict | None:
     result = {}
 
-    present = await _present_npcs(state, sdk)
+    # Scene presence (active characters) and the introduction pass
+    # (unintroduced candidates) look at disjoint parts of the bank, so their
+    # LLM calls run concurrently instead of back-to-back.
+    present, introduction = await asyncio.gather(
+        _present_npcs(state, sdk),
+        _introduction_pass(state, sdk),
+    )
+
     context = _present_characters_context(state, present)
     if context:
         result["context_string"] = context
 
-    introduction = await _introduction_pass(state, sdk)
     if introduction:
         result.update(introduction)
 

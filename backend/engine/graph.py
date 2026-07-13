@@ -587,12 +587,41 @@ class EngineGraph:
                 seen_world_row_ids.add(we["id"])
 
         input_text = state.get("input_text", "")
-        if input_text:
+
+        async def retrieve_rag() -> list[str]:
+            """Embed this turn's input and query the memory/world indexes,
+            returning the resulting context blocks. Mutates the retrieval
+            bookkeeping (retrieved_ids, sticky, world_entries) in the
+            enclosing scope."""
+            nonlocal last_context_query
+            blocks = []
+            if not input_text:
+                return blocks
             last_context_query = input_text
             try:
-                query_vector = await self.llm.get_embedding(input_text,
-                    inspector_ctx={"call_type": "embedding", "step": "gather_context_node"})
                 rag_limit = self.settings.get("memory.rag_limit")
+                world_rag_limit = self.settings.get("world.rag_limit")
+                want_world = world_rag_limit > 0 and self.memory.has_world_index()
+
+                # Build a location-enriched query so vague inputs (e.g. "I look around")
+                # still surface entries relevant to the player's current position.
+                location_hints = " ".join(filter(None, [
+                    state.get("player_location_region", ""),
+                    state.get("player_location_layer_id", ""),
+                ]))
+
+                embed_calls = [self.llm.get_embedding(input_text,
+                    inspector_ctx={"call_type": "embedding", "step": "gather_context_node"})]
+                if want_world and location_hints:
+                    world_query_text = f"{input_text} {location_hints}".strip()
+                    embed_calls.append(self.llm.get_embedding(
+                        world_query_text,
+                        inspector_ctx={"call_type": "embedding", "step": "gather_context_node_world"},
+                    ))
+                vectors = await asyncio.gather(*embed_calls)
+                query_vector = vectors[0]
+                world_query_vector = vectors[1] if len(vectors) > 1 else query_vector
+
                 memories = self.memory.search_memories(query_vector, turn, limit=rag_limit)
                 if memories:
                     memory_block = "<rag_memories>\n"
@@ -600,24 +629,9 @@ class EngineGraph:
                         memory_block += f"- {m['text']}\n"
                         retrieved_ids.append(m.get("id", ""))
                     memory_block += "</rag_memories>"
-                    gathered_context.append(memory_block)
+                    blocks.append(memory_block)
 
-                world_rag_limit = self.settings.get("world.rag_limit")
-                if world_rag_limit > 0 and self.memory.has_world_index():
-                    # Build a location-enriched query so vague inputs (e.g. "I look around")
-                    # still surface entries relevant to the player's current position.
-                    location_hints = " ".join(filter(None, [
-                        state.get("player_location_region", ""),
-                        state.get("player_location_layer_id", ""),
-                    ]))
-                    if location_hints:
-                        world_query_text = f"{input_text} {location_hints}".strip()
-                        world_query_vector = await self.llm.get_embedding(
-                            world_query_text,
-                            inspector_ctx={"call_type": "embedding", "step": "gather_context_node_world"},
-                        )
-                    else:
-                        world_query_vector = query_vector
+                if want_world:
                     for we in self.memory.search_world(world_query_vector, limit=world_rag_limit):
                         # (Re-)trigger stickiness: retrieval starts/refreshes
                         # the entry's active window.
@@ -628,14 +642,7 @@ class EngineGraph:
                             seen_world_row_ids.add(we["id"])
             except Exception as e:
                 print(f"Error fetching RAG memories: {e}")
-
-        if world_entries:
-            world_block = "<world_knowledge>\n"
-            for we in world_entries:
-                world_block += f"- [{we['source_type']}] {we['text']}\n"
-                retrieved_world_ids.append(we.get("id", ""))
-            world_block += "</world_knowledge>"
-            gathered_context.append(world_block)
+            return blocks
 
         # Location/world context is contributed by modules (e.g. wb_worldgen) via
         # on_gather_context -> context_string, collected below.
@@ -646,12 +653,28 @@ class EngineGraph:
             if produces.get("context_string") and result.get("context_string"):
                 context_strings.append(f"<{mod_id}>\n{result['context_string']}\n</{mod_id}>")
 
-        accumulated = await self._run_modules_in_levels(
-            "on_gather_context",
-            state,
-            collect=collect_gather,
-            merge_module_data=True,
+        # The module hooks read only `state`, never this turn's retrieval, so
+        # RAG (embeddings + vector search) runs concurrently with them instead
+        # of ahead of them.
+        rag_blocks, accumulated = await asyncio.gather(
+            retrieve_rag(),
+            self._run_modules_in_levels(
+                "on_gather_context",
+                state,
+                collect=collect_gather,
+                merge_module_data=True,
+            ),
         )
+
+        gathered_context.extend(rag_blocks)
+
+        if world_entries:
+            world_block = "<world_knowledge>\n"
+            for we in world_entries:
+                world_block += f"- [{we['source_type']}] {we['text']}\n"
+                retrieved_world_ids.append(we.get("id", ""))
+            world_block += "</world_knowledge>"
+            gathered_context.append(world_block)
 
         gathered_context.extend(context_strings)
 
