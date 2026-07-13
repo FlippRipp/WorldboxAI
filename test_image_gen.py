@@ -991,6 +991,35 @@ def test_prompt_style_detection(tmp_path):
     assert backend._is_pony(cfg("Pony"))
     assert not backend._is_pony(cfg("Illustrious XL"))
 
+    # An explicit prompt_style_mode overrides the detection in both directions;
+    # "auto" and junk values fall back to it.
+    assert backend._prompt_style({**cfg("Pony"), "prompt_style_mode": "natural"}) == "natural"
+    assert backend._prompt_style({**cfg("FLUX.1"), "prompt_style_mode": "tags"}) == "tags"
+    assert backend._prompt_style({**cfg("Pony"), "prompt_style_mode": "auto"}) == "tags"
+    assert backend._prompt_style({**cfg("Pony"), "prompt_style_mode": "bogus"}) == "tags"
+
+
+def test_prompt_style_mode_config_roundtrip(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    assert backend._load_config()["prompt_style_mode"] == "auto"
+    assert client.put("/config", json={"prompt_style_mode": "booru"}).status_code == 400
+
+    resp = client.put("/config", json={"prompt_style_mode": "tags",
+                                       "model_base": "FLUX.1"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["prompt_style_mode"] == "tags"
+    assert body["prompt_style"] == "tags"  # override beats FLUX detection
+    assert backend._load_config()["prompt_style_mode"] == "tags"
+
+    # An unknown stored value (hand-edited config) normalizes back to auto.
+    cfg = backend._load_config()
+    cfg["prompt_style_mode"] = "bogus"
+    backend._save_config(cfg)
+    assert backend._load_config()["prompt_style_mode"] == "auto"
+
 
 def test_prompt_writer_picks_template_and_pony_tags(tmp_path):
     backend = _load_backend(tmp_path)

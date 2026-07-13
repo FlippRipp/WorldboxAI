@@ -123,7 +123,7 @@ PROFILE_FIELDS = (
     "guidance_scale", "sampler_name", "negative_prompt", "style_suffix",
     "pony_quality_tags", "booru_subject_mode", "booru_break_separator",
     "tag_usage_filter", "tag_usage_min_count", "prompt_template",
-    "prompt_template_tags",
+    "prompt_template_tags", "prompt_style_mode",
 )
 GLOBAL_FIELDS = (
     "enabled", "api_key", "civitai_api_key", "hf_api_key", "interval",
@@ -144,6 +144,11 @@ CHAT_IMAGE_CONCEAL_MODES = ("off", "blur", "blackout")
 # Tag models: how many characters a prompt may depict. "auto" picks single or
 # multi per scene from how many tracked characters are in frame.
 BOORU_SUBJECT_MODES = ("single", "multi", "auto")
+
+# How the prompt writer phrases prompts: danbooru tag lists ("tags"),
+# descriptive natural language ("natural"), or "auto" — detect from the
+# checkpoint's base model / name (BOORU_TAG_MODEL_MARKERS).
+PROMPT_STYLE_MODES = ("auto", "tags", "natural")
 
 # Tag usage filter: drop LLM-produced tags that are too rare on the booru
 # sites to mean anything to a tag-trained checkpoint. "soft" drops only tags
@@ -349,6 +354,7 @@ def _default_config() -> dict:
         "prompt_template_tags": DEFAULT_PROMPT_TEMPLATE_TAGS,
         "pony_quality_tags": DEFAULT_PONY_QUALITY_TAGS,
         "booru_subject_mode": "auto",   # tag models: one of BOORU_SUBJECT_MODES
+        "prompt_style_mode": "auto",    # one of PROMPT_STYLE_MODES
         "booru_break_separator": False, # multi mode: emit BREAK between character groups
         "tag_usage_filter": "off",      # one of TAG_USAGE_FILTER_MODES
         "tag_usage_min_count": DEFAULT_TAG_USAGE_MIN_COUNT,  # min booru posts to keep a tag
@@ -493,6 +499,8 @@ def _effective_config(store: dict) -> dict:
         cfg["chat_image_conceal"] = "off"
     if cfg.get("booru_subject_mode") not in BOORU_SUBJECT_MODES:
         cfg["booru_subject_mode"] = "single"
+    if cfg.get("prompt_style_mode") not in PROMPT_STYLE_MODES:
+        cfg["prompt_style_mode"] = "auto"
     # A stored tags template that still equals an old default was never
     # customized; keep it tracking the current default.
     if cfg.get("prompt_template_tags") in LEGACY_PROMPT_TEMPLATES_TAGS:
@@ -714,8 +722,13 @@ BOORU_TAG_MODEL_MARKERS = ("pony", "illustrious", "noob", "animagine")
 
 
 def _prompt_style(cfg: dict) -> str:
-    """"tags" (danbooru) for Pony/Illustrious/NoobAI/Animagine bases, "natural"
-    for Flux and everything else."""
+    """Resolved prompt style, "tags" (danbooru lists) or "natural" (descriptive
+    text). An explicit prompt_style_mode wins; "auto" picks "tags" for
+    Pony/Illustrious/NoobAI/Animagine bases and "natural" for Flux and
+    everything else."""
+    mode = str(cfg.get("prompt_style_mode") or "auto")
+    if mode in ("tags", "natural"):
+        return mode
     ident = _model_ident(cfg)
     if any(marker in ident for marker in BOORU_TAG_MODEL_MARKERS):
         return "tags"
@@ -2845,6 +2858,7 @@ def get_router():
         pony_quality_tags: str | None = None
         booru_subject_mode: str | None = None
         booru_break_separator: bool | None = None
+        prompt_style_mode: str | None = None
         tag_usage_filter: str | None = None
         tag_usage_min_count: int | None = None
         booru_single_subject: bool | None = None   # deprecated alias for booru_subject_mode
@@ -2936,7 +2950,8 @@ def get_router():
         out["default_prompt_template"] = DEFAULT_PROMPT_TEMPLATE
         out["default_prompt_template_tags"] = DEFAULT_PROMPT_TEMPLATE_TAGS
         out["default_pony_quality_tags"] = DEFAULT_PONY_QUALITY_TAGS
-        out["prompt_style"] = _prompt_style(cfg)
+        out["prompt_style"] = _prompt_style(cfg)   # resolved; the stored mode rides in as prompt_style_mode
+        out["prompt_style_modes"] = PROMPT_STYLE_MODES
         out["civitai_sorts"] = CIVITAI_SORTS
         out["civitai_lora_types"] = CIVITAI_LORA_TYPES
         out["civitai_nsfw_modes"] = CIVITAI_NSFW_MODES
@@ -3016,6 +3031,10 @@ def get_router():
                 and incoming["booru_subject_mode"] not in BOORU_SUBJECT_MODES):
             raise HTTPException(status_code=400,
                                 detail=f"booru_subject_mode must be one of {BOORU_SUBJECT_MODES}")
+        if ("prompt_style_mode" in incoming
+                and incoming["prompt_style_mode"] not in PROMPT_STYLE_MODES):
+            raise HTTPException(status_code=400,
+                                detail=f"prompt_style_mode must be one of {PROMPT_STYLE_MODES}")
         if ("tag_usage_filter" in incoming
                 and incoming["tag_usage_filter"] not in TAG_USAGE_FILTER_MODES):
             raise HTTPException(status_code=400,

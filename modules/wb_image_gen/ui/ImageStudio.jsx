@@ -1494,11 +1494,14 @@ export default function ImageStudio({ onBack }) {
     JSON.stringify({ ...draft, api_key: '', civitai_api_key: '', lora_library: [] }) !==
       JSON.stringify({ ...config, api_key: '', civitai_api_key: '', lora_library: [] });
 
-  // Mirror of the backend's _prompt_style heuristic (BOORU_TAG_MODEL_MARKERS),
-  // live against the draft.
+  // Mirror of the backend's _prompt_style resolution, live against the draft:
+  // an explicit prompt_style_mode wins, "auto" falls back to the
+  // BOORU_TAG_MODEL_MARKERS heuristic.
   const modelIdent = `${draft.model_base || ''} ${draft.model_name || ''}`.toLowerCase();
-  const promptStyle = ['pony', 'illustrious', 'noob', 'animagine'].some((m) => modelIdent.includes(m))
+  const autoPromptStyle = ['pony', 'illustrious', 'noob', 'animagine'].some((m) => modelIdent.includes(m))
     ? 'tags' : 'natural';
+  const promptStyleMode = draft.prompt_style_mode || 'auto';
+  const promptStyle = promptStyleMode === 'auto' ? autoPromptStyle : promptStyleMode;
   const isPony = modelIdent.includes('pony');
   const checkpointFamily =
     draft.model_name === config?.flux2_model_name ? 'flux' : baseFamily(modelIdent);
@@ -1530,6 +1533,7 @@ export default function ImageStudio({ onBack }) {
         pony_quality_tags: draft.pony_quality_tags,
         booru_subject_mode: draft.booru_subject_mode || 'auto',
         booru_break_separator: draft.booru_break_separator === true,
+        prompt_style_mode: draft.prompt_style_mode || 'auto',
         tag_usage_filter: draft.tag_usage_filter || 'off',
         tag_usage_min_count: Number(draft.tag_usage_min_count) || 0,
         style_suffix: draft.style_suffix,
@@ -1939,14 +1943,35 @@ export default function ImageStudio({ onBack }) {
         {/* Prompting */}
         {tab === 'prompting' && (
         <section className={sectionCls}>
+          <div>
+            <label className={labelCls}>Prompt style</label>
+            <select
+              value={promptStyleMode}
+              onChange={(e) => set('prompt_style_mode', e.target.value)}
+              className={inputCls}
+            >
+              <option value="auto">
+                Auto — detect from the model{draft.model_name ? ` (currently ${autoPromptStyle === 'tags' ? 'booru tags' : 'descriptive text'})` : ''}
+              </option>
+              <option value="tags">Booru tags</option>
+              <option value="natural">Descriptive text</option>
+            </select>
+            <p className="text-xs text-gray-600 mt-1">
+              How prompts are phrased: comma-separated booru tags (tag-trained models) or
+              descriptive sentences. Auto detects from the base model — Pony/Illustrious/NoobAI/Animagine → tags,
+              Flux and everything else → descriptive text.
+            </p>
+          </div>
           {draft.model_name && (
             <div className="text-xs text-gray-500 bg-gray-950/60 border border-gray-800 rounded-lg px-3 py-2">
               Selected model uses the{' '}
               <span className="text-purple-300 font-medium">
                 {promptStyle === 'tags' ? 'booru tag' : 'natural language'}
               </span>{' '}
-              template{isPony ? ', with Pony quality tags prepended' : ''}. Detected from base model
-              {draft.model_base ? ` "${draft.model_base}"` : ' / model name'} — Flux → natural language, Pony/Illustrious/NoobAI/Animagine → tags.
+              template{isPony ? ', with Pony quality tags prepended' : ''}.
+              {promptStyleMode === 'auto'
+                ? ` Detected from base model${draft.model_base ? ` "${draft.model_base}"` : ' / model name'}.`
+                : ' Set by the prompt style choice above.'}
             </div>
           )}
           <div>
