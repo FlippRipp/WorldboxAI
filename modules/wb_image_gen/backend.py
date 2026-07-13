@@ -918,7 +918,13 @@ def _render_template(template: str, narration: str, history: str) -> str:
     return out
 
 
-def _clean_image_prompt(raw: str) -> str:
+def _prompt_cap(cfg: dict) -> int | None:
+    """Novita rejects prompts over MAX_PROMPT_CHARS; a local WebUI chunks long
+    prompts itself, so local mode must never truncate (see CLAUDE.md)."""
+    return None if _provider(cfg) == "local" else MAX_PROMPT_CHARS
+
+
+def _clean_image_prompt(raw: str, cap: int | None = None) -> str:
     text = (raw or "").strip()
     if text.startswith("```"):
         parts = text.split("```")
@@ -928,7 +934,7 @@ def _clean_image_prompt(raw: str) -> str:
             text = rest
     text = text.strip().strip('"').strip()
     text = re.sub(r"\s+", " ", text)
-    return text[:MAX_PROMPT_CHARS]
+    return text if cap is None else text[:cap]
 
 
 def _tag_usage_dict() -> dict[str, int] | None:
@@ -1337,11 +1343,14 @@ async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
     prefix = str(cfg.get("pony_quality_tags") or "").strip() if _is_pony(cfg) else ""
     suffix = str(cfg.get("style_suffix") or "").strip()
 
-    # Trim the scene text, never the prefix/suffix, to fit Novita's cap.
-    reserved = (len(prefix) + 2 if prefix else 0) + (len(suffix) + 2 if suffix else 0)
-    image_prompt = image_prompt[:max(0, MAX_PROMPT_CHARS - reserved)].rstrip(", ")
+    cap = _prompt_cap(cfg)
+    if cap is not None:
+        # Trim the scene text, never the prefix/suffix, to fit Novita's cap.
+        reserved = (len(prefix) + 2 if prefix else 0) + (len(suffix) + 2 if suffix else 0)
+        image_prompt = image_prompt[:max(0, cap - reserved)].rstrip(", ")
     pieces = [p for p in (prefix, image_prompt, suffix) if p]
-    return ", ".join(pieces)[:MAX_PROMPT_CHARS]
+    joined = ", ".join(pieces)
+    return joined if cap is None else joined[:cap]
 
 
 async def _soften_image_prompt(cfg: dict, refused_prompt: str, reason: str,
@@ -1367,10 +1376,10 @@ async def _soften_image_prompt(cfg: dict, refused_prompt: str, reason: str,
             ask, model_preference=cfg.get("prompt_model_preference", "smartest"))
     finally:
         sdk.llm._current_module = ""
-    softened = _clean_image_prompt(raw)
+    softened = _clean_image_prompt(raw, cap=_prompt_cap(cfg))
     if not softened or _looks_like_llm_refusal(softened):
         raise RuntimeError("prompt softener returned no usable prompt")
-    return softened[:MAX_PROMPT_CHARS]
+    return softened
 
 
 # --------------------------------------------------------------------------
@@ -2645,7 +2654,8 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
             if prompt_override:
                 # A verbatim prompt (retry, unrefined studio text) cannot be
                 # re-varied; the batch shares it and differs by seed only.
-                prompts = [_clean_image_prompt(prompt_override)] * image_num
+                prompts = [_clean_image_prompt(prompt_override,
+                                               cap=_prompt_cap(cfg))] * image_num
             else:
                 if sdk is None:
                     raise RuntimeError("no LLM available to write the image prompt")

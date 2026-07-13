@@ -4091,3 +4091,37 @@ def test_generate_endpoint_keyless_local_still_requires_model(tmp_path):
     resp = client.post("/generate", json={"prompt_override": "a castle"})
     assert resp.status_code == 400
     assert "model" in resp.json()["detail"].lower()
+
+
+def test_prompt_cap_is_novita_only(tmp_path):
+    backend = _load_backend(tmp_path)
+    long_reply = "a sprawling city, " * 100          # ~1800 chars
+
+    captured = {}
+    sdk = _make_sdk(reply=long_reply, captured=captured)
+
+    novita_cfg = {**backend._default_config(), "provider": "novita"}
+    novita_prompt = asyncio.run(
+        backend._write_image_prompt(novita_cfg, "scene", "past", sdk))
+    assert len(novita_prompt) <= backend.MAX_PROMPT_CHARS
+
+    local_cfg = {**backend._default_config(), "provider": "local"}
+    local_prompt = asyncio.run(
+        backend._write_image_prompt(local_cfg, "scene", "past", sdk))
+    assert len(local_prompt) > backend.MAX_PROMPT_CHARS
+
+    # The style suffix survives uncapped local prompts too.
+    local_cfg["style_suffix"] = "oil painting"
+    styled = asyncio.run(backend._write_image_prompt(local_cfg, "scene", "past", sdk))
+    assert styled.endswith("oil painting")
+
+
+def test_clean_image_prompt_caps_only_when_asked(tmp_path):
+    backend = _load_backend(tmp_path)
+    long_text = "x" * 3000
+    assert len(backend._clean_image_prompt(long_text)) == 3000
+    assert len(backend._clean_image_prompt(long_text, cap=1024)) == 1024
+    # Novita payload builders keep their own defensive cap regardless.
+    cfg = {**backend._default_config(), "model_name": "m"}
+    payload = backend._novita_payload(cfg, long_text)
+    assert len(payload["request"]["prompt"]) == backend.MAX_PROMPT_CHARS
