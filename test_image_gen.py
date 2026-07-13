@@ -4125,3 +4125,177 @@ def test_clean_image_prompt_caps_only_when_asked(tmp_path):
     cfg = {**backend._default_config(), "model_name": "m"}
     payload = backend._novita_payload(cfg, long_text)
     assert len(payload["request"]["prompt"]) == backend.MAX_PROMPT_CHARS
+
+
+# ---------------------------------------------------------------------------
+# Local WebUI client
+# ---------------------------------------------------------------------------
+
+def test_local_payload_shape(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = {**backend._default_config(), "provider": "local",
+           "model_name": "dreamshaper_8.safetensors [879db523c3]",
+           "width": 832, "height": 1216, "steps": 30, "guidance_scale": 5.5,
+           "sampler_name": "Euler a", "negative_prompt": "  "}
+    payload = backend._local_payload(cfg, "a castle at dusk")
+    assert payload["prompt"] == "a castle at dusk"
+    assert payload["width"] == 832 and payload["height"] == 1216
+    assert payload["steps"] == 30 and payload["cfg_scale"] == 5.5
+    assert payload["sampler_name"] == "Euler a"
+    assert payload["override_settings"]["sd_model_checkpoint"] == \
+        "dreamshaper_8.safetensors [879db523c3]"
+    assert payload["override_settings_restore_afterwards"] is False
+    assert payload["save_images"] is False
+    assert "negative_prompt" not in payload   # blank stays out
+
+    cfg["negative_prompt"] = "blurry"
+    assert backend._local_payload(cfg, "x")["negative_prompt"] == "blurry"
+
+    # No truncation, ever (the 1024 cap is Novita's).
+    long_prompt = "tower, " * 400
+    assert backend._local_payload(cfg, long_prompt)["prompt"] == long_prompt
+
+
+def _swap_local_client(backend, client_factory):
+    """Replace httpx.AsyncClient for the duration of one _local_generate call."""
+    import base64
+    import httpx
+
+    async def call(prompt="a castle"):
+        cfg = {**backend._default_config(), "provider": "local",
+               "model_name": "m", "local_base_url": "http://sdbox:7860"}
+        original = httpx.AsyncClient
+        httpx.AsyncClient = lambda **kw: client_factory(kw)
+        try:
+            return await backend._local_generate(cfg, prompt)
+        finally:
+            httpx.AsyncClient = original
+
+    return call
+
+
+class _LocalResp:
+    def __init__(self, body=None, status_code=200, text=""):
+        self._body = body
+        self.status_code = status_code
+        self.text = text
+
+    def json(self):
+        if self._body is None:
+            raise ValueError("no json")
+        return self._body
+
+
+class _LocalClient:
+    """Fake httpx.AsyncClient returning a canned response (or raising)."""
+    def __init__(self, resp=None, exc=None, captured=None):
+        self._resp, self._exc = resp, exc
+        self.captured = captured if captured is not None else {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, url, json=None, **kw):
+        self.captured["url"] = url
+        self.captured["json"] = json
+        if self._exc is not None:
+            raise self._exc
+        return self._resp
+
+    async def get(self, url, **kw):
+        self.captured["url"] = url
+        if self._exc is not None:
+            raise self._exc
+        return self._resp
+
+
+def test_local_generate_success_decodes_base64(tmp_path):
+    import base64
+    backend = _load_backend(tmp_path)
+    png = b"\x89PNG fake bytes"
+    encoded = base64.b64encode(png).decode()
+
+    for image_field in (encoded, f"data:image/png;base64,{encoded}"):
+        captured = {}
+        call = _swap_local_client(
+            backend,
+            lambda kw, c=captured, f=image_field: _LocalClient(
+                _LocalResp({"images": [f]}), captured=c))
+        data, ext = asyncio.run(call("a castle"))
+        assert data == png and ext == "png"
+        assert captured["url"] == "http://sdbox:7860/sdapi/v1/txt2img"
+        assert captured["json"]["prompt"] == "a castle"
+
+
+def test_local_generate_maps_errors_to_retryability(tmp_path):
+    import httpx
+    backend = _load_backend(tmp_path)
+
+    def run(resp=None, exc=None):
+        call = _swap_local_client(
+            backend, lambda kw: _LocalClient(resp=resp, exc=exc))
+        try:
+            asyncio.run(call())
+        except Exception as e:
+            return e
+        raise AssertionError("expected an error")
+
+    err = run(exc=httpx.ConnectError("refused"))
+    assert isinstance(err, backend.NonRetryableError)
+    assert "http://sdbox:7860" in str(err) and "--api" in str(err)
+
+    err = run(exc=httpx.ReadTimeout("slow render"))
+    assert isinstance(err, RuntimeError)
+    assert not isinstance(err, backend.NonRetryableError)
+
+    assert isinstance(run(resp=_LocalResp(status_code=401)),
+                      backend.NonRetryableError)
+    err = run(resp=_LocalResp({"detail": "Sampler not found"}, status_code=400))
+    assert isinstance(err, backend.NonRetryableError)
+    assert "Sampler not found" in str(err)
+    assert isinstance(run(resp=_LocalResp(status_code=404)),
+                      backend.NonRetryableError)
+
+    err = run(resp=_LocalResp(text="CUDA out of memory", status_code=500))
+    assert isinstance(err, RuntimeError)
+    assert not isinstance(err, backend.NonRetryableError)
+    assert "CUDA out of memory" in str(err)
+
+    err = run(resp=_LocalResp({"images": []}))
+    assert isinstance(err, RuntimeError)
+    assert not isinstance(err, backend.NonRetryableError)
+
+
+def test_generate_image_dispatches_by_provider(tmp_path):
+    backend = _load_backend(tmp_path)
+    _fake_novita(backend, image_bytes=b"novita")
+    _fake_local(backend, image_bytes=b"local")
+
+    novita_cfg = {**backend._default_config(), "api_key": "k", "model_name": "m"}
+    assert asyncio.run(backend._generate_image(novita_cfg, "p")) == (b"novita", "jpg")
+
+    local_cfg = {**backend._default_config(), "provider": "local", "model_name": "m"}
+    assert asyncio.run(backend._generate_image(local_cfg, "p")) == (b"local", "png")
+
+
+def test_local_pipeline_end_to_end(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable_local(backend, interval=2)
+    _fake_local(backend)
+
+    async def run():
+        r = await backend.on_librarian(
+            _state(turn=2, data={"turns_since_image": 1}), _make_sdk())
+        update = r["module_data"][MID]
+        assert update["turns_since_image"] == 0
+        await asyncio.gather(*backend._tasks)
+        return update["last_trigger"]
+
+    record_id = asyncio.run(run())
+    record = backend._read_index()[0]
+    assert record["id"] == record_id
+    assert record["status"] == "done"
+    assert (tmp_path / MID / "images" / record["filename"]).read_bytes() == b"fakepng"

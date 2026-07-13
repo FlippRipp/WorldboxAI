@@ -190,6 +190,11 @@ POLL_INTERVAL_S = 2.0
 POLL_MAX_ITERATIONS = 240          # ~8 minutes
 POLL_MAX_TRANSIENT_FAILURES = 5
 SUBMIT_RETRIES = 2
+# The local WebUI's txt2img is synchronous and a render can take minutes on a
+# weak GPU; batch slots also queue serially inside the WebUI, so a slot's wall
+# time includes its siblings'.
+LOCAL_TXT2IMG_TIMEOUT_S = 900.0
+LOCAL_API_TIMEOUT_S = 15.0         # listing/options/refresh calls
 # Pipeline-level retries: how many EXTRA times each step (prompt writing;
 # submit+poll+download as one unit, since a failed task cannot be re-polled
 # and result URLs expire) is re-run after a retryable failure.
@@ -1622,6 +1627,140 @@ async def _download(image_url: str) -> tuple[bytes, str]:
     raise RuntimeError(f"Image download failed: {last_error}")
 
 
+# --------------------------------------------------------------------------
+# Local WebUI client (A1111 / Forge / reForge / SD.Next, /sdapi/v1/*)
+# --------------------------------------------------------------------------
+
+def _local_base(cfg: dict) -> str:
+    return str(cfg.get("local_base_url") or LOCAL_DEFAULT_BASE).strip().rstrip("/")
+
+
+def _local_auth(cfg: dict):
+    """Basic-auth credentials when the WebUI runs with --api-auth."""
+    user = str(cfg.get("local_auth_user") or "").strip()
+    return (user, str(cfg.get("local_auth_pass") or "")) if user else None
+
+
+def _local_error_detail(resp) -> str:
+    """One legible line from a WebUI error: FastAPI's {"detail": ...},
+    A1111's {"error", "errors"} shape, or a non-JSON body."""
+    try:
+        body = resp.json()
+    except Exception:
+        return (resp.text or "").strip()[:300] or f"HTTP {resp.status_code}"
+    if isinstance(body, dict):
+        detail = body.get("detail") or body.get("error") or body.get("errors")
+        if detail:
+            return str(detail)[:300]
+        return str(body)[:300]
+    return str(body)[:300]
+
+
+def _local_unreachable(cfg: dict, error: Exception) -> str:
+    return (f"Could not reach the local Stable Diffusion WebUI at "
+            f"{_local_base(cfg)} — is it running with --api? ({error})")
+
+
+async def _local_get(cfg: dict, path: str, timeout: float = LOCAL_API_TIMEOUT_S):
+    """GET a /sdapi route and return parsed JSON; every failure becomes one
+    RuntimeError with the actionable connection hint."""
+    import httpx
+    url = f"{_local_base(cfg)}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0),
+                                     auth=_local_auth(cfg)) as client:
+            resp = await client.get(url)
+    except httpx.TransportError as e:
+        raise RuntimeError(_local_unreachable(cfg, e))
+    if resp.status_code in (401, 403):
+        raise RuntimeError("The local WebUI rejected the credentials "
+                           "(--api-auth username/password)")
+    if resp.status_code == 404:
+        raise RuntimeError(f"{path} not found at {_local_base(cfg)} — "
+                           "launch the WebUI with --api")
+    if resp.status_code != 200:
+        raise RuntimeError(f"Local WebUI error {resp.status_code}: "
+                           f"{_local_error_detail(resp)}")
+    return resp.json()
+
+
+def _local_payload(cfg: dict, image_prompt: str) -> dict:
+    # No prompt cap here: local WebUIs chunk long prompts themselves.
+    payload = {
+        "prompt": image_prompt,
+        "width": int(cfg.get("width", 1024)),
+        "height": int(cfg.get("height", 1024)),
+        "steps": int(cfg.get("steps", 28)),
+        "cfg_scale": float(cfg.get("guidance_scale", 7.0)),
+        "sampler_name": str(cfg.get("sampler_name", "DPM++ 2M Karras")),
+        "seed": -1,
+        "batch_size": 1,
+        "n_iter": 1,
+        "send_images": True,
+        "save_images": False,
+        # Selecting the checkpoint per request keeps profiles self-contained;
+        # not restoring afterwards keeps it loaded across a batch.
+        "override_settings": {"sd_model_checkpoint": str(cfg.get("model_name", ""))},
+        "override_settings_restore_afterwards": False,
+    }
+    negative = str(cfg.get("negative_prompt") or "").strip()
+    if negative:
+        payload["negative_prompt"] = negative
+    return payload
+
+
+async def _local_generate(cfg: dict, image_prompt: str) -> tuple[bytes, str]:
+    """One synchronous txt2img render against the local WebUI."""
+    import base64
+    import httpx
+    url = f"{_local_base(cfg)}/sdapi/v1/txt2img"
+    payload = _local_payload(cfg, image_prompt)
+    try:
+        async with httpx.AsyncClient(
+                timeout=httpx.Timeout(LOCAL_TXT2IMG_TIMEOUT_S, connect=10.0),
+                auth=_local_auth(cfg)) as client:
+            resp = await client.post(url, json=payload)
+    except httpx.ConnectError as e:
+        # Retrying in seconds won't start the user's WebUI; fail the record
+        # fast with the actionable message instead.
+        raise NonRetryableError(_local_unreachable(cfg, e))
+    except httpx.TransportError as e:
+        # Timeout or reset mid-render: the next attempt may finish.
+        raise RuntimeError(f"Local WebUI request failed: {e}")
+    if resp.status_code in (401, 403):
+        raise NonRetryableError("The local WebUI rejected the credentials "
+                                "(--api-auth username/password)")
+    if resp.status_code == 404:
+        raise NonRetryableError(f"/sdapi/v1/txt2img not found at "
+                                f"{_local_base(cfg)} — launch the WebUI with --api")
+    if resp.status_code in (400, 422):
+        raise NonRetryableError(f"The local WebUI rejected the request "
+                                f"(HTTP {resp.status_code}): {_local_error_detail(resp)}")
+    if resp.status_code >= 500:
+        # Often a CUDA OOM or a mid-load hiccup; worth a resubmission.
+        raise RuntimeError(f"Local WebUI server error {resp.status_code}: "
+                           f"{_local_error_detail(resp)}")
+    images = (resp.json() or {}).get("images") or []
+    if not images:
+        raise RuntimeError("The local WebUI returned no images")
+    # Some WebUIs return a data URI, others bare base64.
+    data = base64.b64decode(str(images[0]).split(",", 1)[-1])
+    return data, "png"
+
+
+async def _generate_image(cfg: dict, image_prompt: str) -> tuple[bytes, str]:
+    """One provider-agnostic image render — the pipeline's retryable unit.
+    Novita is submit/poll/download in one piece (a failed task cannot be
+    re-polled and its result URL expires); the local WebUI is one blocking
+    call. The _novita_* names resolve as module globals at call time so the
+    test suite's monkeypatch seam keeps working."""
+    if _provider(cfg) == "local":
+        return await _local_generate(cfg, image_prompt)
+    task_id = await _novita_submit(cfg, image_prompt)
+    image_url = await _novita_poll(cfg, task_id)
+    return await _download(image_url)
+
+
 async def _novita_list_models(cfg: dict, query: str, cursor: str, limit: int,
                               types: str = "checkpoint",
                               visibility: str = "") -> dict:
@@ -2702,9 +2841,7 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
 
             async def _generate_once(cell):
                 try:
-                    task_id = await _novita_submit(cfg, cell["prompt"])
-                    image_url = await _novita_poll(cfg, task_id)
-                    return await _download(image_url)
+                    return await _generate_image(cfg, cell["prompt"])
                 except ProviderRefusal as e:
                     # Verbatim user text is never rewritten behind the user's
                     # back; only LLM-written prompts get softened.
