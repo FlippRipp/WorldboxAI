@@ -416,3 +416,22 @@ def test_mutation_schema_feeds_the_reader_both_lists():
 
     # Nothing to report when the character is blank.
     assert asyncio.run(backend.on_mutation_schema(_state(), _make_sdk())) == {}
+
+
+def test_legacy_saves_over_the_cap_are_trimmed_to_the_strongest():
+    backend = _load_backend()
+    effects = [
+        _broken_leg(name="a", severity=2),
+        _broken_leg(name="b", severity=8),
+        _broken_leg(name="c", severity=3),
+        _broken_leg(name="d", severity=8),
+        _broken_leg(name="e", severity=5),
+    ]
+
+    # Strongest kept, ties favoring the earlier (older) entry, order preserved.
+    char = backend.Character.from_dict({"status_effects": effects})
+    assert [e["name"] for e in char.status_effects] == ["b", "d", "e"]
+
+    # The trim persists through the per-turn round trip.
+    result = asyncio.run(backend.on_gather_context(_state(effects), _make_sdk()))
+    assert [e["name"] for e in _effects_of(result)] == ["b", "d", "e"]

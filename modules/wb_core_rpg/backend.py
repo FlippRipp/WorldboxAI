@@ -281,6 +281,14 @@ class Character:
                 effect = _sanitize_status_effect(raw)
                 if effect is not None:
                     c.status_effects.append(effect)
+        if len(c.status_effects) > MAX_STATUS_EFFECTS:
+            # Saves from before the cap existed can carry more: keep the
+            # strongest (ties favor the earlier entry) and drop the rest.
+            keep = sorted(c.status_effects, key=lambda e: e.get("severity", 3), reverse=True)[:MAX_STATUS_EFFECTS]
+            keep_ids = {id(e) for e in keep}
+            dropped = [e["name"] for e in c.status_effects if id(e) not in keep_ids]
+            c.status_effects = [e for e in c.status_effects if id(e) in keep_ids]
+            print(f"[RPG] Trimmed status effects over the cap of {MAX_STATUS_EFFECTS}: dropped {', '.join(dropped)}")
         history = d.get("level_up_history", [])
         c.level_up_history = [e for e in history if isinstance(e, dict)] if isinstance(history, list) else []
         return c
