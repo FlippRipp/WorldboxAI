@@ -1,13 +1,13 @@
 import { useEffect, useState, useRef } from 'react';
 import { api } from './lib/api';
 
-const BLOCK_TYPES = ['static_text', 'engine_context', 'world_context', 'character_context', 'module_prompt'];
+const BLOCK_TYPES = ['static_text', 'engine_context', 'world_context', 'character_context', 'module_prompt', 'chat_history'];
 const ROLES = ['system', 'user', 'assistant'];
 const PLACEMENTS = ['system_relative', 'chat_injection'];
 const CATEGORIES = ['system_prompt', 'post_history', 'narrator', 'world_context', 'character', 'utility', 'other'];
 const GENERATION_TYPES = ['storytelling', 'world_building', 'character_creation', 'narration', 'combat', 'memory', 'validation'];
 
-const DEFAULT_BLOCK_IDS = ['core_narrator_rules', 'world_rules_context', 'player_character_context', 'engine_context', 'storyteller_task'];
+const DEFAULT_BLOCK_IDS = ['core_narrator_rules', 'world_rules_context', 'player_character_context', 'engine_context', 'storyteller_task', 'chat_history'];
 
 const CATEGORY_LABELS = {
   system_prompt: 'System Prompt',
@@ -44,6 +44,12 @@ function getBlockDescription(block) {
     case 'character_context': return 'Player character identity';
     case 'static_text': return (block.config?.text || '').substring(0, 80) + ((block.config?.text || '').length > 80 ? '...' : '') || 'Static prompt text';
     case 'module_prompt': return 'Module-managed prompt block';
+    case 'chat_history': {
+      const turns = block.config?.max_turns;
+      return turns == null
+        ? 'Story chat transcript — all turns'
+        : `Story chat transcript — last ${turns} turn${turns === 1 ? '' : 's'}`;
+    }
     default: return '';
   }
 }
@@ -275,7 +281,7 @@ function EditBlockModal({ editingBlock, macros, showMacros, setShowMacros, onSav
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <label className="text-xs text-gray-400 space-y-1">
               <span>Type</span>
-              <select value={editingBlock.type || 'static_text'} onChange={(e) => onSetEditingBlock({ ...editingBlock, type: e.target.value })} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-sm text-gray-100">
+              <select value={editingBlock.type || 'static_text'} onChange={(e) => onSetEditingBlock({ ...editingBlock, type: e.target.value, ...(e.target.value === 'chat_history' ? { placement: 'system_relative', depth: null } : {}) })} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-sm text-gray-100">
                 {BLOCK_TYPES.map((t) => <option key={t} value={t}>{blockLabel(t)}</option>)}
               </select>
             </label>
@@ -287,7 +293,7 @@ function EditBlockModal({ editingBlock, macros, showMacros, setShowMacros, onSav
             </label>
             <label className="text-xs text-gray-400 space-y-1">
               <span>Placement</span>
-              <select value={editingBlock.placement || 'system_relative'} onChange={(e) => onSetEditingBlock({ ...editingBlock, placement: e.target.value, depth: e.target.value === 'chat_injection' ? (editingBlock.depth ?? 0) : null })} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-sm text-gray-100">
+              <select value={editingBlock.placement || 'system_relative'} disabled={editingBlock.type === 'chat_history'} onChange={(e) => onSetEditingBlock({ ...editingBlock, placement: e.target.value, depth: e.target.value === 'chat_injection' ? (editingBlock.depth ?? 0) : null })} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-sm text-gray-100 disabled:opacity-40">
                 {PLACEMENTS.map((p) => <option key={p} value={p}>{blockLabel(p)}</option>)}
               </select>
             </label>
@@ -352,6 +358,28 @@ function EditBlockModal({ editingBlock, macros, showMacros, setShowMacros, onSav
                 </button>
               </div>
               {showMacros === `edit_${editingBlock.id}` && <MacroPanel macros={macros} onInsert={() => setShowMacros(null)} />}
+            </label>
+          )}
+
+          {editingBlock.type === 'chat_history' && (
+            <label className="block text-xs text-gray-400 space-y-1">
+              <span>Turns to Include (empty = all)</span>
+              <input
+                type="number"
+                min="0"
+                value={editingBlock.config?.max_turns ?? ''}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  onUpdateEditingConfig('max_turns', raw === '' ? null : Math.max(0, parseInt(raw, 10) || 0));
+                }}
+                placeholder="All"
+                className="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100"
+              />
+              <p className="text-[11px] text-gray-500">
+                A turn is one player message plus the replies that follow it. Leave empty to
+                send the entire chat transcript; 0 sends no history at all. The block&apos;s
+                position in the pipeline decides where the transcript appears.
+              </p>
             </label>
           )}
 

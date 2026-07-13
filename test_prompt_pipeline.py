@@ -28,8 +28,173 @@ def test_default_pipeline_compiles_messages():
         "player_character_context",
         "engine_context",
         "storyteller_task",
+        "chat_history",
     ]
     print("Default prompt pipeline compile test passed.")
+
+
+def _history_pipeline(max_turns=None, enabled=True, extra_blocks=None, history_position=-1):
+    blocks = [
+        {
+            "id": "rules",
+            "type": "static_text",
+            "source": "user",
+            "enabled": True,
+            "role_type": "system",
+            "placement": "system_relative",
+            "depth": None,
+            "config": {"text": "Narrate tersely."},
+        },
+        {
+            "id": "chat_history",
+            "type": "chat_history",
+            "source": "engine",
+            "enabled": enabled,
+            "role_type": "system",
+            "placement": "system_relative",
+            "depth": None,
+            "config": {"max_turns": max_turns},
+        },
+    ]
+    if extra_blocks:
+        blocks.extend(extra_blocks)
+    if history_position != -1:
+        block = blocks.pop(1)
+        blocks.insert(history_position, block)
+    return blocks
+
+
+def _three_turn_state():
+    return {
+        "input_text": "I order a drink.",
+        "chat_messages": [
+            {"role": "user", "content": "I enter the city."},
+            {"role": "ai", "content": "The gates creak open."},
+            {"role": "user", "content": "I find the market."},
+            {"role": "ai", "content": "Stalls crowd the square."},
+            {"role": "user", "content": "I walk into the tavern."},
+            {"role": "ai", "content": "The barkeep glares at you."},
+        ],
+    }
+
+
+def test_chat_history_block_limits_turns():
+    compiler = PromptCompiler()
+    compiled = compiler.compile(_three_turn_state(), _history_pipeline(max_turns=2))
+    contents = [message["content"] for message in compiled["messages"]]
+
+    assert contents == [
+        "Narrate tersely.",
+        "I find the market.",
+        "Stalls crowd the square.",
+        "I walk into the tavern.",
+        "The barkeep glares at you.",
+        "I order a drink.",
+    ]
+
+    # A cap larger than the transcript keeps everything.
+    compiled = compiler.compile(_three_turn_state(), _history_pipeline(max_turns=10))
+    assert len(compiled["messages"]) == 8
+
+    # Zero turns drops the transcript but keeps the player input.
+    compiled = compiler.compile(_three_turn_state(), _history_pipeline(max_turns=0))
+    contents = [message["content"] for message in compiled["messages"]]
+    assert contents == ["Narrate tersely.", "I order a drink."]
+    print("Chat history turn limit test passed.")
+
+
+def test_disabled_chat_history_block_omits_transcript():
+    compiler = PromptCompiler()
+    compiled = compiler.compile(_three_turn_state(), _history_pipeline(enabled=False))
+    contents = [message["content"] for message in compiled["messages"]]
+
+    assert contents == ["Narrate tersely.", "I order a drink."]
+    by_id = {entry["id"]: entry for entry in compiled["trace"]}
+    assert by_id["chat_history"]["skipped"]
+    assert by_id["chat_history"]["reason"] == "disabled"
+    print("Disabled chat history block test passed.")
+
+
+def test_pipeline_without_chat_history_block_keeps_legacy_order():
+    # Saved pipelines predating the chat_history block still get the full
+    # transcript appended after the system blocks.
+    compiler = PromptCompiler()
+    pipeline = [block for block in _history_pipeline() if block["type"] != "chat_history"]
+    compiled = compiler.compile(_three_turn_state(), pipeline)
+    contents = [message["content"] for message in compiled["messages"]]
+
+    assert contents[0] == "Narrate tersely."
+    assert contents[1] == "I enter the city."
+    assert contents[-1] == "I order a drink."
+    assert len(contents) == 8
+    print("Legacy pipeline without chat history block test passed.")
+
+
+def test_chat_history_block_position_moves_transcript():
+    compiler = PromptCompiler()
+    post_history_block = {
+        "id": "post_history_note",
+        "type": "static_text",
+        "source": "user",
+        "enabled": True,
+        "role_type": "system",
+        "placement": "system_relative",
+        "depth": None,
+        "config": {"text": "Answer in strict prose."},
+    }
+    pipeline = _history_pipeline(max_turns=1, extra_blocks=[post_history_block], history_position=1)
+    compiled = compiler.compile(_three_turn_state(), pipeline)
+    contents = [message["content"] for message in compiled["messages"]]
+
+    assert contents == [
+        "Narrate tersely.",
+        "I walk into the tavern.",
+        "The barkeep glares at you.",
+        "Answer in strict prose.",
+        "I order a drink.",
+    ]
+    print("Chat history block position test passed.")
+
+
+def test_chat_history_block_validation():
+    compiler = PromptCompiler()
+
+    for bad_config in [{"max_turns": -1}, {"max_turns": "five"}, {"max_turns": True}]:
+        try:
+            compiler.normalize_pipeline(_history_pipeline()[:1] + [
+                {
+                    "id": "chat_history",
+                    "type": "chat_history",
+                    "role_type": "system",
+                    "placement": "system_relative",
+                    "config": bad_config,
+                }
+            ])
+        except PromptPipelineValidationError:
+            continue
+        raise AssertionError(f"Invalid chat history config was not rejected: {bad_config}")
+
+    try:
+        compiler.normalize_pipeline([
+            {
+                "id": "history_a",
+                "type": "chat_history",
+                "role_type": "system",
+                "placement": "system_relative",
+                "config": {},
+            },
+            {
+                "id": "history_b",
+                "type": "chat_history",
+                "role_type": "system",
+                "placement": "system_relative",
+                "config": {},
+            },
+        ])
+    except PromptPipelineValidationError:
+        print("Chat history block validation test passed.")
+        return
+    raise AssertionError("Duplicate chat history blocks were not rejected.")
 
 
 def test_chat_injection_depth_and_veto_order():
@@ -347,6 +512,11 @@ def test_auto_player_action_generation_mock():
 async def run_all_tests():
     test_default_pipeline_compiles_messages()
     test_chat_injection_depth_and_veto_order()
+    test_chat_history_block_limits_turns()
+    test_disabled_chat_history_block_omits_transcript()
+    test_pipeline_without_chat_history_block_keeps_legacy_order()
+    test_chat_history_block_position_moves_transcript()
+    test_chat_history_block_validation()
     test_auto_player_action_prompt()
     test_auto_player_action_generation_mock()
     test_invalid_pipeline_rejected()

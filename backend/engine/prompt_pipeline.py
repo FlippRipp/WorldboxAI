@@ -3,7 +3,7 @@ from copy import deepcopy
 from typing import Any
 
 
-ALLOWED_BLOCK_TYPES = {"static_text", "engine_context", "module_prompt", "world_context", "character_context"}
+ALLOWED_BLOCK_TYPES = {"static_text", "engine_context", "module_prompt", "world_context", "character_context", "chat_history"}
 ALLOWED_PLACEMENTS = {"system_relative", "chat_injection"}
 ALLOWED_ROLES = {"system", "user", "assistant"}
 ALLOWED_CATEGORIES = {"system_prompt", "post_history", "narrator", "world_context", "character", "utility", "other"}
@@ -185,6 +185,23 @@ def default_prompt_pipeline() -> list[dict[str, Any]]:
                 "text": "Describe the outcome of the player's action and the current environment. Write 2-4 concise paragraphs. Do not use bullet points or lists.",
             },
         },
+        {
+            "id": "chat_history",
+            "type": "chat_history",
+            "source": "engine",
+            "enabled": True,
+            "role_type": "system",
+            "placement": "system_relative",
+            "depth": None,
+            "display_name": "Chat History",
+            "category": "utility",
+            "generation_types": None,
+            "config": {
+                # None = the full transcript; N = only the last N player turns
+                # (each with the replies that follow it).
+                "max_turns": None,
+            },
+        },
     ]
 
 
@@ -256,6 +273,7 @@ class PromptCompiler:
             raise PromptPipelineValidationError("Prompt pipeline must be a list of blocks.")
 
         seen_ids = set()
+        has_chat_history = False
         for index, block in enumerate(normalized):
             if not isinstance(block, dict):
                 raise PromptPipelineValidationError(f"Prompt block at index {index} must be an object.")
@@ -293,6 +311,18 @@ class PromptCompiler:
 
             if block_type == "static_text" and not isinstance(block.get("config", {}).get("text"), str):
                 raise PromptPipelineValidationError(f"Static text block {block_id} must define config.text.")
+
+            if block_type == "chat_history":
+                if has_chat_history:
+                    raise PromptPipelineValidationError("Prompt pipeline may only contain one chat_history block.")
+                has_chat_history = True
+                if placement != "system_relative":
+                    raise PromptPipelineValidationError(f"Chat history block {block_id} must use system_relative placement.")
+                max_turns = block.get("config", {}).get("max_turns")
+                if max_turns is not None and (isinstance(max_turns, bool) or not isinstance(max_turns, int) or max_turns < 0):
+                    raise PromptPipelineValidationError(
+                        f"Chat history block {block_id} config.max_turns must be a non-negative integer or null."
+                    )
 
             display_name = block.get("display_name")
             if display_name is not None and not isinstance(display_name, str):
@@ -348,11 +378,22 @@ class PromptCompiler:
         if story_style_block:
             blocks.append(story_style_block)
 
-        system_relative_messages = []
+        # (message, trace_entry) pairs in pipeline order; a None message marks
+        # the slot where the chat history transcript is spliced in.
+        system_entries = []
         chat_injections = []
         trace = []
+        history_block = None
+        has_history_block = False
 
         for block in blocks:
+            is_history = block["type"] == "chat_history"
+            if is_history:
+                if has_history_block:
+                    trace.append(self._trace(block, skipped=True, reason="duplicate chat_history block"))
+                    continue
+                has_history_block = True
+
             if generation_type:
                 block_gen_types = block.get("generation_types")
                 if block_gen_types and generation_type not in block_gen_types:
@@ -363,6 +404,13 @@ class PromptCompiler:
                 trace.append(self._trace(block, skipped=True, reason="disabled"))
                 continue
 
+            if is_history:
+                history_block = block
+                entry = self._trace(block)
+                trace.append(entry)
+                system_entries.append((None, entry))
+                continue
+
             content = self._render_block(block, state)
             if not content.strip():
                 trace.append(self._trace(block, skipped=True, reason="empty"))
@@ -370,19 +418,54 @@ class PromptCompiler:
 
             message = {"role": block["role_type"], "content": content}
             if block["placement"] == "system_relative":
-                system_relative_messages.append(message)
-                trace.append(self._trace(block, message_index=len(system_relative_messages) - 1))
+                entry = self._trace(block)
+                trace.append(entry)
+                system_entries.append((message, entry))
             else:
                 chat_injections.append((block, message))
 
-        chat_messages = self._chat_messages(state)
+        if history_block is not None:
+            max_turns = history_block.get("config", {}).get("max_turns")
+            history_messages = self._chat_history_messages(state, max_turns)
+        elif not has_history_block:
+            # Pipelines without an explicit chat_history block keep the
+            # legacy behavior: the full transcript follows the system blocks.
+            history_messages = self._chat_history_messages(state)
+        else:
+            # A chat_history block exists but is disabled or filtered out:
+            # the transcript is deliberately omitted this generation.
+            history_messages = []
+
+        messages = []
+        chat_start = None
+        for message, entry in system_entries:
+            if message is None:
+                chat_start = len(messages)
+                if history_messages:
+                    entry["message_index"] = len(messages)
+                    messages.extend(history_messages)
+                else:
+                    entry["skipped"] = True
+                    entry["reason"] = "empty"
+                continue
+            entry["message_index"] = len(messages)
+            messages.append(message)
+
+        if not has_history_block:
+            chat_start = len(messages)
+            messages.extend(history_messages)
+        if chat_start is None:
+            chat_start = len(messages)
+
+        messages.append(self._current_input_message(state))
+
         for block, message in chat_injections:
-            insert_index = max(0, len(chat_messages) - block["depth"])
-            chat_messages.insert(insert_index, message)
-            trace.append(self._trace(block, message_index=len(system_relative_messages) + insert_index))
+            insert_index = max(chat_start, len(messages) - block["depth"])
+            messages.insert(insert_index, message)
+            trace.append(self._trace(block, message_index=insert_index))
 
         return {
-            "messages": system_relative_messages + chat_messages,
+            "messages": messages,
             "trace": trace,
         }
 
@@ -493,7 +576,7 @@ class PromptCompiler:
         ]
         return "\n".join(lines)
 
-    def _chat_messages(self, state: dict[str, Any]) -> list[dict[str, str]]:
+    def _chat_history_messages(self, state: dict[str, Any], max_turns: int | None = None) -> list[dict[str, str]]:
         messages = []
         for message in state.get("chat_messages", []):
             role = message.get("role")
@@ -510,15 +593,26 @@ class PromptCompiler:
             if role in {"user", "assistant", "system"}:
                 messages.append({"role": role, "content": content})
 
+        if max_turns is None:
+            return messages
+        if max_turns <= 0:
+            return []
+        # A turn starts at a player message and carries the replies that
+        # follow it. A transcript with fewer turns than the cap (or no player
+        # messages yet, e.g. only an opening narration) is kept whole.
+        user_indices = [index for index, message in enumerate(messages) if message["role"] == "user"]
+        if len(user_indices) > max_turns:
+            messages = messages[user_indices[-max_turns]:]
+        return messages
+
+    def _current_input_message(self, state: dict[str, Any]) -> dict[str, str]:
         input_text = (state.get("input_text") or "").strip()
         if input_text:
-            messages.append({"role": "user", "content": input_text})
-        else:
-            # Empty input = a "continue" turn: no player message, just an
-            # editable instruction to advance the story on its own.
-            continue_prompt = (state.get("continue_prompt") or "").strip() or DEFAULT_CONTINUE_PROMPT
-            messages.append({"role": "user", "content": self.resolve_macros(continue_prompt, state)})
-        return messages
+            return {"role": "user", "content": input_text}
+        # Empty input = a "continue" turn: no player message, just an
+        # editable instruction to advance the story on its own.
+        continue_prompt = (state.get("continue_prompt") or "").strip() or DEFAULT_CONTINUE_PROMPT
+        return {"role": "user", "content": self.resolve_macros(continue_prompt, state)}
 
     def _engine_directive_block(self, block_id: str, display_name: str, text: str,
                                 depth: int = 0) -> dict[str, Any]:
