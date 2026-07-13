@@ -4299,3 +4299,127 @@ def test_local_pipeline_end_to_end(tmp_path):
     assert record["id"] == record_id
     assert record["status"] == "done"
     assert (tmp_path / MID / "images" / record["filename"]).read_bytes() == b"fakepng"
+
+
+# ---------------------------------------------------------------------------
+# Local model browsing
+# ---------------------------------------------------------------------------
+
+SD_MODELS_FIXTURE = [
+    {"title": "dreamshaper_8.safetensors [879db523c3]",
+     "model_name": "dreamshaper_8"},
+    {"title": "ponyDiffusionV6XL.safetensors [67ab2fd8ec]",
+     "model_name": "ponyDiffusionV6XL"},
+    {"title": "noobaiXLNAIXL_vPred10.safetensors", "model_name": "noobaiXLNAIXL_vPred10"},
+    {"model_name": ""},                       # unusable: no title/name
+]
+
+
+def test_infer_local_base_table(tmp_path):
+    backend = _load_backend(tmp_path)
+    cases = {
+        "ponyDiffusionV6XL.safetensors": "Pony",
+        "Illustrious-XL-v1.0.safetensors": "Illustrious",
+        "noobaiXLNAIXL_vPred10.safetensors": "NoobAI",
+        "animagineXL40_v4Opt.safetensors": "Animagine XL",
+        "flux1-dev-fp8.safetensors": "Flux.1 D",
+        "juggernautXL_ragnarok.safetensors": "SDXL 1.0",
+        "dreamshaper_8 sd15": "SD 1.5",
+        "v1-5-pruned-emaonly.safetensors": "SD 1.5",
+        "somethingUnrecognizable.ckpt": "",
+    }
+    for name, expected in cases.items():
+        assert backend._infer_local_base(name) == expected, name
+    # The inferred bases keep prompt-style auto detection working.
+    cfg = {**backend._default_config(), "provider": "local",
+           "model_name": "noobai.safetensors", "model_base": "NoobAI"}
+    assert backend._prompt_style(cfg) == "tags"
+
+
+def test_models_endpoint_lists_local_checkpoints(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable_local(backend)
+
+    async def fake_get(cfg, path, timeout=None):
+        assert path == "/sdapi/v1/sd-models"
+        return SD_MODELS_FIXTURE
+
+    backend._local_get = fake_get
+    client = _client(backend)
+
+    body = client.get("/models").json()
+    names = [m["sd_name"] for m in body["models"]]
+    assert names == ["dreamshaper_8.safetensors [879db523c3]",
+                     "ponyDiffusionV6XL.safetensors [67ab2fd8ec]",
+                     "noobaiXLNAIXL_vPred10.safetensors"]
+    pony = body["models"][1]
+    assert pony["base_model"] == "Pony" and pony["is_sdxl"] is True
+    assert body["next_cursor"] == ""
+
+    # Case-insensitive substring filter over title and model_name.
+    body = client.get("/models", params={"query": "PONY"}).json()
+    assert [m["name"] for m in body["models"]] == ["ponyDiffusionV6XL"]
+
+    # No API key needed in local mode; unreachable WebUI surfaces as 502.
+    async def dead_get(cfg, path, timeout=None):
+        raise RuntimeError("Could not reach the local Stable Diffusion WebUI")
+
+    backend._local_get = dead_get
+    resp = client.get("/models")
+    assert resp.status_code == 502
+    assert "WebUI" in resp.json()["detail"]
+
+
+def test_local_status_and_samplers_endpoints(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable_local(backend)
+    client = _client(backend)
+
+    async def fake_get(cfg, path, timeout=None):
+        if path == "/sdapi/v1/options":
+            return {"sd_model_checkpoint": "dreamshaper_8.safetensors [879db523c3]"}
+        if path == "/sdapi/v1/sd-models":
+            return SD_MODELS_FIXTURE[:2]
+        if path == "/sdapi/v1/samplers":
+            return [{"name": "DPM++ 2M"}, {"name": "Euler a"}, {"nope": 1}]
+        raise AssertionError(path)
+
+    backend._local_get = fake_get
+    body = client.get("/local/status").json()
+    assert body["ok"] is True
+    assert body["checkpoint_count"] == 2
+    assert body["current_checkpoint"].startswith("dreamshaper_8")
+
+    assert client.get("/local/samplers").json()["samplers"] == ["DPM++ 2M", "Euler a"]
+
+    async def dead_get(cfg, path, timeout=None):
+        raise RuntimeError("Could not reach the local Stable Diffusion WebUI at "
+                           "http://127.0.0.1:7860 — is it running with --api?")
+
+    backend._local_get = dead_get
+    body = client.get("/local/status").json()
+    assert body["ok"] is False and "--api" in body["error"]
+    # Sampler list falls back to the static Novita list, never empty.
+    assert client.get("/local/samplers").json()["samplers"] == list(backend.SAMPLERS)
+
+
+def test_local_refresh_reports_partial_failures(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable_local(backend)
+    client = _client(backend)
+    posted = []
+
+    async def fake_post(cfg, path, timeout=None):
+        posted.append(path)
+        if path.endswith("refresh-loras"):
+            raise RuntimeError("refresh-loras exploded")
+        return None
+
+    async def fake_get(cfg, path, timeout=None):
+        return {} if path.endswith("options") else SD_MODELS_FIXTURE[:1]
+
+    backend._local_post = fake_post
+    backend._local_get = fake_get
+    body = client.post("/local/refresh").json()
+    assert posted == ["/sdapi/v1/refresh-checkpoints", "/sdapi/v1/refresh-loras"]
+    assert body["ok"] is False and "refresh-loras exploded" in body["error"]

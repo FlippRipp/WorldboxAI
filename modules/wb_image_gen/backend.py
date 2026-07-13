@@ -1661,15 +1661,16 @@ def _local_unreachable(cfg: dict, error: Exception) -> str:
             f"{_local_base(cfg)} — is it running with --api? ({error})")
 
 
-async def _local_get(cfg: dict, path: str, timeout: float = LOCAL_API_TIMEOUT_S):
-    """GET a /sdapi route and return parsed JSON; every failure becomes one
+async def _local_request(cfg: dict, method: str, path: str,
+                         timeout: float = LOCAL_API_TIMEOUT_S):
+    """Call a /sdapi route and return parsed JSON; every failure becomes one
     RuntimeError with the actionable connection hint."""
     import httpx
     url = f"{_local_base(cfg)}{path}"
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0),
                                      auth=_local_auth(cfg)) as client:
-            resp = await client.get(url)
+            resp = await client.request(method, url)
     except httpx.TransportError as e:
         raise RuntimeError(_local_unreachable(cfg, e))
     if resp.status_code in (401, 403):
@@ -1678,10 +1679,68 @@ async def _local_get(cfg: dict, path: str, timeout: float = LOCAL_API_TIMEOUT_S)
     if resp.status_code == 404:
         raise RuntimeError(f"{path} not found at {_local_base(cfg)} — "
                            "launch the WebUI with --api")
-    if resp.status_code != 200:
+    if resp.status_code not in (200, 204):
         raise RuntimeError(f"Local WebUI error {resp.status_code}: "
                            f"{_local_error_detail(resp)}")
-    return resp.json()
+    try:
+        return resp.json()
+    except Exception:
+        return None
+
+
+async def _local_get(cfg: dict, path: str, timeout: float = LOCAL_API_TIMEOUT_S):
+    return await _local_request(cfg, "GET", path, timeout)
+
+
+async def _local_post(cfg: dict, path: str, timeout: float = LOCAL_API_TIMEOUT_S):
+    return await _local_request(cfg, "POST", path, timeout)
+
+
+def _infer_local_base(ident: str) -> str:
+    """Best-effort base-model metadata for a locally-installed checkpoint from
+    its filename — the WebUI API exposes none. Values match Civitai baseModel
+    strings so _base_family and BOORU_TAG_MODEL_MARKERS resolve; the Image
+    Studio base-model select overrides this per profile when a name gives the
+    heuristics nothing to work with."""
+    low = str(ident or "").lower()
+    if "pony" in low:
+        return "Pony"
+    if "illustrious" in low or "ilxl" in low or "illust" in low:
+        return "Illustrious"
+    if "noob" in low:
+        return "NoobAI"
+    if "animagine" in low:
+        return "Animagine XL"
+    if "flux" in low:
+        return "Flux.1 D"
+    if "xl" in low:
+        return "SDXL 1.0"
+    if re.search(r"sd ?_?1[-.]?5|v1-5|\b1\.5\b", low):
+        return "SD 1.5"
+    return ""
+
+
+async def _local_list_checkpoints(cfg: dict) -> list[dict]:
+    """Installed checkpoints in the dropdown-entry shape /models returns.
+    `title` (filename plus the WebUI's short hash once computed) is what
+    override_settings.sd_model_checkpoint accepts."""
+    body = await _local_get(cfg, "/sdapi/v1/sd-models")
+    models = []
+    for m in body if isinstance(body, list) else []:
+        if not isinstance(m, dict):
+            continue
+        title = str(m.get("title") or m.get("model_name") or "").strip()
+        if not title:
+            continue
+        base = _infer_local_base(f"{title} {m.get('model_name') or ''}")
+        models.append({
+            "sd_name": title,
+            "name": str(m.get("model_name") or title),
+            "is_sdxl": _base_family(base) == "sdxl",
+            "base_model": base,
+            "cover_url": None,
+        })
+    return models
 
 
 def _local_payload(cfg: dict, image_prompt: str) -> dict:
@@ -3463,9 +3522,21 @@ def get_router():
     @router.get("/models")
     async def search_models(query: str = "", cursor: str = "", limit: int = 48):
         cfg = _load_config()
+        q, cur = query.strip(), cursor.strip()
+        if _provider(cfg) == "local":
+            # The whole installed list ships on the first page: it is dozens
+            # of entries, not Novita's thousands, so no cursor is needed.
+            try:
+                models = await _local_list_checkpoints(cfg)
+            except RuntimeError as e:
+                raise HTTPException(status_code=502, detail=str(e))
+            if q:
+                low = q.lower()
+                models = [m for m in models
+                          if low in m["sd_name"].lower() or low in m["name"].lower()]
+            return {"models": models, "next_cursor": "", "effective_query": q}
         if not cfg.get("api_key"):
             raise HTTPException(status_code=400, detail="No API key configured")
-        q, cur = query.strip(), cursor.strip()
         try:
             body = await _novita_list_models(cfg, q, cur, limit)
             models = _public_checkpoints(body)
@@ -3488,6 +3559,51 @@ def get_router():
             })
         return {"models": models, "next_cursor": next_cursor,
                 "effective_query": effective_query}
+
+    @router.get("/local/status")
+    async def local_status():
+        """Connection test for the Image Studio setup card. Always 200 — the
+        UI renders {ok: false, error} inline instead of a request failure."""
+        cfg = _load_config()
+        try:
+            options, models = await asyncio.gather(
+                _local_get(cfg, "/sdapi/v1/options"),
+                _local_get(cfg, "/sdapi/v1/sd-models"))
+        except RuntimeError as e:
+            return {"ok": False, "base_url": _local_base(cfg), "error": str(e)}
+        current = str((options if isinstance(options, dict) else {})
+                      .get("sd_model_checkpoint") or "")
+        return {"ok": True, "base_url": _local_base(cfg),
+                "checkpoint_count": len(models if isinstance(models, list) else []),
+                "current_checkpoint": current}
+
+    @router.get("/local/samplers")
+    async def local_samplers():
+        """The WebUI's own sampler list; the static Novita list on any error
+        so the select never renders empty."""
+        cfg = _load_config()
+        try:
+            body = await _local_get(cfg, "/sdapi/v1/samplers")
+            names = [str(s.get("name")) for s in (body if isinstance(body, list) else [])
+                     if isinstance(s, dict) and s.get("name")]
+        except RuntimeError:
+            names = []
+        return {"samplers": names or list(SAMPLERS)}
+
+    @router.post("/local/refresh")
+    async def local_refresh():
+        """Make the WebUI rescan its model folders, then report status."""
+        cfg = _load_config()
+        errors = []
+        for path in ("/sdapi/v1/refresh-checkpoints", "/sdapi/v1/refresh-loras"):
+            try:
+                await _local_post(cfg, path, timeout=60.0)
+            except RuntimeError as e:
+                errors.append(str(e))
+        status = await local_status()
+        if errors and status.get("ok"):
+            status = {**status, "ok": False, "error": "; ".join(errors)}
+        return status
 
     @router.get("/civitai/loras")
     async def civitai_loras(query: str = "", base_model: str = "", lora_type: str = "LORA",
