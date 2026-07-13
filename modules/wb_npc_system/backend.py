@@ -383,6 +383,44 @@ Respond with ONLY a JSON array:
 
 RECENT_STORY_ENTRIES = 3
 
+# Tokens too generic to identify a character by ("The Hooded Stranger" must not
+# alias "The Grey Warden" just because both start with "the").
+NAME_STOPWORDS = {"the", "of", "a", "an", "and"}
+
+
+def _name_tokens(name: str) -> set[str]:
+    return {t for t in re.split(r"[^\w']+", str(name).lower())
+            if len(t) >= 3 and t not in NAME_STOPWORDS}
+
+
+def _same_character_name(a: str, b: str) -> bool:
+    """Loose identity check between two character names: exact match
+    (case-insensitive) or one name's tokens a subset of the other's, so
+    "Kara" and "Kara Vane" or "Borin" and "Borin Ironvein" count as the same
+    character. An epithet and a real name never match here -- that
+    reconciliation needs story context and is the capture LLM's job."""
+    a_l = str(a).strip().lower()
+    b_l = str(b).strip().lower()
+    if not a_l or not b_l:
+        return False
+    if a_l == b_l:
+        return True
+    ta, tb = _name_tokens(a_l), _name_tokens(b_l)
+    return bool(ta and tb and (ta <= tb or tb <= ta))
+
+
+def _find_by_name(name: str, bank: dict) -> dict | None:
+    """Resolve a story name to a bank record: exact name first, then a loose
+    match -- but only when it is unambiguous (exactly one candidate)."""
+    target = str(name).strip().lower()
+    if not target:
+        return None
+    for npc in bank.values():
+        if str(npc.get("name", "")).strip().lower() == target:
+            return npc
+    loose = [npc for npc in bank.values() if _same_character_name(name, npc.get("name", ""))]
+    return loose[0] if len(loose) == 1 else None
+
 
 def _named_in_recent_story(npc: dict, state: dict) -> bool:
     """Whether the character is mentioned by name in the last few story turns.
@@ -393,6 +431,21 @@ def _named_in_recent_story(npc: dict, state: dict) -> bool:
         return False
     recent = " ".join(str(h) for h in state.get("history", [])[-RECENT_STORY_ENTRIES:])
     return bool(re.search(rf"\b{re.escape(name)}\b", recent, re.IGNORECASE))
+
+
+def _named_in_latest_story(npc: dict, state: dict) -> bool:
+    """Whether this turn's narration names the character. Token-tolerant --
+    "Borin Ironvein" counts when the story says just "Borin" -- because it is
+    used to confirm a pending introduction the storyteller was explicitly
+    instructed to make, where a strict full-name match would miss it."""
+    history = state.get("history", [])
+    if not history:
+        return False
+    latest = str(history[-1])
+    return any(
+        re.search(rf"\b{re.escape(t)}\b", latest, re.IGNORECASE)
+        for t in _name_tokens(npc.get("name", ""))
+    )
 
 
 def _presence_pin_fresh(npc: dict, turn) -> bool:
@@ -681,35 +734,114 @@ def _known_names(bank: dict, state: dict) -> set[str]:
 
 
 async def on_mutation_schema(state: dict, sdk) -> dict | None:
-    """Ask the reader to flag significant named characters the storyteller
+    """Dynamic reader schema. Two jobs: (1) spell out the ids of unmet bank
+    characters so the reader can report an introduction by a VALID npc_id --
+    the reader only ever sees the story text plus this schema, so without the
+    roster every introduction is reported with a hallucinated id and silently
+    dropped, leaving the character unintroduced, out of the storyteller's
+    context, drifting from their record, and ripe for duplicate capture.
+    (2) Ask the reader to flag significant characters the storyteller
     introduced on its own, excluding everyone we already know. Reuses the
     reader pass so no extra per-turn LLM call is spent."""
-    if not _config(state).get("capture_story_characters", True):
-        return None
+    bank = _get_bank(state)
+    schema = {}
 
-    known = sorted(n for n in _known_names(_get_bank(state), state) if n)
-    known_list = ", ".join(known) if known else "(none yet)"
-    return {
-        "story_characters": (
-            "array of objects: {name: string, descriptor: string (who they are / what "
-            "they did this scene), evidence: string (brief quote or action from the scene)} "
-            "for characters who materially speak or act in this scene and are NOT already "
-            "known. Use the character's name; if the story has not named them yet but they "
-            "clearly matter, coin a short distinctive title-case epithet from how the story "
-            "refers to them (e.g. 'The Hooded Stranger', 'The One-Eyed Innkeeper') and use "
-            "that as the name. "
-            f"Already-known characters (exclude these, case-insensitive): {known_list} -- "
-            "some of these are epithets for characters not yet named by the story; match "
-            "them by identity, not exact wording. "
-            "Omit incidental extras with no story weight (a passing guard, the crowd), "
-            "the player, and anyone already known."
+    unmet = [n for n in bank.values()
+             if not n.get("introduced") and n.get("status") == "unintroduced"]
+    if unmet:
+        roster = "; ".join(f'{n["id"]} = "{n.get("name", "?")}"' for n in unmet)
+        schema["npc_introductions"] = (
+            "array of objects: {npc_id: string (MUST be an id from the list below), "
+            "name: string (the name the story uses for them), first_impression: string "
+            "(one sentence describing how they met the player), notes: string (optional "
+            "evolving observations)} -- report each listed character who appears in "
+            "person in this scene for the first time. Known-but-unmet characters: "
+            f"{roster}. The story may render a name slightly differently (shortened, "
+            "a title added) -- match by identity and always use the npc_id from the "
+            "list. Never report a character who is not on the list."
         )
-    }
+    else:
+        schema["npc_introductions"] = (
+            "always an empty array -- there are no unmet characters who could be introduced."
+        )
+
+    if not _config(state).get("capture_story_characters", True):
+        return schema
+
+    known = sorted(n for n in _known_names(bank, state) if n)
+    known_list = ", ".join(known) if known else "(none yet)"
+    schema["story_characters"] = (
+        "array of objects: {name: string, descriptor: string (who they are / what "
+        "they did this scene), evidence: string (brief quote or action from the scene)} "
+        "for characters who materially speak or act in this scene and are NOT already "
+        "known. Use the character's name; if the story has not named them yet but they "
+        "clearly matter, coin a short distinctive title-case epithet from how the story "
+        "refers to them (e.g. 'The Hooded Stranger', 'The One-Eyed Innkeeper') and use "
+        "that as the name. "
+        f"Already-known characters (exclude these, case-insensitive): {known_list} -- "
+        "some of these are epithets for characters not yet named by the story; match "
+        "them by identity, not exact wording. "
+        "Omit incidental extras with no story weight (a passing guard, the crowd), "
+        "the player, and anyone already known."
+    )
+    return schema
+
+
+async def _introduce_existing(npc: dict, state: dict, sdk, memory_text: str = "") -> None:
+    """Bring an existing bank character into play: everything a story
+    introduction sets, shared by the reader-reported path, the pending-
+    introduction fallback, and duplicate-capture resolution."""
+    turn = state.get("turn", 0)
+    npc["introduced"] = True
+    npc["met_turn"] = turn
+    npc["status"] = "active"
+
+    if npc.get("encounter_type") == "encounter":
+        npc["encounter_type"] = "location_bound"
+        npc["location_node_id"] = state.get("player_location_node_id")
+        npc["location_region"] = state.get("player_location_region")
+        npc["location_layer_id"] = state.get("player_location_layer_id")
+
+    npc["last_interaction_turn"] = turn
+
+    await sdk.memory.remember(
+        npc["id"], memory_text or f"Met {npc.get('name', 'someone')}.", turn, importance=6,
+    )
+    if _config(state).get("embed_profiles", True):
+        await _embed_profile(npc, turn, sdk)
+    print(f"[NPC System] {npc.get('name')} ({npc['id']}) introduced at turn {turn}")
+
+
+def _is_epithet(name: str) -> bool:
+    return str(name).strip().lower().startswith("the ")
+
+
+async def _maybe_adopt_revealed_name(npc: dict, story_name: str, state: dict, sdk) -> bool:
+    """When a character tracked under a coined epithet ('The Hooded Stranger')
+    turns out to have a real name in the story, rename the record instead of
+    letting the real name spawn a duplicate."""
+    story_name = str(story_name).strip()
+    if (not story_name
+            or _same_character_name(story_name, npc.get("name", ""))
+            or not _is_epithet(npc.get("name", ""))
+            or _is_epithet(story_name)):
+        return False
+    old = npc.get("name", "")
+    npc["name"] = story_name
+    notes = str(npc.get("notes", "")).strip()
+    npc["notes"] = f"{notes} Formerly tracked as {old}.".strip()
+    _log_change(npc, state.get("turn", 0),
+                f"Story revealed {old} is named {story_name}", ["name"], "story")
+    await _refresh_profile_embedding(npc, ["name"], state, sdk)
+    return True
 
 
 async def _capture_story_characters(mutation: dict, state: dict, bank: dict, sdk) -> bool:
     """Generate full profiles for significant characters the story introduced on
-    its own, add them to the bank as introduced NPCs, and embed them into RAG."""
+    its own, add them to the bank as introduced NPCs, and embed them into RAG.
+    Reported characters who are actually existing bank characters -- under the
+    same name, a variant of it, or (LLM-resolved) a different name entirely --
+    are introduced in place instead of duplicated."""
     if not _config(state).get("capture_story_characters", True):
         return False
 
@@ -719,32 +851,63 @@ async def _capture_story_characters(mutation: dict, state: dict, bank: dict, sdk
     if not isinstance(reported, list) or not reported:
         return False
 
-    known = _known_names(bank, state)
+    player = _player_name(state)
+    turn = state.get("turn", 0)
+    added = False
     pending = []
-    seen = set()
     for entry in reported:
         if not isinstance(entry, dict):
             continue
         name = str(entry.get("name", "")).strip()
-        key = name.lower()
-        if not name or key in known or key in seen:
+        if not name or (player and _same_character_name(name, player)):
             continue
-        seen.add(key)
+        if any(_same_character_name(name, p["name"]) for p in pending):
+            continue
+        descriptor = str(entry.get("descriptor", "")).strip()
+
+        # A name variant of a character already in the bank is that character,
+        # not a new one: introduce them if the story just put them on stage.
+        match = _find_by_name(name, bank)
+        if match:
+            if not match.get("introduced"):
+                await _introduce_existing(match, state, sdk,
+                                          memory_text=descriptor or f"Met {match.get('name', name)}.")
+                added = True
+            continue
+
         pending.append({
             "name": name,
-            "descriptor": str(entry.get("descriptor", "")).strip(),
+            "descriptor": descriptor,
             "evidence": str(entry.get("evidence", "")).strip(),
         })
 
     if not pending:
-        return False
+        return added
 
-    turn = state.get("turn", 0)
     scene = "\n".join(str(h) for h in state.get("history", [])[-3:])[-2500:]
     listing = "\n".join(
         f"- {p['name']}: {p['descriptor']}" + (f" (in the scene: {p['evidence']})" if p["evidence"] else "")
         for p in pending
     )
+
+    roster_section = ""
+    dedup_rule = ""
+    if bank:
+        roster = "\n".join(
+            f"- {npc['id']} | {npc.get('name', '?')} ({npc.get('archetype', '')}): {npc.get('pitch', '')}"
+            for npc in bank.values()
+        )
+        roster_section = f"""
+
+CHARACTERS ALREADY ON RECORD (for identity checks -- these are already tracked):
+{roster}"""
+        dedup_rule = ("\n\nIMPORTANT -- no duplicates: compare each character to profile against the "
+                      "characters already on record. If one of them is actually an existing character "
+                      "appearing under a different name, spelling, title, or epithet (or the story "
+                      "finally revealed the real name of a character recorded under an epithet), do "
+                      'NOT build a profile for them. Instead return {"existing_npc_id": "<their '
+                      'npc_id from the record list>", "name": "<the name the story now uses>"} for '
+                      "that character. Only profile genuinely new characters.")
 
     prompt = f"""You are a character designer for a text RPG. The story just introduced the following characters on its own. Build a full character record for EACH one, staying faithful to how they appear in the scene — do not contradict it, and infer sensible details where the scene is silent.
 
@@ -752,9 +915,9 @@ SCENE:
 {scene}
 
 CHARACTERS TO PROFILE (use these exact names):
-{listing}
+{listing}{roster_section}
 
-Some of these names may be descriptive epithets for characters the story has not named yet (e.g. 'The Hooded Stranger'). Keep such an epithet as the name exactly as given -- do NOT invent a real name for them; the record is renamed once the story reveals one.
+Some of these names may be descriptive epithets for characters the story has not named yet (e.g. 'The Hooded Stranger'). Keep such an epithet as the name exactly as given -- do NOT invent a real name for them; the record is renamed once the story reveals one.{dedup_rule}
 
 For each character return:
 - name (exactly as given above)
@@ -773,13 +936,13 @@ Respond with ONLY valid JSON:
         parsed = _parse_json_block(result)
     except Exception as e:
         print(f"[NPC System] Story-character capture failed: {e}")
-        return False
+        return added
 
     if not isinstance(parsed, dict):
-        return False
+        return added
     new_npcs = parsed.get("npcs", [])
     if not isinstance(new_npcs, list) or not new_npcs:
-        return False
+        return added
 
     location = (
         state.get("player_location_node_id"),
@@ -787,14 +950,31 @@ Respond with ONLY valid JSON:
         state.get("player_location_layer_id"),
     )
 
-    added = False
     for npc_data in new_npcs:
         if not isinstance(npc_data, dict):
             continue
-        name = str(npc_data.get("name", "")).strip()
-        if not name or name.lower() in known:
+
+        # The profiler recognized a reported "new" character as an existing
+        # record: introduce/rename that record instead of duplicating it.
+        existing_id = str(npc_data.get("existing_npc_id") or "").strip()
+        if existing_id:
+            npc = bank.get(existing_id)
+            if not npc:
+                continue
+            story_name = str(npc_data.get("name", "")).strip()
+            descriptor = next(
+                (p["descriptor"] for p in pending if _same_character_name(p["name"], story_name)), "")
+            if await _maybe_adopt_revealed_name(npc, story_name, state, sdk):
+                added = True
+            if not npc.get("introduced"):
+                await _introduce_existing(npc, state, sdk,
+                                          memory_text=descriptor or f"Met {npc.get('name', story_name)}.")
+                added = True
             continue
-        known.add(name.lower())
+
+        name = str(npc_data.get("name", "")).strip()
+        if not name or _find_by_name(name, bank) or (player and _same_character_name(name, player)):
+            continue
 
         npc_id, record = _build_npc_record(
             npc_data, turn, bank, introduced=True, source="story", location=location,
@@ -802,7 +982,7 @@ Respond with ONLY valid JSON:
         record["last_interaction_turn"] = turn
         bank[npc_id] = record
 
-        descriptor = next((p["descriptor"] for p in pending if p["name"].lower() == name.lower()), "")
+        descriptor = next((p["descriptor"] for p in pending if _same_character_name(p["name"], name)), "")
         await sdk.memory.remember(npc_id, descriptor or f"Encountered {name}.", turn, importance=6)
         if _config(state).get("embed_profiles", True):
             await _embed_profile(record, turn, sdk)
@@ -811,6 +991,24 @@ Respond with ONLY valid JSON:
         print(f"[NPC System] Captured story character {name} ({npc_id}) at turn {turn}")
 
     return added
+
+
+def _resolve_intro_npc(intro: dict, bank: dict) -> dict | None:
+    """Resolve a reader-reported introduction to a bank record. Reader models
+    regularly echo the character's name (or a hallucinated id) instead of the
+    bank id, so fall back to name matching among unmet characters -- dropping
+    the introduction silently is what leaves records unintroduced and lets the
+    same character be captured again as a duplicate."""
+    npc_id = str(intro.get("npc_id", "") or "").strip()
+    if npc_id in bank:
+        return bank[npc_id]
+    for candidate in (npc_id, str(intro.get("name", "") or "").strip()):
+        if not candidate:
+            continue
+        match = _find_by_name(candidate, bank)
+        if match and not match.get("introduced"):
+            return match
+    return None
 
 
 async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict | None:
@@ -825,22 +1023,9 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict | None:
     for intro in introductions:
         if not isinstance(intro, dict):
             continue
-        npc_id = intro.get("npc_id", "")
-        if not npc_id or npc_id not in bank:
+        npc = _resolve_intro_npc(intro, bank)
+        if npc is None or npc.get("introduced"):
             continue
-
-        npc = bank[npc_id]
-        npc["introduced"] = True
-        npc["met_turn"] = turn
-        npc["status"] = "active"
-
-        if npc.get("encounter_type") == "encounter":
-            npc["encounter_type"] = "location_bound"
-            npc["location_node_id"] = state.get("player_location_node_id")
-            npc["location_region"] = state.get("player_location_region")
-            npc["location_layer_id"] = state.get("player_location_layer_id")
-
-        npc["last_interaction_turn"] = turn
 
         impression = intro.get("first_impression", "")
         if impression:
@@ -851,14 +1036,23 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict | None:
             existing = npc.get("notes", "")
             npc["notes"] = f"{existing} {notes}".strip()
 
-        memory_text = impression or notes or f"Met {npc['name']}."
-        await sdk.memory.remember(npc_id, memory_text, turn, importance=6)
-
-        if _config(state).get("embed_profiles", True):
-            await _embed_profile(npc, turn, sdk)
-
+        await _introduce_existing(npc, state, sdk,
+                                  memory_text=impression or notes or f"Met {npc['name']}.")
         updated = True
-        print(f"[NPC System] {npc['name']} ({npc_id}) introduced at turn {turn}")
+
+    # Fallback for the turn's planned introduction: the storyteller was
+    # explicitly told to bring this character on stage, so if the reader
+    # failed to report it by a resolvable id but the narration names them,
+    # register the introduction anyway. Otherwise the record stays
+    # unintroduced while the character walks the story -- the exact split
+    # that ends in duplicate capture.
+    npc_module_data = state.get("module_data", {}).get("wb_npc_system", {})
+    pending_id = npc_module_data.get("pending_introduction")
+    if pending_id:
+        npc = bank.get(pending_id)
+        if npc and not npc.get("introduced") and _named_in_latest_story(npc, state):
+            await _introduce_existing(npc, state, sdk)
+            updated = True
 
     if await _capture_story_characters(mutation, state, bank, sdk):
         updated = True
@@ -888,7 +1082,11 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict | None:
         updated = True
         print(f"[NPC System] {npc['name']} ({npc_id}) {'joins' if joining else 'leaves'} the party at turn {turn}")
 
-    if updated:
+    # Always clear a consumed pending introduction, even when nothing else
+    # changed: leaving it set re-renders the "introduce this character" block
+    # every following turn, making the storyteller re-introduce someone who is
+    # already in the scene.
+    if updated or pending_id or npc_module_data.get("introduction_reason"):
         return _set_bank(
             {"pending_introduction": None, "introduction_reason": None},
             bank,

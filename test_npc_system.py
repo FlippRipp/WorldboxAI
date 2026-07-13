@@ -180,6 +180,165 @@ def test_capture_excludes_the_player():
     assert calls["generate_count"] == 0
 
 
+# ── Duplicate prevention: introductions must land on the existing record ─────
+
+def _unmet_npc(npc_id, name, **overrides):
+    npc = {
+        "id": npc_id, "name": name, "race": "human", "gender": "male",
+        "appearance": "Weathered.", "archetype": "smith",
+        "personality": ["gruff", "loyal", "proud"], "role": "ally",
+        "pitch": f"{name} owes the player a debt.",
+        "encounter_type": "encounter", "introduced": False,
+        "status": "unintroduced", "notes": "",
+    }
+    npc.update(overrides)
+    return npc
+
+
+def test_intro_resolves_by_name_when_reader_id_is_wrong():
+    # Reader models regularly echo the character's name (or invent an id)
+    # instead of the bank id; the introduction must still land on the record
+    # instead of being silently dropped.
+    backend = _load_backend()
+    sdk, calls = _make_sdk()
+    bank = {"npc_1": _unmet_npc("npc_1", "Borin Ironvein")}
+    mutation = {"npc_introductions": [
+        {"npc_id": "npc_borin", "name": "Borin", "first_impression": "Met Borin at his forge."}
+    ]}
+
+    result = asyncio.run(backend.on_mutate_state(mutation, _state(bank), sdk))
+
+    npc = _bank_from_result(result)["npc_1"]
+    assert npc["introduced"] is True
+    assert any("Met Borin at his forge." in c["text"] for c in calls["remember"])
+
+
+def test_intro_skips_already_introduced_character():
+    # Re-reporting a met character must not reset their record or add another
+    # "met them" memory.
+    backend = _load_backend()
+    sdk, calls = _make_sdk()
+    bank = {"npc_1": _unmet_npc("npc_1", "Borin", introduced=True, status="active")}
+    mutation = {"npc_introductions": [{"npc_id": "npc_1", "first_impression": "Met again."}]}
+
+    result = asyncio.run(backend.on_mutate_state(mutation, _state(bank), sdk))
+
+    assert result is None
+    assert calls["remember"] == []
+
+
+def _pending_state(bank, pending_id, history):
+    state = _state(bank, history=history)
+    state["module_data"]["wb_npc_system"]["pending_introduction"] = pending_id
+    state["module_data"]["wb_npc_system"]["introduction_reason"] = "The scene calls for it."
+    return state
+
+
+def test_pending_introduction_lands_when_narration_names_character():
+    # The storyteller was explicitly told to introduce this character. If the
+    # reader fails to report it but the narration names them (even partially),
+    # the introduction still registers -- otherwise the record stays unmet
+    # while the character walks the story, the exact split that later gets
+    # them captured as a duplicate.
+    backend = _load_backend()
+    sdk, _ = _make_sdk()
+    bank = {"npc_1": _unmet_npc("npc_1", "Borin Ironvein")}
+    state = _pending_state(bank, "npc_1", ["Borin looks up from the anvil and nods."])
+
+    result = asyncio.run(backend.on_mutate_state({}, state, sdk))
+
+    npc = _bank_from_result(result)["npc_1"]
+    assert npc["introduced"] is True
+    assert result["module_data"]["wb_npc_system"]["pending_introduction"] is None
+
+
+def test_pending_introduction_cleared_even_when_not_woven_in():
+    # A stale pending id would re-render the "introduce this character" block
+    # every turn, making the storyteller re-introduce someone repeatedly.
+    backend = _load_backend()
+    sdk, _ = _make_sdk()
+    bank = {"npc_1": _unmet_npc("npc_1", "Borin Ironvein")}
+    state = _pending_state(bank, "npc_1", ["The rain hammers the empty street."])
+
+    result = asyncio.run(backend.on_mutate_state({}, state, sdk))
+
+    assert result["module_data"]["wb_npc_system"]["pending_introduction"] is None
+    assert _bank_from_result(result)["npc_1"]["introduced"] is False
+
+
+def test_capture_name_variant_introduces_existing_record():
+    # "Kara" in the reader's report is the bank's "Kara Vane" -- the existing
+    # record is introduced instead of a duplicate being created, without
+    # spending an LLM call.
+    backend = _load_backend()
+    sdk, calls = _make_sdk()
+    bank = {"npc_1": _unmet_npc("npc_1", "Kara Vane")}
+    mutation = {"story_characters": [
+        {"name": "Kara", "descriptor": "a smuggler at the docks", "evidence": "She waved."}
+    ]}
+
+    result = asyncio.run(backend.on_mutate_state(mutation, _state(bank), sdk))
+
+    new_bank = _bank_from_result(result)
+    assert list(new_bank) == ["npc_1"]
+    assert new_bank["npc_1"]["introduced"] is True
+    assert calls["generate_count"] == 0
+    assert any("smuggler at the docks" in c["text"] for c in calls["remember"])
+
+
+def test_capture_llm_resolves_revealed_name_to_epithet_record():
+    # The story reveals that "The Hooded Stranger" is called Veyra. String
+    # matching cannot connect the two, so the capture prompt carries the
+    # existing roster and the profiler answers with existing_npc_id; the
+    # record is renamed and introduced instead of duplicated.
+    backend = _load_backend()
+    reply = json.dumps({"npcs": [{"existing_npc_id": "npc_1", "name": "Veyra"}]})
+    sdk, calls = _make_sdk(reply)
+    bank = {"npc_1": _unmet_npc("npc_1", "The Hooded Stranger")}
+    mutation = {"story_characters": [
+        {"name": "Veyra", "descriptor": "the stranger, finally named", "evidence": "'I am Veyra.'"}
+    ]}
+
+    result = asyncio.run(backend.on_mutate_state(mutation, _state(bank), sdk))
+
+    new_bank = _bank_from_result(result)
+    assert list(new_bank) == ["npc_1"]
+    npc = new_bank["npc_1"]
+    assert npc["name"] == "Veyra"
+    assert npc["introduced"] is True
+    assert "Formerly tracked as The Hooded Stranger." in npc["notes"]
+    # The profiler saw the existing roster to match identities against.
+    assert "npc_1" in calls["prompts"][0] and "The Hooded Stranger" in calls["prompts"][0]
+
+
+def test_capture_llm_duplicate_of_introduced_character_creates_nothing():
+    # The profiler flags the reported "new" character as an already-met
+    # record: nothing is created, renamed, or re-remembered. (An epithet
+    # reported for a character with a real name never overwrites it.)
+    backend = _load_backend()
+    reply = json.dumps({"npcs": [{"existing_npc_id": "npc_1", "name": "The Grey Guide"}]})
+    sdk, calls = _make_sdk(reply)
+    bank = {"npc_1": _unmet_npc("npc_1", "Mara", introduced=True, status="active")}
+    mutation = {"story_characters": [
+        {"name": "The Grey Guide", "descriptor": "a grey-cloaked guide", "evidence": "x"}
+    ]}
+
+    result = asyncio.run(backend.on_mutate_state(mutation, _state(bank), sdk))
+
+    assert result is None or list(_bank_from_result(result)) == ["npc_1"]
+    assert calls["remember"] == []
+    assert bank["npc_1"]["name"] == "Mara"
+
+
+def test_same_character_name_matching():
+    backend = _load_backend()
+    assert backend._same_character_name("Kara", "Kara Vane")
+    assert backend._same_character_name("Borin Ironvein", "borin")
+    assert not backend._same_character_name("The Hooded Stranger", "The Grey Warden")
+    assert not backend._same_character_name("Veyra", "The Hooded Stranger")
+    assert not backend._same_character_name("", "Kara")
+
+
 # ── Part B: dynamic mutation schema ──────────────────────────────────────────
 
 def test_mutation_schema_lists_known_names_to_exclude():
@@ -207,12 +366,40 @@ def test_mutation_schema_asks_for_unnamed_epithets():
     assert "incidental extras" in desc
 
 
-def test_mutation_schema_disabled_returns_none():
+def test_mutation_schema_disabled_omits_story_characters():
+    # The capture toggle only controls story-character capture; the schema
+    # still tells the reader which unmet characters it may introduce.
     backend = _load_backend()
     sdk, _ = _make_sdk()
     state = _state({}, mutation_config={"capture_story_characters": False})
 
-    assert asyncio.run(backend.on_mutation_schema(state, sdk)) is None
+    schema = asyncio.run(backend.on_mutation_schema(state, sdk))
+    assert "story_characters" not in schema
+    assert "npc_introductions" in schema
+
+
+def test_mutation_schema_lists_unmet_character_ids():
+    # The reader only ever sees the story text plus this schema, so the bank
+    # ids of unmet characters must be spelled out -- otherwise it cannot
+    # report an introduction by a valid npc_id.
+    backend = _load_backend()
+    sdk, _ = _make_sdk()
+    bank = {
+        "npc_1": {"id": "npc_1", "name": "Borin Ironvein",
+                  "introduced": False, "status": "unintroduced"},
+        "npc_2": {"id": "npc_2", "name": "Mara", "introduced": True, "status": "active"},
+    }
+
+    schema = asyncio.run(backend.on_mutation_schema(_state(bank), sdk))
+
+    desc = schema["npc_introductions"]
+    assert "npc_1" in desc and "Borin Ironvein" in desc
+    # Already-met characters are not introduction candidates.
+    assert "npc_2" not in desc
+
+    # With nobody left to meet, the reader is told to report nothing.
+    schema = asyncio.run(backend.on_mutation_schema(_state({}), sdk))
+    assert "empty array" in schema["npc_introductions"]
 
 
 # ── Part C: present characters always in context ─────────────────────────────
