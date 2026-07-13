@@ -195,6 +195,18 @@ def test_mutation_schema_lists_known_names_to_exclude():
     assert "aria" in desc  # player excluded too
 
 
+def test_mutation_schema_asks_for_unnamed_epithets():
+    backend = _load_backend()
+    sdk, _ = _make_sdk()
+
+    schema = asyncio.run(backend.on_mutation_schema(_state({}), sdk))
+
+    desc = schema["story_characters"].lower()
+    assert "epithet" in desc
+    # Trivial extras stay excluded even with unnamed capture on.
+    assert "incidental extras" in desc
+
+
 def test_mutation_schema_disabled_returns_none():
     backend = _load_backend()
     sdk, _ = _make_sdk()

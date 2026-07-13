@@ -693,9 +693,16 @@ async def on_mutation_schema(state: dict, sdk) -> dict | None:
         "story_characters": (
             "array of objects: {name: string, descriptor: string (who they are / what "
             "they did this scene), evidence: string (brief quote or action from the scene)} "
-            "for NAMED characters who materially speak or act in this scene and are NOT already "
-            f"known. Already-known characters (exclude these, case-insensitive): {known_list}. "
-            "Omit nameless extras (a guard, the crowd), the player, and anyone already known."
+            "for characters who materially speak or act in this scene and are NOT already "
+            "known. Use the character's name; if the story has not named them yet but they "
+            "clearly matter, coin a short distinctive title-case epithet from how the story "
+            "refers to them (e.g. 'The Hooded Stranger', 'The One-Eyed Innkeeper') and use "
+            "that as the name. "
+            f"Already-known characters (exclude these, case-insensitive): {known_list} -- "
+            "some of these are epithets for characters not yet named by the story; match "
+            "them by identity, not exact wording. "
+            "Omit incidental extras with no story weight (a passing guard, the crowd), "
+            "the player, and anyone already known."
         )
     }
 
@@ -739,13 +746,15 @@ async def _capture_story_characters(mutation: dict, state: dict, bank: dict, sdk
         for p in pending
     )
 
-    prompt = f"""You are a character designer for a text RPG. The story just introduced the following named characters on its own. Build a full character record for EACH one, staying faithful to how they appear in the scene — do not contradict it, and infer sensible details where the scene is silent.
+    prompt = f"""You are a character designer for a text RPG. The story just introduced the following characters on its own. Build a full character record for EACH one, staying faithful to how they appear in the scene — do not contradict it, and infer sensible details where the scene is silent.
 
 SCENE:
 {scene}
 
 CHARACTERS TO PROFILE (use these exact names):
 {listing}
+
+Some of these names may be descriptive epithets for characters the story has not named yet (e.g. 'The Hooded Stranger'). Keep such an epithet as the name exactly as given -- do NOT invent a real name for them; the record is renamed once the story reveals one.
 
 For each character return:
 - name (exactly as given above)

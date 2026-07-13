@@ -89,7 +89,7 @@
       "default": true,
       "label": "Capture Story-Introduced Characters",
       "category": "NPC System",
-      "description": "Detect significant named characters the storyteller introduces on its own, generate full profiles for them, and track them as known NPCs."
+      "description": "Detect significant characters the storyteller introduces on its own (unnamed ones are tracked under a descriptive epithet until the story names them), generate full profiles for them, and track them as known NPCs."
     }
   },
   "mutation_schema": {
