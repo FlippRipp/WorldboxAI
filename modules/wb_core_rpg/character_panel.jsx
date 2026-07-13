@@ -155,7 +155,9 @@ export default function CharacterPanel({ state, config }) {
               >
                 <div className="flex items-center justify-between mb-1">
                   <span className={`font-medium capitalize text-sm ${e.kind === 'good' ? 'text-emerald-300' : 'text-red-300'}`}>{e.name}</span>
-                  <span className="text-gray-500 font-mono text-xs">{effectDurationLabel(e, nowMinutes)}</span>
+                  <span className="text-gray-500 font-mono text-xs">
+                    {e.severity != null ? `severity ${e.severity}/10 · ` : ''}{effectDurationLabel(e, nowMinutes)}
+                  </span>
                 </div>
                 {e.description && <div className="text-[11px] text-gray-400 leading-relaxed">{e.description}</div>}
               </div>

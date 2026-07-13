@@ -66,7 +66,10 @@ function StatusEffectList({ effects, nowMinutes, detailed = false }) {
         >
           <div className="flex items-center justify-between">
             <span className={`capitalize truncate ${e.kind === 'good' ? 'text-emerald-300' : 'text-red-300'}`}>{e.name}</span>
-            <span className="text-gray-500 font-mono ml-2 shrink-0">{effectDurationLabel(e, nowMinutes)}</span>
+            <span className="text-gray-500 font-mono ml-2 shrink-0">
+              {e.severity != null && <span className="mr-1.5 text-gray-600">S{e.severity}</span>}
+              {effectDurationLabel(e, nowMinutes)}
+            </span>
           </div>
           {detailed && e.description && (
             <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">{e.description}</div>

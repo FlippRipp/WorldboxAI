@@ -22,8 +22,8 @@ def _make_sdk(reply: str = "{}", captured: dict | None = None):
     return SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
 
 
-def _state(effects=None, clock=None, input_text=""):
-    module_data = {"wb_core_rpg": {"status_effects": effects or []}}
+def _state(effects=None, clock=None, input_text="", skills=None):
+    module_data = {"wb_core_rpg": {"status_effects": effects or [], "skills": skills or {}}}
     if clock is not None:
         module_data["wb_time_tracker"] = {"clock": {"total_minutes_elapsed": clock}}
     return {
@@ -44,8 +44,10 @@ def _broken_leg(**overrides):
         "name": "broken leg",
         "description": "Broken leg from the fall.",
         "kind": "bad",
+        "severity": 3,
         "duration_turns": None,
         "expires_at_minutes": None,
+        "turns_active": 0,
     }
     effect.update(overrides)
     return effect
@@ -118,14 +120,17 @@ def test_minutes_duration_without_a_clock_lasts_until_story_removal():
     effects = _effects_of(result)
     assert effects[0]["expires_at_minutes"] is None
 
-    # No duration resolved: nothing to tick, the effect just persists.
-    assert asyncio.run(backend.on_mutate_state({}, _state(effects), _make_sdk())) == {}
+    # No duration resolved: the effect persists, only its age advances.
+    result = asyncio.run(backend.on_mutate_state({}, _state(effects), _make_sdk()))
+    assert _effects_of(result)[0]["name"] == "cursed mark"
 
 
-def test_indefinite_effect_persists_untouched():
+def test_indefinite_effect_persists_and_ages():
     backend = _load_backend()
     result = asyncio.run(backend.on_mutate_state({}, _state([_broken_leg()]), _make_sdk()))
-    assert result == {}
+    effects = _effects_of(result)
+    assert effects[0]["name"] == "broken leg"
+    assert effects[0]["turns_active"] == 1
 
 
 def test_story_removal_is_case_insensitive():
@@ -162,8 +167,8 @@ def test_feasibility_assessment_sees_status_effects():
 
     asyncio.run(backend.on_gather_context(state, sdk))
 
-    assert "[bad] Broken leg from the fall." in captured["prompt"]
-    assert "[good] Blessed by the hearth-goddess." in captured["prompt"]
+    assert "[bad, severity 3/10] Broken leg from the fall." in captured["prompt"]
+    assert "[good, severity 3/10] Blessed by the hearth-goddess." in captured["prompt"]
     assert "Status effects: weigh them like circumstances" in captured["prompt"]
 
 
@@ -272,3 +277,142 @@ def test_effects_survive_the_character_round_trip():
     round_tripped = backend.Character.from_dict(char.to_dict())
 
     assert round_tripped.status_effects == effects
+
+
+def test_cap_of_three_and_stronger_overrides_weakest():
+    backend = _load_backend()
+    full = [
+        _broken_leg(name="scraped knee", severity=2),
+        _broken_leg(name="poisoned", severity=5),
+        _broken_leg(name="dazed", severity=4),
+    ]
+
+    # A stronger effect lands by overriding the weakest active one.
+    mutation = {"status_effects_gained": [
+        {"name": "Deadly venom", "description": "Deadly venom in the veins.", "kind": "bad", "severity": 8},
+    ]}
+    result = asyncio.run(backend.on_mutate_state(mutation, _state(full), _make_sdk()))
+    names = {e["name"] for e in _effects_of(result)}
+    assert names == {"poisoned", "dazed", "deadly venom"}
+
+    # A weaker effect is rejected at the cap.
+    mutation = {"status_effects_gained": [
+        {"name": "Mild headache", "description": "A mild headache.", "kind": "bad", "severity": 1},
+    ]}
+    result = asyncio.run(backend.on_mutate_state(mutation, _state([_broken_leg(name=n, severity=s) for n, s in
+                                                                   [("a", 4), ("b", 5), ("c", 6)]]), _make_sdk()))
+    assert "mild headache" not in {e["name"] for e in _effects_of(result)}
+
+
+def test_refreshing_an_active_effect_at_the_cap_keeps_all_three():
+    backend = _load_backend()
+    full = [
+        _broken_leg(name="poisoned", severity=5, turns_active=4),
+        _broken_leg(name="dazed", severity=4),
+        _broken_leg(name="cursed mark", severity=6),
+    ]
+    mutation = {"status_effects_gained": [
+        {"name": "Poisoned", "description": "The venom takes fresh hold.", "kind": "bad", "severity": 7},
+    ]}
+
+    result = asyncio.run(backend.on_mutate_state(mutation, _state(full), _make_sdk()))
+
+    effects = {e["name"]: e for e in _effects_of(result)}
+    assert set(effects) == {"poisoned", "dazed", "cursed mark"}
+    assert effects["poisoned"]["severity"] == 7
+    # A refresh keeps the effect's lingering age.
+    assert effects["poisoned"]["turns_active"] == 4
+
+
+def test_effect_gain_skipped_when_a_same_named_skill_exists():
+    backend = _load_backend()
+    skills = {"shadow brand": {"rating": 6, "description": "A brand of living shadow.",
+                               "trigger_words": [], "type": "curse"}}
+    mutation = {"status_effects_gained": [
+        {"name": "Shadow Brand", "description": "Branded by shadow.", "kind": "bad", "severity": 6},
+    ]}
+
+    result = asyncio.run(backend.on_mutate_state(mutation, _state(skills=skills), _make_sdk()))
+
+    assert all(e["name"] != "shadow brand" for e in _effects_of(result)) if result else True
+
+
+def test_new_skill_supersedes_a_same_named_status_effect():
+    backend = _load_backend()
+    mutation = {"skill_changes": {"Iron Grip": {
+        "rating": 4, "description": "Crushing grip hardened by the trial.",
+        "trigger_words": [], "type": "passive",
+    }}}
+
+    result = asyncio.run(backend.on_mutate_state(
+        mutation, _state([_broken_leg(name="iron grip", kind="good", severity=4)]), _make_sdk()))
+
+    data = result["module_data"]["wb_core_rpg"]
+    assert "iron grip" in data["skills"]
+    assert all(e["name"] != "iron grip" for e in data["status_effects"])
+
+
+def test_librarian_grant_supersedes_effect_and_prompt_lists_effects():
+    backend = _load_backend()
+    captured = {}
+    reply = json.dumps({"added": [{
+        "name": "Emberkiss", "rating": 4, "description": "A boon from the hearth-goddess.",
+        "trigger_words": [], "type": "active",
+    }], "removed": [], "altered": []})
+    sdk = _make_sdk(reply, captured)
+    state = _state([_broken_leg(name="emberkiss", kind="good", severity=5)])
+    state["history"] = ["The goddess makes her blessing permanent."]
+
+    result = asyncio.run(backend.on_librarian(state, sdk))
+
+    assert "emberkiss (good, severity 5): Broken leg from the fall." in captured["prompt"]
+    assert "Do NOT report a temporary condition" in captured["prompt"]
+    data = result["module_data"]["wb_core_rpg"]
+    assert "emberkiss" in data["skills"]
+    assert all(e["name"] != "emberkiss" for e in data["status_effects"])
+
+
+def test_lingering_strong_bad_effect_hardens_into_a_curse():
+    backend = _load_backend()
+    effect = _broken_leg(name="creeping corruption", severity=8, turns_active=9)
+
+    result = asyncio.run(backend.on_mutate_state({}, _state([effect]), _make_sdk()))
+
+    data = result["module_data"]["wb_core_rpg"]
+    assert all(e["name"] != "creeping corruption" for e in data["status_effects"])
+    curse = data["skills"]["creeping corruption"]
+    assert curse["type"] == "curse"
+    assert curse["rating"] == 8
+
+
+def test_no_curse_promotion_for_good_weak_or_expiring_effects():
+    backend = _load_backend()
+    effects = [
+        _broken_leg(name="divine favor", kind="good", severity=9, turns_active=20),
+        _broken_leg(name="dull ache", severity=5, turns_active=20),
+        _broken_leg(name="fading venom", severity=9, turns_active=20, duration_turns=5),
+    ]
+
+    result = asyncio.run(backend.on_mutate_state({}, _state(effects), _make_sdk()))
+
+    data = result["module_data"]["wb_core_rpg"]
+    assert {e["name"] for e in data["status_effects"]} == {"divine favor", "dull ache", "fading venom"}
+    assert data["skills"] == {}
+
+
+def test_mutation_schema_feeds_the_reader_both_lists():
+    backend = _load_backend()
+    skills = {"emberkiss": {"rating": 4, "description": "", "trigger_words": [], "type": "active"}}
+    state = _state([_broken_leg(severity=5)], skills=skills)
+
+    schema = asyncio.run(backend.on_mutation_schema(state, _make_sdk()))
+
+    assert "emberkiss (active)" in schema["status_effects_gained"]
+    assert "broken leg (bad, severity 5)" in schema["status_effects_gained"]
+    # The dynamic entry re-includes the manifest's base description.
+    assert "temporary conditions the PLAYER gained" in schema["status_effects_gained"]
+    assert "broken leg (bad, severity 5)" in schema["skill_changes"]
+    assert "never duplicate an active status effect's name" in schema["skill_changes"]
+
+    # Nothing to report when the character is blank.
+    assert asyncio.run(backend.on_mutation_schema(_state(), _make_sdk())) == {}

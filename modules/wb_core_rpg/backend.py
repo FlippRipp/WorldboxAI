@@ -1,5 +1,6 @@
 """Core RPG System -- stats, skills, XP, leveling, action judgement, HP."""
 import math
+import os
 import random
 import json
 import re
@@ -92,11 +93,30 @@ def _score_span(lo: int, hi: int) -> str:
     return str(lo) if lo == hi else f"{lo}-{hi}"
 
 
+# The static Reader mutation schema, for on_mutation_schema to extend with the
+# character's live skill/effect lists (dynamic schema entries REPLACE the
+# manifest's, so the base text must be re-included).
+try:
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "manifest.json"), encoding="utf-8") as _f:
+        _BASE_MUTATION_SCHEMA = json.load(_f).get("mutation_schema", {})
+except (OSError, json.JSONDecodeError):
+    _BASE_MUTATION_SCHEMA = {}
+
+
 # Status effects are temporary conditions (broken leg, poisoned, blessed,
-# brainwashed) with a ONE-sentence description. They expire after a number of
-# player turns (duration_turns) or at an in-world clock time from
-# wb_time_tracker (expires_at_minutes, absolute total_minutes_elapsed); with
-# neither set they last until story events remove them.
+# brainwashed) with a ONE-sentence description and a severity (1-10). They
+# expire after a number of player turns (duration_turns) or at an in-world
+# clock time from wb_time_tracker (expires_at_minutes, absolute
+# total_minutes_elapsed); with neither set they last until story events
+# remove them. turns_active counts how long an effect has lingered.
+MAX_STATUS_EFFECTS = 3
+
+# A bad, indefinite status effect at least this severe that has lingered at
+# least this many turns hardens into a lasting curse skill.
+CURSE_SEVERITY_MIN = 7
+CURSE_AGE_TURNS = 10
+
+
 def _sanitize_status_effect(raw) -> dict | None:
     if not isinstance(raw, dict):
         return None
@@ -110,10 +130,15 @@ def _sanitize_status_effect(raw) -> dict | None:
         "name": name,
         "description": str(raw.get("description", "")).strip() or name,
         "kind": kind,
+        "severity": 3,
         "duration_turns": None,
         "expires_at_minutes": None,
+        "turns_active": 0,
     }
-    for key in ("duration_turns", "expires_at_minutes"):
+    severity = raw.get("severity")
+    if isinstance(severity, (int, float)) and not isinstance(severity, bool):
+        effect["severity"] = max(1, min(10, int(severity)))
+    for key in ("duration_turns", "expires_at_minutes", "turns_active"):
         val = raw.get(key)
         if isinstance(val, (int, float)) and not isinstance(val, bool) and int(val) > 0:
             effect[key] = int(val)
@@ -413,7 +438,7 @@ async def _assess_action(input_text: str, char: Character, config: dict, sdk, mo
                 skill_lines.append(f'Curse "{n}" ({d["rating"]}/10) [always active]: {d.get("description", "")}')
     if char.status_effects:
         skill_lines.append("Status effects: " + "; ".join(
-            f"[{e['kind']}] {e['description']}" for e in char.status_effects))
+            f"[{e['kind']}, severity {e.get('severity', 3)}/10] {e['description']}" for e in char.status_effects))
 
     stats_line = ", ".join(f"{s}={char.stats[s]} ({_tier_for(char.stats[s], tier_list)})" for s in STAT_NAMES)
     unconscious = " [UNCONSCIOUS - cannot act physically]" if char.is_unconscious() else ""
@@ -448,7 +473,7 @@ Outcome mapping at this difficulty: {outcome_mapping}.
 Judging guidelines:
 - Social actions: the outcome depends on the TARGET's likely disposition as shown in the recent story and world context, not on the player's stats. A bold ask to a receptive, bored, curious, or amused character is plausible even for a weak character. Only rate a social action 1-2 if the target's established nature makes acceptance truly impossible.
 - Reward creativity: a clever, novel, or dramatically interesting approach that fits the established fiction rates one band higher than a blunt attempt at the same goal. Punish contradiction of established facts, not ambition.
-- Status effects: weigh them like circumstances, not stats. A [bad] effect lowers feasibility of actions it would plausibly impede (a broken leg makes sprinting far harder) and can push a directly-blocked attempt to 1-2; a [good] effect raises feasibility of actions it aids. Effects unrelated to the attempt change nothing.
+- Status effects: weigh them like circumstances, not stats. A [bad] effect lowers feasibility of actions it would plausibly impede (a broken leg makes sprinting far harder) and can push a directly-blocked attempt to 1-2; a [good] effect raises feasibility of actions it aids. The higher an effect's severity, the more it sways the score. Effects unrelated to the attempt change nothing.
 - Difficulty is set to "{difficulty_label}": {difficulty_guidance}
 
 You are a referee, not a narrator: determine the outcome, do not describe it. Never write story prose.
@@ -492,6 +517,29 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
             return {}
         return {"content": _build_action_feasibility_prompt(char, input_text, config)}
     return {}
+
+
+async def on_mutation_schema(state: dict, sdk) -> dict:
+    """Make the Reader aware of the character's current skills and status
+    effects, so it never reports one as the other or duplicates a name."""
+    char = Character.from_dict(state.get("module_data", {}).get("wb_core_rpg", {}))
+    if not char.skills and not char.status_effects:
+        return {}
+    skill_list = ", ".join(f"{n} ({d.get('type', 'active')})" for n, d in char.skills.items()) or "(none)"
+    effect_list = ", ".join(
+        f"{e['name']} ({e['kind']}, severity {e.get('severity', 3)})" for e in char.status_effects) or "(none)"
+    return {
+        "status_effects_gained": (
+            f"{_BASE_MUTATION_SCHEMA.get('status_effects_gained', '')} "
+            f"The player's existing skills and curses: {skill_list}. Active status effects: {effect_list}. "
+            "Never report an existing skill or curse as a new status effect; re-report an active effect only if the story changed it."
+        ),
+        "skill_changes": (
+            f"{_BASE_MUTATION_SCHEMA.get('skill_changes', '')} "
+            f"Active status effects (temporary conditions, NOT skills): {effect_list}. "
+            "Never report a temporary condition as a skill, and never duplicate an active status effect's name as a skill."
+        ),
+    }
 
 
 async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
@@ -565,6 +613,11 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
                     "trigger_words": trigger_words,
                     "type": skill_type,
                 }
+                # The condition graduated into a lasting ability/curse: the
+                # skill takes over from the same-named status effect.
+                if any(e["name"] == name for e in char.status_effects):
+                    char.status_effects = [e for e in char.status_effects if e["name"] != name]
+                    print(f"[RPG] Status effect '{name}' superseded by new skill of the same name")
             updated = True
 
     # 3b. Status effects: apply conditions gained/removed in the story, then
@@ -582,12 +635,32 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
             if (effect["expires_at_minutes"] is None and now_minutes is not None
                     and isinstance(minutes, (int, float)) and not isinstance(minutes, bool) and int(minutes) > 0):
                 effect["expires_at_minutes"] = now_minutes + int(minutes)
-            # Re-applying an effect refreshes it (new duration/description).
-            char.status_effects = [e for e in char.status_effects if e["name"] != effect["name"]]
-            char.status_effects.append(effect)
+            # A same-named skill or curse already covers this condition.
+            if effect["name"] in char.skills:
+                print(f"[RPG] Status effect '{effect['name']}' skipped: a skill/curse of that name exists")
+                continue
+            existing = next((e for e in char.status_effects if e["name"] == effect["name"]), None)
+            if existing is not None:
+                # Re-applying an effect refreshes it (new duration/severity/
+                # description) but keeps its lingering age.
+                effect["turns_active"] = existing.get("turns_active", 0)
+                char.status_effects.remove(existing)
+                char.status_effects.append(effect)
+            elif len(char.status_effects) < MAX_STATUS_EFFECTS:
+                char.status_effects.append(effect)
+            else:
+                # At the cap: a stronger effect overrides the weakest one.
+                weakest = min(char.status_effects, key=lambda e: e.get("severity", 3))
+                if effect["severity"] > weakest.get("severity", 3):
+                    char.status_effects.remove(weakest)
+                    char.status_effects.append(effect)
+                    print(f"[RPG] Status effect '{effect['name']}' (severity {effect['severity']}) overrides weaker '{weakest['name']}' (severity {weakest.get('severity', 3)})")
+                else:
+                    print(f"[RPG] Status effect '{effect['name']}' (severity {effect['severity']}) rejected: {MAX_STATUS_EFFECTS} effects active and none weaker")
+                    continue
             gained_names.add(effect["name"])
             updated = True
-            print(f"[RPG] Status effect gained: '{effect['name']}' ({effect['kind']}, {_effect_duration_label(effect, now_minutes)})")
+            print(f"[RPG] Status effect gained: '{effect['name']}' ({effect['kind']}, severity {effect['severity']}, {_effect_duration_label(effect, now_minutes)})")
 
     removed_effects = mutation.get("status_effects_removed", [])
     if isinstance(removed_effects, list) and removed_effects:
@@ -603,16 +676,33 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
     ticked = []
     for effect in char.status_effects:
         if effect["name"] not in gained_names:
+            effect["turns_active"] = effect.get("turns_active", 0) + 1
+            updated = True
             if effect.get("duration_turns") is not None:
                 effect["duration_turns"] -= 1
-                updated = True
                 if effect["duration_turns"] <= 0:
                     print(f"[RPG] Status effect wore off: '{effect['name']}'")
                     continue
             expires_at = effect.get("expires_at_minutes")
             if expires_at is not None and now_minutes is not None and now_minutes >= expires_at:
                 print(f"[RPG] Status effect expired: '{effect['name']}'")
-                updated = True
+                continue
+            # A strong, bad condition with no expiry that has lingered long
+            # enough hardens into a lasting curse skill.
+            if (effect["kind"] == "bad"
+                    and effect.get("duration_turns") is None
+                    and effect.get("expires_at_minutes") is None
+                    and effect.get("severity", 3) >= CURSE_SEVERITY_MIN
+                    and effect["turns_active"] >= CURSE_AGE_TURNS
+                    and effect["name"] not in char.skills):
+                rating = max(1, min(10, int(effect.get("severity", 3))))
+                char.skills[effect["name"]] = {
+                    "rating": rating,
+                    "description": effect["description"],
+                    "trigger_words": [],
+                    "type": "curse",
+                }
+                print(f"[RPG] Status effect '{effect['name']}' hardened into a curse ({rating}/10) after {effect['turns_active']} turns")
                 continue
         ticked.append(effect)
     char.status_effects = ticked
@@ -744,6 +834,12 @@ async def on_librarian(state: dict, sdk) -> dict | None:
     else:
         skill_lines = "(none)"
 
+    if char.status_effects:
+        effect_lines = "; ".join(
+            f"{e['name']} ({e['kind']}, severity {e.get('severity', 3)}): {e['description']}" for e in char.status_effects)
+    else:
+        effect_lines = "(none)"
+
     model_pref = config.get("practice_ai_model", "fastest")
     prompt = f"""You are the game system that records supernatural or external changes to a player character's abilities in a text RPG.
 
@@ -752,6 +848,10 @@ Read the recent narration and detect ONLY skill changes that an EXTERNAL force i
 Do NOT report skills the player improved through their own effort, practice, training, or repeated use — those are handled elsewhere. If nothing external happened, return empty arrays.
 
 The player's current skills: {skill_lines}
+
+The player's current status effects (temporary conditions tracked separately from skills): {effect_lines}
+
+Do NOT report a temporary condition (an injury, poison, illusion, or short-lived buff or hex) as a skill change - conditions are handled elsewhere. Do not add a skill that duplicates a status effect listed above, and do not remove a skill merely because a temporary condition suppresses it.
 
 {earlier_block}THIS TURN'S SCENE (check this for skill changes):
 {latest}
@@ -788,6 +888,10 @@ Respond with ONLY valid JSON:
             "trigger_words": [str(w) for w in entry.get("trigger_words", []) if w],
             "type": skill_type,
         }
+        # The skill takes over from a same-named temporary condition.
+        if any(e["name"] == name for e in char.status_effects):
+            char.status_effects = [e for e in char.status_effects if e["name"] != name]
+            print(f"[RPG] Status effect '{name}' superseded by granted skill of the same name")
         updated = True
         print(f"[RPG] External event granted skill '{name}' ({char.skills[name]['rating']}/10, {skill_type})")
 

@@ -40,8 +40,8 @@ Stored in `state["module_data"]["wb_core_rpg"]`:
   "pending_evolutions": [{"skill": "brutal bladework", "options": null, "status": "pending"}],
   "level_up_history": [{"level": 3}],
   "status_effects": [
-    {"name": "broken leg", "description": "Broken leg from the fall.", "kind": "bad", "duration_turns": 3, "expires_at_minutes": null},
-    {"name": "blessed", "description": "Blessed by the hearth-goddess.", "kind": "good", "duration_turns": null, "expires_at_minutes": 5460}
+    {"name": "broken leg", "description": "Broken leg from the fall.", "kind": "bad", "severity": 5, "duration_turns": 3, "expires_at_minutes": null, "turns_active": 2},
+    {"name": "blessed", "description": "Blessed by the hearth-goddess.", "kind": "good", "severity": 4, "duration_turns": null, "expires_at_minutes": 5460, "turns_active": 1}
   ]
 }
 ```
@@ -55,9 +55,27 @@ Stored in `state["module_data"]["wb_core_rpg"]`:
 
 Temporary conditions — good (buffs, blessings) or bad (injuries, poisons, mind
 control) — with a ONE-sentence description ("Broken leg from the fall.",
-"Brainwashed by the cult leader."). The Reader applies and removes them from
-story events via the `status_effects_gained` / `status_effects_removed`
-mutation keys.
+"Brainwashed by the cult leader.") and a severity (1-10, how strong/impactful
+the condition is). The Reader applies and removes them from story events via
+the `status_effects_gained` / `status_effects_removed` mutation keys.
+
+The character bears at most **3** concurrent effects (`MAX_STATUS_EFFECTS`).
+Re-applying an active effect refreshes its duration/severity/description
+without counting against the cap; at the cap, a new effect only lands if it is
+stronger than the weakest active one, which it overrides — otherwise it is
+rejected.
+
+A bad, indefinite effect (no duration) with severity ≥ 7 that has lingered for
+10+ turns (`turns_active`) **hardens into a curse**: it leaves the effect list
+and becomes a `type: "curse"` skill whose rating equals its severity.
+
+Skills and status effects are mutually aware: a gained effect whose name
+matches an existing skill/curse is skipped; a newly added skill (Reader
+`skill_changes` or a librarian external grant) supersedes a same-named effect;
+the librarian's external-event prompt lists active effects and is told not to
+report temporary conditions as skill changes; and the module's
+`on_mutation_schema` hook feeds the Reader the live skill and effect lists so
+it never reports one as the other.
 
 Durations, at most one per effect:
 
