@@ -1,0 +1,325 @@
+"""Tests for the skill evolution flow (options + evolve endpoints, queueing)."""
+import asyncio
+import importlib.util
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+BASE = "/api/modules/wb_core_rpg"
+
+
+def _load_backend():
+    path = Path(__file__).parent / "modules" / "wb_core_rpg" / "backend.py"
+    spec = importlib.util.spec_from_file_location("wb_core_rpg_backend_evolution", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _fake_llm(replies, calls):
+    """LLM stub: pops canned replies in order and records each prompt."""
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        calls.append({"prompt": prompt, "model_preference": model_preference})
+        if not replies:
+            return ""
+        return replies.pop(0)
+
+    return SimpleNamespace(generate=generate, _current_module="")
+
+
+def _rpg(**overrides):
+    base = {
+        "stats": {s: 10 for s in ["power", "agility", "vitality", "intelligence", "spirit", "charm"]},
+        "level": 5,
+        "xp": 700,
+        "hp": 80,
+        "max_hp": 80,
+        "backstory": "A wandering duelist.",
+        "skills": {
+            "swordplay": {"rating": 10, "description": "Master duelist.", "trigger_words": ["slash"], "type": "active"},
+        },
+        "practice_counters": {"swordplay": 12},
+        "pending_evolutions": [{"skill": "swordplay", "options": None, "status": "pending"}],
+        "unspent_attribute_points": 0,
+        "unspent_skill_points": 0,
+    }
+    base.update(overrides)
+    return base
+
+
+def _make_client(mod, rpg, llm_replies=None, config=None):
+    calls = []
+    llm = _fake_llm(list(llm_replies or []), calls)
+    session_manager = SimpleNamespace(
+        active_save_id="save1",
+        state={
+            "turn": 9,
+            "world_data": {"rules": {"genre": "Dark Fantasy", "tone": "Grim"}, "lore": {"premise": "A dying empire."}},
+            "module_configs": {"wb_core_rpg": config or {}},
+            "module_data": {"wb_core_rpg": rpg},
+        },
+        save_manager=SimpleNamespace(save_turn=lambda *a: None),
+    )
+    engine = SimpleNamespace(sdk=SimpleNamespace(llm=llm))
+    mod.set_services({"session_manager": session_manager, "engine": engine})
+
+    app = FastAPI()
+    app.include_router(mod.get_router(), prefix=BASE)
+    return TestClient(app), session_manager, calls
+
+
+OPTIONS_REPLY = json.dumps({
+    "options": [
+        {"theme": "Brutal", "summary": "raw overwhelming force"},
+        {"theme": "Efficiency", "summary": "no wasted motion"},
+        {"theme": "Stealthy", "summary": "strikes from silence"},
+    ]
+})
+
+EVOLVE_REPLY = json.dumps({
+    "name": "Brutal Bladework",
+    "description": "Every cut lands with crushing force; armor and guard mean little.",
+    "trigger_words": ["cleave", "crush", "overpower"],
+})
+
+
+# ---------------------------------------------------------------------------
+# evolution-options
+# ---------------------------------------------------------------------------
+
+def test_options_returns_three_themes_and_caches():
+    mod = _load_backend()
+    client, sm, calls = _make_client(mod, _rpg(), llm_replies=[OPTIONS_REPLY])
+
+    res = client.post(f"{BASE}/skills/swordplay/evolution-options")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["skill"] == "swordplay"
+    assert body["tier"] == 1
+    assert [o["theme"] for o in body["options"]] == ["Brutal", "Efficiency", "Stealthy"]
+    assert len(calls) == 1
+    # Full context reaches the prompt: world, character, complete skill record.
+    prompt = calls[0]["prompt"]
+    assert "Dark Fantasy" in prompt
+    assert "Master duelist." in prompt
+    assert "A wandering duelist." in prompt
+
+    # Second call returns the cached options with zero extra LLM calls.
+    res2 = client.post(f"{BASE}/skills/swordplay/evolution-options")
+    assert res2.status_code == 200
+    assert res2.json()["options"] == body["options"]
+    assert len(calls) == 1
+
+
+def test_options_rejects_non_maxed_skill():
+    mod = _load_backend()
+    rpg = _rpg()
+    rpg["skills"]["swordplay"]["rating"] = 9
+    rpg["pending_evolutions"] = []
+    client, _, calls = _make_client(mod, rpg, llm_replies=[OPTIONS_REPLY])
+    res = client.post(f"{BASE}/skills/swordplay/evolution-options")
+    assert res.status_code == 409
+    assert calls == []
+
+
+def test_options_rejects_curse():
+    mod = _load_backend()
+    rpg = _rpg()
+    rpg["skills"]["swordplay"]["type"] = "curse"
+    rpg["pending_evolutions"] = []
+    client, _, calls = _make_client(mod, rpg, llm_replies=[OPTIONS_REPLY])
+    res = client.post(f"{BASE}/skills/swordplay/evolution-options")
+    assert res.status_code == 409
+    assert calls == []
+
+
+def test_options_llm_garbage_returns_502():
+    mod = _load_backend()
+    client, sm, _ = _make_client(mod, _rpg(), llm_replies=["not json at all"])
+    res = client.post(f"{BASE}/skills/swordplay/evolution-options")
+    assert res.status_code == 502
+    # Entry stays pending with no cached options, so a retry re-calls the LLM.
+    entry = sm.state["module_data"]["wb_core_rpg"]["pending_evolutions"][0]
+    assert entry["options"] is None
+
+
+def test_options_theme_clamped_to_three_words():
+    mod = _load_backend()
+    reply = json.dumps({"options": [
+        {"theme": "Way Too Many Words Here Truly", "summary": "s"},
+        {"theme": "B", "summary": "s"},
+        {"theme": "C", "summary": "s"},
+    ]})
+    client, _, _ = _make_client(mod, _rpg(), llm_replies=[reply])
+    res = client.post(f"{BASE}/skills/swordplay/evolution-options")
+    assert res.status_code == 200
+    assert res.json()["options"][0]["theme"] == "Way Too Many"
+
+
+# ---------------------------------------------------------------------------
+# evolve
+# ---------------------------------------------------------------------------
+
+def _cached_rpg():
+    rpg = _rpg()
+    rpg["pending_evolutions"] = [{
+        "skill": "swordplay",
+        "options": [
+            {"theme": "Brutal", "summary": "raw force"},
+            {"theme": "Efficiency", "summary": "clean"},
+            {"theme": "Stealthy", "summary": "silent"},
+        ],
+        "status": "pending",
+    }]
+    return rpg
+
+
+def test_evolve_applies_tiered_form():
+    mod = _load_backend()
+    client, sm, calls = _make_client(mod, _cached_rpg(), llm_replies=[EVOLVE_REPLY], config={"evolution_ai_model": "smartest"})
+
+    res = client.post(f"{BASE}/skills/swordplay/evolve", json={"theme": "Brutal"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["evolved"] == {
+        "old_name": "swordplay",
+        "new_name": "brutal bladework",
+        "tier": 2,
+        "theme": "Brutal",
+        "description": "Every cut lands with crushing force; armor and guard mean little.",
+    }
+    rpg = body["rpg"]
+    assert "swordplay" not in rpg["skills"]
+    skill = rpg["skills"]["brutal bladework"]
+    assert skill["tier"] == 2
+    assert skill["rating"] == 5  # reset to regrow
+    assert skill["type"] == "active"
+    assert skill["lineage"] == ["swordplay"]
+    assert skill["evolution_theme"] == "Brutal"
+    # Practice counters follow the rename; the queue entry is consumed.
+    assert rpg["practice_counters"] == {"brutal bladework": 12}
+    assert rpg["pending_evolutions"] == []
+    assert calls[0]["model_preference"] == "smartest"
+    assert '"Brutal" path' in calls[0]["prompt"]
+
+
+def test_evolve_rejects_theme_not_offered():
+    mod = _load_backend()
+    client, _, calls = _make_client(mod, _cached_rpg(), llm_replies=[EVOLVE_REPLY])
+    res = client.post(f"{BASE}/skills/swordplay/evolve", json={"theme": "Cuddly"})
+    assert res.status_code == 400
+    assert calls == []
+
+
+def test_evolve_accepts_any_theme_when_no_cached_options():
+    mod = _load_backend()
+    client, _, _ = _make_client(mod, _rpg(), llm_replies=[EVOLVE_REPLY])
+    res = client.post(f"{BASE}/skills/swordplay/evolve", json={"theme": "Relentless"})
+    assert res.status_code == 200
+    assert res.json()["evolved"]["theme"] == "Relentless"
+
+
+def test_evolve_name_collision_disambiguates():
+    mod = _load_backend()
+    rpg = _cached_rpg()
+    rpg["skills"]["brutal bladework"] = {"rating": 4, "description": "", "trigger_words": [], "type": "active"}
+    client, _, _ = _make_client(mod, rpg, llm_replies=[EVOLVE_REPLY])
+    res = client.post(f"{BASE}/skills/swordplay/evolve", json={"theme": "Brutal"})
+    assert res.status_code == 200
+    assert res.json()["evolved"]["new_name"] == "brutal bladework 2"
+    # The pre-existing skill is untouched.
+    assert res.json()["rpg"]["skills"]["brutal bladework"]["rating"] == 4
+
+
+def test_evolve_llm_failure_leaves_state_untouched():
+    mod = _load_backend()
+    client, sm, _ = _make_client(mod, _cached_rpg(), llm_replies=[""])
+    res = client.post(f"{BASE}/skills/swordplay/evolve", json={"theme": "Brutal"})
+    assert res.status_code == 502
+    rpg = sm.state["module_data"]["wb_core_rpg"]
+    assert rpg["skills"]["swordplay"]["rating"] == 10
+    assert rpg["pending_evolutions"][0]["skill"] == "swordplay"
+
+
+def test_evolved_skill_can_evolve_again():
+    mod = _load_backend()
+    rpg = _cached_rpg()
+    rpg["skills"]["swordplay"].update({"tier": 2, "lineage": ["blades"], "evolution_theme": "Efficiency"})
+    reply = json.dumps({"name": "Deathless Edge", "description": "d", "trigger_words": ["edge"]})
+    client, _, calls = _make_client(mod, rpg, llm_replies=[reply])
+    res = client.post(f"{BASE}/skills/swordplay/evolve", json={"theme": "Brutal"})
+    assert res.status_code == 200
+    skill = res.json()["rpg"]["skills"]["deathless edge"]
+    assert skill["tier"] == 3
+    assert skill["lineage"] == ["blades", "swordplay"]
+    assert "Tier 2 to Tier 3" in calls[0]["prompt"]
+
+
+# ---------------------------------------------------------------------------
+# defer + queueing paths
+# ---------------------------------------------------------------------------
+
+def test_defer_marks_entry_deferred():
+    mod = _load_backend()
+    client, sm, _ = _make_client(mod, _rpg())
+    res = client.delete(f"{BASE}/skills/swordplay/evolution")
+    assert res.status_code == 200
+    assert res.json()["pending_evolutions"][0]["status"] == "deferred"
+
+
+def test_deferred_entry_not_requeued_as_pending():
+    backend = _load_backend()
+    char = {
+        "stats": {s: 10 for s in ["power", "agility", "vitality", "intelligence", "spirit", "charm"]},
+        "level": 1, "xp": 0, "hp": 85, "max_hp": 85,
+        "skills": {"swordplay": {"rating": 10, "description": "", "trigger_words": [], "type": "active"}},
+        "pending_evolutions": [{"skill": "swordplay", "options": None, "status": "deferred"}],
+        "action_assessment": {"feasibility": 8, "difficulty": "moderate"},
+    }
+    state = {"module_configs": {"wb_core_rpg": {}}, "module_data": {"wb_core_rpg": char}}
+    result = asyncio.run(backend.on_mutate_state({}, state, None))
+    rpg = result["module_data"]["wb_core_rpg"]
+    assert rpg["pending_evolutions"] == [{"skill": "swordplay", "options": None, "status": "deferred"}]
+
+
+def test_librarian_grant_to_max_queues_evolution():
+    backend = _load_backend()
+    reply = json.dumps({
+        "added": [],
+        "removed": [],
+        "altered": [{"name": "swordplay", "new_rating": 10}],
+    })
+    calls = []
+    sdk = SimpleNamespace(llm=_fake_llm([reply], calls))
+    state = {
+        "turn": 3,
+        "history": ["The war-god's blessing settles into your arms."],
+        "module_configs": {},
+        "module_data": {"wb_core_rpg": {
+            "skills": {"swordplay": {"rating": 7, "description": "", "trigger_words": [], "type": "active"}},
+        }},
+    }
+    result = asyncio.run(backend.on_librarian(state, sdk))
+    rpg = result["module_data"]["wb_core_rpg"]
+    assert rpg["skills"]["swordplay"]["rating"] == 10
+    assert rpg["pending_evolutions"] == [{"skill": "swordplay", "options": None, "status": "pending"}]
+
+
+def test_manual_edit_to_max_queues_and_delete_prunes():
+    mod = _load_backend()
+    rpg = _rpg()
+    rpg["skills"]["swordplay"]["rating"] = 9
+    rpg["pending_evolutions"] = []
+    client, _, _ = _make_client(mod, rpg)
+
+    res = client.put(f"{BASE}/skills/swordplay", json={"rating": 10})
+    assert res.status_code == 200
+    assert rpg["pending_evolutions"] == [{"skill": "swordplay", "options": None, "status": "pending"}]
+
+    res = client.delete(f"{BASE}/skills/swordplay")
+    assert res.status_code == 200
+    assert rpg["pending_evolutions"] == []

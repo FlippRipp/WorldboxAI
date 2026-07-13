@@ -436,7 +436,7 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
                     char.skills[name].setdefault("trigger_words", []).extend(
                         w for w in trigger_words if w not in char.skills[name].get("trigger_words", [])
                     )
-                if change.get("type"):
+                if isinstance(change, dict) and change.get("type"):
                     char.skills[name]["type"] = skill_type
             else:
                 char.skills[name] = {
