@@ -276,13 +276,17 @@ function Lightbox({ items, index, onNavigate, onClose, errorRecord }) {
 }
 
 // Searchable dropdown over Novita's checkpoint catalog (thousands of models).
-// Searches server-side via the module's /models proxy; cursor-paginated.
+// Searches server-side via the module's /models proxy; cursor-paginated. The
+// proxy may answer a spaced query with a catalog-style respelling (Novita
+// names Civitai mirrors after the no-space file name) — pagination must reuse
+// that effective_query, not what the user typed.
 // onSelect receives the whole model object (sd_name + base_model metadata).
 function ModelPicker({ value, valueBase, hasKey, onSelect }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [models, setModels] = useState([]);
   const [nextCursor, setNextCursor] = useState('');
+  const [effQuery, setEffQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const debounceRef = useRef(null);
@@ -305,6 +309,7 @@ function ModelPicker({ value, valueBase, hasKey, onSelect }) {
       if (seq !== seqRef.current) return; // stale response, a newer search is in flight
       setModels((prev) => (cursor ? [...prev, ...data.models] : data.models));
       setNextCursor(data.next_cursor || '');
+      if (!cursor) setEffQuery(data.effective_query || '');
     } catch (e) {
       if (seq === seqRef.current) setError(String(e.message || e));
     } finally {
@@ -375,6 +380,11 @@ function ModelPicker({ value, valueBase, hasKey, onSelect }) {
           {!error && models.length === 0 && !loading && (
             <div className="px-3 py-2 text-xs text-gray-500 italic">No models found.</div>
           )}
+          {!error && models.length > 0 && effQuery && effQuery !== query.trim() && (
+            <div className="px-3 py-1.5 text-[10px] text-gray-500 border-b border-gray-800">
+              Matched catalog spelling <span className="font-mono text-gray-400">{effQuery}</span>
+            </div>
+          )}
           {models.map((m) => (
             <button
               key={m.sd_name}
@@ -402,7 +412,7 @@ function ModelPicker({ value, valueBase, hasKey, onSelect }) {
           {loading && <div className="px-3 py-2 text-xs text-gray-500 animate-pulse">Searching…</div>}
           {!loading && nextCursor && (
             <button
-              onClick={() => search(query, nextCursor)}
+              onClick={() => search(effQuery || query, nextCursor)}
               className="w-full px-3 py-2 text-xs text-purple-400 hover:text-purple-300 hover:bg-gray-800 transition-colors"
             >
               Load more…

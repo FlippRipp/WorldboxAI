@@ -1598,6 +1598,79 @@ async def _novita_list_models(cfg: dict, query: str, cursor: str, limit: int,
         return resp.json()
 
 
+def _public_checkpoints(body: dict) -> list[dict]:
+    """Reduce a /v3/model response to the dropdown-entry shape, dropping
+    models that are not deployable (status != 1) or have no usable sd_name."""
+    return [
+        {
+            "sd_name": m.get("sd_name_in_api") or m.get("sd_name"),
+            "name": m.get("name"),
+            "is_sdxl": bool(m.get("is_sdxl")),
+            "base_model": m.get("base_model"),
+            "cover_url": m.get("cover_url"),
+        }
+        for m in (body.get("models") or [])
+        if m.get("status") == 1 and (m.get("sd_name_in_api") or m.get("sd_name"))
+    ]
+
+
+def _novita_query_variants(query: str) -> list[str]:
+    """Alternate spellings for a multi-word catalog query. Novita names its
+    Civitai mirrors after the *file* name — camelCase, no spaces (the model
+    titled "Jib Mix Realistic XL" is "jibMixRealisticXL_v10_...") — so a
+    page-title query with spaces misses. Only spellings that differ from the
+    original are returned, so single-word queries produce none."""
+    words = query.split()
+    if len(words) < 2:
+        return []
+    collapsed = "".join(words)
+    camel = words[0].lower() + "".join(w[:1].upper() + w[1:] for w in words[1:])
+    variants: list[str] = []
+    for v in (collapsed, camel, collapsed.lower()):
+        if v != query and v not in variants:
+            variants.append(v)
+    return variants
+
+
+def _query_tokens(query: str) -> list[str]:
+    """Alphanumeric words of a query, deduped case-insensitively, in order."""
+    tokens: list[str] = []
+    for t in re.findall(r"[A-Za-z0-9]{2,}", query):
+        if t.casefold() not in {x.casefold() for x in tokens}:
+            tokens.append(t)
+    return tokens
+
+
+async def _novita_search_fallback(cfg: dict, query: str,
+                                  limit: int) -> tuple[str, list[dict], str]:
+    """Recover from a zero-hit catalog search caused by spacing/word order.
+    First retries no-space spellings of the query (see _novita_query_variants);
+    the winning spelling is returned as the effective query so the client can
+    keep paginating with it. If those miss too, searches word-by-word and
+    keeps only models whose name contains every word of the original query —
+    that path post-filters, so its Novita cursor would leak unfiltered pages
+    and pagination is disabled instead.
+    Returns (effective_query, models, next_cursor)."""
+    for variant in _novita_query_variants(query):
+        body = await _novita_list_models(cfg, variant, "", limit)
+        models = _public_checkpoints(body)
+        if models:
+            next_cursor = (body.get("pagination") or {}).get("next_cursor") or ""
+            return variant, models, next_cursor
+    tokens = _query_tokens(query)
+    if len(tokens) >= 2:
+        for token in sorted(tokens, key=len, reverse=True)[:3]:
+            body = await _novita_list_models(cfg, token, "", 100)
+            models = [
+                m for m in _public_checkpoints(body)
+                if all(t.casefold() in f"{m['name']} {m['sd_name']}".casefold()
+                       for t in tokens)
+            ]
+            if models:
+                return query, models, ""
+    return query, [], ""
+
+
 # --------------------------------------------------------------------------
 # Civitai client (LoRA browsing) + Novita availability matching
 # --------------------------------------------------------------------------
@@ -3148,25 +3221,20 @@ def get_router():
         cfg = _load_config()
         if not cfg.get("api_key"):
             raise HTTPException(status_code=400, detail="No API key configured")
+        q, cur = query.strip(), cursor.strip()
         try:
-            body = await _novita_list_models(cfg, query.strip(), cursor.strip(), limit)
+            body = await _novita_list_models(cfg, q, cur, limit)
+            models = _public_checkpoints(body)
+            next_cursor = (body.get("pagination") or {}).get("next_cursor") or ""
+            effective_query = q
+            if not models and q and not cur:
+                effective_query, models, next_cursor = (
+                    await _novita_search_fallback(cfg, q, limit))
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))
-        models = [
-            {
-                "sd_name": m.get("sd_name_in_api") or m.get("sd_name"),
-                "name": m.get("name"),
-                "is_sdxl": bool(m.get("is_sdxl")),
-                "base_model": m.get("base_model"),
-                "cover_url": m.get("cover_url"),
-            }
-            for m in (body.get("models") or [])
-            if m.get("status") == 1 and (m.get("sd_name_in_api") or m.get("sd_name"))
-        ]
-        next_cursor = (body.get("pagination") or {}).get("next_cursor") or ""
         # First-party FLUX.2 rides its own endpoint, so it is not in /v3/model;
         # pin it to the top of matching first pages.
-        if not cursor.strip() and (not query.strip() or "flux" in query.lower()):
+        if not cur and (not q or "flux" in q.lower()):
             models.insert(0, {
                 "sd_name": FLUX2_MODEL_NAME,
                 "name": "FLUX.2 [dev] — Novita first-party (LoRAs via Civitai link)",
@@ -3174,7 +3242,8 @@ def get_router():
                 "base_model": "Flux.2",
                 "cover_url": None,
             })
-        return {"models": models, "next_cursor": next_cursor}
+        return {"models": models, "next_cursor": next_cursor,
+                "effective_query": effective_query}
 
     @router.get("/civitai/loras")
     async def civitai_loras(query: str = "", base_model: str = "", lora_type: str = "LORA",

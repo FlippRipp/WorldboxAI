@@ -1296,6 +1296,82 @@ def test_models_endpoint_proxies_and_requires_key(tmp_path):
     assert "invalid API key" in resp.json()["detail"]
 
 
+# Novita names its Civitai mirrors after the no-space file name, so spaced
+# page-title queries need the proxy's respelling fallback to find anything.
+JIB_MODEL = {
+    "sd_name": "jibMixRealisticXL_v10_168644.safetensors",
+    "sd_name_in_api": "jibMixRealisticXL_v10_168644.safetensors",
+    "name": "jibMixRealisticXL", "status": 1, "is_sdxl": True,
+    "base_model": "SDXL 1.0", "cover_url": None,
+}
+
+
+def test_models_search_retries_collapsed_spellings(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+    _enable(backend)
+    calls = []
+
+    async def fake_list(cfg, query, cursor, limit):
+        calls.append(query)
+        if query == "jibMixRealisticXL":  # only the camelCase spelling hits
+            return {"models": [JIB_MODEL], "pagination": {"next_cursor": "c2"}}
+        return {"models": [], "pagination": {}}
+
+    backend._novita_list_models = fake_list
+    body = client.get("/models", params={"query": "Jib Mix Realistic XL"}).json()
+    assert calls == ["Jib Mix Realistic XL", "JibMixRealisticXL", "jibMixRealisticXL"]
+    assert [m["sd_name"] for m in body["models"]] == [JIB_MODEL["sd_name"]]
+    # The client paginates with the spelling that matched, not the typed one.
+    assert body["effective_query"] == "jibMixRealisticXL"
+    assert body["next_cursor"] == "c2"
+
+    # Direct hits and cursored pages never trigger the fallback.
+    calls.clear()
+    async def direct(cfg, query, cursor, limit):
+        calls.append((query, cursor))
+        return {"models": [JIB_MODEL], "pagination": {}}
+    backend._novita_list_models = direct
+    body = client.get("/models", params={"query": "jibmix"}).json()
+    assert body["effective_query"] == "jibmix"
+    body = client.get("/models", params={"query": "Jib Mix", "cursor": "c2"}).json()
+    assert calls == [("jibmix", ""), ("Jib Mix", "c2")]
+
+
+def test_models_search_word_fallback_post_filters(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+    _enable(backend)
+    other = dict(JIB_MODEL, sd_name="jibberish_v1.safetensors",
+                 sd_name_in_api="jibberish_v1.safetensors", name="jibberish")
+    calls = []
+
+    async def fake_list(cfg, query, cursor, limit):
+        calls.append(query)
+        if query == "Jib":  # no collapsed spelling matches, the word does
+            return {"models": [JIB_MODEL, other],
+                    "pagination": {"next_cursor": "unfiltered"}}
+        return {"models": [], "pagination": {}}
+
+    backend._novita_list_models = fake_list
+    body = client.get("/models", params={"query": "Jib Mix XL"}).json()
+    assert calls == ["Jib Mix XL", "JibMixXL", "jibMixXL", "jibmixxl", "Jib"]
+    # Only models containing every query word survive the post-filter, and
+    # the unfiltered Novita cursor is not exposed.
+    assert [m["sd_name"] for m in body["models"]] == [JIB_MODEL["sd_name"]]
+    assert body["next_cursor"] == ""
+    assert body["effective_query"] == "Jib Mix XL"
+
+    # Single-word misses have no respellings to try: one call, empty result.
+    calls.clear()
+    async def empty(cfg, query, cursor, limit):
+        calls.append(query)
+        return {"models": [], "pagination": {}}
+    backend._novita_list_models = empty
+    assert client.get("/models", params={"query": "nosuchmodel"}).json()["models"] == []
+    assert calls == ["nosuchmodel"]
+
+
 # ---------------------------------------------------------------------------
 # LoRA library: families, payloads, trigger words, Civitai flattening
 # ---------------------------------------------------------------------------
