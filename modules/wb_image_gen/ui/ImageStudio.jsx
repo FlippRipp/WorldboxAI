@@ -284,7 +284,7 @@ function Lightbox({ items, index, onNavigate, onClose, errorRecord }) {
 // names Civitai mirrors after the no-space file name) — pagination must reuse
 // that effective_query, not what the user typed.
 // onSelect receives the whole model object (sd_name + base_model metadata).
-function ModelPicker({ value, valueBase, hasKey, onSelect }) {
+function ModelPicker({ value, valueBase, hasKey, local, onSelect }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [models, setModels] = useState([]);
@@ -292,9 +292,11 @@ function ModelPicker({ value, valueBase, hasKey, onSelect }) {
   const [effQuery, setEffQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
   const debounceRef = useRef(null);
   const seqRef = useRef(0);
   const boxRef = useRef(null);
+  const enabled = local || hasKey;   // the local WebUI needs no API key
 
   const search = useCallback(async (q, cursor = '') => {
     const seq = ++seqRef.current;
@@ -352,7 +354,7 @@ function ModelPicker({ value, valueBase, hasKey, onSelect }) {
             )}
             <button
               onClick={() => setOpen(true)}
-              disabled={!hasKey}
+              disabled={!enabled}
               className="text-xs text-purple-400 hover:text-purple-300 disabled:opacity-40"
             >
               Change
@@ -365,15 +367,17 @@ function ModelPicker({ value, valueBase, hasKey, onSelect }) {
           type="text"
           value={query}
           autoFocus={open}
-          disabled={!hasKey}
+          disabled={!enabled}
           onChange={(e) => setQuery(e.target.value)}
           onFocus={() => setOpen(true)}
           onKeyDown={(e) => { if (e.key === 'Escape') setOpen(false); }}
-          placeholder={hasKey ? 'Search thousands of models — e.g. realistic, anime, fantasy…' : 'Save an API key first'}
+          placeholder={local
+            ? 'Search your installed checkpoints…'
+            : hasKey ? 'Search thousands of models — e.g. realistic, anime, fantasy…' : 'Save an API key first'}
           className={inputCls}
         />
       )}
-      {!hasKey && !value && (
+      {!enabled && !value && (
         <p className="text-xs text-yellow-500 mt-1">Save an API key to browse models.</p>
       )}
 
@@ -381,7 +385,27 @@ function ModelPicker({ value, valueBase, hasKey, onSelect }) {
         <div className="absolute z-30 mt-1 w-full max-h-80 overflow-y-auto bg-gray-900 border border-gray-700 rounded-lg shadow-2xl">
           {error && <div className="px-3 py-2 text-xs text-red-400">{error}</div>}
           {!error && models.length === 0 && !loading && (
-            <div className="px-3 py-2 text-xs text-gray-500 italic">No models found.</div>
+            <div className="px-3 py-2 text-xs text-gray-500 italic">
+              {local
+                ? 'No checkpoints found — is the WebUI running with --api?'
+                : 'No models found.'}
+            </div>
+          )}
+          {local && !loading && (
+            <button
+              onClick={async () => {
+                setRefreshing(true);
+                try {
+                  await fetch(`${API_BASE}/local/refresh`, { method: 'POST' });
+                } catch (e) { /* the re-search below surfaces errors */ }
+                setRefreshing(false);
+                search(query);
+              }}
+              disabled={refreshing}
+              className="w-full px-3 py-1.5 text-left text-[11px] text-purple-400 hover:text-purple-300 hover:bg-gray-800 border-b border-gray-800 disabled:opacity-40"
+            >
+              {refreshing ? 'Rescanning model folders…' : '↻ Rescan the WebUI’s model folders'}
+            </button>
           )}
           {!error && models.length > 0 && effQuery && effQuery !== query.trim() && (
             <div className="px-3 py-1.5 text-[10px] text-gray-500 border-b border-gray-800">
@@ -481,6 +505,154 @@ function KeyField({ provider, label, placeholder, saved, savedMask, onSaved, chi
         <p className={`text-xs mt-1 ${status.ok ? 'text-green-400' : 'text-red-400'}`}>{status.msg}</p>
       )}
       {children}
+    </div>
+  );
+}
+
+// Connection settings for a local A1111/Forge/reForge/SD.Next WebUI. The
+// fields ride the normal draft/save flow; Test connection checks the SAVED
+// config server-side, so unsaved edits get a save-first hint instead.
+function LocalConnectionCard({ config, draft, set }) {
+  const [status, setStatus] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [showGuide, setShowGuide] = useState(false);
+  const unsaved = (draft.local_base_url || '') !== (config.local_base_url || '') ||
+    (draft.local_auth_user || '') !== (config.local_auth_user || '') ||
+    (draft.local_auth_pass || '') !== (config.local_auth_pass || '');
+
+  const test = async () => {
+    setBusy(true);
+    setStatus(null);
+    try {
+      const res = await fetch(`${API_BASE}/local/status`);
+      setStatus(await res.json());
+    } catch (e) {
+      setStatus({ ok: false, error: String(e.message || e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <label className={labelCls}>Local WebUI address</label>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={draft.local_base_url ?? ''}
+            onChange={(e) => set('local_base_url', e.target.value)}
+            placeholder="http://127.0.0.1:7860"
+            className={inputCls}
+            autoComplete="off"
+          />
+          <button
+            onClick={test}
+            disabled={busy}
+            className="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium disabled:opacity-40 shrink-0"
+          >
+            {busy ? 'Checking…' : 'Test connection'}
+          </button>
+        </div>
+        {status && (
+          <p className={`text-xs mt-1 ${status.ok ? 'text-green-400' : 'text-red-400'}`}>
+            {status.ok
+              ? `Connected ✓ — ${status.checkpoint_count} checkpoint${status.checkpoint_count === 1 ? '' : 's'} installed${status.current_checkpoint ? `, ${status.current_checkpoint} loaded` : ''}`
+              : status.error}
+          </p>
+        )}
+        {unsaved && (
+          <p className="text-xs text-yellow-600 mt-1">Unsaved connection changes — press Save Changes before testing.</p>
+        )}
+        <p className="text-xs text-gray-600 mt-1">
+          Any AUTOMATIC1111-compatible WebUI (A1111, Forge, reForge, SD.Next) started with the{' '}
+          <span className="font-mono text-gray-500">--api</span> flag.{' '}
+          <button onClick={() => setShowGuide((s) => !s)} className="text-purple-400 hover:underline">
+            {showGuide ? 'Hide quick start' : 'How do I set it up?'}
+          </button>
+        </p>
+        {showGuide && (
+          <ol className="mt-2 space-y-1.5 text-xs text-gray-400 list-decimal list-inside bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+            <li>
+              Install a WebUI —{' '}
+              <a href="https://github.com/AUTOMATIC1111/stable-diffusion-webui" target="_blank" rel="noreferrer" className="text-purple-400 hover:underline">
+                AUTOMATIC1111
+              </a>{' '}
+              or{' '}
+              <a href="https://github.com/lllyasviel/stable-diffusion-webui-forge" target="_blank" rel="noreferrer" className="text-purple-400 hover:underline">
+                Forge
+              </a>{' '}
+              (faster, also runs Flux) — and drop at least one checkpoint into{' '}
+              <span className="font-mono">models/Stable-diffusion</span>.
+            </li>
+            <li>
+              Add <span className="font-mono text-gray-300">--api</span> to its launch flags
+              (in <span className="font-mono">webui-user.bat</span>: <span className="font-mono">set COMMANDLINE_ARGS=--api</span>) and start it.
+            </li>
+            <li>
+              Point the address above at it (the default is right for a WebUI on this machine),
+              press <span className="text-gray-300 font-medium">Save Changes</span>, then <span className="text-gray-300 font-medium">Test connection</span>.
+            </li>
+            <li>
+              Generation is free and private — images never leave your machine. Only optional
+              WebUI logins (<span className="font-mono">--api-auth</span>) need the fields below.
+            </li>
+          </ol>
+        )}
+      </div>
+      <div className="grid sm:grid-cols-2 gap-3">
+        <div>
+          <label className={labelCls}>API auth user (optional)</label>
+          <input
+            type="text"
+            value={draft.local_auth_user ?? ''}
+            onChange={(e) => set('local_auth_user', e.target.value)}
+            placeholder="only with --api-auth"
+            className={inputCls}
+            autoComplete="off"
+          />
+        </div>
+        <div>
+          <label className={labelCls}>API auth password</label>
+          <input
+            type="password"
+            value={draft.local_auth_pass ?? ''}
+            onChange={(e) => set('local_auth_pass', e.target.value)}
+            placeholder="only with --api-auth"
+            className={inputCls}
+            autoComplete="off"
+          />
+        </div>
+      </div>
+      <div>
+        <label className={labelCls}>LoRA folder (optional — enables one-click installs)</label>
+        <input
+          type="text"
+          value={draft.local_lora_dir ?? ''}
+          onChange={(e) => set('local_lora_dir', e.target.value)}
+          placeholder="e.g. C:\\stable-diffusion-webui\\models\\Lora"
+          className={inputCls}
+          autoComplete="off"
+        />
+        <p className="text-xs text-gray-600 mt-1">
+          The WebUI's <span className="font-mono">models/Lora</span> folder on this machine. With it set,
+          the LoRA browser installs files for you and links them up automatically.
+        </p>
+      </div>
+      <div>
+        <label className={labelCls}>Checkpoint folder (optional)</label>
+        <input
+          type="text"
+          value={draft.local_checkpoint_dir ?? ''}
+          onChange={(e) => set('local_checkpoint_dir', e.target.value)}
+          placeholder="e.g. C:\\stable-diffusion-webui\\models\\Stable-diffusion"
+          className={inputCls}
+          autoComplete="off"
+        />
+        <p className="text-xs text-gray-600 mt-1">
+          The WebUI's <span className="font-mono">models/Stable-diffusion</span> folder, for checkpoint downloads.
+        </p>
+      </div>
     </div>
   );
 }
@@ -604,10 +776,18 @@ function loraLink(item) {
   return url;
 }
 
-// Availability of a saved LoRA on Novita: Flux LoRAs travel as download links,
-// SD-family ones must exist in Novita's mirrored catalog (or be console-uploaded
-// and named manually).
-function loraAvailability(entry) {
+// Availability of a saved LoRA. Local mode: it must be linked to a file
+// installed in the WebUI (any family — Forge runs Flux LoRAs through the same
+// prompt syntax). Novita: Flux LoRAs travel as download links, SD-family ones
+// must exist in Novita's mirrored catalog (or be console-uploaded and named
+// manually).
+function loraAvailability(entry, isLocal) {
+  if (isLocal) {
+    const name = entry.local && entry.local.name;
+    return name
+      ? { ok: true, label: `→ ${name}`, cls: 'bg-green-900/50 text-green-300 border-green-800' }
+      : { ok: false, label: 'not installed', cls: 'bg-red-900/50 text-red-300 border-red-800' };
+  }
   if (baseFamily(entry.base_model) === 'flux') {
     return entry.download_url
       ? { ok: true, label: 'via link', cls: 'bg-purple-900/40 text-purple-300 border-purple-800' }
@@ -641,14 +821,34 @@ function mergeBrowseResults(prev, incoming, sortLabel) {
   return merged;
 }
 
-// Availability badge for a browse result (not yet saved). The backend checks
-// each result's hashes against Novita's mirrored catalog; flux LoRAs travel
-// as download links so the mirror doesn't matter for them.
-function browseAvailability(item) {
+// Availability badge for a browse result (not yet saved). Local mode checks
+// each result's hashes against a scan of the LoRA folder; Novita mode against
+// Novita's mirrored catalog (flux LoRAs travel as download links there).
+function browseAvailability(item, isLocal) {
   if (item.gated) {
     return {
       label: 'gated', cls: 'bg-yellow-900/40 text-yellow-400 border-yellow-800',
-      title: 'Gated Hugging Face repo — Novita cannot download it, so it cannot be used',
+      title: isLocal
+        ? 'Gated Hugging Face repo — it cannot be downloaded automatically'
+        : 'Gated Hugging Face repo — Novita cannot download it, so it cannot be used',
+    };
+  }
+  if (isLocal) {
+    if (item.local_available === true) {
+      return {
+        label: 'installed', cls: 'bg-green-900/50 text-green-300 border-green-800',
+        title: item.local_name ? `In your LoRA folder as ${item.local_name}` : 'In your LoRA folder',
+      };
+    }
+    if (item.local_available === false) {
+      return {
+        label: 'not installed', cls: 'bg-gray-800/80 text-gray-400 border-gray-700',
+        title: 'Not in your LoRA folder yet — press Install',
+      };
+    }
+    return {
+      label: 'installed: ?', cls: 'bg-gray-900/40 text-gray-600 border-gray-800',
+      title: 'Local availability unknown (set your LoRA folder in Setup and it will be scanned)',
     };
   }
   if (baseFamily(item.base_model) === 'flux') {
@@ -674,7 +874,111 @@ function browseAvailability(item) {
   };
 }
 
-function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLoras, maxSlots, loadMyUploads, fetchMyUploads }) {
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(2)} GB`;
+  if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(0)} MB`;
+  return `${(n / 1024).toFixed(0)} kB`;
+}
+
+// Progress bar for one in-flight (or just-finished) install.
+function InstallProgress({ download, onCancel }) {
+  if (!download) return null;
+  if (download.status === 'error') {
+    return <p className="text-[11px] text-red-400">Install failed: {download.error}</p>;
+  }
+  if (download.status === 'done') {
+    return <p className="text-[11px] text-green-400">Installed ✓ {download.filename}</p>;
+  }
+  const pct = download.total_bytes
+    ? Math.min(100, Math.round((download.received_bytes / download.total_bytes) * 100))
+    : null;
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between text-[10px] text-gray-500">
+        <span className="truncate">
+          Installing {download.label || download.filename}… {fmtBytes(download.received_bytes)}
+          {download.total_bytes ? ` of ${fmtBytes(download.total_bytes)}` : ''}
+        </span>
+        {onCancel && (
+          <button onClick={() => onCancel(download.id)} className="text-gray-600 hover:text-red-400 shrink-0 ml-2">
+            cancel
+          </button>
+        )}
+      </div>
+      <div className="h-1.5 rounded bg-gray-800 overflow-hidden">
+        <div
+          className={`h-full bg-purple-500 ${pct == null ? 'w-1/3 animate-pulse' : ''}`}
+          style={pct == null ? undefined : { width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// The Install button's version picker: Civitai models ship many versions but
+// browse hits carry only the latest, so picking fetches the full list. HF
+// items have no versions and install directly (the button skips this panel).
+function VersionPicker({ item, onInstall, onClose }) {
+  const [versions, setVersions] = useState(null);
+  const [error, setError] = useState('');
+  const [busyId, setBusyId] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/civitai/model-versions/${item.model_id}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        if (!cancelled) setVersions(data.versions || []);
+      } catch (e) {
+        if (!cancelled) setError(String(e.message || e));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [item.model_id]);
+
+  return (
+    <div className="space-y-1.5 border-t border-gray-800 pt-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] uppercase tracking-wider text-gray-500">Pick a version</span>
+        <button onClick={onClose} className="text-[10px] text-gray-600 hover:text-gray-300">close</button>
+      </div>
+      {error && <p className="text-[11px] text-red-400">{error}</p>}
+      {versions === null && !error && (
+        <p className="text-[11px] text-gray-500 animate-pulse">Loading versions…</p>
+      )}
+      {(versions || []).map((v) => (
+        <div key={v.id} className="flex items-center gap-2 text-[11px]">
+          <span className="text-gray-300 truncate flex-1" title={`${v.version_name} · ${v.base_model}`}>
+            {v.version_name || v.id}
+            <span className="text-gray-600">
+              {' '}· {v.base_model}
+              {v.size_kb ? ` · ${(v.size_kb / 1024).toFixed(0)} MB` : ''}
+            </span>
+          </span>
+          {v.local_available === true ? (
+            <span className="text-green-400 shrink-0">installed ✓</span>
+          ) : (
+            <button
+              onClick={async () => { setBusyId(v.id); await onInstall(v); setBusyId(null); }}
+              disabled={busyId !== null}
+              className="px-2 py-0.5 rounded bg-purple-600 hover:bg-purple-500 text-white disabled:opacity-40 shrink-0"
+            >
+              {busyId === v.id ? '…' : 'Install'}
+            </button>
+          )}
+        </div>
+      ))}
+      {versions !== null && versions.length === 0 && !error && (
+        <p className="text-[11px] text-gray-600 italic">No downloadable versions.</p>
+      )}
+    </div>
+  );
+}
+
+function LoraRow({ entry, checkpointFamily, provider, canInstall, download, onInstall, onCancelInstall, installedLoras, loadInstalledLoras, onPatch, onDelete, onRematch, myLoras, maxSlots, loadMyUploads, fetchMyUploads }) {
   const [strength, setStrength] = useState(entry.strength ?? 0.7);
   const [showOverride, setShowOverride] = useState(false);
   const [override, setOverride] = useState(entry.sd_name_override || '');
@@ -682,6 +986,9 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
   const [detected, setDetected] = useState(null); // new upload seen but still processing
   const [condition, setCondition] = useState(entry.condition || '');
   const [triggers, setTriggers] = useState((entry.trained_words || []).join(', '));
+  const [showLink, setShowLink] = useState(false);
+  const [linkFilter, setLinkFilter] = useState('');
+  const isLocal = provider === 'local';
 
   useEffect(() => { setStrength(entry.strength ?? 0.7); }, [entry.strength]);
   useEffect(() => { setCondition(entry.condition || ''); }, [entry.condition]);
@@ -754,7 +1061,7 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
   }, [showOverride]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fam = baseFamily(entry.base_model);
-  const availability = loraAvailability(entry);
+  const availability = loraAvailability(entry, isLocal);
   const compatible = fam && checkpointFamily && fam === checkpointFamily;
   const dimmed = entry.active && !compatible;
   const pageUrl = loraLink(entry);
@@ -912,7 +1219,79 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
         </div>
       )}
 
-      {!availability.ok && fam !== 'flux' && (
+      {isLocal && download && <InstallProgress download={download} onCancel={onCancelInstall} />}
+
+      {isLocal && !availability.ok && (!download || download.status === 'error') && (
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-3 text-[11px]">
+            {entry.download_url && !entry.gated && (
+              <button
+                onClick={() => onInstall(entry)}
+                disabled={!canInstall}
+                title={canInstall
+                  ? `Download into your LoRA folder${entry.size_kb ? ` (${(entry.size_kb / 1024).toFixed(0)} MB)` : ''} and link it up`
+                  : 'Set your LoRA folder in Setup to enable one-click installs'}
+                className="px-2 py-0.5 rounded bg-purple-600 hover:bg-purple-500 text-white disabled:opacity-40"
+              >
+                Install to WebUI
+              </button>
+            )}
+            <button
+              onClick={() => { setShowLink((s) => !s); if (!showLink) loadInstalledLoras(); }}
+              className="text-gray-500 hover:text-gray-300"
+            >
+              {showLink ? 'Hide installed files' : 'Link to an installed file'}
+            </button>
+            <a
+              href={`${API_BASE}/loras/${entry.id}/download`}
+              className="text-gray-600 hover:text-gray-400 underline"
+              title="Plain browser download — put the file in your LoRA folder yourself"
+            >
+              download file
+            </a>
+          </div>
+          {!canInstall && entry.download_url && !entry.gated && (
+            <p className="text-[10px] text-gray-600">
+              Set your WebUI's LoRA folder in the Setup tab to enable one-click installs.
+            </p>
+          )}
+          {showLink && (
+            <div className="space-y-1 border border-gray-800 rounded-lg p-2.5 bg-gray-900/40">
+              {installedLoras === null && <p className="text-[11px] text-gray-500 animate-pulse">Loading installed LoRAs…</p>}
+              {installedLoras !== null && installedLoras.length === 0 && (
+                <p className="text-[11px] text-gray-600 italic">
+                  The WebUI reports no installed LoRAs — is it running with --api?
+                </p>
+              )}
+              {installedLoras !== null && installedLoras.length > 5 && (
+                <input
+                  type="text"
+                  value={linkFilter}
+                  onChange={(e) => setLinkFilter(e.target.value)}
+                  placeholder="Filter installed files…"
+                  className={`${inputCls} text-xs`}
+                />
+              )}
+              {(installedLoras || [])
+                .filter((m) => !linkFilter || m.name.toLowerCase().includes(linkFilter.toLowerCase()))
+                .slice(0, 30)
+                .map((m) => (
+                  <div key={m.name} className="flex items-center gap-2 text-[11px]">
+                    <span className="text-gray-300 truncate flex-1" title={m.path || m.name}>{m.name}</span>
+                    <button
+                      onClick={() => { onPatch(entry.id, { local_name: m.name }); setShowLink(false); }}
+                      className="px-2 py-0.5 rounded bg-purple-600 hover:bg-purple-500 text-white shrink-0"
+                    >
+                      Use
+                    </button>
+                  </div>
+                ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {!isLocal && !availability.ok && fam !== 'flux' && (
         <div className="space-y-1.5">
           <div className="flex items-center gap-3 text-[11px]">
             <button
@@ -1038,8 +1417,10 @@ function loadLoraBrowserState() {
 // LoRA browser (Civitai + Hugging Face) + local library. Browsing is proxied
 // through the module backend (which injects the Civitai key for NSFW); saving
 // stores metadata only — no file ever touches this device.
-function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily }) {
+function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily, onConfigRefresh }) {
   const [saved] = useState(loadLoraBrowserState);
+  const isLocal = (draft.provider || config.provider) === 'local';
+  const canInstall = !!(config.local_lora_dir || '').trim();
   const [source, setSource] = useState(saved?.source || 'civitai');
   const [novitaOnly, setNovitaOnly] = useState(!!saved?.novitaOnly);
   const [query, setQuery] = useState(saved?.query || '');
@@ -1075,19 +1456,110 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   // Civitai requires its key for anything beyond SFW.
   const nsfwMode = (source === 'hf' || config.has_civitai_key) ? (draft.civitai_nsfw || 'off') : 'off';
 
-  // "On Novita only": keep results that are usable as-is — hash-matched in
-  // Novita's mirror, or flux (sent as a download link, no mirror needed).
+  // "On Novita only" / "Installed only": keep results usable as-is — locally
+  // that means hash-matched to an installed file; on Novita hash-matched in
+  // the mirror, or flux (sent as a download link, no mirror needed).
   // Unknown availability (badge "?") is hidden too: it is not a known yes.
-  const usableOnNovita = (i) =>
-    !i.gated && (i.novita_available === true ||
-      (baseFamily(i.base_model) === 'flux' && i.download_url));
-  const visibleItems = novitaOnly ? items.filter(usableOnNovita) : items;
+  const usableNow = (i) => !i.gated && (isLocal
+    ? i.local_available === true
+    : (i.novita_available === true ||
+      (baseFamily(i.base_model) === 'flux' && i.download_url)));
+  const visibleItems = novitaOnly ? items.filter(usableNow) : items;
   const savedIds = new Set(library.map((e) => e.id));
-  const isUnmatched = (e) =>
-    baseFamily(e.base_model) !== 'flux' &&
-    !(e.novita && e.novita.sd_name_in_api) &&
-    !e.sd_name_override;
+  const isUnmatched = (e) => (isLocal
+    ? !(e.local && e.local.name)
+    : baseFamily(e.base_model) !== 'flux' &&
+      !(e.novita && e.novita.sd_name_in_api) &&
+      !e.sd_name_override);
   const unmatchedCount = library.filter(isUnmatched).length;
+
+  // In-flight and recent installs, polled while any download is running so
+  // rows show live progress; a finishing install links its library entry
+  // server-side, so completion refreshes the whole config.
+  const [downloads, setDownloads] = useState([]);
+  const [installedLoras, setInstalledLoras] = useState(null);
+  const [versionPickerFor, setVersionPickerFor] = useState(null);   // browse item id
+  const downloadsPollRef = useRef(null);
+  const downloadingIdsRef = useRef(new Set());
+  const installedLorasRef = useRef(false);
+
+  const refreshDownloads = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/local/downloads`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const list = data.downloads || [];
+      const nowDownloading = new Set(
+        list.filter((d) => d.status === 'downloading').map((d) => d.id));
+      const finished = [...downloadingIdsRef.current].some((id) => !nowDownloading.has(id));
+      downloadingIdsRef.current = nowDownloading;
+      setDownloads(list);
+      if (finished) onConfigRefresh();   // pick up auto-linked entries
+    } catch (e) { /* retried by the poller */ }
+  }, [onConfigRefresh]);
+
+  useEffect(() => {
+    if (isLocal) refreshDownloads();
+  }, [isLocal, refreshDownloads]);
+
+  useEffect(() => {
+    const active = downloads.some((d) => d.status === 'downloading');
+    if (active && !downloadsPollRef.current) {
+      downloadsPollRef.current = setInterval(refreshDownloads, 1000);
+    } else if (!active && downloadsPollRef.current) {
+      clearInterval(downloadsPollRef.current);
+      downloadsPollRef.current = null;
+    }
+    return () => {
+      if (downloadsPollRef.current) {
+        clearInterval(downloadsPollRef.current);
+        downloadsPollRef.current = null;
+      }
+    };
+  }, [downloads, refreshDownloads]);
+
+  const startInstall = useCallback(async (payload) => {
+    setError('');
+    try {
+      const res = await fetch(`${API_BASE}/local/downloads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      await refreshDownloads();
+      return data.download;
+    } catch (e) {
+      setError(String(e.message || e));
+      return null;
+    }
+  }, [refreshDownloads]);
+
+  const cancelInstall = useCallback(async (dlId) => {
+    await fetch(`${API_BASE}/local/downloads/${dlId}`, { method: 'DELETE' }).catch(() => {});
+    refreshDownloads();
+  }, [refreshDownloads]);
+
+  // Latest download per library entry, for row progress bars.
+  const downloadByLoraId = {};
+  for (const d of downloads) {
+    if (d.lora_id && !downloadByLoraId[d.lora_id]) downloadByLoraId[d.lora_id] = d;
+  }
+
+  const loadInstalledLoras = useCallback(async () => {
+    if (installedLorasRef.current) return;
+    installedLorasRef.current = true;
+    try {
+      const res = await fetch(`${API_BASE}/local/loras`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      setInstalledLoras(data.loras || []);
+    } catch (e) {
+      setInstalledLoras([]);
+      setError(String(e.message || e));
+    }
+  }, []);
 
   const search = useCallback(async (cursor = '') => {
     const seq = ++seqRef.current;
@@ -1244,7 +1716,8 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   const recheckAll = async () => {
     setRecheckBusy(true);
     try {
-      await callLibrary('/loras/match_all', { method: 'POST' });
+      await callLibrary(isLocal ? '/local/match-loras' : '/loras/match_all',
+        { method: 'POST' });
     } finally {
       setRecheckBusy(false);
     }
@@ -1252,8 +1725,9 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
 
   // Novita's mirror grows over time — silently recheck unmatched entries
   // once per studio visit when the last check is a week old or older.
+  // (Novita-only: the local equivalent is the explicit Match installed scan.)
   useEffect(() => {
-    if (autoRecheckRef.current || !config.has_key) return;
+    if (isLocal || autoRecheckRef.current || !config.has_key) return;
     const weekAgo = Date.now() - 7 * 24 * 3600 * 1000;
     const stale = library.some(
       (e) => isUnmatched(e) &&
@@ -1287,7 +1761,17 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
           LoRAs {library.length > 0 && <span className="text-gray-600">({library.length} saved{activeCount > 0 ? `, ${activeCount} active` : ''})</span>}
         </h2>
         <div className="flex items-center gap-3">
-          {unmatchedCount > 0 && config.has_key && (
+          {isLocal && canInstall && library.length > 0 && (
+            <button
+              onClick={recheckAll}
+              disabled={recheckBusy}
+              className="text-xs text-gray-500 hover:text-gray-300 disabled:opacity-40"
+              title="Hash-scan your LoRA folder and link library entries to the files it finds"
+            >
+              {recheckBusy ? 'Scanning…' : unmatchedCount > 0 ? `Match installed (${unmatchedCount})` : 'Match installed'}
+            </button>
+          )}
+          {!isLocal && unmatchedCount > 0 && config.has_key && (
             <button
               onClick={recheckAll}
               disabled={recheckBusy}
@@ -1306,9 +1790,15 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
         </div>
       </div>
       <p className="text-xs text-gray-600">
-        Save LoRAs you like from Civitai or Hugging Face, then activate them. SD-family LoRAs are applied
-        through Novita's mirrored catalog; Flux LoRAs are sent as download links (FLUX.2 model only). Active
-        LoRAs that do not match the selected checkpoint are skipped.
+        {isLocal ? (
+          <>Find LoRAs on Civitai or Hugging Face and press Install — the file lands in your WebUI's LoRA
+          folder and links up automatically. Active LoRAs that do not match the selected checkpoint are
+          skipped.</>
+        ) : (
+          <>Save LoRAs you like from Civitai or Hugging Face, then activate them. SD-family LoRAs are applied
+          through Novita's mirrored catalog; Flux LoRAs are sent as download links (FLUX.2 model only). Active
+          LoRAs that do not match the selected checkpoint are skipped.</>
+        )}
       </p>
 
       {open && (
@@ -1372,7 +1862,9 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
             </select>
             <label
               className="flex items-center gap-1.5 text-[11px] text-gray-400 shrink-0 cursor-pointer"
-              title="Only show LoRAs that work right away: mirrored in Novita's catalog, or Flux LoRAs sent as download links. Hides ones with unknown availability."
+              title={isLocal
+                ? 'Only show LoRAs already installed in your LoRA folder. Hides ones with unknown availability.'
+                : "Only show LoRAs that work right away: mirrored in Novita's catalog, or Flux LoRAs sent as download links. Hides ones with unknown availability."}
             >
               <input
                 type="checkbox"
@@ -1380,7 +1872,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
                 onChange={(e) => setNovitaOnly(e.target.checked)}
                 className="accent-purple-500"
               />
-              On Novita only
+              {isLocal ? 'Installed only' : 'On Novita only'}
             </label>
             {source === 'civitai' && !config.has_civitai_key && (
               <span className="text-[11px] text-yellow-600">Save a Civitai API key (Setup tab) to browse NSFW LoRAs.</span>
@@ -1396,7 +1888,13 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
           >
             {visibleItems.map((item) => {
               const pageUrl = loraLink(item);
-              const badge = browseAvailability(item);
+              const badge = browseAvailability(item, isLocal);
+              const itemDownload = downloads.find(
+                (d) => d.lora_id === item.id && d.status === 'downloading');
+              // A finished install marks the cached browse result installed
+              // without waiting for a fresh search to re-annotate it.
+              const itemInstalled = item.local_available === true ||
+                downloads.some((d) => d.lora_id === item.id && d.status === 'done');
               return (
                 <div key={item.id} className="bg-gray-950/60 border border-gray-800 rounded-lg overflow-hidden">
                   {item.thumb_url ? (
@@ -1433,14 +1931,54 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
                         )}
                       </div>
                     )}
-                    <button
-                      onClick={() => saveLora(item)}
-                      disabled={savedIds.has(item.id) || item.gated}
-                      title={item.gated ? 'Gated repos cannot be fetched by Novita' : undefined}
-                      className="w-full px-2 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      {savedIds.has(item.id) ? 'Saved ✓' : item.gated ? 'Gated' : 'Save to library'}
-                    </button>
+                    {isLocal && itemDownload ? (
+                      <InstallProgress download={itemDownload} onCancel={cancelInstall} />
+                    ) : isLocal && itemInstalled ? (
+                      <p className="w-full px-2 py-1 rounded bg-green-900/40 border border-green-800 text-green-300 text-[11px] font-medium text-center">
+                        Installed ✓
+                      </p>
+                    ) : isLocal && !item.gated && (item.download_url || item.model_id) ? (
+                      <button
+                        onClick={() => {
+                          if (!canInstall) return;
+                          if (item.source !== 'hf' && item.model_id) {
+                            setVersionPickerFor(versionPickerFor === item.id ? null : item.id);
+                          } else {
+                            startInstall({ item });
+                          }
+                        }}
+                        disabled={!canInstall}
+                        title={canInstall
+                          ? (item.source !== 'hf' && item.model_id
+                            ? 'Pick a version, then it downloads into your LoRA folder and links up'
+                            : 'Download into your LoRA folder and link it up')
+                          : 'Set your LoRA folder in Setup to enable one-click installs'}
+                        className="w-full px-2 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        Install
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => saveLora(item)}
+                        disabled={savedIds.has(item.id) || item.gated}
+                        title={item.gated
+                          ? (isLocal ? 'Gated repos cannot be downloaded automatically' : 'Gated repos cannot be fetched by Novita')
+                          : undefined}
+                        className="w-full px-2 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {savedIds.has(item.id) ? 'Saved ✓' : item.gated ? 'Gated' : 'Save to library'}
+                      </button>
+                    )}
+                    {isLocal && versionPickerFor === item.id && (
+                      <VersionPicker
+                        item={item}
+                        onClose={() => setVersionPickerFor(null)}
+                        onInstall={async (version) => {
+                          const started = await startInstall({ item: version });
+                          if (started) setVersionPickerFor(null);
+                        }}
+                      />
+                    )}
                   </div>
                 </div>
               );
@@ -1455,7 +1993,8 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
           )}
           {!loading && novitaOnly && items.length > visibleItems.length && (
             <p className="text-xs text-gray-600">
-              {items.length - visibleItems.length} of {items.length} results hidden (not on Novita)
+              {items.length - visibleItems.length} of {items.length} results hidden{' '}
+              ({isLocal ? 'not installed' : 'not on Novita'})
               {visibleItems.length === 0 && nextCursor ? ' — try Load more' : ''}.
             </p>
           )}
@@ -1481,6 +2020,13 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
               key={entry.id}
               entry={entry}
               checkpointFamily={checkpointFamily}
+              provider={isLocal ? 'local' : 'novita'}
+              canInstall={canInstall}
+              download={downloadByLoraId[entry.id]}
+              onInstall={(e) => startInstall({ lora_id: e.id })}
+              onCancelInstall={cancelInstall}
+              installedLoras={installedLoras}
+              loadInstalledLoras={loadInstalledLoras}
               onPatch={patchLora}
               onDelete={deleteLora}
               onRematch={rematchLora}
@@ -1557,6 +2103,19 @@ export default function ImageStudio({ onBack }) {
     applyConfig(await res.json());
   }, [applyConfig]);
 
+  // Refresh config + library without touching the draft, so background
+  // changes (a finished install linking its entry) don't clobber unsaved
+  // edits.
+  const refreshLibrary = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/config`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setConfig(data);
+      setLibrary(data.lora_library || []);
+    } catch (e) { /* next poll retries */ }
+  }, []);
+
   const loadImages = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/images?limit=200`);
@@ -1604,12 +2163,27 @@ export default function ImageStudio({ onBack }) {
   const promptStyleMode = draft.prompt_style_mode || 'auto';
   const promptStyle = promptStyleMode === 'auto' ? autoPromptStyle : promptStyleMode;
   const isPony = modelIdent.includes('pony');
+  const isLocal = (draft.provider || config?.provider) === 'local';
   const checkpointFamily =
     draft.model_name === config?.flux2_model_name ? 'flux' : baseFamily(modelIdent);
   const activeLoraCount = library.filter(
     (e) => e.active && baseFamily(e.base_model) === checkpointFamily).length;
 
   const set = (key, value) => setDraft((d) => ({ ...d, [key]: value }));
+
+  // The local WebUI reports its own sampler list; fall back to the static
+  // Novita list until (or unless) it answers.
+  const [localSamplers, setLocalSamplers] = useState(null);
+  useEffect(() => {
+    if (!isLocal) return undefined;
+    let cancelled = false;
+    fetch(`${API_BASE}/local/samplers`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => { if (!cancelled && data) setLocalSamplers(data.samplers || null); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [isLocal]);
+  const samplerOptions = (isLocal && localSamplers) || config?.samplers || [];
 
   const save = async () => {
     setSaving(true);
@@ -1642,6 +2216,14 @@ export default function ImageStudio({ onBack }) {
         player_in_images: draft.player_in_images || 'show',
         chat_image_conceal: draft.chat_image_conceal || 'off',
         civitai_nsfw: draft.civitai_nsfw || 'off',
+        provider: draft.provider || 'novita',
+        local_base_url: draft.local_base_url ?? '',
+        local_auth_user: draft.local_auth_user ?? '',
+        // Masked round-trips are ignored server-side, so sending the field
+        // unconditionally never clobbers a stored password.
+        local_auth_pass: draft.local_auth_pass ?? '',
+        local_checkpoint_dir: draft.local_checkpoint_dir ?? '',
+        local_lora_dir: draft.local_lora_dir ?? '',
       };
       const res = await fetch(`${API_BASE}/config`, {
         method: 'PUT',
@@ -1763,7 +2345,8 @@ export default function ImageStudio({ onBack }) {
         <div>
           <h1 className="text-3xl font-bold flex items-center gap-3">🎨 Image Studio</h1>
           <p className="text-gray-500 mt-1 text-sm">
-            Story illustrations via the Novita AI API. Auto-generates every N turns; use /image in-game for on-demand shots.
+            Story illustrations via {isLocal ? 'your local Stable Diffusion WebUI' : 'the Novita AI API'}.
+            Auto-generates every N turns; use /image in-game for on-demand shots.
           </p>
         </div>
 
@@ -1807,9 +2390,37 @@ export default function ImageStudio({ onBack }) {
           </div>
         )}
 
-        {/* Setup: keys + model */}
+        {/* Setup: provider + keys/connection + model */}
         {tab === 'setup' && (
         <section className={sectionCls}>
+          <div>
+            <label className={labelCls}>Image provider</label>
+            <div className="flex gap-1">
+              {[['novita', 'Novita AI (cloud)'], ['local', 'Local Stable Diffusion']].map(([id, label]) => (
+                <button
+                  key={id}
+                  onClick={() => set('provider', id)}
+                  className={`px-3 py-1.5 rounded-full text-sm whitespace-nowrap transition-colors ${
+                    (draft.provider || 'novita') === id
+                      ? 'bg-purple-600 text-white'
+                      : 'bg-gray-900 border border-gray-800 text-gray-400 hover:text-gray-200'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-gray-600 mt-1">
+              {isLocal
+                ? 'Runs on your own machine through an A1111/Forge-compatible WebUI — free, private, no content filter.'
+                : 'Cloud rendering on novita.ai — no GPU needed, thousands of hosted checkpoints.'}
+              {' '}Model and generation settings live in profiles, so keep one profile per provider and switch freely.
+            </p>
+          </div>
+
+          {isLocal && <LocalConnectionCard config={config} draft={draft} set={set} />}
+
+          {!isLocal && (
           <KeyField
             provider="novita"
             label="Novita API Key"
@@ -1861,6 +2472,7 @@ export default function ImageStudio({ onBack }) {
               </ol>
             )}
           </KeyField>
+          )}
           <KeyField
             provider="civitai"
             label="Civitai API Key (optional)"
@@ -1870,8 +2482,10 @@ export default function ImageStudio({ onBack }) {
             onSaved={(data) => { setConfig(data); setLibrary(data.lora_library || []); }}
           >
             <p className="text-xs text-gray-600 mt-1">
-              Needed for NSFW LoRA browsing and for FLUX.2 LoRA download links (Civitai requires auth on
-              downloads). Create one under{' '}
+              {isLocal
+                ? 'Needed for NSFW LoRA browsing and for most Civitai downloads — one-click installs use it server-side.'
+                : 'Needed for NSFW LoRA browsing and for FLUX.2 LoRA download links (Civitai requires auth on downloads).'}
+              {' '}Create one under{' '}
               <a href="https://civitai.com/user/account" target="_blank" rel="noreferrer" className="text-purple-400 hover:underline">
                 civitai.com account settings
               </a>
@@ -1899,8 +2513,32 @@ export default function ImageStudio({ onBack }) {
             value={draft.model_name}
             valueBase={draft.model_base}
             hasKey={!!config.has_key}
+            local={isLocal}
             onSelect={(m) => setDraft((d) => ({ ...d, model_name: m.sd_name, model_base: m.base_model || '' }))}
           />
+          {isLocal && draft.model_name && (
+            <div>
+              <label className={labelCls}>Base model</label>
+              <select
+                value={draft.model_base || ''}
+                onChange={(e) => set('model_base', e.target.value)}
+                className={inputCls}
+              >
+                <option value="">Unknown</option>
+                {draft.model_base && !(config.civitai_base_models || []).includes(draft.model_base) && (
+                  <option value={draft.model_base}>{draft.model_base}</option>
+                )}
+                {(config.civitai_base_models || []).map((b) => (
+                  <option key={b} value={b}>{b}</option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-600 mt-1">
+                Local checkpoints carry no metadata, so this is guessed from the filename. Correct it if
+                wrong — it drives the automatic prompt style (booru tags vs natural language) and which
+                LoRAs are considered compatible.
+              </p>
+            </div>
+          )}
         </section>
         )}
 
@@ -1953,8 +2591,10 @@ export default function ImageStudio({ onBack }) {
             />
             <p className="text-xs text-gray-600 mt-1">
               Each image gets its own AI-written prompt — a different angle,
-              beat, or focus of the same scene — and its own Novita
-              generation, all run in parallel (cost scales with the count).
+              beat, or focus of the same scene — and its own generation
+              {isLocal
+                ? ' (the local WebUI renders them one after another)'
+                : ', all run in parallel on Novita (cost scales with the count)'}.
               Swipe or use the arrow keys in the fullscreen viewer to flip
               through them.
             </p>
@@ -2023,7 +2663,10 @@ export default function ImageStudio({ onBack }) {
               onChange={(e) => set('sampler_name', e.target.value)}
               className={inputCls}
             >
-              {(config.samplers || []).map((s) => (
+              {draft.sampler_name && !samplerOptions.includes(draft.sampler_name) && (
+                <option value={draft.sampler_name}>{draft.sampler_name}</option>
+              )}
+              {samplerOptions.map((s) => (
                 <option key={s} value={s}>{s}</option>
               ))}
             </select>
@@ -2077,7 +2720,8 @@ export default function ImageStudio({ onBack }) {
               <option value="fastest">Fastest</option>
             </select>
             <p className="text-xs text-gray-600 mt-1">
-              The LLM that turns the latest scene into an image prompt before Novita is called.
+              The LLM that turns the latest scene into an image prompt before the image
+              provider is called.
             </p>
           </div>
           <div className="space-y-2">
@@ -2265,6 +2909,7 @@ export default function ImageStudio({ onBack }) {
           library={library}
           setLibrary={setLibrary}
           checkpointFamily={checkpointFamily}
+          onConfigRefresh={refreshLibrary}
         />
         )}
 
@@ -2313,10 +2958,10 @@ export default function ImageStudio({ onBack }) {
             />
             Refine with the prompt-writer LLM (uncheck to send the text as-is)
           </label>
-          {!config.has_key && (
+          {!isLocal && !config.has_key && (
             <p className="text-xs text-yellow-500">Save a Novita API key in the Setup tab first.</p>
           )}
-          {config.has_key && !config.model_name && (
+          {(isLocal || config.has_key) && !config.model_name && (
             <p className="text-xs text-yellow-500">Pick a model in the Setup tab and save first.</p>
           )}
           {testError && <p className="text-xs text-red-400">{testError}</p>}
