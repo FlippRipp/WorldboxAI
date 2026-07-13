@@ -171,7 +171,7 @@ Before the Storyteller generates narrative, a fast-model pre-assessment rates th
 5. The injected block states the ruling derived from the feasibility band (7-10 success, 3-6 partial success/success-at-a-cost, 1-2 failure) and **fails forward**: 3-6 is never a flat refusal, and even 1-2 failures tell the Storyteller to show why in world terms and how the world reacts.
 6. The ruling decides only *whether* the action succeeds — how it plays out is the Storyteller's to narrate, adapting specifics to the living scene, and never resolving a non-impossible action as a dead end.
 
-The `action_rating_strictness` slider (1-10) shifts judgment within the rubric: 1-3 is cinematic (favor the player, rule-of-cool), 4-6 balanced, 7-10 simulationist. Strictness never turns a merely unlikely action into a 1-2.
+The `action_rating_strictness` slider (1-10) shifts judgment within the rubric: 1-3 is cinematic (favor the player, rule-of-cool), 4-6 balanced, 7-10 brutal (harsh and unforgiving — lean toward failure when in doubt, success comes at a cost). Strictness never turns a merely unlikely action into a 1-2.
 
 Only substantive actions are assessed: pure dialog with nothing at stake or trivial everyday actions (standing up, looking around, etc.) are skipped entirely — no feasibility ruling is generated or injected for that turn. Social *attempts* with a contested outcome (persuading, proposing, deceiving, intimidating) are substantive and are assessed.
 

@@ -397,7 +397,7 @@ Judging guidelines:
 - Social actions: the outcome depends on the TARGET's likely disposition as shown in the recent story and world context, not on the player's stats. A bold ask to a receptive, bored, curious, or amused character is plausible even for a weak character. Only rate a social action 1-2 if the target's established nature makes acceptance truly impossible.
 - Reward creativity: a clever, novel, or dramatically interesting approach that fits the established fiction rates one band higher than a blunt attempt at the same goal. Punish contradiction of established facts, not ambition.
 - Status effects: weigh them like circumstances, not stats. A [bad] effect lowers feasibility of actions it would plausibly impede (a broken leg makes sprinting far harder) and can push a directly-blocked attempt to 1-2; a [good] effect raises feasibility of actions it aids. Effects unrelated to the attempt change nothing.
-- Strictness is {strictness}/10: 1-3 means cinematic - lean generous, favor the player and rule-of-cool; 4-6 means balanced; 7-10 means simulationist - judge capabilities strictly. Strictness shifts scores within bands but never turns a merely unlikely action into a 1-2.
+- Strictness is {strictness}/10: 1-3 means cinematic - lean generous, favor the player and rule-of-cool; 4-6 means balanced; 7-10 means brutal - the world is harsh and unforgiving: judge capabilities strictly, lean toward failure when in doubt, and let success come at a cost. Strictness shifts scores within bands but never turns a merely unlikely action into a 1-2.
 
 You are a referee, not a narrator: determine the outcome, do not describe it. Never write story prose.
 

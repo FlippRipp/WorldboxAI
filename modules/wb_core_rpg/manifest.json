@@ -60,7 +60,15 @@
     },
     "xp_curve_steepness": {"type": "slider", "min": 1, "max": 5, "default": 2},
     "hp_per_vitality": {"type": "slider", "min": 3, "max": 15, "default": 7},
-    "action_rating_strictness": {"type": "slider", "min": 1, "max": 10, "default": 5},
+    "action_rating_strictness": {
+      "type": "slider",
+      "min": 1,
+      "max": 10,
+      "default": 5,
+      "label": "Action Rating Strictness",
+      "category": "Core RPG System",
+      "description": "How harshly player actions are judged: 1-3 cinematic (generous, rule-of-cool), 4-6 balanced, 7-10 brutal (harsh and unforgiving — failure when in doubt, success at a cost)."
+    },
     "skill_improvement_rate": {"type": "slider", "min": 1, "max": 10, "default": 5},
     "max_stat_value": {"type": "slider", "min": 15, "max": 30, "default": 20},
     "attribute_points_per_level": {
