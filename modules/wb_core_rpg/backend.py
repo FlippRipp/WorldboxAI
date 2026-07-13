@@ -53,6 +53,31 @@ SKILL_ACTION_KEYWORDS = {
     "charm": ["persuade", "intimidate", "deceive", "bluff", "bargain", "negotiate", "perform", "inspire", "seduce", "befriend"],
 }
 
+# Each action_rating_strictness value maps to a difficulty label + guidance
+# for the feasibility judge. The prompt gets ONLY the chosen tier, never the
+# 1-10 scale or its band ranges.
+STRICTNESS_TIERS = {
+    1: ("Power Fantasy", "the player is the unstoppable protagonist of this story. Practically anything they attempt succeeds, and succeeds with flair; reserve failure for the truly impossible."),
+    2: ("Cinematic", "rule-of-cool cinema. Lean very generous - style, momentum, and daring carry attempts that mundane logic would question."),
+    3: ("Heroic", "the player is the hero. Favor them in any doubt; success is the default for anything plausibly within reach."),
+    4: ("Favorable", "the wind is at the player's back. Read attempts charitably, but let real overreach still fall short."),
+    5: ("Balanced", "judge each attempt on its merits - success and failure are both live outcomes, decided by capability and circumstance."),
+    6: ("Gritty", "the world has teeth. Read attempts realistically and let sloppy or lazy plans underperform."),
+    7: ("Demanding", "capabilities are judged strictly; an attempt needs a genuine edge to score well."),
+    8: ("Harsh", "overreach is punished, and even sound plans tend to cost something."),
+    9: ("Merciless", "assume the least favorable plausible reading; success requires clear, demonstrated advantage."),
+    10: ("Brutal", "the world is harsh and unforgiving. Lean toward failure when in doubt, and let success come at a cost."),
+}
+
+
+def _strictness_tier(config: dict) -> tuple[str, str]:
+    try:
+        strictness = int(config.get("action_rating_strictness", 5))
+    except (TypeError, ValueError):
+        strictness = 5
+    return STRICTNESS_TIERS[max(1, min(10, strictness))]
+
+
 # Status effects are temporary conditions (broken leg, poisoned, blessed,
 # brainwashed) with a ONE-sentence description. They expire after a number of
 # player turns (duration_turns) or at an in-world clock time from
@@ -334,7 +359,7 @@ async def on_gather_context(state: dict, sdk) -> dict:
 
 async def _assess_action(input_text: str, char: Character, config: dict, sdk, model_pref: str = "fastest", world_data: dict = None, recent_story: list = None) -> dict:
     tier_list = config.get("stat_tiers", DEFAULT_STAT_TIERS) or DEFAULT_STAT_TIERS
-    strictness = config.get("action_rating_strictness", 5)
+    difficulty_label, difficulty_guidance = _strictness_tier(config)
 
     active_skills = {n: d for n, d in char.skills.items() if d.get("type") == "active"}
     passive_skills = {n: d for n, d in char.skills.items() if d.get("type") == "passive"}
@@ -397,7 +422,7 @@ Judging guidelines:
 - Social actions: the outcome depends on the TARGET's likely disposition as shown in the recent story and world context, not on the player's stats. A bold ask to a receptive, bored, curious, or amused character is plausible even for a weak character. Only rate a social action 1-2 if the target's established nature makes acceptance truly impossible.
 - Reward creativity: a clever, novel, or dramatically interesting approach that fits the established fiction rates one band higher than a blunt attempt at the same goal. Punish contradiction of established facts, not ambition.
 - Status effects: weigh them like circumstances, not stats. A [bad] effect lowers feasibility of actions it would plausibly impede (a broken leg makes sprinting far harder) and can push a directly-blocked attempt to 1-2; a [good] effect raises feasibility of actions it aids. Effects unrelated to the attempt change nothing.
-- Strictness is {strictness}/10: 1-3 means cinematic - lean generous, favor the player and rule-of-cool; 4-6 means balanced; 7-10 means brutal - the world is harsh and unforgiving: judge capabilities strictly, lean toward failure when in doubt, and let success come at a cost. Strictness shifts scores within bands but never turns a merely unlikely action into a 1-2.
+- Difficulty is set to "{difficulty_label}": {difficulty_guidance} Difficulty shifts scores within bands but never turns a merely unlikely action into a 1-2.
 
 You are a referee, not a narrator: determine the outcome, do not describe it. Never write story prose.
 

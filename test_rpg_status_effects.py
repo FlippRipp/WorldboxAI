@@ -167,6 +167,27 @@ def test_feasibility_assessment_sees_status_effects():
     assert "Status effects: weigh them like circumstances" in captured["prompt"]
 
 
+def test_difficulty_tier_reaches_the_prompt_as_a_label_not_a_scale():
+    # The judge is told only the named difficulty tier for the configured
+    # strictness value - never the raw 1-10 slider or its band ranges.
+    backend = _load_backend()
+    captured = {}
+    reply = json.dumps({"feasibility": 5, "skill_used": "", "difficulty": "moderate",
+                        "curse_triggered": "", "passive_effects": "", "failure_reason": ""})
+    sdk = _make_sdk(reply, captured)
+    state = _state(input_text="I climb the crumbling wall")
+    state["module_configs"] = {"wb_core_rpg": {"action_rating_strictness": 10}}
+
+    asyncio.run(backend.on_gather_context(state, sdk))
+
+    assert 'Difficulty is set to "Brutal"' in captured["prompt"]
+    assert "Strictness" not in captured["prompt"]
+
+    state["module_configs"] = {"wb_core_rpg": {"action_rating_strictness": 1}}
+    asyncio.run(backend.on_gather_context(state, sdk))
+    assert 'Difficulty is set to "Power Fantasy"' in captured["prompt"]
+
+
 def test_character_sheet_lists_afflictions_and_boons():
     backend = _load_backend()
     char = backend.Character.from_dict({
