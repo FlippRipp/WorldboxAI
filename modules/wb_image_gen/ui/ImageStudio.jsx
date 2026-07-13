@@ -1066,6 +1066,9 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   const pendingScrollRef = useRef(saved?.scrollTop || 0);
   const scrollTopRef = useRef(saved?.scrollTop || 0);
   const scrollSaveRef = useRef(null);
+  // Cursor already auto-fetched by scrolling, so a burst of scroll events
+  // (loading isn't set until the next render) fires only one request per page.
+  const autoLoadCursorRef = useRef('');
 
   // Hugging Face browsing is public, so the NSFW filter needs no key there;
   // Civitai requires its key for anything beyond SFW.
@@ -1161,9 +1164,20 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   };
 
   const onGridScroll = () => {
-    scrollTopRef.current = gridRef.current ? gridRef.current.scrollTop : 0;
+    const el = gridRef.current;
+    scrollTopRef.current = el ? el.scrollTop : 0;
     if (scrollSaveRef.current) clearTimeout(scrollSaveRef.current);
     scrollSaveRef.current = setTimeout(saveScrollTop, 250);
+    // Infinite scroll: fetch the next page as the bottom approaches. A page
+    // that fails keeps its cursor in autoLoadCursorRef, so scrolling won't
+    // hammer the API — the Load more button below stays as the manual retry.
+    if (
+      el && !loading && nextCursor && autoLoadCursorRef.current !== nextCursor &&
+      el.scrollTop + el.clientHeight >= el.scrollHeight - 200
+    ) {
+      autoLoadCursorRef.current = nextCursor;
+      search(nextCursor);
+    }
   };
 
   // Flush a pending scroll save when the section unmounts (tab switch).
