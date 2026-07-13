@@ -58,6 +58,24 @@ def _enable(backend, **overrides):
     return cfg
 
 
+def _enable_local(backend, **overrides):
+    """Enabled config pointed at a local A1111/Forge WebUI (keyless)."""
+    cfg = backend._default_config()
+    cfg.update({"enabled": True, "provider": "local", "interval": 2,
+                "model_name": "dreamshaper_8.safetensors [879db523c3]"})
+    cfg.update(overrides)
+    backend._save_config(cfg)
+    return cfg
+
+
+def _fake_local(backend, image_bytes=b"fakepng"):
+    """Monkeypatch the local WebUI client with an instant fake."""
+    async def generate(cfg, prompt):
+        return image_bytes, "png"
+
+    backend._local_generate = generate
+
+
 def _fake_novita(backend, image_bytes=b"fakepng"):
     """Monkeypatch the Novita client with instant fakes."""
     async def submit(cfg, prompt):
@@ -3966,3 +3984,110 @@ def test_put_config_routes_global_vs_profile_fields(tmp_path):
     assert body["interval"] == 7                  # global: carried over
     assert body["chat_image_conceal"] == "blur"   # global: carried over
     assert body["steps"] == 28                    # per-profile: B's default
+
+
+# ---------------------------------------------------------------------------
+# Provider toggle (local Stable Diffusion vs Novita)
+# ---------------------------------------------------------------------------
+
+def test_provider_defaults_to_novita_and_coerces_garbage(tmp_path):
+    backend = _load_backend(tmp_path)
+    assert backend._load_config()["provider"] == "novita"
+    assert backend._provider(backend._load_config()) == "novita"
+
+    cfg = backend._default_config()
+    cfg["provider"] = "banana"
+    backend._save_config(cfg)
+    assert backend._load_config()["provider"] == "novita"
+
+    _enable_local(backend)
+    assert backend._provider(backend._load_config()) == "local"
+
+
+def test_missing_setup_requires_key_only_for_novita(tmp_path):
+    backend = _load_backend(tmp_path)
+    assert backend._missing_setup({"provider": "novita"}) == "api_key"
+    assert backend._missing_setup(
+        {"provider": "novita", "api_key": "k"}) == "model_name"
+    assert backend._missing_setup(
+        {"provider": "novita", "api_key": "k", "model_name": "m"}) is None
+    assert backend._missing_setup({"provider": "local"}) == "model_name"
+    assert backend._missing_setup(
+        {"provider": "local", "model_name": "m"}) is None
+
+
+def test_put_config_validates_provider_and_local_fields(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    assert client.put("/config", json={"provider": "banana"}).status_code == 400
+    assert client.put("/config",
+                      json={"local_base_url": "ftp://box:21"}).status_code == 400
+
+    body = client.put("/config", json={
+        "provider": "local",
+        "local_base_url": "http://192.168.1.5:7860/",
+        "local_auth_user": "me",
+        "local_auth_pass": "hunter2",
+        "local_lora_dir": "/sd/models/Lora",
+    }).json()
+    assert body["provider"] == "local"
+    assert body["local_base_url"] == "http://192.168.1.5:7860"   # trailing / stripped
+    assert body["local_auth_pass"] == "****ter2"                 # masked in responses
+    assert body["has_local_auth"] is True
+    assert body["providers"] == ["novita", "local"]
+    assert backend._load_config()["local_auth_pass"] == "hunter2"
+
+    # Round-tripping the masked password must not clobber the stored one.
+    client.put("/config", json={"local_auth_pass": "****ter2"})
+    assert backend._load_config()["local_auth_pass"] == "hunter2"
+
+    # Blank base URL falls back to the default rather than storing "".
+    body = client.put("/config", json={"local_base_url": ""}).json()
+    assert body["local_base_url"] == backend.LOCAL_DEFAULT_BASE
+
+
+def test_put_config_sampler_validation_is_provider_aware(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    # Novita (default): only the static list is accepted.
+    resp = client.put("/config", json={"sampler_name": "Weird Custom 3000"})
+    assert resp.status_code == 400
+
+    _enable_local(backend)
+    body = client.put("/config", json={"sampler_name": "Weird Custom 3000"}).json()
+    assert body["sampler_name"] == "Weird Custom 3000"
+    assert client.put("/config", json={"sampler_name": "  "}).status_code == 400
+
+    # Switching provider and sampler in one request validates against the
+    # incoming provider, not the stored one.
+    resp = client.put("/config", json={"provider": "novita",
+                                       "sampler_name": "Weird Custom 3000"})
+    assert resp.status_code == 400
+
+
+def test_librarian_runs_keyless_when_provider_is_local(tmp_path):
+    backend = _load_backend(tmp_path)
+
+    async def run():
+        # Counterpart to test_librarian_noop_when_disabled_keyless_or_modelless:
+        # local mode needs no API key, so the counter advances.
+        _enable_local(backend, interval=5)
+        result = await backend.on_librarian(_state(), _make_sdk())
+        assert result["module_data"][MID]["turns_since_image"] == 1
+
+        # But a missing model still blocks.
+        _enable_local(backend, model_name="")
+        assert await backend.on_librarian(_state(), _make_sdk()) is None
+
+    asyncio.run(run())
+
+
+def test_generate_endpoint_keyless_local_still_requires_model(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable_local(backend, model_name="")
+    client = _client(backend)
+    resp = client.post("/generate", json={"prompt_override": "a castle"})
+    assert resp.status_code == 400
+    assert "model" in resp.json()["detail"].lower()

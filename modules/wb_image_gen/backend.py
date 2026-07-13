@@ -28,6 +28,11 @@ MODULE_ID = "wb_image_gen"
 NOVITA_BASE = "https://api.novita.ai"
 CIVITAI_BASE = "https://civitai.com/api/v1"
 
+# Image providers: Novita's cloud API or a local A1111/Forge-compatible WebUI
+# (AUTOMATIC1111, SD WebUI Forge, reForge, SD.Next) started with --api.
+PROVIDERS = ("novita", "local")
+LOCAL_DEFAULT_BASE = "http://127.0.0.1:7860"
+
 # Built-in first-party model routed to /v3/async/flux-2-dev (not in /v3/model).
 # Its LoRAs are passed as download URLs, so any Civitai Flux LoRA works directly.
 FLUX2_MODEL_NAME = "flux-2-dev"
@@ -129,6 +134,8 @@ GLOBAL_FIELDS = (
     "enabled", "api_key", "civitai_api_key", "hf_api_key", "interval",
     "step_retries", "prompt_model_preference", "character_reference_enabled",
     "player_in_images", "chat_image_conceal", "civitai_nsfw",
+    "provider", "local_base_url", "local_auth_user", "local_auth_pass",
+    "local_checkpoint_dir", "local_lora_dir",
 )
 LORA_STATE_FIELDS = ("active", "strength", "llm_mode", "condition")
 PROFILES_MAX = 20
@@ -365,6 +372,12 @@ def _default_config() -> dict:
         "civitai_api_key": "",
         "civitai_nsfw": "off",          # one of CIVITAI_NSFW_MODES
         "hf_api_key": "",               # optional; raises Hub rate limits
+        "provider": "novita",           # one of PROVIDERS
+        "local_base_url": LOCAL_DEFAULT_BASE,
+        "local_auth_user": "",          # optional --api-auth credentials
+        "local_auth_pass": "",          # masked like the API keys
+        "local_checkpoint_dir": "",     # enables checkpoint installs from the browser
+        "local_lora_dir": "",           # enables LoRA installs from the browser
         "lora_library": [],             # saved LoRAs; see _normalize_lora_entry
     }
 
@@ -493,6 +506,9 @@ def _effective_config(store: dict) -> dict:
     # civitai_nsfw was a bool before it became a mode string.
     if cfg.get("civitai_nsfw") not in CIVITAI_NSFW_MODES:
         cfg["civitai_nsfw"] = "include" if cfg.get("civitai_nsfw") is True else "off"
+    # Configs from before the local provider existed have no provider field.
+    if cfg.get("provider") not in PROVIDERS:
+        cfg["provider"] = "novita"
     if cfg.get("player_in_images") not in PLAYER_IN_IMAGES_MODES:
         cfg["player_in_images"] = "show"
     if cfg.get("chat_image_conceal") not in CHAT_IMAGE_CONCEAL_MODES:
@@ -568,6 +584,20 @@ def _mask_key(key: str) -> str:
     if not key:
         return ""
     return KEY_MASK_PREFIX + key[-4:]
+
+
+def _provider(cfg: dict) -> str:
+    return "local" if cfg.get("provider") == "local" else "novita"
+
+
+def _missing_setup(cfg: dict) -> str | None:
+    """None when generation can run; otherwise the piece that's missing.
+    Only Novita needs an API key — the local WebUI is keyless."""
+    if _provider(cfg) == "novita" and not cfg.get("api_key"):
+        return "api_key"
+    if not cfg.get("model_name"):
+        return "model_name"
+    return None
 
 
 def _get_index_lock() -> asyncio.Lock:
@@ -2446,7 +2476,7 @@ def _spawn_tag_backfill(save_id: str, characters: dict | None, sdk) -> None:
     if not characters:
         return
     cfg = _load_config()
-    if not cfg.get("api_key") or not cfg.get("model_name"):
+    if _missing_setup(cfg):
         return
     if _prompt_style(cfg) != "tags" or not cfg.get("character_reference_enabled", True):
         return
@@ -2743,7 +2773,7 @@ async def on_gather_context(state: dict, sdk) -> dict:
 
 async def on_librarian(state: dict, sdk) -> dict | None:
     cfg = _load_config()
-    if not cfg.get("enabled") or not cfg.get("api_key") or not cfg.get("model_name"):
+    if not cfg.get("enabled") or _missing_setup(cfg):
         return None
     history = state.get("history", [])
     if not history:
@@ -2784,10 +2814,11 @@ def _latest_narration(state: dict) -> str:
 
 async def on_command_image(args: list[str], state: dict, sdk) -> dict:
     cfg = _load_config()
-    if not cfg.get("api_key"):
+    missing = _missing_setup(cfg)
+    if missing == "api_key":
         return {"message": "[Image Gen] No API key configured. Add one in Image Studio (main menu).",
                 "signal": "end_turn"}
-    if not cfg.get("model_name"):
+    if missing == "model_name":
         return {"message": "[Image Gen] No model selected. Pick one in Image Studio (main menu).",
                 "signal": "end_turn"}
 
@@ -2881,6 +2912,12 @@ def get_router():
         civitai_api_key: str | None = None
         civitai_nsfw: str | None = None
         hf_api_key: str | None = None
+        provider: str | None = None
+        local_base_url: str | None = None
+        local_auth_user: str | None = None
+        local_auth_pass: str | None = None
+        local_checkpoint_dir: str | None = None
+        local_lora_dir: str | None = None
 
     class GenerateRequest(BaseModel):
         prompt_override: str | None = None
@@ -2958,6 +2995,9 @@ def get_router():
         out["has_civitai_key"] = bool(cfg.get("civitai_api_key"))
         out["hf_api_key"] = _mask_key(cfg.get("hf_api_key", ""))
         out["has_hf_key"] = bool(cfg.get("hf_api_key"))
+        out["local_auth_pass"] = _mask_key(cfg.get("local_auth_pass", ""))
+        out["has_local_auth"] = bool(cfg.get("local_auth_user"))
+        out["providers"] = PROVIDERS
         out["samplers"] = SAMPLERS
         out["default_prompt_template"] = DEFAULT_PROMPT_TEMPLATE
         out["default_prompt_template_tags"] = DEFAULT_PROMPT_TEMPLATE_TAGS
@@ -3003,9 +3043,35 @@ def get_router():
         hf_key = incoming.pop("hf_api_key", None)
         if hf_key is not None and not hf_key.startswith(KEY_MASK_PREFIX):
             cfg["hf_api_key"] = hf_key.strip()
+        local_pass = incoming.pop("local_auth_pass", None)
+        if local_pass is not None and not local_pass.startswith(KEY_MASK_PREFIX):
+            cfg["local_auth_pass"] = local_pass
 
-        if "sampler_name" in incoming and incoming["sampler_name"] not in SAMPLERS:
-            raise HTTPException(status_code=400, detail=f"Unknown sampler. Allowed: {SAMPLERS}")
+        if "provider" in incoming and incoming["provider"] not in PROVIDERS:
+            raise HTTPException(status_code=400,
+                                detail=f"provider must be one of {PROVIDERS}")
+        if "local_base_url" in incoming:
+            base = str(incoming["local_base_url"]).strip().rstrip("/")
+            if base and not base.startswith(("http://", "https://")):
+                raise HTTPException(status_code=400,
+                                    detail="local_base_url must start with http:// or https://")
+            incoming["local_base_url"] = base or LOCAL_DEFAULT_BASE
+        for field in ("local_checkpoint_dir", "local_lora_dir"):
+            if field in incoming:
+                # Existence is checked when an install starts, not here — the
+                # WebUI may live on another machine or not be mounted yet.
+                incoming[field] = os.path.expanduser(str(incoming[field]).strip())
+        # The sampler list is Novita's; the local WebUI reports its own via
+        # /local/samplers, so any non-empty name is accepted there.
+        effective_provider = incoming.get("provider", _provider(cfg))
+        if "sampler_name" in incoming:
+            if effective_provider == "local":
+                name = str(incoming["sampler_name"]).strip()
+                if not name or len(name) > 100:
+                    raise HTTPException(status_code=400, detail="Invalid sampler name")
+                incoming["sampler_name"] = name
+            elif incoming["sampler_name"] not in SAMPLERS:
+                raise HTTPException(status_code=400, detail=f"Unknown sampler. Allowed: {SAMPLERS}")
         for side in ("width", "height"):
             if side in incoming:
                 incoming[side] = max(128, min(2048, (int(incoming[side]) // 8) * 8))
@@ -3489,9 +3555,10 @@ def get_router():
     @router.post("/generate")
     async def generate(req: GenerateRequest):
         cfg = _load_config()
-        if not cfg.get("api_key"):
+        missing = _missing_setup(cfg)
+        if missing == "api_key":
             raise HTTPException(status_code=400, detail="No API key configured")
-        if not cfg.get("model_name"):
+        if missing == "model_name":
             raise HTTPException(status_code=400, detail="No model selected — search and pick one first")
 
         save_id = req.save_id
