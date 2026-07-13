@@ -3,7 +3,7 @@ import os
 import tempfile
 
 from backend.engine.graph import EngineGraph
-from backend.engine.prompt_pipeline import PromptCompiler, PromptPipelineValidationError, build_auto_player_action_prompt
+from backend.engine.prompt_pipeline import PromptCompiler, PromptPipelineValidationError, build_auto_player_action_prompt, render_story_style
 from backend.engine.registry import ModuleRegistry
 
 
@@ -99,6 +99,52 @@ def test_command_messages_stay_out_of_the_prompt():
     assert "/plot" not in contents
     assert "[Plot] Act 1 of 3." not in contents
     print("Command message exclusion test passed.")
+
+
+def test_story_style_injected_at_depth_zero():
+    # The save's editable themes/tags/pacing must land as the final system
+    # directive of every turn, after the player's input.
+    compiler = PromptCompiler()
+    state = {
+        "input_text": "I order a drink.",
+        "chat_messages": [
+            {"role": "user", "content": "I walk into the tavern."},
+            {"role": "ai", "content": "The barkeep glares at you."},
+        ],
+        "story_style": {"themes": "redemption, found family", "tags": "dark fantasy", "pacing": "slow burn"},
+    }
+
+    compiled = compiler.compile(state)
+    messages = compiled["messages"]
+
+    assert messages[-1]["role"] == "system"
+    assert "<story_style>" in messages[-1]["content"]
+    assert "Themes: redemption, found family" in messages[-1]["content"]
+    assert "Tags: dark fantasy" in messages[-1]["content"]
+    assert "Pacing: slow burn" in messages[-1]["content"]
+    assert messages[-2] == {"role": "user", "content": "I order a drink."}
+    assert any(entry["id"] == "engine_story_style" for entry in compiled["trace"])
+    print("Story style depth-0 injection test passed.")
+
+
+def test_empty_story_style_injects_nothing():
+    compiler = PromptCompiler()
+    state = {
+        "input_text": "I order a drink.",
+        "chat_messages": [],
+        "story_style": {"themes": "  ", "tags": "", "pacing": ""},
+    }
+
+    compiled = compiler.compile(state)
+
+    assert all("<story_style>" not in m["content"] for m in compiled["messages"])
+    assert compiled["messages"][-1] == {"role": "user", "content": "I order a drink."}
+
+    # Partially filled: only the set fields are rendered.
+    text = render_story_style({"themes": "", "tags": "", "pacing": "breakneck"})
+    assert "Pacing: breakneck" in text
+    assert "Themes:" not in text and "Tags:" not in text
+    print("Empty story style no-op test passed.")
 
 
 def test_invalid_pipeline_rejected():

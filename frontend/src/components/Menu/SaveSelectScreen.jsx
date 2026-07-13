@@ -39,6 +39,8 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
   const [editingSave, setEditingSave] = useState(null);
   const [editModules, setEditModules] = useState(() => new Set());
   const [editName, setEditName] = useState('');
+  // Story direction (themes/tags/pacing) injected into every turn's prompt.
+  const [editStyle, setEditStyle] = useState({ themes: '', tags: '', pacing: '' });
   const [savingSettings, setSavingSettings] = useState(false);
   const [branching, setBranching] = useState(false);
   // Inline error messages, one per section, instead of blocking alert()s.
@@ -130,10 +132,14 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
     // Default to "all active" while we fetch, then apply the saved set. A null
     // result (legacy save) means every module is active.
     setEditModules(new Set(modules.map((m) => m.id)));
+    setEditStyle({ themes: '', tags: '', pacing: '' });
     try {
       const data = await api.getSaveActiveModules(saveId);
       const active = data.active_modules;
       if (Array.isArray(active)) setEditModules(new Set(active));
+      const styleData = await api.getStoryStyle(saveId);
+      const style = styleData.story_style || {};
+      setEditStyle({ themes: style.themes || '', tags: style.tags || '', pacing: style.pacing || '' });
     } catch (e) {
       setSettingsError(`Failed to load story settings: ${e.message}`);
     }
@@ -148,6 +154,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
         editingSave,
         modules.map((m) => m.id).filter((id) => editModules.has(id)),
       );
+      await api.setStoryStyle(editingSave, editStyle);
       const save = saves.find((s) => s.id === editingSave);
       const name = editName.trim();
       if (name && name !== (save?.display_name || editingSave)) {
@@ -503,6 +510,31 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
                 aria-label="Story display name"
               />
+            </div>
+
+            <div className="p-4 border-b border-gray-700">
+              <h4 className="text-sm font-medium text-gray-300 mb-1">Story Style</h4>
+              <p className="text-xs text-gray-500 mb-3">
+                Optional direction the storyteller follows every turn. Leave a field empty for no direction.
+              </p>
+              <div className="space-y-2.5">
+                {[
+                  { key: 'themes', label: 'Themes', placeholder: 'e.g. redemption, found family, the cost of power' },
+                  { key: 'tags', label: 'Tags', placeholder: 'e.g. dark fantasy, mystery, slow burn' },
+                  { key: 'pacing', label: 'Pacing', placeholder: 'e.g. slow and atmospheric, fast-paced action' },
+                ].map(({ key, label, placeholder }) => (
+                  <div key={key}>
+                    <label className="block text-xs text-gray-400 mb-1">{label}</label>
+                    <input
+                      value={editStyle[key]}
+                      onChange={(e) => setEditStyle({ ...editStyle, [key]: e.target.value })}
+                      placeholder={placeholder}
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-purple-500"
+                      aria-label={`Story ${label.toLowerCase()}`}
+                    />
+                  </div>
+                ))}
+              </div>
             </div>
 
             <div className="p-4 border-b border-gray-700 flex items-start justify-between gap-4">

@@ -6,7 +6,7 @@ import re
 import shutil
 
 from backend.engine.save_manager import SaveManager
-from backend.engine.prompt_pipeline import PromptCompiler
+from backend.engine.prompt_pipeline import PromptCompiler, STORY_STYLE_FIELDS
 from backend.engine.settings_registry import SettingsRegistry
 
 
@@ -51,6 +51,7 @@ class GameSessionManager:
             "continue_prompt": self.save_manager.load_continue_prompt(),
             "last_prompt_trace": [],
             "turn": 0,
+            "story_style": {},
         }
 
     def _require_active_save(self):
@@ -214,6 +215,7 @@ class GameSessionManager:
             "player_location_layer_id": metadata.get("player_location_layer_id"),
             "revealed_node_ids": metadata.get("revealed_node_ids", []),
             "sticky_world_entries": metadata.get("sticky_world_entries", {}),
+            "story_style": metadata.get("story_style") or {},
         }
 
         world_data = saved_state.get("world_data")
@@ -336,6 +338,30 @@ class GameSessionManager:
             configs["__active_modules__"] = active
             self.save_manager.save_module_configs(save_id, configs)
         return active
+
+    def get_story_style(self, save_id: str) -> dict[str, str]:
+        """The save's editable story direction (themes/tags/pacing); every
+        field defaults to "" for saves that never set one."""
+        self._validate_save_id(save_id)
+        if save_id == self.active_save_id:
+            style = self.state.get("story_style") or {}
+        else:
+            if not (self.data_dir / "saves" / save_id).exists() \
+                    and not (self.data_dir / "saves" / f"{save_id}.wbx").exists():
+                raise FileNotFoundError(f"Save {save_id} not found.")
+            metadata = self.save_manager.read_core_json(save_id, "metadata.json", {}) or {}
+            style = metadata.get("story_style") or {}
+        return {key: str(style.get(key) or "") for key, _ in STORY_STYLE_FIELDS}
+
+    def set_story_style(self, save_id: str, style: dict[str, Any]) -> dict[str, str]:
+        """Persist a save's story direction. Works on the loaded save (updates
+        in-memory state too, so the next turn picks it up) or any save on disk."""
+        self._validate_save_id(save_id)
+        clean = {key: str((style or {}).get(key) or "").strip() for key, _ in STORY_STYLE_FIELDS}
+        self.save_manager.update_metadata(save_id, {"story_style": clean})
+        if save_id == self.active_save_id:
+            self.state["story_style"] = clean
+        return clean
 
     def update_prompt_pipeline(self, prompt_pipeline: list[dict[str, Any]]) -> dict[str, Any]:
         # The pipeline is global, so editing it from within a session writes the

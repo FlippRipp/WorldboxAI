@@ -16,6 +16,36 @@ DEFAULT_CONTINUE_PROMPT = (
     "events, NPCs, and the world forward without waiting for the player to act."
 )
 
+# The editable story-style fields ({state key, prompt label}) and how they are
+# rendered — shared by the per-turn depth-0 injection and the intro prompt.
+STORY_STYLE_FIELDS = [
+    ("themes", "Themes"),
+    ("tags", "Tags"),
+    ("pacing", "Pacing"),
+]
+
+
+def render_story_style(story_style: dict[str, Any] | None) -> str:
+    """Render the story's themes/tags/pacing as a <story_style> directive.
+    Empty fields are skipped; returns "" when nothing is set."""
+    style = story_style or {}
+    field_lines = []
+    for key, label in STORY_STYLE_FIELDS:
+        value = (style.get(key) or "").strip() if isinstance(style.get(key), str) else ""
+        if value:
+            field_lines.append(f"{label}: {value}")
+    if not field_lines:
+        return ""
+    return "\n".join([
+        "<story_style>",
+        *field_lines,
+        "Let these themes, tags, and pacing guide the style, mood, and rhythm "
+        "of the narration. Express them through the story itself — never name "
+        "or reference them directly.",
+        "</story_style>",
+    ])
+
+
 def build_auto_player_action_prompt(state: dict[str, Any], nudge: str = "") -> str:
     """Prompt for the fast model that plays the player in storyteller auto
     mode: decide the character's next action from their personality and the
@@ -312,6 +342,12 @@ class PromptCompiler:
                     f"engine_lore_depth_{index}", f"Lorebook @ depth {depth}",
                     text, depth=depth))
 
+        # Story style (themes/tags/pacing) is injected at depth 0 — the last
+        # directive before generation — so it steers every turn's output.
+        story_style_block = self._story_style_block(state)
+        if story_style_block:
+            blocks.append(story_style_block)
+
         system_relative_messages = []
         chat_injections = []
         trace = []
@@ -506,6 +542,14 @@ class PromptCompiler:
 
     def _validation_veto_block(self, validation_veto: str) -> dict[str, Any]:
         return self._engine_directive_block("engine_validation_veto", "Validation Veto", validation_veto)
+
+    def _story_style_block(self, state: dict[str, Any]) -> dict[str, Any] | None:
+        """The story's editable style direction (themes/tags/pacing) as a
+        depth-0 chat injection. Returns None when every field is empty."""
+        text = render_story_style(state.get("story_style"))
+        if not text:
+            return None
+        return self._engine_directive_block("engine_story_style", "Story Style", text)
 
     def _trace(
         self,

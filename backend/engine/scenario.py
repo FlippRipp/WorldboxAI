@@ -71,6 +71,11 @@ class ScenarioStore:
             "name": name,
             "scenario_description": data.get("scenario_description", ""),
             "starting_prompt": data.get("starting_prompt", ""),
+            # Story-style direction seeded onto saves created from this
+            # scenario; each is free text and empty by default.
+            "themes": data.get("themes", ""),
+            "tags": data.get("tags", ""),
+            "pacing": data.get("pacing", ""),
             "created_at": data.get("created_at") or datetime.now(timezone.utc).isoformat(),
         }
         self.scenarios_dir.mkdir(parents=True, exist_ok=True)

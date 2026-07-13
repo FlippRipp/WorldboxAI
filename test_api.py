@@ -132,6 +132,57 @@ def test_create_save_passes_picked_start_location(tmp_path, monkeypatch):
     assert resp.json()["start_location"]["node_id"] == "node_42"
 
 
+def test_story_style_seeded_from_scenario_and_editable(tmp_path, monkeypatch):
+    # Scenario themes/tags/pacing round-trip through the store, seed the
+    # created save's story_style, and stay editable per save afterwards.
+    client, session_manager = make_client(tmp_path, monkeypatch)
+
+    from backend.engine.scenario import ScenarioStore
+    store = ScenarioStore(str(tmp_path / "data"))
+    monkeypatch.setattr(server, "scenario_store", store)
+
+    create = client.post("/api/scenarios", json={
+        "name": "Styled",
+        "scenario_description": "A city of thieves.",
+        "themes": "betrayal",
+        "tags": "noir, heist",
+        "pacing": "breakneck",
+    })
+    assert create.status_code == 200
+    scenario_id = create.json()["scenario"]["id"]
+    loaded = store.load_scenario(scenario_id)
+    assert (loaded["themes"], loaded["tags"], loaded["pacing"]) == ("betrayal", "noir, heist", "breakneck")
+
+    resp = client.post("/api/saves", json={"save_id": "styled_save", "scenario_id": scenario_id})
+    assert resp.status_code == 200
+    expected = {"themes": "betrayal", "tags": "noir, heist", "pacing": "breakneck"}
+    assert session_manager.state["story_style"] == expected
+
+    get_resp = client.get("/api/saves/styled_save/story-style")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["story_style"] == expected
+
+    put_resp = client.put("/api/saves/styled_save/story-style", json={
+        "themes": "hope", "tags": "", "pacing": "slow and atmospheric",
+    })
+    assert put_resp.status_code == 200
+    assert session_manager.state["story_style"]["themes"] == "hope"
+    metadata = session_manager.save_manager.read_core_json("styled_save", "metadata.json", {})
+    assert metadata["story_style"] == {"themes": "hope", "tags": "", "pacing": "slow and atmospheric"}
+
+
+def test_story_style_defaults_empty_and_missing_save_404(tmp_path, monkeypatch):
+    client, _ = make_client(tmp_path, monkeypatch)
+
+    # A save that never set a style (or predates the feature) reads as empty.
+    resp = client.get("/api/saves/autosave/story-style")
+    assert resp.status_code == 200
+    assert resp.json()["story_style"] == {"themes": "", "tags": "", "pacing": ""}
+
+    assert client.get("/api/saves/no_such_save/story-style").status_code == 404
+    assert client.put("/api/saves/no_such_save/story-style", json={"themes": "x"}).status_code == 404
+
+
 def test_create_save_with_missing_scenario_returns_404(tmp_path, monkeypatch):
     client, session_manager = make_client(tmp_path, monkeypatch)
 

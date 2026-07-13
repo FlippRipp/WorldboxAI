@@ -10,6 +10,7 @@ from backend.engine.session import GameSessionManager
 from backend.engine.settings_registry import SettingsRegistry
 from backend.engine.character_builder import CharacterBuilder
 from backend.engine.scenario import ScenarioStore
+from backend.engine.prompt_pipeline import STORY_STYLE_FIELDS
 from backend.engine.lorebook import LorebookStore, make_story_entry, patch_story_entry, story_entries_book
 from backend.engine.provider_manager import ProviderManager
 from backend.engine.prompt_library import PromptLibrary, get_default_library_path
@@ -918,6 +919,12 @@ async def create_save(request: CreateSaveRequest):
             with open(scenario_dir / "scenario.json", "w", encoding="utf-8") as f:
                 _json.dump(scenario, f, indent=2, ensure_ascii=False)
             session_manager.state["scenario_data"] = scenario
+            # Seed the save's editable story direction from the scenario's
+            # themes/tags/pacing. Stored in save metadata so it stays editable
+            # per story, independently of the frozen scenario copy.
+            style = {key: str(scenario.get(key) or "").strip() for key, _ in STORY_STYLE_FIELDS}
+            if any(style.values()):
+                session_manager.set_story_style(request.save_id, style)
 
         if request.world_id:
             # World is an optional story source provided by the wb_worldgen module.
@@ -1023,6 +1030,12 @@ class RenameSaveRequest(BaseModel):
     display_name: str
 
 
+class StoryStyleRequest(BaseModel):
+    themes: Optional[str] = ""
+    tags: Optional[str] = ""
+    pacing: Optional[str] = ""
+
+
 @app.get("/api/saves/{save_id}/export")
 async def export_save(save_id: str, format: str = "md"):
     """Download a save's transcript as markdown, plain text, or JSONL."""
@@ -1049,6 +1062,28 @@ async def branch_save(save_id: str, request: BranchRequest):
         raise HTTPException(status_code=404, detail=str(exc))
     except FileExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/saves/{save_id}/story-style")
+async def get_story_style(save_id: str):
+    """The save's editable story direction (themes/tags/pacing)."""
+    try:
+        return {"story_style": session_manager.get_story_style(save_id)}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.put("/api/saves/{save_id}/story-style")
+async def set_story_style(save_id: str, request: StoryStyleRequest):
+    """Edit a save's story direction; injected at depth 0 on every turn."""
+    try:
+        return {"story_style": session_manager.set_story_style(save_id, request.model_dump())}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1193,6 +1228,9 @@ class ScenarioRequest(BaseModel):
     name: str
     scenario_description: Optional[str] = ""
     starting_prompt: Optional[str] = ""
+    themes: Optional[str] = ""
+    tags: Optional[str] = ""
+    pacing: Optional[str] = ""
 
 
 @app.get("/api/scenarios")

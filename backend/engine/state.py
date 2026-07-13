@@ -32,3 +32,4 @@ class WorldState(TypedDict):
     player_location_layer_id: Optional[str] # Current layer the player is on
     revealed_node_ids: list[str]            # Node IDs revealed to the player (fog of war)
     world_data: Optional[dict[str, Any]]    # Cached compiled world data (rules, lore, regions, map, layers)
+    story_style: dict[str, str]             # Editable story direction ({themes, tags, pacing}), injected at depth 0 every turn

@@ -4,7 +4,7 @@ from backend.sdk.mock_sdk import WorldBoxSDK, ValidationVeto
 from backend.engine.registry import ModuleRegistry
 from backend.engine.llm import LLMService
 from backend.engine.memory import MemoryManager
-from backend.engine.prompt_pipeline import PromptCompiler, build_auto_player_action_prompt
+from backend.engine.prompt_pipeline import PromptCompiler, build_auto_player_action_prompt, render_story_style
 from backend.engine.settings_registry import SettingsRegistry
 from backend.engine.provider_manager import ProviderManager
 from copy import deepcopy
@@ -463,6 +463,12 @@ class EngineGraph:
                 parts.append("<scenario>")
                 parts.append(description)
                 parts.append("</scenario>")
+
+        # The story's themes/tags/pacing shape the opening scene too; ongoing
+        # turns get the same directive as a depth-0 chat injection.
+        style_text = render_story_style(state.get("story_style"))
+        if style_text:
+            parts.append(style_text)
 
         parts.append("<instructions>")
         parts.append("Write the opening scene for this adventure. Do the following:")

@@ -28,7 +28,7 @@ export default function ScenarioManager({ onBack }) {
 
   const startNew = () => {
     setLinkedLorebooks([]);
-    setEditing({ name: '', scenario_description: '', starting_prompt: '' });
+    setEditing({ name: '', scenario_description: '', starting_prompt: '', themes: '', tags: '', pacing: '' });
   };
 
   const startEdit = async (id) => {
@@ -36,7 +36,8 @@ export default function ScenarioManager({ onBack }) {
       const { scenario } = await api.loadScenario(id);
       const { lorebook_ids } = await api.getLorebookLinks('scenario', id).catch(() => ({ lorebook_ids: [] }));
       setLinkedLorebooks(lorebook_ids || []);
-      setEditing(scenario);
+      // Older scenarios predate themes/tags/pacing; backfill so the inputs stay controlled.
+      setEditing({ themes: '', tags: '', pacing: '', ...scenario });
     } catch (e) {
       alert(`Failed to load scenario: ${e.message}`);
     }
@@ -169,6 +170,42 @@ export default function ScenarioManager({ onBack }) {
                   placeholder="The tavern door groans shut behind you, cutting off the storm..."
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500 resize-y"
                 />
+              </div>
+
+              <div className="space-y-3 p-4 rounded-lg border border-gray-700 bg-gray-800/30">
+                <div>
+                  <h4 className="text-sm font-medium text-gray-300">Story Style</h4>
+                  <p className="text-xs text-gray-500">
+                    Optional direction injected into every turn to guide the story's themes, style, and pace. Editable per story after creation.
+                  </p>
+                </div>
+                <div className="space-y-1.5">
+                  {field('Themes', 'e.g. redemption, found family, the cost of power')}
+                  <input
+                    value={editing.themes}
+                    onChange={(e) => setEditing({ ...editing, themes: e.target.value })}
+                    placeholder="Empty — no theme direction"
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  {field('Tags', 'e.g. dark fantasy, mystery, slow burn, political intrigue')}
+                  <input
+                    value={editing.tags}
+                    onChange={(e) => setEditing({ ...editing, tags: e.target.value })}
+                    placeholder="Empty — no tags"
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  {field('Pacing', 'e.g. slow and atmospheric, fast-paced with frequent action')}
+                  <input
+                    value={editing.pacing}
+                    onChange={(e) => setEditing({ ...editing, pacing: e.target.value })}
+                    placeholder="Empty — default pacing"
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500"
+                  />
+                </div>
               </div>
 
               {allLorebooks.length > 0 && (

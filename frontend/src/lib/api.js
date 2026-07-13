@@ -39,6 +39,8 @@ export const api = {
   deleteMessage:          (index) => request(`/api/session/messages/${index}`, { method: 'DELETE' }),
   deleteSave:             (saveId) => request(`/api/saves/${saveId}`, { method: 'DELETE' }),
   renameSave:             (saveId, displayName) => request(`/api/saves/${saveId}/name`, { method: 'PUT', body: JSON.stringify({ display_name: displayName }) }),
+  getStoryStyle:          (saveId) => request(`/api/saves/${saveId}/story-style`),
+  setStoryStyle:          (saveId, style) => request(`/api/saves/${saveId}/story-style`, { method: 'PUT', body: JSON.stringify(style) }),
   branchSave:             (saveId, opts = {}) => request(`/api/saves/${saveId}/branch`, { method: 'POST', body: JSON.stringify({
                             new_save_id: opts.newSaveId ?? null,
                             target_turn: opts.targetTurn ?? null,
