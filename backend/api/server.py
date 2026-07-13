@@ -1281,10 +1281,17 @@ class LorebookEntryUpdateRequest(BaseModel):
     constant: Optional[bool] = None
     # Per-entry sticky override; an explicit null clears it (inherit the book).
     sticky_turns: Optional[int] = None
+    # ST '@ depth' injection; an explicit null reverts to normal placement.
+    injection_depth: Optional[int] = None
 
 
 class LorebookUpdateRequest(BaseModel):
     sticky_turns: Optional[int] = None
+
+
+# Entry-PUT fields where an explicit null is a meaningful "clear this" value
+# rather than "leave untouched" (requests use exclude_unset to tell them apart).
+_NULLABLE_ENTRY_FIELDS = {"sticky_turns", "injection_depth"}
 
 
 class LorebookLinksRequest(BaseModel):
@@ -1369,10 +1376,10 @@ async def update_lorebook(lorebook_id: str, request: LorebookUpdateRequest):
 
 @app.put("/api/lorebooks/{lorebook_id}/entries/{uid}")
 async def update_lorebook_entry(lorebook_id: str, uid: str, request: LorebookEntryUpdateRequest):
-    # exclude_unset so an explicit `"sticky_turns": null` clears the per-entry
-    # override while omitted fields stay untouched.
+    # exclude_unset so an explicit null clears nullable fields (sticky
+    # override, injection depth) while omitted fields stay untouched.
     raw = request.model_dump(exclude_unset=True)
-    patch = {k: v for k, v in raw.items() if v is not None or k == "sticky_turns"}
+    patch = {k: v for k, v in raw.items() if v is not None or k in _NULLABLE_ENTRY_FIELDS}
     try:
         record = lorebook_store.update_entry(lorebook_id, uid, patch)
     except FileNotFoundError as exc:
@@ -1422,6 +1429,7 @@ class StoryEntryRequest(BaseModel):
     constant: Optional[bool] = None
     enabled: Optional[bool] = None
     sticky_turns: Optional[int] = None
+    injection_depth: Optional[int] = None
 
 
 def _read_story_entries(save_id: str) -> list:
@@ -1456,7 +1464,10 @@ async def add_story_lorebook_entry(save_id: str, request: StoryEntryRequest):
 @app.put("/api/saves/{save_id}/lorebooks/entries/{uid}")
 async def update_story_lorebook_entry(save_id: str, uid: str, request: StoryEntryRequest):
     entries = _read_story_entries(save_id)
-    patch = {k: v for k, v in request.model_dump().items() if v is not None}
+    # exclude_unset so an explicit `"injection_depth": null` reverts the entry
+    # to normal placement while omitted fields stay untouched.
+    raw = request.model_dump(exclude_unset=True)
+    patch = {k: v for k, v in raw.items() if v is not None or k == "injection_depth"}
     for i, entry in enumerate(entries):
         if str(entry.get("uid")) == uid:
             try:

@@ -301,6 +301,17 @@ class PromptCompiler:
         if validation_veto:
             blocks.append(self._validation_veto_block(validation_veto))
 
+        # Lorebook entries configured with an injection depth (ST '@ depth'):
+        # gather_context routes their text here instead of the lore context
+        # block, one pre-grouped message per depth.
+        for index, injection in enumerate(state.get("lore_depth_injections") or []):
+            depth = injection.get("depth")
+            text = injection.get("text", "")
+            if isinstance(depth, int) and depth >= 0 and text.strip():
+                blocks.append(self._engine_directive_block(
+                    f"engine_lore_depth_{index}", f"Lorebook @ depth {depth}",
+                    text, depth=depth))
+
         system_relative_messages = []
         chat_injections = []
         trace = []
@@ -473,9 +484,10 @@ class PromptCompiler:
             messages.append({"role": "user", "content": self.resolve_macros(continue_prompt, state)})
         return messages
 
-    def _engine_directive_block(self, block_id: str, display_name: str, text: str) -> dict[str, Any]:
-        """An engine-appended system directive injected at the very end of the
-        chat (depth 0), after the player's input."""
+    def _engine_directive_block(self, block_id: str, display_name: str, text: str,
+                                depth: int = 0) -> dict[str, Any]:
+        """An engine-appended system directive injected into the chat at the
+        given depth (0 = the very end, after the player's input)."""
         return {
             "id": block_id,
             "type": "static_text",
@@ -483,7 +495,7 @@ class PromptCompiler:
             "enabled": True,
             "role_type": "system",
             "placement": "chat_injection",
-            "depth": 0,
+            "depth": depth,
             "display_name": display_name,
             "category": "utility",
             "generation_types": None,

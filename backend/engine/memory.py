@@ -37,6 +37,10 @@ _WORLD_COLUMNS = {
     # ST 'sticky': after this entry is triggered by retrieval it stays in
     # context for N more turns (0 = off). Only set on lorebook rows.
     "sticky_turns": "INTEGER DEFAULT 0",
+    # ST '@ depth' placement: when set, an active entry is injected into the
+    # chat N messages from the bottom instead of the normal lore context
+    # block. NULL = normal placement. Only set on lorebook rows.
+    "injection_depth": "INTEGER",
 }
 
 
@@ -341,7 +345,7 @@ class MemoryManager:
         if self._world_conn is None:
             raise RuntimeError("World index not initialized. Call init_world_index() first.")
         self._world_conn.execute("DELETE FROM world_entries WHERE source_type = 'lorebook'")
-        pending = []  # (text, source_id, constant, sticky_turns)
+        pending = []  # (text, source_id, constant, sticky_turns, injection_depth)
         for book in lorebooks:
             book_id = book.get("id", "")
             book_sticky = int(book.get("sticky_turns") or 0)
@@ -354,14 +358,16 @@ class MemoryManager:
                 # Per-entry sticky override wins; None inherits the book value.
                 override = entry.get("sticky_turns")
                 sticky = book_sticky if override is None else int(override)
+                depth = entry.get("injection_depth")
                 pending.append((text, f"{book_id}:{entry.get('uid', '')}",
-                                1 if entry.get("constant") else 0, max(0, sticky)))
-        vectors = await self._embed_texts([t for t, _, _, _ in pending], llm)
-        for (text, source_id, constant, sticky), vec in zip(pending, vectors):
+                                1 if entry.get("constant") else 0, max(0, sticky),
+                                None if depth is None else max(0, int(depth))))
+        vectors = await self._embed_texts([t for t, _, _, _, _ in pending], llm)
+        for (text, source_id, constant, sticky, depth), vec in zip(pending, vectors):
             self._world_conn.execute(
-                """INSERT INTO world_entries (id, embedding, text, source_type, source_id, region, constant, sticky_turns)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (str(uuid.uuid4()), _serialize(vec), text, "lorebook", source_id, "", constant, sticky),
+                """INSERT INTO world_entries (id, embedding, text, source_type, source_id, region, constant, sticky_turns, injection_depth)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (str(uuid.uuid4()), _serialize(vec), text, "lorebook", source_id, "", constant, sticky, depth),
             )
         self._world_conn.commit()
         return len(pending)
@@ -396,6 +402,7 @@ class MemoryManager:
                 "id": row["id"] or "",
                 "text": row["text"] or "",
                 "source_id": row["source_id"] or "",
+                "injection_depth": row["injection_depth"],
             }
             for row in rows
         ]
@@ -584,6 +591,7 @@ class MemoryManager:
                 "source_id": row["source_id"] or "",
                 "region": row["region"] or "",
                 "sticky_turns": int(row["sticky_turns"] or 0),
+                "injection_depth": row["injection_depth"],
             }
             if with_scores:
                 entry["dist"] = row["dist"]
@@ -599,7 +607,7 @@ class MemoryManager:
         placeholders = ", ".join("?" for _ in source_ids)
         rows = self._world_conn.execute(
             f"""SELECT id, text, source_type, source_id, region,
-                       COALESCE(sticky_turns, 0) AS sticky_turns
+                       COALESCE(sticky_turns, 0) AS sticky_turns, injection_depth
                 FROM world_entries
                 WHERE source_id IN ({placeholders}) AND COALESCE(constant, 0) = 0""",
             list(source_ids),
@@ -613,6 +621,7 @@ class MemoryManager:
                 "source_id": row["source_id"] or "",
                 "region": row["region"] or "",
                 "sticky_turns": int(row["sticky_turns"] or 0),
+                "injection_depth": row["injection_depth"],
             }
             for sid in source_ids
             if (row := by_source.get(sid)) is not None
@@ -628,6 +637,7 @@ class MemoryManager:
             "region": row["region"] or "",
             "constant": bool(row["constant"]),
             "sticky_turns": int(row["sticky_turns"] or 0),
+            "injection_depth": row["injection_depth"],
         }
 
     def list_world_entries(self, limit: int = 1000) -> list[dict]:
@@ -638,7 +648,8 @@ class MemoryManager:
         rows = self._world_conn.execute(
             """SELECT id, text, source_type, source_id, region,
                       COALESCE(constant, 0) AS constant,
-                      COALESCE(sticky_turns, 0) AS sticky_turns
+                      COALESCE(sticky_turns, 0) AS sticky_turns,
+                      injection_depth
                FROM world_entries
                ORDER BY source_type, source_id
                LIMIT ?""",
@@ -652,7 +663,8 @@ class MemoryManager:
         row = self._world_conn.execute(
             """SELECT id, text, source_type, source_id, region,
                       COALESCE(constant, 0) AS constant,
-                      COALESCE(sticky_turns, 0) AS sticky_turns
+                      COALESCE(sticky_turns, 0) AS sticky_turns,
+                      injection_depth
                FROM world_entries WHERE id = ?""",
             (entry_id,),
         ).fetchone()

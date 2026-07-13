@@ -40,6 +40,8 @@ V2_LOREBOOK = {
             "content": "Magic is drawn from ley lines and fades at sea.",
             "constant": True,
             "disable": False,
+            "position": 4,
+            "depth": 2,
             "order": 50,
         },
         "2": {
@@ -70,7 +72,7 @@ CHARACTER_BOOK = {
             "content": "Vale is a ranger who guards the northern woods.",
             "enabled": True,
             "constant": False,
-            "extensions": {"sticky": 2},
+            "extensions": {"sticky": 2, "position": 4, "depth": 1},
             "insertion_order": 10,
         },
         {
@@ -106,6 +108,8 @@ def test_parse_v2_lorebook():
 
     assert entries["1"]["constant"] is True
     assert entries["1"]["sticky_turns"] is None  # no sticky → inherit book default
+    assert entries["1"]["injection_depth"] == 2  # ST position 4 ('@ depth')
+    assert capital["injection_depth"] is None  # no position → normal placement
     assert entries["2"]["enabled"] is False  # disable: true → preserved but flagged
 
     # Sorted by ST order (magic=50 before capital=100 before disabled=200).
@@ -122,10 +126,12 @@ def test_parse_character_book_list_shape():
     assert vale["keys"] == ["Vale", "ranger"]
     assert vale["secondary_keys"] == ["bow"]
     assert vale["sticky_turns"] == 2  # character books carry sticky under extensions
+    assert vale["injection_depth"] == 1  # extensions position 4 / depth 1
     oath = entries["The Oath"]
     assert oath["enabled"] is False
     assert oath["constant"] is True
     assert oath["sticky_turns"] is None
+    assert oath["injection_depth"] is None
     # insertion_order respected: oath (5) before vale (10)
     assert parsed["entries"][0]["title"] == "The Oath"
 
@@ -243,6 +249,18 @@ def test_book_sticky_setting_and_entry_override(tmp_path):
 
     with pytest.raises(FileNotFoundError):
         store.update_lorebook("missing_book", {"sticky_turns": 1})
+
+
+def test_entry_injection_depth_update(tmp_path):
+    store = LorebookStore(str(tmp_path / "data"))
+    book_id = store.import_lorebook(V2_LOREBOOK, name="Realm Lore")["lorebook"]["id"]
+
+    record = store.update_entry(book_id, "0", {"injection_depth": 3})
+    assert next(e for e in record["entries"] if e["uid"] == "0")["injection_depth"] == 3
+    record = store.update_entry(book_id, "0", {"injection_depth": -2})  # clamps
+    assert next(e for e in record["entries"] if e["uid"] == "0")["injection_depth"] == 0
+    record = store.update_entry(book_id, "0", {"injection_depth": None})  # clears
+    assert next(e for e in record["entries"] if e["uid"] == "0")["injection_depth"] is None
 
 
 def test_store_links_roundtrip(tmp_path):
@@ -658,6 +676,80 @@ def test_sticky_state_persists_in_save_metadata_and_api(tmp_path, monkeypatch):
     resp = client.get("/api/session/world-entries").json()
     assert resp["sticky_source_ids"] == {f"{book_id}:0": 4}
     assert resp["turn"] == 1
+
+
+# ── injection depth (ST '@ depth': inject into the chat, not the lore block) ─
+
+def _depth_db_rows(tmp_path, save_id):
+    db = tmp_path / "data" / "saves" / save_id / "world_index" / "world.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        return dict(conn.execute(
+            "SELECT source_id, injection_depth FROM world_entries WHERE source_type = 'lorebook'"
+        ).fetchall())
+    finally:
+        conn.close()
+
+
+def test_injection_depth_routes_active_entries_into_chat(tmp_path, monkeypatch):
+    client, session_manager, _, _ = make_client(tmp_path, monkeypatch)
+    book_id = client.post(
+        "/api/lorebooks/import", json={"data": V2_LOREBOOK, "name": "Realm Lore"}
+    ).json()["lorebook"]["id"]
+    client.put("/api/saves/autosave/lorebooks", json={"lorebook_ids": [book_id]})
+
+    # Embed carries the imported ST depth (uid 1: position 4 / depth 2).
+    assert _depth_db_rows(tmp_path, "autosave") == {
+        f"{book_id}:0": None, f"{book_id}:1": 2}
+
+    state = dict(session_manager.state)
+    state.update({
+        "input_text": "Tell me about the capital",
+        "turn": 1,
+        "chat_messages": [
+            {"role": "user", "content": "one"},
+            {"role": "ai", "content": "two"},
+            {"role": "user", "content": "three"},
+            {"role": "ai", "content": "four"},
+        ],
+    })
+    result = asyncio.run(server.engine.gather_context_node(state))
+
+    # The constant '@ depth' entry leaves the <lorebook> block for a chat
+    # injection; the normal entry still lands in <world_knowledge>.
+    assert not any("<lorebook>" in b for b in result["current_context"])
+    assert any("<world_knowledge>" in b and "Eldoria" in b
+               for b in result["current_context"])
+    injections = result["lore_depth_injections"]
+    assert len(injections) == 1
+    assert injections[0]["depth"] == 2
+    assert "ley lines" in injections[0]["text"]
+
+    # The compiler inserts it 2 messages from the chat bottom, above the
+    # player's input.
+    compiled = server.engine.prompt_compiler.compile({**state, **result})
+    messages = compiled["messages"]
+    idx = next(i for i, m in enumerate(messages)
+               if m["role"] == "system" and "ley lines" in m["content"])
+    assert idx == len(messages) - 3
+    assert messages[-1]["content"] == "Tell me about the capital"
+
+    # Per-entry PUT sets and (with an explicit null) clears the depth.
+    client.put(f"/api/lorebooks/{book_id}/entries/0", json={"injection_depth": 1})
+    assert _depth_db_rows(tmp_path, "autosave")[f"{book_id}:0"] == 1
+    client.put(f"/api/lorebooks/{book_id}/entries/0", json={"injection_depth": None})
+    assert _depth_db_rows(tmp_path, "autosave")[f"{book_id}:0"] is None
+
+    # Story entries support it too (depth 0 = the very bottom of the chat).
+    entry = client.post("/api/saves/autosave/lorebooks/entries", json={
+        "content": "The pact stone hums.", "injection_depth": 0}).json()["entry"]
+    assert entry["injection_depth"] == 0
+    assert _depth_db_rows(tmp_path, "autosave")[f"{STORY_LOREBOOK_ID}:{entry['uid']}"] == 0
+    # And an explicit null on the story PUT reverts to normal placement.
+    updated = client.put(f"/api/saves/autosave/lorebooks/entries/{entry['uid']}",
+                         json={"injection_depth": None}).json()["entry"]
+    assert updated["injection_depth"] is None
+    assert _depth_db_rows(tmp_path, "autosave")[f"{STORY_LOREBOOK_ID}:{entry['uid']}"] is None
 
 
 def test_undo_preserves_lorebook_links_and_keeps_toggles_effective(tmp_path, monkeypatch):

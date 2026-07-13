@@ -298,6 +298,14 @@ export default function LorebookManager({ onBack }) {
                             sticky {entry.sticky_turns ?? selected.sticky_turns}
                           </span>
                         )}
+                        {entry.injection_depth != null && (
+                          <span
+                            className="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide bg-emerald-900/60 text-emerald-300 border border-emerald-800/50"
+                            title="When active, injected into the chat this many messages from the bottom instead of the lore block"
+                          >
+                            @ depth {entry.injection_depth}
+                          </span>
+                        )}
                       </div>
                       {entry.keys.length > 0 && (
                         <p className="text-xs text-gray-500 truncate">🔑 {entry.keys.join(', ')}</p>

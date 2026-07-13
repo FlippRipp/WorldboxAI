@@ -576,6 +576,11 @@ function WorldEntryCard({ entry, isActive, stickyLeft = 0, onEdit }) {
                 sticky · {stickyLeft} {stickyLeft === 1 ? 'turn' : 'turns'} left
               </span>
             )}
+            {entry.injection_depth != null && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded border uppercase tracking-wide bg-emerald-900/60 text-emerald-300 border-emerald-800/50" title="Injected into the chat this many messages from the bottom instead of the lore block">
+                @ depth {entry.injection_depth}
+              </span>
+            )}
             {entry.region && (
               <span className="text-xs text-gray-500">{entry.region}</span>
             )}
@@ -811,18 +816,27 @@ function LorebooksTab({ saveId, search, setEditing, onEntriesChanged }) {
     { key: 'enabled', label: 'Enabled', type: 'checkbox' },
     { key: 'constant', label: 'Constant (always in context)', type: 'checkbox' },
     { key: 'sticky_turns', label: 'Sticky turns (stays in context this many turns after triggered; 0 = off)', type: 'number', min: 0 },
+    { key: 'injection_depth', label: 'Injection depth (blank = normal lore block; 0 = chat bottom, N = N messages up)', type: 'text' },
   ];
 
   const splitKeys = (value) => value.split(',').map(k => k.trim()).filter(Boolean);
 
+  const storyEntryPatch = (values) => {
+    const patch = { ...values };
+    if ('keys' in patch) patch.keys = splitKeys(patch.keys);
+    if ('injection_depth' in patch) {
+      const raw = String(patch.injection_depth).trim();
+      patch.injection_depth = raw === '' ? null : Math.max(0, parseInt(raw, 10) || 0);
+    }
+    return patch;
+  };
+
   const newStoryEntry = () => setEditing({
     title: 'New Story Entry',
     fields: STORY_ENTRY_FIELDS,
-    initialValues: { title: '', keys: '', content: '', enabled: true, constant: false, sticky_turns: 0 },
+    initialValues: { title: '', keys: '', content: '', enabled: true, constant: false, sticky_turns: 0, injection_depth: '' },
     onSave: async (values) => {
-      const { story_entries } = await api.addStoryLorebookEntry(saveId, {
-        ...values, keys: splitKeys(values.keys),
-      });
+      const { story_entries } = await api.addStoryLorebookEntry(saveId, storyEntryPatch(values));
       setStoryEntries(story_entries);
       onEntriesChanged();
     },
@@ -838,12 +852,12 @@ function LorebooksTab({ saveId, search, setEditing, onEntriesChanged }) {
       enabled: !!entry.enabled,
       constant: !!entry.constant,
       sticky_turns: entry.sticky_turns || 0,
+      injection_depth: entry.injection_depth ?? '',
     },
     onSave: async (values, changed) => {
       if (Object.keys(changed).length === 0) return;
-      const patch = { ...changed };
-      if ('keys' in patch) patch.keys = splitKeys(patch.keys);
-      const { story_entries } = await api.updateStoryLorebookEntry(saveId, entry.uid, patch);
+      const { story_entries } = await api.updateStoryLorebookEntry(
+        saveId, entry.uid, storyEntryPatch(changed));
       setStoryEntries(story_entries);
       onEntriesChanged();
     },
@@ -1030,6 +1044,14 @@ function LorebookEntryCard({ entry, bookSticky = 0, onToggle, onEdit, onDelete }
                 title={entry.sticky_turns != null ? 'Stays in context this many turns after being triggered (per-entry value)' : 'Stays in context this many turns after being triggered (book default)'}
               >
                 sticky {effectiveSticky}
+              </span>
+            )}
+            {entry.injection_depth != null && (
+              <span
+                className="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide bg-emerald-900/60 text-emerald-300 border border-emerald-800/50"
+                title="When active, injected into the chat this many messages from the bottom instead of the lore block"
+              >
+                @ depth {entry.injection_depth}
               </span>
             )}
           </div>

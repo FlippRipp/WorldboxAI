@@ -17,6 +17,7 @@ class WorldState(TypedDict):
     last_retrieved_world_ids: list[str]  # world_entries rows retrieved for the last turn's context
     last_context_query: Optional[str]    # Query text used for the last RAG retrieval
     sticky_world_entries: dict[str, int] # Sticky lorebook entries: source_id -> last turn they stay in context
+    lore_depth_injections: list[dict[str, Any]] # Active '@ depth' lorebook entries for the prompt compiler: [{depth, text}]
     last_stored_memory_id: Optional[str] # Librarian's most recently stored memory
     last_model: Optional[str]    # Model that produced the latest storyteller output
     last_usage: Optional[dict[str, Any]] # Token usage of the latest storyteller call, when the provider reported it

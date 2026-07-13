@@ -564,11 +564,27 @@ class EngineGraph:
         retrieved_world_ids = []
         last_context_query = ""
 
+        # Active entries with an injection depth (ST '@ depth') are injected
+        # into the chat by the prompt compiler instead of the context blocks:
+        # depth -> [entry texts].
+        depth_texts = {}
+
+        def route_lore_entry(entry) -> bool:
+            """True when the entry goes to the normal context block; False when
+            it was claimed by a depth injection."""
+            if entry.get("injection_depth") is None:
+                return True
+            depth_texts.setdefault(int(entry["injection_depth"]), []).append(entry["text"])
+            return False
+
         # Constant lore is injected on every turn — even empty-input continue
         # turns that skip RAG retrieval below.
-        lore_block = self._constant_lorebook_block()
-        if lore_block:
-            gathered_context.append(lore_block)
+        if self.memory is not None and self.memory.has_world_index():
+            constant_entries = [e for e in self.memory.get_constant_lorebook_entries()
+                                if route_lore_entry(e)]
+            if constant_entries:
+                lines = "\n".join(f"- {e['text']}" for e in constant_entries)
+                gathered_context.append(f"<lorebook>\n{lines}\n</lorebook>")
 
         # Sticky lorebook entries (ST 'sticky'): once triggered by retrieval,
         # an entry stays in context for its configured number of turns. Tracked
@@ -669,12 +685,25 @@ class EngineGraph:
         gathered_context.extend(rag_blocks)
 
         if world_entries:
-            world_block = "<world_knowledge>\n"
+            block_entries = []
             for we in world_entries:
-                world_block += f"- [{we['source_type']}] {we['text']}\n"
+                # Depth-injected entries are still "active" for the UI, they
+                # just reach the prompt through the chat instead of this block.
                 retrieved_world_ids.append(we.get("id", ""))
-            world_block += "</world_knowledge>"
-            gathered_context.append(world_block)
+                if route_lore_entry(we):
+                    block_entries.append(we)
+            if block_entries:
+                world_block = "<world_knowledge>\n"
+                for we in block_entries:
+                    world_block += f"- [{we['source_type']}] {we['text']}\n"
+                world_block += "</world_knowledge>"
+                gathered_context.append(world_block)
+
+        # One chat-injected message per depth, mirroring the block format.
+        lore_depth_injections = [
+            {"depth": depth, "text": "<lorebook>\n" + "\n".join(f"- {t}" for t in texts) + "\n</lorebook>"}
+            for depth, texts in sorted(depth_texts.items())
+        ]
 
         gathered_context.extend(context_strings)
 
@@ -684,6 +713,7 @@ class EngineGraph:
             "last_retrieved_world_ids": retrieved_world_ids,
             "last_context_query": last_context_query,
             "sticky_world_entries": sticky,
+            "lore_depth_injections": lore_depth_injections,
             "module_data": accumulated.get("module_data", dict(state.get("module_data", {}))),
         }
 

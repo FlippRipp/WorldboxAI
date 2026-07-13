@@ -281,6 +281,7 @@ class GameSessionManager:
             "active_save_id": self.active_save_id,
             "input_text": "",
             "current_context": [],
+            "lore_depth_injections": [],
             "chat_messages": chat_messages,
             "world_id": final_state.get("world_id", self.state.get("world_id")),
             "world_data": final_state.get("world_data", self.state.get("world_data")),

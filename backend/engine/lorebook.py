@@ -60,6 +60,19 @@ def _parse_sticky(raw_entry: dict) -> int | None:
     return None
 
 
+def _parse_injection_depth(raw_entry: dict) -> int | None:
+    """ST '@ depth' placement: position 4 plus a depth value means the entry is
+    injected into the chat N messages from the bottom instead of the normal
+    lore block. Lives on the entry (V2 World Info) or under extensions
+    (character books). None = normal placement."""
+    ext = raw_entry.get("extensions") if isinstance(raw_entry.get("extensions"), dict) else {}
+    position = raw_entry.get("position", ext.get("position"))
+    depth = raw_entry.get("depth", ext.get("depth"))
+    if position == 4 and isinstance(depth, (int, float)) and int(depth) >= 0:
+        return int(depth)
+    return None
+
+
 def _normalize_entry(raw_entry: dict, uid, *, v2: bool) -> dict | None:
     content = str(raw_entry.get("content") or "").strip()
     if not content:
@@ -85,6 +98,7 @@ def _normalize_entry(raw_entry: dict, uid, *, v2: bool) -> dict | None:
         "constant": bool(raw_entry.get("constant", False)),
         "enabled": enabled,
         "sticky_turns": _parse_sticky(raw_entry),
+        "injection_depth": _parse_injection_depth(raw_entry),
         "order": int(order) if isinstance(order, (int, float)) else 100,
         "raw": raw_entry,
     }
@@ -151,7 +165,7 @@ def parse_sillytavern_lorebook(raw: dict, fallback_name: str = "") -> dict:
 # (keywords, constant injection, enabled flag, RAG retrieval).
 
 _STORY_ENTRY_FIELDS = ("title", "keys", "secondary_keys", "content", "constant",
-                       "enabled", "sticky_turns")
+                       "enabled", "sticky_turns", "injection_depth")
 
 
 def make_story_entry(data: dict, uid: str | None = None) -> dict:
@@ -169,6 +183,8 @@ def make_story_entry(data: dict, uid: str | None = None) -> dict:
         "enabled": bool(data.get("enabled", True)),
         # Story entries have no book to inherit from, so sticky is a plain int.
         "sticky_turns": max(0, int(data.get("sticky_turns") or 0)),
+        "injection_depth": (None if data.get("injection_depth") is None
+                            else max(0, int(data["injection_depth"]))),
     }
 
 
@@ -308,6 +324,10 @@ class LorebookStore:
             # None clears the per-entry override (falls back to the book value).
             value = patch["sticky_turns"]
             entry["sticky_turns"] = None if value is None else max(0, int(value))
+        if "injection_depth" in patch:
+            # None reverts to normal placement in the lore context block.
+            value = patch["injection_depth"]
+            entry["injection_depth"] = None if value is None else max(0, int(value))
         record["updated_at"] = datetime.now(timezone.utc).isoformat()
         with open(self._path(lorebook_id), "w", encoding="utf-8") as f:
             json.dump(record, f, indent=2, ensure_ascii=False)

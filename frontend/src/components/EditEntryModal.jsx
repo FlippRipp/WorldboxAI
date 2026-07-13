@@ -97,6 +97,7 @@ export const LOREBOOK_ENTRY_FIELDS = [
   { key: 'enabled', label: 'Enabled', type: 'checkbox' },
   { key: 'constant', label: 'Constant (always in context)', type: 'checkbox' },
   { key: 'sticky_turns', label: 'Sticky turns (blank = use the book default)', type: 'text' },
+  { key: 'injection_depth', label: 'Injection depth (blank = normal lore block; 0 = chat bottom, N = N messages up)', type: 'text' },
 ];
 
 export function lorebookEntryInitialValues(entry) {
@@ -107,17 +108,20 @@ export function lorebookEntryInitialValues(entry) {
     enabled: !!entry.enabled,
     constant: !!entry.constant,
     sticky_turns: entry.sticky_turns ?? '',
+    injection_depth: entry.injection_depth ?? '',
   };
 }
 
 // Turn the modal's raw changed-values into an API patch: split keyword
-// strings and map a blank sticky field to null (clear the override).
+// strings and map blank numeric fields to null (clear the setting).
 export function lorebookEntryPatch(changed) {
   const patch = { ...changed };
   if ('keys' in patch) patch.keys = patch.keys.split(',').map(k => k.trim()).filter(Boolean);
-  if ('sticky_turns' in patch) {
-    const raw = String(patch.sticky_turns).trim();
-    patch.sticky_turns = raw === '' ? null : Math.max(0, parseInt(raw, 10) || 0);
+  for (const key of ['sticky_turns', 'injection_depth']) {
+    if (key in patch) {
+      const raw = String(patch[key]).trim();
+      patch[key] = raw === '' ? null : Math.max(0, parseInt(raw, 10) || 0);
+    }
   }
   return patch;
 }
