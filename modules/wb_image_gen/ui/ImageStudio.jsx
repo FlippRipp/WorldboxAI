@@ -26,9 +26,12 @@ function loraLlmMode(entry) {
 const labelCls = 'block text-xs uppercase tracking-wider text-gray-500 mb-1.5';
 const sectionCls = 'bg-gray-900/60 border border-gray-800 rounded-xl p-5 space-y-4';
 
-// Single-line-height textarea that grows with its content, so longer text
-// stays readable while typing. Modeled on the CharacterBuilder's AutoTextarea.
-function AutoGrowTextarea({ value, onChange, onBlur, onKeyDown, placeholder, className }) {
+// Textarea that grows with its content (rows sets the minimum height), so
+// longer text stays readable while typing. Modeled on the CharacterBuilder's
+// AutoTextarea. With height reset to auto the rows attribute drives the
+// rendered height, and scrollHeight is never below it — so rows acts as the
+// floor the field shrinks back to.
+function AutoGrowTextarea({ value, onChange, onBlur, onKeyDown, placeholder, className, rows = 1 }) {
   const ref = useRef(null);
   const adjustHeight = useCallback(() => {
     const el = ref.current;
@@ -46,7 +49,7 @@ function AutoGrowTextarea({ value, onChange, onBlur, onKeyDown, placeholder, cla
       onBlur={onBlur}
       onKeyDown={onKeyDown}
       placeholder={placeholder}
-      rows={1}
+      rows={rows}
       className={`${className} resize-none overflow-hidden whitespace-pre-wrap break-words`}
     />
   );
@@ -889,19 +892,20 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
       )}
 
       {entry.active && (
-        <div className="flex items-center gap-2">
+        <div className="flex items-start gap-2">
           <label
-            className="text-[10px] uppercase tracking-wider shrink-0 text-gray-500"
+            className="text-[10px] uppercase tracking-wider shrink-0 pt-2.5 text-gray-500"
             title="Trigger words woven into every prompt that uses this LoRA. Pulled from the model page — edit them here if they're wrong or missing. Comma-separated."
           >
             Triggers
           </label>
-          <input
-            type="text"
+          <AutoGrowTextarea
             value={triggers}
             onChange={(e) => setTriggers(e.target.value)}
             onBlur={commitTriggers}
-            onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.target.blur(); }
+            }}
             placeholder="none — comma-separated words injected into the prompt (e.g. glowing runes, ornate armor)"
             className={`${inputCls} text-xs`}
           />
@@ -998,11 +1002,13 @@ function LoraRow({ entry, checkpointFamily, onPatch, onDelete, onRematch, myLora
                   ))}
                 </div>
               )}
-              <div className="flex gap-2">
-                <input
-                  type="text"
+              <div className="flex items-start gap-2">
+                <AutoGrowTextarea
                   value={override}
                   onChange={(e) => setOverride(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) e.preventDefault();
+                  }}
                   placeholder="…or type the MODEL NAME IN API by hand"
                   className={`${inputCls} text-xs`}
                 />
@@ -1992,8 +1998,7 @@ export default function ImageStudio({ onBack }) {
           </div>
           <div>
             <label className={labelCls}>Negative Prompt</label>
-            <input
-              type="text"
+            <AutoGrowTextarea
               value={draft.negative_prompt || ''}
               onChange={(e) => set('negative_prompt', e.target.value)}
               placeholder="blurry, low quality, watermark, text"
@@ -2089,10 +2094,10 @@ export default function ImageStudio({ onBack }) {
                 Reset to default
               </button>
             </div>
-            <textarea
+            <AutoGrowTextarea
               value={draft.prompt_template || ''}
               onChange={(e) => set('prompt_template', e.target.value)}
-              rows={8}
+              rows={3}
               className={`${inputCls} font-mono text-xs leading-relaxed`}
             />
           </div>
@@ -2108,10 +2113,10 @@ export default function ImageStudio({ onBack }) {
                 Reset to default
               </button>
             </div>
-            <textarea
+            <AutoGrowTextarea
               value={draft.prompt_template_tags || ''}
               onChange={(e) => set('prompt_template_tags', e.target.value)}
-              rows={8}
+              rows={3}
               className={`${inputCls} font-mono text-xs leading-relaxed`}
             />
             <p className="text-xs text-gray-600 mt-1">
@@ -2200,8 +2205,7 @@ export default function ImageStudio({ onBack }) {
                 Reset to default
               </button>
             </div>
-            <input
-              type="text"
+            <AutoGrowTextarea
               value={draft.pony_quality_tags || ''}
               onChange={(e) => set('pony_quality_tags', e.target.value)}
               placeholder="score_9, score_8_up, score_7_up"
@@ -2210,8 +2214,7 @@ export default function ImageStudio({ onBack }) {
           </div>
           <div>
             <label className={labelCls}>Style suffix (appended to every image prompt)</label>
-            <input
-              type="text"
+            <AutoGrowTextarea
               value={draft.style_suffix || ''}
               onChange={(e) => set('style_suffix', e.target.value)}
               placeholder="e.g. digital painting, dramatic lighting, fantasy concept art"
@@ -2243,12 +2246,16 @@ export default function ImageStudio({ onBack }) {
               : 'Sends your text straight to the image model, word for word (skips the prompt-writer LLM).'}
             {' '}Uses saved settings — save changes first. Results appear in the Image Library tab.
           </p>
-          <div className="flex gap-2">
-            <input
-              type="text"
+          <div className="flex items-start gap-2">
+            <AutoGrowTextarea
               value={testPrompt}
               onChange={(e) => updateTestPrompt(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && testPrompt.trim() && !generating) testGenerate(); }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  if (testPrompt.trim() && !generating) testGenerate();
+                }
+              }}
               placeholder={testRefine
                 ? 'The knight faces the dragon on the crumbling bridge at dawn'
                 : 'A moonlit castle above a stormy sea, oil painting'}
