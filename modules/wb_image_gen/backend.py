@@ -2310,6 +2310,15 @@ def _snapshot_names(characters: dict | None) -> list[str]:
     return names + [n["name"] for n in characters.get("npcs") or []]
 
 
+def _tag_entry_stale(save_id: str, sheet: dict) -> bool:
+    """Whether a sheet's cached tags are missing or keyed to an outdated
+    descriptor (regeneration needed). Reads the cache fresh so mid-pipeline
+    manual edits are seen."""
+    entry = (_read_tag_cache().get(str(save_id)) or {}).get(sheet.get("key"))
+    return not (isinstance(entry, dict)
+                and entry.get("hash") == _appearance_hash(sheet["descriptor"]))
+
+
 def _characters_needing_tags(save_id: str, characters: dict) -> list[dict]:
     """Sheets whose cached appearance tags are missing or hash-stale. Drawn
     from all_npcs (every known living character), not just the scene roster,
@@ -2368,6 +2377,10 @@ async def _tag_backfill_pipeline(save_id: str, worklist: list[dict],
             if sdk is None:
                 return
             for sheet in worklist[:TAG_BACKFILL_MAX_PER_RUN]:
+                # A manual edit (character-tags endpoint) may have landed since
+                # this worklist was computed; a fresh entry needs no LLM call.
+                if not _tag_entry_stale(save_id, sheet):
+                    continue
                 prompt = (CHARACTER_TAG_PROMPT
                           .replace("{name}", sheet["name"])
                           .replace("{descriptor}", sheet["descriptor"]))
@@ -2386,8 +2399,13 @@ async def _tag_backfill_pipeline(save_id: str, worklist: list[dict],
                     print(f"[Image Gen] Unusable tag reply for {sheet['name']} "
                           f"(will retry): {raw[:200]!r}")
                     continue
-                # Only this pipeline writes the cache, and _tag_lock
-                # serializes pipelines, so read-modify-write is safe here.
+                # This block is synchronous (no awaits), so in the engine's
+                # single event loop the read-modify-write cannot interleave
+                # with the character-tags endpoints' own synchronous RMW.
+                if not _tag_entry_stale(save_id, sheet):
+                    # A manual edit for the current descriptor landed while
+                    # the LLM call was in flight -- the player wins.
+                    continue
                 cache = _read_tag_cache()
                 entries = cache.get(str(save_id))
                 if not isinstance(entries, dict):
@@ -2806,6 +2824,26 @@ def get_router():
     class KeySubmit(BaseModel):
         api_key: str
 
+    # Identity fields mirror what _character_snapshot feeds the tag pipeline,
+    # so the hash computed here matches the one the backfill would compute.
+    class TagCharacter(BaseModel):
+        key: str
+        name: str = ""
+        race: str = ""
+        gender: str = ""
+        appearance: str = ""
+
+    class TagLookup(BaseModel):
+        save_id: str
+        characters: list[TagCharacter] = []
+
+    class TagUpdate(BaseModel):
+        tags: str
+        name: str = ""
+        race: str = ""
+        gender: str = ""
+        appearance: str = ""
+
     class ProfileCreate(BaseModel):
         name: str
         duplicate_from: str | None = None
@@ -3032,6 +3070,78 @@ def get_router():
             raise HTTPException(status_code=404, detail="Not found")
         # Filenames are immutable (uuid-suffixed), so long caching is safe.
         return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+    # ---- Character appearance tags (browsed/edited from character UIs) ----
+
+    def _public_tag_entry(entry: dict, descriptor: str) -> dict:
+        return {
+            "tags": str(entry.get("tags") or ""),
+            # Stale = keyed to an outdated descriptor: the prompt writer is
+            # ignoring these tags and the backfill will regenerate them.
+            "stale": entry.get("hash") != _appearance_hash(descriptor),
+            "updated_at": entry.get("updated_at"),
+            "source": str(entry.get("source") or "generated"),
+        }
+
+    @router.post("/character-tags/lookup")
+    async def lookup_character_tags(req: TagLookup):
+        """Cached appearance tags for the requested characters. A POST (not a
+        GET) because staleness is computed against each character's current
+        identity fields, which the caller supplies."""
+        cfg = _load_config()
+        entries = _read_tag_cache().get(str(req.save_id))
+        if not isinstance(entries, dict):
+            entries = {}
+        tags = {}
+        for ch in req.characters:
+            entry = entries.get(ch.key)
+            if isinstance(entry, dict) and str(entry.get("tags") or "").strip():
+                descriptor = _character_descriptor(ch.race, ch.gender, ch.appearance)
+                tags[ch.key] = _public_tag_entry(entry, descriptor)
+        return {
+            "tags_enabled": _prompt_style(cfg) == "tags"
+                            and bool(cfg.get("character_reference_enabled", True)),
+            "tags": tags,
+        }
+
+    @router.put("/character-tags/{save_id}/{key}")
+    async def put_character_tags(save_id: str, key: str, update: TagUpdate):
+        """Manually set (or, with empty tags, clear) a character's cached
+        appearance tags. Saving stamps the hash of the character's current
+        descriptor, so the edit counts as fresh and the backfill leaves it
+        alone until the appearance changes again; clearing lets the next
+        backfill regenerate from scratch. Synchronous read-modify-write (no
+        awaits), so it cannot interleave with the backfill pipeline's."""
+        raw = update.tags.strip()
+        cache = _read_tag_cache()
+        entries = cache.get(str(save_id))
+        if not isinstance(entries, dict):
+            entries = {}
+        if not raw:
+            if key in entries:
+                del entries[key]
+                cache[str(save_id)] = entries
+                _write_tag_cache(cache)
+            return {"deleted": True}
+        # No usage filter (cfg=None): a deliberate manual tag is kept even if
+        # it is rare on the booru sites.
+        tags = _clean_character_tags(raw)
+        if not tags:
+            raise HTTPException(
+                status_code=400,
+                detail="No usable tags — scene/quality tags like 'solo' or "
+                       "'masterpiece' are always stripped.")
+        descriptor = _character_descriptor(update.race, update.gender, update.appearance)
+        entries[key] = {
+            "hash": _appearance_hash(descriptor),
+            "tags": tags,
+            "name": update.name,
+            "updated_at": _now(),
+            "source": "manual",
+        }
+        cache[str(save_id)] = entries
+        _write_tag_cache(cache)
+        return _public_tag_entry(entries[key], descriptor)
 
     @router.get("/models")
     async def search_models(query: str = "", cursor: str = "", limit: int = 48):

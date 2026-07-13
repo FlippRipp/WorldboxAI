@@ -6,6 +6,13 @@ import React, { useEffect, useMemo, useState } from 'react';
 // can be refreshed from the recent story (/npc update) and every character can
 // be edited manually (/npc edit). Characters can also be created from scratch
 // (/npc add) or removed (/npc delete). Receives { state, config, onCommand, busy }.
+//
+// Each card also surfaces the booru appearance tags the Image Generation
+// module derives for its illustrations, fetched from (and edited through)
+// that module's character-tags endpoints. When the module is absent the
+// lookup fails and the section simply stays hidden.
+
+const TAGS_API = '/api/modules/wb_image_gen/character-tags';
 
 const ROLES = ['quest_giver', 'antagonist', 'ally', 'informant', 'rival', 'neutral', 'wildcard'];
 const STATUSES = ['active', 'departed', 'deceased', 'unintroduced'];
@@ -24,9 +31,9 @@ const ROLE_COLORS = {
   wildcard: 'bg-purple-500/15 text-purple-300 border-purple-500/30',
 };
 
-function Badge({ className = '', children }) {
+function Badge({ className = '', title, children }) {
   return (
-    <span className={`text-[10px] px-1.5 py-0.5 rounded-full border whitespace-nowrap ${className}`}>
+    <span title={title} className={`text-[10px] px-1.5 py-0.5 rounded-full border whitespace-nowrap ${className}`}>
       {children}
     </span>
   );
@@ -185,6 +192,124 @@ function EditForm({ npc, busy, onSave, onCancel }) {
   );
 }
 
+// The appearance tags of one character: chips when present, an inline editor
+// on demand. Edits PUT straight to the image module (no story turn involved);
+// saving an empty field clears the tags so the AI regenerates them.
+function TagsSection({ npc, saveId, entry, enabled, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  if (!entry && !enabled) return null;
+
+  const startEdit = () => {
+    setDraft(entry?.tags || '');
+    setError('');
+    setEditing(true);
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError('');
+    try {
+      const res = await fetch(`${TAGS_API}/${encodeURIComponent(saveId)}/${encodeURIComponent(String(npc.id))}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tags: draft,
+          name: npc.name || '',
+          race: npc.race || '',
+          gender: npc.gender || '',
+          appearance: npc.appearance || '',
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || 'Could not save the tags.');
+      onSaved(String(npc.id), body.deleted ? null : body);
+      setEditing(false);
+    } catch (e) {
+      setError(e.message || 'Could not save the tags.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Field label="Appearance Tags (images)">
+      {editing ? (
+        <div className="space-y-2">
+          <textarea
+            className={inputCls}
+            rows={2}
+            value={draft}
+            disabled={saving}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="silver hair, green eyes, elf ears…"
+          />
+          <p className="text-xs text-gray-500">
+            Comma-separated booru tags keeping this character's look consistent in generated
+            images. Save the field empty to clear them and let the AI regenerate from the
+            appearance text.
+          </p>
+          {error && <p className="text-xs text-red-400">{error}</p>}
+          <div className="flex gap-2 justify-end">
+            <button
+              onClick={() => setEditing(false)}
+              className="text-xs px-3 py-1.5 rounded-lg border border-gray-600 text-gray-400 hover:text-gray-200 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={save}
+              disabled={saving}
+              className="text-xs px-3 py-1.5 rounded-lg border border-indigo-500/30 bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Save Tags
+            </button>
+          </div>
+        </div>
+      ) : entry ? (
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center gap-1">
+            {entry.tags.split(',').map((t) => t.trim()).filter(Boolean).map((t, i) => (
+              <span key={i} className="text-xs px-2 py-0.5 bg-gray-700/60 text-gray-300 rounded">{t}</span>
+            ))}
+            {entry.source === 'manual' && (
+              <Badge className="bg-sky-500/15 text-sky-300 border-sky-500/30" title="Set by hand — kept until the appearance text changes">
+                edited
+              </Badge>
+            )}
+            {entry.stale && (
+              <Badge className="bg-amber-500/15 text-amber-300 border-amber-500/30" title="The appearance changed since these tags were made, so images ignore them until they are regenerated — or edited here">
+                outdated
+              </Badge>
+            )}
+            <button
+              onClick={startEdit}
+              className="text-xs px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
+            >
+              Edit
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-gray-500 italic">
+            Not generated yet — the AI derives tags before this character's first illustration.
+          </span>
+          <button
+            onClick={startEdit}
+            className="text-xs px-2 py-0.5 rounded border border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-500 transition-colors"
+          >
+            Add manually
+          </button>
+        </div>
+      )}
+    </Field>
+  );
+}
+
 export default function CharacterTab({ state, onCommand, busy }) {
   const bank = state?.module_data?.wb_npc_system?.characters || {};
   const [query, setQuery] = useState('');
@@ -201,6 +326,48 @@ export default function CharacterTab({ state, onCommand, busy }) {
   useEffect(() => {
     if (!busy) setUpdatingId(null);
   }, [busy]);
+
+  // Cached appearance tags live in the image module's own store; the current
+  // identity fields ride along so the backend can flag entries outdated by an
+  // appearance edit. Keyed on those fields (not the bank object) so ordinary
+  // state updates don't refetch, but an edit or a finished turn does.
+  const saveId = state?.active_save_id;
+  const [tagInfo, setTagInfo] = useState(null);
+  const rosterSig = useMemo(() => JSON.stringify(Object.values(bank)
+    .filter((n) => n && n.id)
+    .map((n) => [n.id, n.name, n.race, n.gender, n.appearance])), [bank]);
+
+  useEffect(() => {
+    if (!saveId || busy) return undefined;
+    const characters = Object.values(bank).filter((n) => n && n.id).map((n) => ({
+      key: String(n.id),
+      name: n.name || '',
+      race: n.race || '',
+      gender: n.gender || '',
+      appearance: n.appearance || '',
+    }));
+    if (characters.length === 0) { setTagInfo(null); return undefined; }
+    let cancelled = false;
+    fetch(`${TAGS_API}/lookup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ save_id: saveId, characters }),
+    })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))
+      .then((body) => { if (!cancelled) setTagInfo(body); })
+      .catch(() => { if (!cancelled) setTagInfo(null); });
+    return () => { cancelled = true; };
+  }, [saveId, rosterSig, busy]);
+
+  const applyTagUpdate = (key, entry) => {
+    setTagInfo((cur) => {
+      if (!cur) return cur;
+      const tags = { ...cur.tags };
+      if (entry) tags[key] = entry;
+      else delete tags[key];
+      return { ...cur, tags };
+    });
+  };
 
   const npcs = useMemo(() => {
     const all = Object.values(bank);
@@ -365,6 +532,17 @@ export default function CharacterTab({ state, onCommand, busy }) {
               <div className="px-3 pb-3 space-y-3 border-t border-gray-700/50 pt-3">
                 {npc.appearance && (
                   <Field label="Appearance"><p className="text-sm text-gray-300 leading-relaxed">{npc.appearance}</p></Field>
+                )}
+                {/* Only characters with appearance text ever reach the image
+                    pipeline, so tags are only meaningful alongside one. */}
+                {tagInfo && npc.id && npc.appearance && (
+                  <TagsSection
+                    npc={npc}
+                    saveId={saveId}
+                    entry={tagInfo.tags?.[String(npc.id)]}
+                    enabled={tagInfo.tags_enabled}
+                    onSaved={applyTagUpdate}
+                  />
                 )}
                 {npc.pitch && (
                   <Field label="Pitch"><p className="text-sm text-gray-300 leading-relaxed">{npc.pitch}</p></Field>

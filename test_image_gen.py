@@ -3148,6 +3148,148 @@ def test_tag_backfill_gating(tmp_path):
     assert backend._read_tag_cache() == {}
 
 
+def test_character_tags_lookup_reports_entries_staleness_and_gating(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend, model_base="Pony", model_name="m.safetensors", interval=99)
+    sdk = _make_sdk(reply="silver hair, green eyes")
+
+    async def run():
+        await backend.on_librarian(_tag_state(), sdk)
+        await asyncio.gather(*backend._tasks)
+
+    asyncio.run(run())
+    client = _client(backend)
+
+    chars = [
+        {"key": "n1", "name": "Borin", "race": "human", "gender": "male",
+         "appearance": "tall and scarred"},
+        {"key": "n2", "name": "Kira", "race": "human", "gender": "male",
+         "appearance": "tall and scarred"},
+        {"key": "player", "name": "Ash", "race": "elf", "gender": "female",
+         "appearance": "silver hair, green cloak"},
+        {"key": "ghost"},
+    ]
+    resp = client.post("/character-tags/lookup",
+                       json={"save_id": "mystory", "characters": chars})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["tags_enabled"] is True
+    assert sorted(body["tags"]) == ["n1", "n2", "player"]
+    for entry in body["tags"].values():
+        assert entry["tags"] == "silver hair, green eyes"
+        assert entry["stale"] is False
+        assert entry["source"] == "generated"
+        assert entry["updated_at"]
+
+    # An appearance edit flags the entry as outdated for the UI.
+    resp = client.post("/character-tags/lookup", json={
+        "save_id": "mystory",
+        "characters": [{**chars[0], "appearance": "now bald"}]})
+    assert resp.json()["tags"]["n1"]["stale"] is True
+
+    # Natural-language checkpoints don't run the tag pipeline, but existing
+    # entries stay viewable.
+    _enable(backend)
+    resp = client.post("/character-tags/lookup",
+                       json={"save_id": "mystory", "characters": chars})
+    assert resp.json()["tags_enabled"] is False
+    assert "n1" in resp.json()["tags"]
+
+    # A save with no cached section returns no tags.
+    resp = client.post("/character-tags/lookup",
+                       json={"save_id": "elsewhere", "characters": chars})
+    assert resp.json()["tags"] == {}
+
+
+def test_character_tags_manual_edit_persists_and_clears(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend, model_base="Pony", model_name="m.safetensors", interval=99)
+    sdk = _make_sdk(reply="silver hair, green eyes")
+
+    async def run():
+        await backend.on_librarian(_tag_state(), sdk)
+        await asyncio.gather(*backend._tasks)
+
+    asyncio.run(run())
+    client = _client(backend)
+
+    ident = {"name": "Borin", "race": "human", "gender": "male",
+             "appearance": "tall and scarred"}
+    resp = client.put("/character-tags/mystory/n1",
+                      json={"tags": "Blue Hair, blue hair, solo, facial scar", **ident})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["tags"] == "blue hair, facial scar"   # cleaned like the pipeline's
+    assert body["stale"] is False
+    assert body["source"] == "manual"
+
+    entry = backend._read_tag_cache()["mystory"]["n1"]
+    assert entry["tags"] == "blue hair, facial scar"
+    assert entry["source"] == "manual"
+    # Stamped with the current descriptor's hash, so the entry counts as fresh
+    # and the backfill has nothing to regenerate for this character.
+    assert entry["hash"] == backend._appearance_hash("male human; tall and scarred")
+    snapshot = backend._character_snapshot(_tag_state())
+    assert backend._characters_needing_tags("mystory", snapshot) == []
+    borin = next(n for n in snapshot["all_npcs"] if n["name"] == "Borin")
+    assert borin["tags"] == "blue hair, facial scar"
+
+    # Nothing but scene/quality tags is a rejected edit, not a silent clear.
+    resp = client.put("/character-tags/mystory/n1",
+                      json={"tags": "solo, masterpiece", **ident})
+    assert resp.status_code == 400
+    assert backend._read_tag_cache()["mystory"]["n1"]["tags"] == "blue hair, facial scar"
+
+    # Saving empty clears the entry, putting the character back on the
+    # backfill's worklist.
+    resp = client.put("/character-tags/mystory/n1", json={"tags": "  ", **ident})
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": True}
+    assert "n1" not in backend._read_tag_cache()["mystory"]
+    needing = backend._characters_needing_tags("mystory", snapshot)
+    assert [s["key"] for s in needing] == ["n1"]
+
+
+def test_tag_backfill_yields_to_manual_edits(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _enable(backend, model_base="Pony", model_name="m.safetensors")
+    borin = {"key": "n1", "name": "Borin", "descriptor": "male human; tall and scarred"}
+    kira = {"key": "n2", "name": "Kira", "descriptor": "female human; short and quick"}
+    roster = {"n1", "n2", "player"}
+
+    def manual_entry(sheet, tags):
+        return {"hash": backend._appearance_hash(sheet["descriptor"]), "tags": tags,
+                "name": sheet["name"], "updated_at": backend._now(), "source": "manual"}
+
+    # An entry already fresh by the time its turn comes up (the worklist was
+    # computed earlier) is skipped without an LLM call.
+    backend._write_tag_cache({"mystory": {"n1": manual_entry(borin, "blue hair")}})
+    captured = {}
+    sdk = _make_sdk(reply="silver hair, green eyes", captured=captured)
+    asyncio.run(backend._tag_backfill_pipeline("mystory", [borin, kira], roster, cfg, sdk))
+    cache = backend._read_tag_cache()["mystory"]
+    assert cache["n1"]["tags"] == "blue hair"
+    assert cache["n2"]["tags"] == "silver hair, green eyes"
+    assert len(captured["prompts"]) == 1
+
+    # A manual edit landing while the LLM call is in flight wins over the
+    # generated reply.
+    backend._write_tag_cache({"mystory": {}})
+    captured = {"prompts": []}
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        captured["prompts"].append(prompt)
+        mid_flight = backend._read_tag_cache()
+        mid_flight.setdefault("mystory", {})["n1"] = manual_entry(borin, "blue hair")
+        backend._write_tag_cache(mid_flight)
+        return "silver hair, green eyes"
+
+    sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
+    asyncio.run(backend._tag_backfill_pipeline("mystory", [borin], roster, cfg, sdk))
+    assert backend._read_tag_cache()["mystory"]["n1"]["tags"] == "blue hair"
+    assert len(captured["prompts"]) == 1
+
+
 def test_character_block_serves_ready_tags(tmp_path):
     backend = _load_backend(tmp_path)
     tag_cfg = {**backend._default_config(),
