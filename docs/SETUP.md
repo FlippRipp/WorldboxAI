@@ -48,6 +48,21 @@ For deterministic backend smoke tests without live provider calls, set:
 LLM_MODE=mock
 ```
 
+## Image Generation (optional)
+
+Story illustrations are provided by the `wb_image_gen` module and configured
+entirely in the **Image Studio** main-menu screen (no env vars). Two providers
+are supported, switched with the provider toggle on the Setup tab:
+
+- **Novita AI (cloud)** — paste a [novita.ai](https://novita.ai) API key and
+  pick one of the thousands of hosted checkpoints. No GPU needed.
+- **Local Stable Diffusion** — point the Studio at any A1111-compatible WebUI
+  (AUTOMATIC1111, SD WebUI Forge, reForge, SD.Next) started with the `--api`
+  flag (default address `http://127.0.0.1:7860`). Generation is free and
+  private; the model dropdown lists your installed checkpoints. Optionally set
+  the WebUI's `models/Lora` folder in the Studio to enable one-click LoRA
+  installs from the built-in Civitai/Hugging Face browser.
+
 Start the backend:
 
 ```powershell

@@ -38,6 +38,13 @@ cd frontend && npm install && cd ..
 
 Both start scripts pull the latest changes from git on launch (skipped gracefully if offline) and refresh pip/npm dependencies when an update was pulled.
 
+## Image Generation
+
+Story illustrations render through either the Novita AI cloud API or a local
+A1111/Forge-compatible Stable Diffusion WebUI (started with `--api`), switched
+in the Image Studio main-menu screen. See
+[docs/SETUP.md](docs/SETUP.md#image-generation-optional).
+
 ## Documentation
 
 See [docs/index.md](docs/index.md) for full documentation including:

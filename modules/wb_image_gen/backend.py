@@ -1,15 +1,30 @@
-"""Image Generation -- illustrates the story with Novita AI text-to-image.
+"""Image Generation -- illustrates the story with text-to-image.
 
 Every N storyteller generations (or on demand via /image) the latest narration
-is condensed into an image prompt by the smartest LLM slot, then submitted to
-Novita's async txt2img API. The whole pipeline runs as a fire-and-forget
-background task so the player keeps playing while the image renders; the
-chat-feed footer widget polls the module's index and shows the image under the
-turn it illustrates. Novita hosts thousands of community checkpoints, so the
-model is picked via a searchable dropdown backed by the /models proxy below.
+is condensed into an image prompt by the smartest LLM slot, then rendered by
+one of two providers behind the _generate_image dispatch (a small in-module
+branch; two providers and one call site don't earn a registry):
 
-Config is global (one Novita key for all stories), owned by this module and
-edited in the Image Studio main-menu screen -- not in per-save settings.
+- "novita": Novita AI's async cloud API -- submit, poll, download as one
+  retryable unit (a failed task cannot be re-polled and its presigned result
+  URL expires). Thousands of Civitai-mirrored checkpoints via the /models
+  proxy; SD LoRAs resolve through Novita's mirrored catalog, FLUX.2 rides its
+  own first-party endpoint with URL LoRAs. Prompts are capped at
+  MAX_PROMPT_CHARS (a Novita API limit).
+- "local": an A1111/Forge-compatible WebUI (--api) at a configured base URL.
+  txt2img there is one synchronous call; /models lists the installed
+  checkpoints; LoRAs apply as <lora:name:weight> prompt tags added at payload
+  time only, linked to library entries by hashing the configured LoRA folder
+  (one-click installs download Civitai/HF files straight into it). No prompt
+  cap and no content filter, so the refusal-softening path never triggers.
+
+The whole pipeline runs as a fire-and-forget background task so the player
+keeps playing while the image renders; the chat-feed footer widget polls the
+module's index and shows the image under the turn it illustrates.
+
+Config is global (one provider choice and one set of keys for all stories),
+owned by this module and edited in the Image Studio main-menu screen -- not in
+per-save settings.
 """
 import asyncio
 import csv
