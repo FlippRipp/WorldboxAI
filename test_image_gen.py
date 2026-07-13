@@ -4423,3 +4423,156 @@ def test_local_refresh_reports_partial_failures(tmp_path):
     body = client.post("/local/refresh").json()
     assert posted == ["/sdapi/v1/refresh-checkpoints", "/sdapi/v1/refresh-loras"]
     assert body["ok"] is False and "refresh-loras exploded" in body["error"]
+
+
+# ---------------------------------------------------------------------------
+# Local LoRA support
+# ---------------------------------------------------------------------------
+
+def _local_lora_entry(**overrides):
+    entry = {"id": "101", "name": "Ink Style", "base_model": "SDXL 1.0",
+             "active": True, "strength": 0.8,
+             "sha256": "a" * 64, "all_hashes": ["a" * 64],
+             "download_url": "https://civitai.com/api/download/models/101",
+             "local": {"name": "ink_style_xl", "source": "hash"}}
+    entry.update(overrides)
+    return entry
+
+
+def test_entry_usable_gains_local_dimension(tmp_path):
+    backend = _load_backend(tmp_path)
+    linked = _local_lora_entry()
+    unlinked = _local_lora_entry(local=None)
+    unlinked.pop("local")
+
+    assert backend._entry_usable(linked, "sdxl", "local") is True
+    assert backend._entry_usable(unlinked, "sdxl", "local") is False
+    assert backend._entry_usable(linked, "sd15", "local") is False   # family mismatch
+    # Novita semantics unchanged: needs a catalog name, not a local file.
+    assert backend._entry_usable(linked, "sdxl") is False
+    assert backend._entry_usable(linked, "sdxl", "novita") is False
+    # Flux under Forge works through the same prompt syntax locally.
+    flux = _local_lora_entry(base_model="Flux.1 D")
+    assert backend._entry_usable(flux, "flux", "local") is True
+
+
+def test_local_payload_injects_lora_tags_only_at_payload_time(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = {**backend._default_config(), "provider": "local",
+           "model_name": "juggernautXL.safetensors", "model_base": "SDXL 1.0",
+           "lora_library": [
+               _local_lora_entry(),
+               _local_lora_entry(id="102", strength=99,           # clamped to 10
+                                 local={"name": "other_xl", "source": "manual"}),
+               _local_lora_entry(id="103", active=False),          # inactive
+               _local_lora_entry(id="104", local=None) | {},      # unlinked
+               _local_lora_entry(id="105", base_model="SD 1.5"),   # wrong family
+           ]}
+    cfg["lora_library"][3].pop("local")
+
+    tags = backend._local_prompt_lora_tags(cfg)
+    assert tags == "<lora:ink_style_xl:0.8> <lora:other_xl:10.0>"
+
+    payload = backend._local_payload(cfg, "a stormy harbor")
+    assert payload["prompt"] == "a stormy harbor <lora:ink_style_xl:0.8> <lora:other_xl:10.0>"
+
+    # Trigger words follow local usability now.
+    cfg["lora_library"][0]["trained_words"] = ["inkwash"]
+    cfg["lora_library"][3]["trained_words"] = ["neverapplied"]
+    words = backend._active_trigger_words(cfg)
+    assert "inkwash" in words and "neverapplied" not in words
+
+    # The LLM-gated cfg copy flows straight into the tags.
+    gated = {**cfg, "lora_library": [e for e in cfg["lora_library"]
+                                     if e["id"] != "101"]}
+    assert backend._local_prompt_lora_tags(gated) == "<lora:other_xl:10.0>"
+
+
+def test_lora_patch_local_name_links_and_clears(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _enable_local(backend)
+    cfg["lora_library"] = [_local_lora_entry(local=None)]
+    cfg["lora_library"][0].pop("local")
+    backend._save_config(cfg)
+    client = _client(backend)
+
+    body = client.patch("/loras/101", json={"local_name": " ink_style_xl "}).json()
+    assert body["entry"]["local"] == {"name": "ink_style_xl", "source": "manual"}
+
+    body = client.patch("/loras/101", json={"local_name": ""}).json()
+    assert "local" not in body["entry"]
+
+
+def test_local_match_loras_scans_links_and_unlinks(tmp_path):
+    backend = _load_backend(tmp_path)
+    lora_dir = tmp_path / "sd" / "models" / "Lora"
+    (lora_dir / "styles").mkdir(parents=True)
+    file_a = lora_dir / "styles" / "ink_style_xl.safetensors"
+    file_a.write_bytes(b"weights-a")
+    (lora_dir / "notes.txt").write_text("ignored")
+
+    import hashlib
+    sha_a = hashlib.sha256(b"weights-a").hexdigest()
+
+    cfg = _enable_local(backend, local_lora_dir=str(lora_dir))
+    cfg["lora_library"] = [
+        _local_lora_entry(id="101", sha256=sha_a, all_hashes=[sha_a], local=None),
+        _local_lora_entry(id="102", sha256="b" * 64, all_hashes=["b" * 64]),
+        _local_lora_entry(id="103", sha256="c" * 64, all_hashes=["c" * 64],
+                          local={"name": "handmade", "source": "manual"}),
+    ]
+    for e in cfg["lora_library"][:1]:
+        e.pop("local", None)
+    backend._save_config(cfg)
+    client = _client(backend)
+
+    body = client.post("/local/match-loras").json()
+    assert body["files"] == 1                       # .txt ignored, subdir scanned
+    assert body["matched"] == 1 and body["checked"] == 2
+    by_id = {e["id"]: e for e in body["lora_library"]}
+    assert by_id["101"]["local"] == {"name": "ink_style_xl", "source": "hash"}
+    assert "local" not in by_id["102"]              # stale hash link removed
+    assert by_id["103"]["local"]["name"] == "handmade"   # manual link survives
+
+    # The scan cache is reused and feeds save-time linking + browse badges.
+    cache = backend._read_local_hash_cache()
+    assert backend._local_hash_index(cache) == {sha_a: "ink_style_xl"}
+
+    items = [{"id": "x", "base_model": "SDXL 1.0", "sha256": sha_a},
+             {"id": "y", "base_model": "SDXL 1.0", "sha256": "d" * 64},
+             {"id": "z", "base_model": "SDXL 1.0"}]
+    backend._annotate_local_availability(backend._load_config(), items)
+    assert items[0]["local_available"] is True
+    assert items[0]["local_name"] == "ink_style_xl"
+    assert items[1]["local_available"] is False
+    assert items[2]["local_available"] is None      # no hashes to match
+
+    # Unconfigured folder is a clear 400, not a silent no-op.
+    cfg = backend._load_config()
+    cfg["local_lora_dir"] = ""
+    backend._save_config(cfg)
+    assert client.post("/local/match-loras").status_code == 400
+
+
+def test_local_loras_endpoint_lists_installed(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable_local(backend)
+
+    async def fake_get(cfg, path, timeout=None):
+        assert path == "/sdapi/v1/loras"
+        return [{"name": "ink_style_xl", "alias": "ink", "path": "/x/ink.safetensors"},
+                {"noname": True}]
+
+    backend._local_get = fake_get
+    client = _client(backend)
+    body = client.get("/local/loras").json()
+    assert body["loras"] == [{"name": "ink_style_xl", "alias": "ink",
+                              "path": "/x/ink.safetensors"}]
+
+
+def test_annotate_local_availability_unknown_without_scan(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _enable_local(backend)          # no lora dir configured, no cache
+    items = [{"id": "x", "base_model": "SDXL 1.0", "sha256": "a" * 64}]
+    backend._annotate_local_availability(cfg, items)
+    assert items[0]["local_available"] is None

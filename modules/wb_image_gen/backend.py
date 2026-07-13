@@ -330,6 +330,7 @@ _gen_lock: asyncio.Lock | None = None
 _index_lock: asyncio.Lock | None = None
 _lora_index_lock: asyncio.Lock | None = None
 _tag_lock: asyncio.Lock | None = None
+_local_scan_lock: asyncio.Lock | None = None
 
 
 # --------------------------------------------------------------------------
@@ -626,6 +627,13 @@ def _get_lora_index_lock() -> asyncio.Lock:
     return _lora_index_lock
 
 
+def _get_local_scan_lock() -> asyncio.Lock:
+    global _local_scan_lock
+    if _local_scan_lock is None:
+        _local_scan_lock = asyncio.Lock()
+    return _local_scan_lock
+
+
 def _get_tag_lock() -> asyncio.Lock:
     global _tag_lock
     if _tag_lock is None:
@@ -842,11 +850,22 @@ def _active_loras(cfg: dict) -> list[dict]:
     return [e for e in library if isinstance(e, dict) and e.get("active")]
 
 
-def _entry_usable(entry: dict, family: str) -> bool:
+def _entry_local_name(entry: dict) -> str:
+    """The name the local WebUI knows this LoRA file by (its stem), used in
+    <lora:name:weight> prompt syntax. Set by an install, a hash scan of the
+    LoRA folder, or a manual link in the Studio."""
+    return str((entry.get("local") or {}).get("name") or "").strip()
+
+
+def _entry_usable(entry: dict, family: str, provider: str = "novita") -> bool:
     """Active entry is usable when it matches the checkpoint family and has a
-    way to reach Novita (library name for SD, download URL for Flux)."""
+    way to reach the provider: locally an installed file (prompt syntax works
+    for SD and Flux-under-Forge alike); on Novita a library name for SD, a
+    download URL for Flux."""
     if _base_family(entry.get("base_model")) != family or not family:
         return False
+    if provider == "local":
+        return bool(_entry_local_name(entry))
     if family == "flux":
         return bool(str(entry.get("download_url") or "").strip())
     return bool(_entry_sd_name(entry))
@@ -889,23 +908,41 @@ def _flux_payload_loras(cfg: dict) -> list[str]:
     return [u for u in urls if u][:FLUX_LORAS_MAX]
 
 
+def _local_prompt_lora_tags(cfg: dict) -> str:
+    """<lora:name:weight> tags for the local WebUI, applied at payload time
+    only — never fed to the prompt-writer LLM (which would mangle them), never
+    run through tag-usage filtering, and never stored on records (so a retry's
+    prompt_override cannot double-inject them). LLM gating and LLM-picked
+    weights arrive here already applied to cfg's lora_library."""
+    family = _checkpoint_family(cfg)
+    tags = []
+    for entry in _active_loras(cfg):
+        if not _entry_usable(entry, family, "local"):
+            continue
+        weight = _clamp_lora_weight(entry.get("strength", LORA_DEFAULT_WEIGHT))
+        tags.append(f"<lora:{_entry_local_name(entry)}:{weight}>")
+    return " ".join(tags[:SD_LORAS_MAX])
+
+
 def _applied_lora_names(cfg: dict) -> list[str]:
     family = _checkpoint_family(cfg)
+    provider = _provider(cfg)
     return [
         str(entry.get("name") or entry.get("id") or "?")
         for entry in _active_loras(cfg)
-        if _entry_usable(entry, family)
-    ][:FLUX_LORAS_MAX if family == "flux" else SD_LORAS_MAX]
+        if _entry_usable(entry, family, provider)
+    ][:FLUX_LORAS_MAX if family == "flux" and provider == "novita" else SD_LORAS_MAX]
 
 
 def _active_trigger_words(cfg: dict) -> list[str]:
     """Trained trigger words of the LoRAs that will actually be applied, so the
     prompt-writer LLM can work them in and the LoRAs fire."""
     family = _checkpoint_family(cfg)
+    provider = _provider(cfg)
     words: list[str] = []
     seen: set[str] = set()
     for entry in _active_loras(cfg):
-        if not _entry_usable(entry, family):
+        if not _entry_usable(entry, family, provider):
             continue
         for word in (entry.get("trained_words") or [])[:4]:
             word = str(word).strip().strip(",")
@@ -1743,10 +1780,145 @@ async def _local_list_checkpoints(cfg: dict) -> list[dict]:
     return models
 
 
+# The WebUI's /sdapi/v1/loras exposes only kohya's sshs_model_hash (a weights
+# hash) — never the file SHA256 that Civitai/HF publish — so matching library
+# entries to installed files means hashing the LoRA folder ourselves. Results
+# are cached by (size, mtime) so rescans only hash new or changed files.
+LOCAL_HASH_CACHE_FILE = "local_hash_cache.json"
+LOCAL_LORA_EXTS = (".safetensors", ".ckpt", ".pt")
+
+
+def _read_local_hash_cache() -> dict | None:
+    path = _data_dir() / LOCAL_HASH_CACHE_FILE
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[Image Gen] Failed to read {LOCAL_HASH_CACHE_FILE}: {e}")
+        return None
+    return data if isinstance(data, dict) and isinstance(data.get("files"), dict) \
+        else None
+
+
+def _local_hash_index(cache: dict | None) -> dict[str, str] | None:
+    """sha256 -> file stem (the WebUI's <lora:...> name) from a scan cache;
+    None when no scan has ever run (unknown, not 'nothing installed')."""
+    if cache is None:
+        return None
+    index: dict[str, str] = {}
+    for file_path, meta in cache.get("files", {}).items():
+        sha = str((meta or {}).get("sha256") or "").lower()
+        if sha:
+            index[sha] = Path(file_path).stem
+    return index
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+async def _scan_local_lora_hashes(lora_dir: str) -> dict:
+    """Hash every LoRA file under the folder (recursively — the WebUI supports
+    subfolders), reusing cached digests for files whose size+mtime are
+    unchanged. Persists and returns the refreshed cache."""
+    root = Path(lora_dir)
+    old_files = (_read_local_hash_cache() or {}).get("files", {})
+    files: dict[str, dict] = {}
+    for path in sorted(p for p in root.rglob("*")
+                       if p.is_file() and p.suffix.lower() in LOCAL_LORA_EXTS):
+        try:
+            stat = path.stat()
+            prev = old_files.get(str(path))
+            if (isinstance(prev, dict) and prev.get("size") == stat.st_size
+                    and prev.get("mtime") == stat.st_mtime):
+                files[str(path)] = prev
+                continue
+            digest = await asyncio.to_thread(_sha256_file, path)
+        except OSError as e:
+            print(f"[Image Gen] Could not hash {path}: {e}")
+            continue
+        files[str(path)] = {"size": stat.st_size, "mtime": stat.st_mtime,
+                            "sha256": digest}
+    cache = {"files": files, "scanned_at": _now()}
+    _atomic_write_json(_data_dir() / LOCAL_HASH_CACHE_FILE, cache)
+    return cache
+
+
+def _register_local_lora_file(path: Path) -> None:
+    """Add one just-installed file to the hash cache without a full rescan."""
+    try:
+        stat = path.stat()
+        digest = _sha256_file(path)
+    except OSError as e:
+        print(f"[Image Gen] Could not hash {path}: {e}")
+        return
+    cache = _read_local_hash_cache() or {"files": {}}
+    cache["files"][str(path)] = {"size": stat.st_size, "mtime": stat.st_mtime,
+                                 "sha256": digest}
+    cache["scanned_at"] = _now()
+    _atomic_write_json(_data_dir() / LOCAL_HASH_CACHE_FILE, cache)
+
+
+def _match_local_hashes(index: dict[str, str], entry: dict) -> str | None:
+    """Newest-version-first file-stem hit, mirroring _match_hashes."""
+    for h in _entry_hashes(entry):
+        stem = index.get(h)
+        if stem:
+            return stem
+    return None
+
+
+def _spawn_local_hash_scan(cfg: dict) -> None:
+    """Fire-and-forget LoRA-folder scan so browse annotation never blocks on
+    hashing; the scan lock dedupes concurrent runs."""
+    lora_dir = str(cfg.get("local_lora_dir") or "").strip()
+    if not lora_dir or not Path(lora_dir).is_dir():
+        return
+    if _get_local_scan_lock().locked():
+        return
+
+    async def _run():
+        async with _get_local_scan_lock():
+            try:
+                await _scan_local_lora_hashes(lora_dir)
+            except OSError as e:
+                print(f"[Image Gen] LoRA folder scan failed: {e}")
+    task = asyncio.get_running_loop().create_task(_run())
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+
+def _annotate_local_availability(cfg: dict, items: list[dict]) -> None:
+    """Badge browse results with whether the file is already installed in the
+    local LoRA folder (matched by SHA256 against the scan cache). No scan yet
+    degrades to None ("unknown") while one runs in the background."""
+    index = _local_hash_index(_read_local_hash_cache())
+    if index is None:
+        _spawn_local_hash_scan(cfg)
+    for item in items:
+        if index is None or not _entry_hashes(item):
+            item["local_available"] = None
+            continue
+        stem = _match_local_hashes(index, item)
+        item["local_available"] = bool(stem)
+        if stem:
+            item["local_name"] = stem
+
+
 def _local_payload(cfg: dict, image_prompt: str) -> dict:
+    prompt = image_prompt
+    lora_tags = _local_prompt_lora_tags(cfg)
+    if lora_tags:
+        prompt = f"{prompt} {lora_tags}" if prompt else lora_tags
     # No prompt cap here: local WebUIs chunk long prompts themselves.
     payload = {
-        "prompt": image_prompt,
+        "prompt": prompt,
         "width": int(cfg.get("width", 1024)),
         "height": int(cfg.get("height", 1024)),
         "steps": int(cfg.get("steps", 28)),
@@ -3159,6 +3331,7 @@ def get_router():
         active: bool | None = None
         strength: float | None = None
         sd_name_override: str | None = None
+        local_name: str | None = None      # manual link to an installed file; "" clears
         condition: str | None = None
         llm_mode: str | None = None
         trained_words: list[str] | None = None
@@ -3577,6 +3750,63 @@ def get_router():
                 "checkpoint_count": len(models if isinstance(models, list) else []),
                 "current_checkpoint": current}
 
+    @router.get("/local/loras")
+    async def local_loras():
+        """Installed LoRAs as the WebUI names them, for the manual link picker.
+        The alias (kohya's ss_output_name) also works in prompt syntax."""
+        cfg = _load_config()
+        try:
+            body = await _local_get(cfg, "/sdapi/v1/loras")
+        except RuntimeError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        loras = []
+        for item in body if isinstance(body, list) else []:
+            if not isinstance(item, dict) or not str(item.get("name") or "").strip():
+                continue
+            loras.append({"name": str(item["name"]).strip(),
+                          "alias": str(item.get("alias") or "").strip(),
+                          "path": str(item.get("path") or "")})
+        return {"loras": loras}
+
+    @router.post("/local/match-loras")
+    async def local_match_loras():
+        """Hash-scan the configured LoRA folder and (re)link non-manual
+        library entries to installed files by SHA256. Files that vanished
+        unlink, so the badge never claims a deleted LoRA still applies."""
+        cfg = _load_config()
+        lora_dir = str(cfg.get("local_lora_dir") or "").strip()
+        if not lora_dir:
+            raise HTTPException(status_code=400,
+                                detail="Set your WebUI's LoRA folder in Setup first")
+        if not Path(lora_dir).is_dir():
+            raise HTTPException(status_code=400,
+                                detail=f"LoRA folder not found: {lora_dir}")
+        async with _get_local_scan_lock():
+            cache = await _scan_local_lora_hashes(lora_dir)
+        index = _local_hash_index(cache) or {}
+
+        cfg = _load_config()  # the scan awaited; re-load before mutating
+        now = _now()
+        checked = matched = 0
+        for entry in cfg.get("lora_library") or []:
+            if not isinstance(entry, dict):
+                continue
+            if str((entry.get("local") or {}).get("source") or "") == "manual":
+                continue  # user-made links outrank the scan
+            if not _entry_hashes(entry):
+                continue
+            checked += 1
+            stem = _match_local_hashes(index, entry)
+            if stem:
+                entry["local"] = {"name": stem, "source": "hash"}
+                matched += 1
+            else:
+                entry.pop("local", None)
+            entry["local_checked_at"] = now
+        _save_config(cfg)
+        return {"lora_library": cfg["lora_library"], "matched": matched,
+                "checked": checked, "files": len(cache.get("files", {}))}
+
     @router.get("/local/samplers")
     async def local_samplers():
         """The WebUI's own sampler list; the static Novita list on any error
@@ -3625,7 +3855,10 @@ def get_router():
             raise HTTPException(status_code=503, detail=str(e))
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))
-        _annotate_novita_availability(cfg, result["items"])
+        if _provider(cfg) == "local":
+            _annotate_local_availability(cfg, result["items"])
+        else:
+            _annotate_novita_availability(cfg, result["items"])
         return result
 
     @router.get("/hf/loras")
@@ -3645,7 +3878,10 @@ def get_router():
             raise HTTPException(status_code=503, detail=str(e))
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))
-        _annotate_novita_availability(cfg, result["items"])
+        if _provider(cfg) == "local":
+            _annotate_local_availability(cfg, result["items"])
+        else:
+            _annotate_novita_availability(cfg, result["items"])
         return result
 
     def _find_lora(cfg: dict, lora_id: str) -> dict:
@@ -3681,6 +3917,13 @@ def get_router():
                 print(f"[Image Gen] Novita match failed for {entry['id']}: {e}")
             else:
                 entry["novita_checked_at"] = _now()
+        # A file already sitting in the local LoRA folder links immediately.
+        index = _local_hash_index(_read_local_hash_cache())
+        if index:
+            stem = _match_local_hashes(index, entry)
+            if stem:
+                entry["local"] = {"name": stem, "source": "hash"}
+                entry["local_checked_at"] = _now()
 
         cfg = _load_config()  # re-load: the match awaited, config may have moved
         library = cfg.get("lora_library") or []
@@ -3788,6 +4031,13 @@ def get_router():
             entry["strength"] = _clamp_lora_weight(patch.strength)
         if patch.sd_name_override is not None:
             entry["sd_name_override"] = patch.sd_name_override.strip()
+        if patch.local_name is not None:
+            name = patch.local_name.strip()
+            if name:
+                entry["local"] = {"name": name, "source": "manual"}
+            else:
+                entry.pop("local", None)
+            entry["local_checked_at"] = _now()
         if patch.condition is not None:
             entry["condition"] = patch.condition.strip()
         if patch.llm_mode is not None:
