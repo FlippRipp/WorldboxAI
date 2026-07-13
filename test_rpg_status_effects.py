@@ -181,6 +181,9 @@ def test_difficulty_tier_reaches_the_prompt_as_a_label_not_a_scale():
     asyncio.run(backend.on_gather_context(state, sdk))
 
     assert 'Difficulty is set to "Brutal"' in captured["prompt"]
+    assert "success is almost impossible" in captured["prompt"]
+    # Brutal is exempt from the merely-unlikely guardrail the lower tiers carry.
+    assert "Never turn a merely unlikely action into a 1-2" not in captured["prompt"]
     assert "Strictness" not in captured["prompt"]
 
     state["module_configs"] = {"wb_core_rpg": {"action_rating_strictness": 1}}

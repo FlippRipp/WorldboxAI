@@ -57,16 +57,16 @@ SKILL_ACTION_KEYWORDS = {
 # for the feasibility judge. The prompt gets ONLY the chosen tier, never the
 # 1-10 scale or its band ranges.
 STRICTNESS_TIERS = {
-    1: ("Power Fantasy", "the player is the unstoppable protagonist of this story. Practically anything they attempt succeeds, and succeeds with flair; reserve failure for the truly impossible."),
-    2: ("Cinematic", "rule-of-cool cinema. Lean very generous - style, momentum, and daring carry attempts that mundane logic would question."),
-    3: ("Heroic", "the player is the hero. Favor them in any doubt; success is the default for anything plausibly within reach."),
-    4: ("Favorable", "the wind is at the player's back. Read attempts charitably, but let real overreach still fall short."),
-    5: ("Balanced", "judge each attempt on its merits - success and failure are both live outcomes, decided by capability and circumstance."),
-    6: ("Gritty", "the world has teeth. Read attempts realistically and let sloppy or lazy plans underperform."),
-    7: ("Demanding", "capabilities are judged strictly; an attempt needs a genuine edge to score well."),
-    8: ("Harsh", "overreach is punished, and even sound plans tend to cost something."),
-    9: ("Merciless", "assume the least favorable plausible reading; success requires clear, demonstrated advantage."),
-    10: ("Brutal", "the world is harsh and unforgiving. Lean toward failure when in doubt, and let success come at a cost."),
+    1: ("Power Fantasy", "the player is the unstoppable protagonist of this story. Practically anything they attempt succeeds, and succeeds with flair; rate attempts 7+ unless they are truly impossible. Never turn a merely unlikely action into a 1-2."),
+    2: ("Cinematic", "rule-of-cool cinema. Lean very generous - style, momentum, and daring carry attempts that mundane logic would question; when torn between two bands, pick the higher. Never turn a merely unlikely action into a 1-2."),
+    3: ("Heroic", "the player is the hero. Favor them in any doubt; success is the default for anything plausibly within reach. Never turn a merely unlikely action into a 1-2."),
+    4: ("Favorable", "the wind is at the player's back. Read attempts charitably, but let real overreach still fall short. Never turn a merely unlikely action into a 1-2."),
+    5: ("Balanced", "judge each attempt on its merits - success and failure are both live outcomes, decided by capability and circumstance. Never turn a merely unlikely action into a 1-2."),
+    6: ("Gritty", "the world has teeth. Read attempts realistically and let sloppy or lazy plans underperform. Never turn a merely unlikely action into a 1-2."),
+    7: ("Demanding", "capabilities are judged strictly. An attempt needs a genuine, demonstrated edge to score above 6; ambition without preparation lands in 3-4. Never turn a merely unlikely action into a 1-2."),
+    8: ("Harsh", "overreach is punished. Rate ambitious attempts a full band lower than they would otherwise earn; even sound plans succeed at a cost, and only well-prepared attempts squarely within ability score above 6. Never turn a merely unlikely action into a 1-2."),
+    9: ("Merciless", "assume the least favorable plausible reading of every attempt. Anything beyond the character's proven, demonstrated ability rates 3-4 at best; a 7+ requires overwhelming advantage; most attempts fail or succeed only at a heavy price."),
+    10: ("Brutal", "success is almost impossible. A 7+ is reserved for trivial actions or overwhelming, established advantage; ambitious or uncertain attempts rate 3-4; anything beyond the character's proven ability rates 1-2 and simply fails. The world is actively hostile - at this tier even a merely unlikely action may fail outright."),
 }
 
 
@@ -412,7 +412,7 @@ Character:
 Player action: "{input_text}"
 
 Feasibility scale (rate the attempt, not the ambition):
-  1-2: violates the world's rules or established story facts, or is physically/logically impossible. This is the ONLY band where the attempt simply fails.
+  1-2: violates the world's rules or established story facts, is physically/logically impossible, or is doomed under the current difficulty's guidance. This is the ONLY band where the attempt simply fails.
   3-4: far beyond current ability or an enormous ask, but not impossible.
   5-6: challenging; meaningful chance of failure.
   7-8: within the character's demonstrated abilities.
@@ -422,12 +422,12 @@ Judging guidelines:
 - Social actions: the outcome depends on the TARGET's likely disposition as shown in the recent story and world context, not on the player's stats. A bold ask to a receptive, bored, curious, or amused character is plausible even for a weak character. Only rate a social action 1-2 if the target's established nature makes acceptance truly impossible.
 - Reward creativity: a clever, novel, or dramatically interesting approach that fits the established fiction rates one band higher than a blunt attempt at the same goal. Punish contradiction of established facts, not ambition.
 - Status effects: weigh them like circumstances, not stats. A [bad] effect lowers feasibility of actions it would plausibly impede (a broken leg makes sprinting far harder) and can push a directly-blocked attempt to 1-2; a [good] effect raises feasibility of actions it aids. Effects unrelated to the attempt change nothing.
-- Difficulty is set to "{difficulty_label}": {difficulty_guidance} Difficulty shifts scores within bands but never turns a merely unlikely action into a 1-2.
+- Difficulty is set to "{difficulty_label}": {difficulty_guidance}
 
 You are a referee, not a narrator: determine the outcome, do not describe it. Never write story prose.
 
 JSON response:
-{{"feasibility": int 1-10, "skill_used": "name or empty string", "difficulty": "trivial|easy|moderate|hard|extreme|impossible", "curse_triggered": "name or empty string", "passive_effects": "brief factual note on which passives apply and how, or empty string", "failure_reason": "empty string unless feasibility is 1-2; then one short factual clause naming the world rule or established fact the attempt violates"}}"""
+{{"feasibility": int 1-10, "skill_used": "name or empty string", "difficulty": "trivial|easy|moderate|hard|extreme|impossible", "curse_triggered": "name or empty string", "passive_effects": "brief factual note on which passives apply and how, or empty string", "failure_reason": "empty string unless feasibility is 1-2; then one short factual clause naming the world rule, established fact, or decisive capability gap the attempt founders on"}}"""
 
     try:
         result = await sdk.llm.generate(prompt, model_preference=model_pref)
