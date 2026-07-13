@@ -301,21 +301,7 @@ async def _assess_action(input_text: str, char: Character, config: dict, sdk, mo
     stats_line = ", ".join(f"{s}={char.stats[s]} ({_tier_for(char.stats[s], tier_list)})" for s in STAT_NAMES)
     unconscious = " [UNCONSCIOUS - cannot act physically]" if char.is_unconscious() else ""
 
-    world_lines = []
-    if world_data:
-        rules = world_data.get("rules", {})
-        lore = world_data.get("lore", {})
-        if rules:
-            world_lines.append(f"Genre: {rules.get('genre', 'Fantasy')}")
-            world_lines.append(f"Magic Level: {rules.get('magic_level', 'Medium')}")
-            world_lines.append(f"Technology Era: {rules.get('tech_era', 'Medieval')}")
-            world_lines.append(f"Tone: {rules.get('tone', 'Neutral')}")
-        if lore.get("premise"):
-            world_lines.append(f"Premise: {lore['premise']}")
-
-    world_section = ""
-    if world_lines:
-        world_section = "World context:\n" + "\n".join(world_lines) + "\n"
+    world_section = _world_context_section(world_data)
 
     story_section = ""
     if recent_story:
@@ -352,28 +338,10 @@ JSON response:
 
     try:
         result = await sdk.llm.generate(prompt, model_preference=model_pref)
-        cleaned = result.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        if not cleaned:
-            print(f"[RPG] Action assessment failed: empty LLM response")
+        assessment = _parse_json_repair(result)
+        if assessment is None:
+            print(f"[RPG] Action assessment failed: unable to parse JSON response: {(result or '')[:200]}")
             return {}
-        try:
-            assessment = json.loads(cleaned)
-        except json.JSONDecodeError:
-            if cleaned.startswith("{"):
-                brace_count = cleaned.count("{") - cleaned.count("}")
-                if brace_count > 0:
-                    cleaned = cleaned.rstrip() + "}" * brace_count
-                    try:
-                        assessment = json.loads(cleaned)
-                    except json.JSONDecodeError:
-                        print(f"[RPG] Action assessment failed: unable to parse JSON response: {cleaned[:200]}")
-                        return {}
-                else:
-                    print(f"[RPG] Action assessment failed: invalid JSON response: {cleaned[:200]}")
-                    return {}
-            else:
-                print(f"[RPG] Action assessment failed: response is not JSON: {cleaned[:200]}")
-                return {}
         if not isinstance(assessment, dict):
             return {}
         if assessment.get("skip"):
@@ -520,6 +488,42 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
         _check_evolution_ready(char)
         return {"module_data": {"wb_core_rpg": char.to_dict()}}
     return {}
+
+
+def _parse_json_repair(raw: str):
+    """Parse a JSON object from an LLM reply: strip Markdown code fences and
+    repair a truncated object by appending missing closing braces."""
+    text = (raw or "").strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        if text.startswith("{"):
+            brace_count = text.count("{") - text.count("}")
+            if brace_count > 0:
+                try:
+                    return json.loads(text.rstrip() + "}" * brace_count)
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+def _world_context_section(world_data: dict | None) -> str:
+    world_lines = []
+    if world_data:
+        rules = world_data.get("rules", {})
+        lore = world_data.get("lore", {})
+        if rules:
+            world_lines.append(f"Genre: {rules.get('genre', 'Fantasy')}")
+            world_lines.append(f"Magic Level: {rules.get('magic_level', 'Medium')}")
+            world_lines.append(f"Technology Era: {rules.get('tech_era', 'Medieval')}")
+            world_lines.append(f"Tone: {rules.get('tone', 'Neutral')}")
+        if lore.get("premise"):
+            world_lines.append(f"Premise: {lore['premise']}")
+    if world_lines:
+        return "World context:\n" + "\n".join(world_lines) + "\n"
+    return ""
 
 
 def _parse_json_block(raw: str):
@@ -879,25 +883,33 @@ def _skill_prompt_label(name: str, data: dict) -> str:
     return f"{name} [Tier {tier}]" if tier > 1 else name
 
 
-def _check_evolution_ready(char: Character) -> None:
+def _sync_pending_evolutions(skills: dict, pending: list) -> list:
     """Keep pending_evolutions in sync with the skill list: enqueue any
     evolvable skill that reached max rating, prune entries whose skill no
     longer exists or dropped below max (deferred entries survive as long as
     the skill still qualifies)."""
-    char.pending_evolutions = [
-        e for e in char.pending_evolutions
-        if e.get("skill") in char.skills
-        and char.skills[e["skill"]].get("rating") == MAX_SKILL_RATING
-        and char.skills[e["skill"]].get("type", "active") in EVOLVABLE_TYPES
+    if not isinstance(pending, list):
+        pending = []
+    pending = [
+        e for e in pending
+        if isinstance(e, dict)
+        and e.get("skill") in skills
+        and skills[e["skill"]].get("rating") == MAX_SKILL_RATING
+        and skills[e["skill"]].get("type", "active") in EVOLVABLE_TYPES
     ]
-    queued = {e["skill"] for e in char.pending_evolutions}
-    for name, data in char.skills.items():
+    queued = {e["skill"] for e in pending}
+    for name, data in skills.items():
         if (
             data.get("rating") == MAX_SKILL_RATING
             and data.get("type", "active") in EVOLVABLE_TYPES
             and name not in queued
         ):
-            char.pending_evolutions.append({"skill": name, "options": None, "status": "pending"})
+            pending.append({"skill": name, "options": None, "status": "pending"})
+    return pending
+
+
+def _check_evolution_ready(char: Character) -> None:
+    char.pending_evolutions = _sync_pending_evolutions(char.skills, char.pending_evolutions)
 
 
 PHYSICAL_ACTION_KEYWORDS = [
@@ -957,6 +969,89 @@ async def on_validate_output(llm_output: str, state: dict, sdk) -> None:
 
 
 # --------------------------------------------------------------------------
+# Skill evolution prompts (LLM calls made from the module router)
+# --------------------------------------------------------------------------
+
+
+def _skill_record_block(name: str, data: dict) -> str:
+    tier = _skill_tier(data)
+    lines = [
+        f"Name: {name}",
+        f"Tier: {tier}",
+        f"Rating: {data.get('rating', 1)}/10",
+        f"Type: {data.get('type', 'active')}",
+        f"Description: {data.get('description') or '(none)'}",
+        f"Trigger words: {', '.join(data.get('trigger_words', [])) or '(none)'}",
+    ]
+    lineage = data.get("lineage") or []
+    if lineage:
+        lines.append(f"Evolution lineage (oldest first): {' -> '.join(lineage)} -> {name}")
+    if data.get("evolution_theme"):
+        lines.append(f"Current evolution theme: {data['evolution_theme']}")
+    return "\n".join(lines)
+
+
+def _character_context_block(rpg: dict) -> str:
+    stats = rpg.get("stats", {})
+    stats_line = ", ".join(f"{s}={stats.get(s, 10)}" for s in STAT_NAMES)
+    lines = [
+        f"Level {rpg.get('level', 1)} adventurer",
+        f"Stats: {stats_line}",
+    ]
+    backstory = rpg.get("backstory", "")
+    if backstory:
+        lines.append(f"Backstory: {backstory}")
+    other = [
+        f"{n} ({d.get('rating', 1)}/10, {d.get('type', 'active')})"
+        for n, d in rpg.get("skills", {}).items()
+    ]
+    if other:
+        lines.append("All skills: " + ", ".join(other))
+    return "\n".join(lines)
+
+
+def _evolution_options_prompt(rpg: dict, key: str, data: dict, world_data: dict | None) -> str:
+    tier = _skill_tier(data)
+    world_section = _world_context_section(world_data)
+    return f"""You are the game system for a text RPG. A character's skill has reached maximum rating and is ready to EVOLVE into a more powerful Tier {tier + 1} form. Output ONLY valid JSON, no other text.
+
+{world_section}Character:
+{_character_context_block(rpg)}
+
+Skill ready to evolve:
+{_skill_record_block(key, data)}
+
+Propose exactly 3 distinct thematic directions this skill could evolve toward. Each theme is a short evocative label of 1-3 words (like "Brutal", "Efficiency", "Stealthy" - but fitting THIS skill and world), plus one short clause summarizing what that path emphasizes. The three themes must be meaningfully different from each other and from the skill's current form. Do not repeat the skill's current evolution theme.
+
+JSON response:
+{{"options": [{{"theme": "1-3 words", "summary": "one short clause"}}, {{"theme": "...", "summary": "..."}}, {{"theme": "...", "summary": "..."}}]}}"""
+
+
+def _evolve_prompt(rpg: dict, key: str, data: dict, theme: str, world_data: dict | None) -> str:
+    tier = _skill_tier(data)
+    world_section = _world_context_section(world_data)
+    return f"""You are the game system for a text RPG. A character's maxed-out skill is evolving from Tier {tier} to Tier {tier + 1} down the "{theme}" path. Output ONLY valid JSON, no other text.
+
+{world_section}Character:
+{_character_context_block(rpg)}
+
+Skill that is evolving:
+{_skill_record_block(key, data)}
+
+Chosen evolution theme: {theme}
+
+Design the evolved Tier {tier + 1} form. Requirements:
+- It MUST be strictly more powerful than the current form: broader in scope, stronger in effect, or with fewer limits - a major step up, not a rename.
+- It must embody the "{theme}" theme and stay true to the world's tone and the skill's history.
+- Give it a new evocative name of 2-4 words. It must not be the same as the old name.
+- The description is 1-2 tight sentences: what it does, how it manifests, and any remaining limit or cost. Concrete over flowery.
+- Trigger words: 2-5 short words or phrases a player would naturally use when invoking it.
+
+JSON response:
+{{"name": "2-4 word evolved name", "description": "1-2 tight sentences", "trigger_words": ["word1", "word2"]}}"""
+
+
+# --------------------------------------------------------------------------
 # Skill editing API (router mounted at /api/modules/wb_core_rpg)
 # --------------------------------------------------------------------------
 
@@ -986,6 +1081,20 @@ def get_router():
         trigger_words: list[str] | None = None
         type: str | None = None
 
+    class NewSkillSpec(BaseModel):
+        name: str
+        description: str | None = None
+        trigger_words: list[str] | None = None
+        type: str | None = None
+
+    class SpendPayload(BaseModel):
+        stat_allocations: dict[str, int] | None = None
+        skill_allocations: dict[str, int] | None = None
+        new_skill: NewSkillSpec | None = None
+
+    class EvolvePayload(BaseModel):
+        theme: str
+
     def _session_manager():
         sm = _services.get("session_manager")
         if sm is None or not getattr(sm, "active_save_id", None):
@@ -1000,6 +1109,33 @@ def get_router():
 
     def _persist(sm):
         sm.save_manager.save_turn(sm.active_save_id, sm.state, sm.state.get("turn", 0))
+
+    def _config(sm) -> dict:
+        return sm.state.get("module_configs", {}).get("wb_core_rpg", {}) or {}
+
+    def _llm_bridge():
+        engine = _services.get("engine")
+        llm = getattr(getattr(engine, "sdk", None), "llm", None)
+        if llm is None:
+            raise HTTPException(status_code=503, detail="LLM service is not available.")
+        return llm
+
+    def _sync_evolutions(rpg: dict):
+        rpg["pending_evolutions"] = _sync_pending_evolutions(
+            rpg.get("skills", {}), rpg.get("pending_evolutions", [])
+        )
+
+    def _pending_entry(rpg: dict, key: str) -> dict | None:
+        for entry in rpg.get("pending_evolutions", []):
+            if isinstance(entry, dict) and entry.get("skill") == key:
+                return entry
+        return None
+
+    def _evolvable_or_409(key: str, data: dict):
+        if data.get("rating") != MAX_SKILL_RATING:
+            raise HTTPException(status_code=409, detail=f"Skill '{key}' is not at max rating ({MAX_SKILL_RATING}).")
+        if data.get("type", "active") not in EVOLVABLE_TYPES:
+            raise HTTPException(status_code=409, detail="Curse skills cannot be evolved.")
 
     def _find_key(skills: dict, name: str) -> str | None:
         if name in skills:
@@ -1050,6 +1186,7 @@ def get_router():
             "trigger_words": _clean_triggers(payload.trigger_words or []),
             "type": payload.type or "active",
         }
+        _sync_evolutions(rpg)
         _persist(sm)
         return {"skills": skills}
 
@@ -1091,7 +1228,12 @@ def get_router():
             counters = rpg.get("practice_counters")
             if isinstance(counters, dict) and key in counters:
                 counters[new_name] = counters.pop(key)
+            # Pending-evolution entries are keyed by skill name too.
+            for entry in rpg.get("pending_evolutions", []) or []:
+                if isinstance(entry, dict) and entry.get("skill") == key:
+                    entry["skill"] = new_name
 
+        _sync_evolutions(rpg)
         _persist(sm)
         return {"skills": skills}
 
@@ -1107,8 +1249,226 @@ def get_router():
         counters = rpg.get("practice_counters")
         if isinstance(counters, dict):
             counters.pop(key, None)
+        _sync_evolutions(rpg)
         _persist(sm)
         return {"skills": skills}
+
+    @router.post("/levelup/spend")
+    def spend_levelup_points(payload: SpendPayload):
+        sm = _session_manager()
+        rpg = _rpg_data(sm)
+        config = _config(sm)
+        skills = rpg.setdefault("skills", {})
+        stats = rpg.setdefault("stats", {})
+
+        stat_allocations = payload.stat_allocations or {}
+        skill_allocations = payload.skill_allocations or {}
+
+        attr_available = max(0, int(rpg.get("unspent_attribute_points", 0) or 0))
+        skill_available = max(0, int(rpg.get("unspent_skill_points", 0) or 0))
+        max_stat = config.get("max_stat_value", 20)
+        new_skill_cost = config.get("new_skill_cost", 3)
+
+        # Validate everything before mutating anything, so a rejected request
+        # leaves the in-memory state untouched.
+        for stat, delta in stat_allocations.items():
+            if stat not in STAT_NAMES:
+                raise HTTPException(status_code=400, detail=f"Unknown stat '{stat}'.")
+            if not isinstance(delta, int) or delta <= 0:
+                raise HTTPException(status_code=400, detail=f"Allocation for '{stat}' must be a positive integer.")
+            if int(stats.get(stat, 10)) + delta > max_stat:
+                raise HTTPException(status_code=400, detail=f"Stat '{stat}' cannot exceed {max_stat}.")
+        if sum(stat_allocations.values()) > attr_available:
+            raise HTTPException(status_code=400, detail=f"Not enough attribute points (have {attr_available}).")
+
+        resolved_skills: dict[str, int] = {}
+        for skill_name, delta in skill_allocations.items():
+            if not isinstance(delta, int) or delta <= 0:
+                raise HTTPException(status_code=400, detail=f"Allocation for '{skill_name}' must be a positive integer.")
+            key = _find_key(skills, skill_name)
+            if key is None:
+                raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found.")
+            if skills[key].get("type", "active") == "curse":
+                raise HTTPException(status_code=400, detail="Curse skills cannot be improved with skill points.")
+            if int(skills[key].get("rating", 1)) + delta > MAX_SKILL_RATING:
+                raise HTTPException(status_code=400, detail=f"Skill '{key}' cannot exceed rating {MAX_SKILL_RATING}.")
+            resolved_skills[key] = delta
+
+        new_skill_name = None
+        if payload.new_skill is not None:
+            spec = payload.new_skill
+            if spec.type is not None and spec.type not in EVOLVABLE_TYPES:
+                raise HTTPException(status_code=400, detail="New skills must be active or passive.")
+            new_skill_name = _clean_name(spec.name)
+            if _find_key(skills, new_skill_name) is not None:
+                raise HTTPException(status_code=409, detail=f"Skill '{new_skill_name}' already exists.")
+
+        skill_cost = sum(resolved_skills.values()) + (new_skill_cost if new_skill_name else 0)
+        if skill_cost > skill_available:
+            raise HTTPException(status_code=400, detail=f"Not enough skill points (have {skill_available}).")
+
+        # Apply.
+        vitality_before = int(stats.get("vitality", 10))
+        for stat, delta in stat_allocations.items():
+            stats[stat] = int(stats.get(stat, 10)) + delta
+        if int(stats.get("vitality", 10)) != vitality_before:
+            hp_per_con = config.get("hp_per_vitality", config.get("hp_per_constitution", 7))
+            hp_per_level = 2
+            old_max = max(1, int(rpg.get("max_hp", 1) or 1))
+            old_ratio = max(0, int(rpg.get("hp", 0) or 0)) / old_max
+            new_max = int(stats.get("vitality", 10)) * hp_per_con + int(rpg.get("level", 1) or 1) * hp_per_level
+            rpg["max_hp"] = new_max
+            rpg["hp"] = min(new_max, max(0, int(new_max * old_ratio)))
+
+        for key, delta in resolved_skills.items():
+            skills[key]["rating"] = int(skills[key].get("rating", 1)) + delta
+
+        if new_skill_name:
+            spec = payload.new_skill
+            skills[new_skill_name] = {
+                "rating": min(MAX_SKILL_RATING, max(1, int(new_skill_cost))),
+                "description": (spec.description or "").strip(),
+                "trigger_words": _clean_triggers(spec.trigger_words or []),
+                "type": spec.type or "active",
+            }
+
+        rpg["unspent_attribute_points"] = attr_available - sum(stat_allocations.values())
+        rpg["unspent_skill_points"] = skill_available - skill_cost
+        _sync_evolutions(rpg)
+        _persist(sm)
+        return rpg
+
+    @router.post("/skills/{skill_name}/evolution-options")
+    async def evolution_options(skill_name: str):
+        sm = _session_manager()
+        rpg = _rpg_data(sm)
+        skills = rpg.setdefault("skills", {})
+        key = _find_key(skills, skill_name)
+        if key is None:
+            raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found.")
+        data = skills[key]
+        _evolvable_or_409(key, data)
+
+        _sync_evolutions(rpg)
+        entry = _pending_entry(rpg, key)
+        if entry is None:  # unreachable after sync, but stay defensive
+            entry = {"skill": key, "options": None, "status": "pending"}
+            rpg["pending_evolutions"].append(entry)
+        if entry.get("options"):
+            return {"skill": key, "tier": _skill_tier(data), "options": entry["options"]}
+
+        llm = _llm_bridge()
+        config = _config(sm)
+        prompt = _evolution_options_prompt(rpg, key, data, sm.state.get("world_data"))
+        try:
+            llm._current_module = "wb_core_rpg"
+            raw = await llm.generate(prompt, model_preference=config.get("evolution_ai_model", "smartest"))
+        finally:
+            llm._current_module = ""
+
+        parsed = _parse_json_repair(raw)
+        options = parsed.get("options") if isinstance(parsed, dict) else None
+        cleaned = []
+        if isinstance(options, list):
+            for opt in options:
+                if not isinstance(opt, dict):
+                    continue
+                theme = " ".join(str(opt.get("theme", "")).strip().split()[:3])
+                if not theme:
+                    continue
+                cleaned.append({"theme": theme, "summary": str(opt.get("summary", "")).strip()})
+        if len(cleaned) != 3:
+            raise HTTPException(status_code=502, detail="The AI failed to produce 3 evolution options. Try again.")
+
+        entry["options"] = cleaned
+        _persist(sm)
+        return {"skill": key, "tier": _skill_tier(data), "options": cleaned}
+
+    @router.post("/skills/{skill_name}/evolve")
+    async def evolve_skill(skill_name: str, payload: EvolvePayload):
+        sm = _session_manager()
+        rpg = _rpg_data(sm)
+        skills = rpg.setdefault("skills", {})
+        key = _find_key(skills, skill_name)
+        if key is None:
+            raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found.")
+        data = skills[key]
+        _evolvable_or_409(key, data)
+
+        theme = payload.theme.strip()
+        if not theme:
+            raise HTTPException(status_code=400, detail="An evolution theme is required.")
+        entry = _pending_entry(rpg, key)
+        cached = entry.get("options") if entry else None
+        if cached and theme.lower() not in {o.get("theme", "").lower() for o in cached}:
+            raise HTTPException(status_code=400, detail=f"'{theme}' is not one of the offered evolution themes.")
+
+        llm = _llm_bridge()
+        config = _config(sm)
+        prompt = _evolve_prompt(rpg, key, data, theme, sm.state.get("world_data"))
+        try:
+            llm._current_module = "wb_core_rpg"
+            raw = await llm.generate(prompt, model_preference=config.get("evolution_ai_model", "smartest"))
+        finally:
+            llm._current_module = ""
+
+        parsed = _parse_json_repair(raw)
+        if not isinstance(parsed, dict) or not str(parsed.get("name", "")).strip():
+            raise HTTPException(status_code=502, detail="The AI failed to produce the evolved skill. Try again.")
+
+        old_tier = _skill_tier(data)
+        new_key = _clean_name(str(parsed["name"]))
+        if new_key == key:
+            new_key = f"{new_key} {old_tier + 1}"
+        # A successful (paid) LLM call is never discarded over a name clash:
+        # disambiguate deterministically instead.
+        candidate, n = new_key, 2
+        while _find_key(skills, candidate) is not None and candidate != key:
+            candidate = f"{new_key} {n}"
+            n += 1
+        new_key = candidate
+
+        evolved = {
+            "rating": EVOLVED_RESET_RATING,
+            "description": str(parsed.get("description", "")).strip() or data.get("description", ""),
+            "trigger_words": _clean_triggers([str(w) for w in parsed.get("trigger_words", []) if w]) or data.get("trigger_words", []),
+            "type": data.get("type", "active"),
+            "tier": old_tier + 1,
+            "lineage": list(data.get("lineage") or []) + [key],
+            "evolution_theme": theme,
+        }
+        skills.pop(key)
+        skills[new_key] = evolved
+        counters = rpg.get("practice_counters")
+        if isinstance(counters, dict) and key in counters:
+            counters[new_key] = counters.pop(key)
+        _sync_evolutions(rpg)
+        _persist(sm)
+        return {
+            "rpg": rpg,
+            "evolved": {
+                "old_name": key,
+                "new_name": new_key,
+                "tier": old_tier + 1,
+                "theme": theme,
+                "description": evolved["description"],
+            },
+        }
+
+    @router.delete("/skills/{skill_name}/evolution")
+    def defer_evolution(skill_name: str):
+        sm = _session_manager()
+        rpg = _rpg_data(sm)
+        skills = rpg.setdefault("skills", {})
+        key = _find_key(skills, skill_name)
+        if key is None:
+            raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found.")
+        entry = _pending_entry(rpg, key)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"Skill '{key}' has no pending evolution.")
+        entry["status"] = "deferred"
+        _persist(sm)
+        return rpg
 
     return router
 

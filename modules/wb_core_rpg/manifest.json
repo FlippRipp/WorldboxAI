@@ -1,7 +1,7 @@
 {
   "id": "wb_core_rpg",
   "name": "Core RPG System",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "dependencies": [],
   "consumes": {
     "state": ["input_text", "turn", "history"],
@@ -63,7 +63,45 @@
     "action_rating_strictness": {"type": "slider", "min": 1, "max": 10, "default": 5},
     "skill_improvement_rate": {"type": "slider", "min": 1, "max": 10, "default": 5},
     "max_stat_value": {"type": "slider", "min": 15, "max": 30, "default": 20},
-    "skill_pool_start": {"type": "slider", "min": 3, "max": 20, "default": 8},
+    "attribute_points_per_level": {
+      "type": "slider",
+      "min": 0,
+      "max": 5,
+      "default": 2,
+      "label": "Attribute Points per Level",
+      "category": "Core RPG System",
+      "description": "Attribute points banked on each level-up for the player to spend on stats (XP and Milestone progression only)."
+    },
+    "skill_points_per_level": {
+      "type": "slider",
+      "min": 0,
+      "max": 3,
+      "default": 1,
+      "label": "Skill Points per Level",
+      "category": "Core RPG System",
+      "description": "Skill points banked on each level-up. Spend 1 point for +1 rating on an existing skill, or save up to learn a brand-new skill (XP and Milestone progression only)."
+    },
+    "new_skill_cost": {
+      "type": "slider",
+      "min": 1,
+      "max": 5,
+      "default": 3,
+      "label": "New Skill Cost",
+      "category": "Core RPG System",
+      "description": "Skill points required to learn a brand-new skill from the level-up screen. The new skill starts at a rating equal to this cost."
+    },
+    "evolution_ai_model": {
+      "type": "select",
+      "label": "Skill Evolution AI",
+      "category": "Core RPG System",
+      "description": "Model used to generate skill evolution themes and evolved forms when a skill reaches max rating.",
+      "options": [
+        {"value": "fastest", "label": "Fastest (cheapest)"},
+        {"value": "balanced", "label": "Balanced"},
+        {"value": "smartest", "label": "Smartest (most creative)"}
+      ],
+      "default": "smartest"
+    },
     "external_skill_events_enabled": {
       "type": "toggle",
       "default": true,
@@ -85,7 +123,7 @@
   "mutation_schema": {
     "hp_change": "integer, HP gained or lost by the player in the story. Use 0 if no player HP changed.",
     "stat_changes": "object mapping stat name (power/agility/vitality/intelligence/spirit/charm) to integer change. Empty object if none.",
-    "skill_changes": "object mapping skill name to {rating: int, description: str, trigger_words: [str], type: 'active'|'passive'|'curse'}. For new skills, provide rating/description/trigger_words/type. description: 1-2 tight sentences stating what the ability actually does, how it manifests, its source, and any limits/costs/conditions shown in the story — concrete and specific to this story, never generic filler like 'skilled in X'. For existing skills, just rating. Empty object if none.",
+    "skill_changes": "object mapping skill name to {rating: int, description: str, trigger_words: [str], type: 'active'|'passive'|'curse'}. For new skills, provide rating/description/trigger_words/type. description: 1-2 tight sentences stating what the ability actually does, how it manifests, its source, and any limits/costs/conditions shown in the story — concrete and specific to this story, never generic filler like 'skilled in X'. For existing skills, just rating. Never set a rating above 10; skill tiers are system-managed, do not modify them. Empty object if none.",
     "xp_gained": "integer, experience points the character earned from this action. Use 0 if none. Only consulted when the module's XP Gain Condition is set to 'AI Reader decides'; otherwise XP is awarded automatically from the action assessment."
   },
   "character_creation": {
@@ -105,7 +143,11 @@
       "level": 1,
       "xp": 0,
       "hp": 85,
-      "max_hp": 85
+      "max_hp": 85,
+      "unspent_attribute_points": 0,
+      "unspent_skill_points": 0,
+      "pending_evolutions": [],
+      "level_up_history": []
     }
   },
   "prompt_blocks": [
