@@ -56,6 +56,19 @@ function statBarColor(val, max) {
   return 'bg-slate-500';
 }
 
+function effectDurationLabel(effect, nowMinutes) {
+  if (effect.duration_turns != null) {
+    return `${effect.duration_turns} turn${effect.duration_turns !== 1 ? 's' : ''} left`;
+  }
+  if (effect.expires_at_minutes != null && nowMinutes != null) {
+    const left = Math.max(0, effect.expires_at_minutes - nowMinutes);
+    if (left >= 1440) return `~${Math.round(left / 1440)}d left`;
+    if (left >= 60) return `~${Math.round(left / 60)}h left`;
+    return `${left}m left`;
+  }
+  return 'ongoing';
+}
+
 export default function CharacterPanel({ state, config }) {
   const rpg = state?.module_data?.wb_core_rpg;
   if (!rpg) return <div className="text-sm text-gray-500 italic">No RPG data.</div>;
@@ -69,6 +82,8 @@ export default function CharacterPanel({ state, config }) {
   const tiers = rpg.stat_tiers ?? FALLBACK_TIERS;
   const backstory = rpg.backstory ?? '';
   const unconscious = hp <= 0;
+  const statusEffects = Array.isArray(rpg.status_effects) ? rpg.status_effects : [];
+  const nowMinutes = state?.module_data?.wb_time_tracker?.clock?.total_minutes_elapsed ?? null;
 
   const hpPct = maxHp > 0 ? Math.max(0, Math.min(100, (hp / maxHp) * 100)) : 100;
   const hpColor = hpPct > 60 ? 'bg-green-500' : hpPct > 30 ? 'bg-yellow-500' : 'bg-red-500';
@@ -128,6 +143,26 @@ export default function CharacterPanel({ state, config }) {
           </div>
         </div>
       </section>
+
+      {statusEffects.length > 0 && (
+        <section>
+          <h4 className="text-xs uppercase tracking-wider text-gray-500 mb-3">Status Effects ({statusEffects.length})</h4>
+          <div className="space-y-2">
+            {statusEffects.map((e) => (
+              <div
+                key={e.name}
+                className={`rounded-lg border p-3 ${e.kind === 'good' ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-red-500/10 border-red-500/30'}`}
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <span className={`font-medium capitalize text-sm ${e.kind === 'good' ? 'text-emerald-300' : 'text-red-300'}`}>{e.name}</span>
+                  <span className="text-gray-500 font-mono text-xs">{effectDurationLabel(e, nowMinutes)}</span>
+                </div>
+                {e.description && <div className="text-[11px] text-gray-400 leading-relaxed">{e.description}</div>}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section>
         <h4 className="text-xs uppercase tracking-wider text-gray-500 mb-3">Attributes</h4>

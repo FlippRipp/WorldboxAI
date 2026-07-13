@@ -53,6 +53,60 @@ SKILL_ACTION_KEYWORDS = {
     "charm": ["persuade", "intimidate", "deceive", "bluff", "bargain", "negotiate", "perform", "inspire", "seduce", "befriend"],
 }
 
+# Status effects are temporary conditions (broken leg, poisoned, blessed,
+# brainwashed) with a ONE-sentence description. They expire after a number of
+# player turns (duration_turns) or at an in-world clock time from
+# wb_time_tracker (expires_at_minutes, absolute total_minutes_elapsed); with
+# neither set they last until story events remove them.
+def _sanitize_status_effect(raw) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    name = str(raw.get("name", "")).strip().lower()
+    if not name:
+        return None
+    kind = raw.get("kind")
+    if kind not in ("good", "bad"):
+        kind = "bad"
+    effect = {
+        "name": name,
+        "description": str(raw.get("description", "")).strip() or name,
+        "kind": kind,
+        "duration_turns": None,
+        "expires_at_minutes": None,
+    }
+    for key in ("duration_turns", "expires_at_minutes"):
+        val = raw.get(key)
+        if isinstance(val, (int, float)) and not isinstance(val, bool) and int(val) > 0:
+            effect[key] = int(val)
+    return effect
+
+
+def _clock_minutes(state: dict) -> int | None:
+    """wb_time_tracker's monotonic in-world clock, or None when the time
+    module is inactive or hasn't written a clock yet."""
+    clock = state.get("module_data", {}).get("wb_time_tracker", {}).get("clock")
+    if isinstance(clock, dict):
+        val = clock.get("total_minutes_elapsed")
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            return int(val)
+    return None
+
+
+def _effect_duration_label(effect: dict, now_minutes: int | None) -> str:
+    turns = effect.get("duration_turns")
+    if turns is not None:
+        return f"{turns} turn{'s' if turns != 1 else ''} left"
+    expires_at = effect.get("expires_at_minutes")
+    if expires_at is not None and now_minutes is not None:
+        left = max(0, expires_at - now_minutes)
+        if left >= 1440:
+            return f"~{round(left / 1440)}d left"
+        if left >= 60:
+            return f"~{round(left / 60)}h left"
+        return f"{left}m left"
+    return "ongoing"
+
+
 @dataclass
 class Character:
     stats: dict[str, int] = field(default_factory=lambda: {s: 10 for s in STAT_NAMES})
@@ -69,6 +123,7 @@ class Character:
     unspent_skill_points: int = 0
     pending_evolutions: list = field(default_factory=list)
     level_up_history: list = field(default_factory=list)
+    status_effects: list = field(default_factory=list)
 
     def recalc_hp(self, hp_per_con: int = 7, hp_per_level: int = 2):
         self.max_hp = (self.stats.get("vitality", 10) * hp_per_con) + (self.level * hp_per_level)
@@ -93,6 +148,7 @@ class Character:
             "unspent_skill_points": self.unspent_skill_points,
             "pending_evolutions": list(self.pending_evolutions),
             "level_up_history": list(self.level_up_history),
+            "status_effects": [dict(e) for e in self.status_effects],
         }
 
     @classmethod
@@ -154,6 +210,13 @@ class Character:
             c.unspent_skill_points = 0
         pending = d.get("pending_evolutions", [])
         c.pending_evolutions = [e for e in pending if isinstance(e, dict) and e.get("skill")] if isinstance(pending, list) else []
+        raw_effects = d.get("status_effects", [])
+        c.status_effects = []
+        if isinstance(raw_effects, list):
+            for raw in raw_effects:
+                effect = _sanitize_status_effect(raw)
+                if effect is not None:
+                    c.status_effects.append(effect)
         history = d.get("level_up_history", [])
         c.level_up_history = [e for e in history if isinstance(e, dict)] if isinstance(history, list) else []
         return c
@@ -298,6 +361,9 @@ async def _assess_action(input_text: str, char: Character, config: dict, sdk, mo
                 skill_lines.append(f'Curse "{n}" ({d["rating"]}/10): triggers on [{", ".join(triggers)}] - {d.get("description", "")}')
             else:
                 skill_lines.append(f'Curse "{n}" ({d["rating"]}/10) [always active]: {d.get("description", "")}')
+    if char.status_effects:
+        skill_lines.append("Status effects: " + "; ".join(
+            f"[{e['kind']}] {e['description']}" for e in char.status_effects))
 
     stats_line = ", ".join(f"{s}={char.stats[s]} ({_tier_for(char.stats[s], tier_list)})" for s in STAT_NAMES)
     unconscious = " [UNCONSCIOUS - cannot act physically]" if char.is_unconscious() else ""
@@ -330,6 +396,7 @@ Feasibility scale (rate the attempt, not the ambition):
 Judging guidelines:
 - Social actions: the outcome depends on the TARGET's likely disposition as shown in the recent story and world context, not on the player's stats. A bold ask to a receptive, bored, curious, or amused character is plausible even for a weak character. Only rate a social action 1-2 if the target's established nature makes acceptance truly impossible.
 - Reward creativity: a clever, novel, or dramatically interesting approach that fits the established fiction rates one band higher than a blunt attempt at the same goal. Punish contradiction of established facts, not ambition.
+- Status effects: weigh them like circumstances, not stats. A [bad] effect lowers feasibility of actions it would plausibly impede (a broken leg makes sprinting far harder) and can push a directly-blocked attempt to 1-2; a [good] effect raises feasibility of actions it aids. Effects unrelated to the attempt change nothing.
 - Strictness is {strictness}/10: 1-3 means cinematic - lean generous, favor the player and rule-of-cool; 4-6 means balanced; 7-10 means simulationist - judge capabilities strictly. Strictness shifts scores within bands but never turns a merely unlikely action into a 1-2.
 
 You are a referee, not a narrator: determine the outcome, do not describe it. Never write story prose.
@@ -447,6 +514,56 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
                     "type": skill_type,
                 }
             updated = True
+
+    # 3b. Status effects: apply conditions gained/removed in the story, then
+    # tick durations. Effects gained this turn are not ticked, so a 1-turn
+    # effect influences exactly one player action before wearing off.
+    now_minutes = _clock_minutes(state)
+    gained_names = set()
+    gained = mutation.get("status_effects_gained", [])
+    if isinstance(gained, list):
+        for raw in gained:
+            effect = _sanitize_status_effect(raw)
+            if effect is None:
+                continue
+            minutes = raw.get("duration_minutes")
+            if (effect["expires_at_minutes"] is None and now_minutes is not None
+                    and isinstance(minutes, (int, float)) and not isinstance(minutes, bool) and int(minutes) > 0):
+                effect["expires_at_minutes"] = now_minutes + int(minutes)
+            # Re-applying an effect refreshes it (new duration/description).
+            char.status_effects = [e for e in char.status_effects if e["name"] != effect["name"]]
+            char.status_effects.append(effect)
+            gained_names.add(effect["name"])
+            updated = True
+            print(f"[RPG] Status effect gained: '{effect['name']}' ({effect['kind']}, {_effect_duration_label(effect, now_minutes)})")
+
+    removed_effects = mutation.get("status_effects_removed", [])
+    if isinstance(removed_effects, list) and removed_effects:
+        removed_keys = {str(n).strip().lower() for n in removed_effects}
+        kept = [e for e in char.status_effects if e["name"] not in removed_keys]
+        if len(kept) != len(char.status_effects):
+            for e in char.status_effects:
+                if e["name"] in removed_keys:
+                    print(f"[RPG] Status effect removed by story: '{e['name']}'")
+            char.status_effects = kept
+            updated = True
+
+    ticked = []
+    for effect in char.status_effects:
+        if effect["name"] not in gained_names:
+            if effect.get("duration_turns") is not None:
+                effect["duration_turns"] -= 1
+                updated = True
+                if effect["duration_turns"] <= 0:
+                    print(f"[RPG] Status effect wore off: '{effect['name']}'")
+                    continue
+            expires_at = effect.get("expires_at_minutes")
+            if expires_at is not None and now_minutes is not None and now_minutes >= expires_at:
+                print(f"[RPG] Status effect expired: '{effect['name']}'")
+                updated = True
+                continue
+        ticked.append(effect)
+    char.status_effects = ticked
 
     # 4. Progress system
     progression = config.get("progression_system", "xp")
@@ -670,6 +787,10 @@ async def on_command_stats(args: list[str], state: dict, sdk):
     lines.append(" | ".join(f"{s[:3].upper()}:{v}" for s, v in char.stats.items()))
     if char.skills:
         lines.append("Skills: " + ", ".join(f"{n}({d['rating']})" for n, d in char.skills.items()))
+    if char.status_effects:
+        now_minutes = _clock_minutes(state)
+        lines.append("Effects: " + ", ".join(
+            f"{e['name']} [{e['kind']}, {_effect_duration_label(e, now_minutes)}]" for e in char.status_effects))
     return {"message": "\n".join(lines), "signal": "end_turn"}
 
 
@@ -793,6 +914,13 @@ def _render_character_sheet(char: Character, config: dict) -> str:
         curse_parts.append(desc)
     if curse_parts:
         lines.append("Curses: " + "; ".join(curse_parts) + ".")
+
+    afflictions = [e["description"].rstrip(".") for e in char.status_effects if e["kind"] == "bad"]
+    boons = [e["description"].rstrip(".") for e in char.status_effects if e["kind"] == "good"]
+    if afflictions:
+        lines.append("Current afflictions: " + "; ".join(afflictions) + ".")
+    if boons:
+        lines.append("Current boons: " + "; ".join(boons) + ".")
 
     if char.backstory:
         lines.append(f"Backstory: {char.backstory}")

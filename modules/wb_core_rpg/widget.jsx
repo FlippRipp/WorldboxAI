@@ -41,6 +41,42 @@ const TYPE_LABELS = {
 const API_BASE = '/api/modules/wb_core_rpg';
 const NEW_SKILL = '__new__';
 
+function effectDurationLabel(effect, nowMinutes) {
+  if (effect.duration_turns != null) {
+    return `${effect.duration_turns} turn${effect.duration_turns !== 1 ? 's' : ''}`;
+  }
+  if (effect.expires_at_minutes != null && nowMinutes != null) {
+    const left = Math.max(0, effect.expires_at_minutes - nowMinutes);
+    if (left >= 1440) return `~${Math.round(left / 1440)}d`;
+    if (left >= 60) return `~${Math.round(left / 60)}h`;
+    return `${left}m`;
+  }
+  return 'ongoing';
+}
+
+function StatusEffectList({ effects, nowMinutes, detailed = false }) {
+  if (!effects || effects.length === 0) return null;
+  return (
+    <div className="space-y-1">
+      {effects.map((e) => (
+        <div
+          key={e.name}
+          className={`rounded px-2 py-1 border text-xs ${e.kind === 'good' ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-red-500/10 border-red-500/30'}`}
+          title={e.description}
+        >
+          <div className="flex items-center justify-between">
+            <span className={`capitalize truncate ${e.kind === 'good' ? 'text-emerald-300' : 'text-red-300'}`}>{e.name}</span>
+            <span className="text-gray-500 font-mono ml-2 shrink-0">{effectDurationLabel(e, nowMinutes)}</span>
+          </div>
+          {detailed && e.description && (
+            <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">{e.description}</div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function xpForLevel(level, steepness = 2) {
   return Math.floor(50 * Math.pow(level, steepness));
 }
@@ -743,6 +779,8 @@ export default function CoreRpgWidget({ state, config, generating }) {
   const tiers = rpg.stat_tiers ?? FALLBACK_TIERS;
   const backstory = rpg.backstory ?? '';
   const unconscious = hp <= 0;
+  const statusEffects = Array.isArray(rpg.status_effects) ? rpg.status_effects : [];
+  const nowMinutes = state?.module_data?.wb_time_tracker?.clock?.total_minutes_elapsed ?? null;
 
   const hpPct = maxHp > 0 ? Math.max(0, Math.min(100, (hp / maxHp) * 100)) : 100;
   const hpColor =
@@ -804,6 +842,13 @@ export default function CoreRpgWidget({ state, config, generating }) {
             />
           </div>
         </div>
+
+        {statusEffects.length > 0 && (
+          <div>
+            <div className="text-xs text-gray-400 uppercase tracking-wider mb-1">Effects</div>
+            <StatusEffectList effects={statusEffects} nowMinutes={nowMinutes} />
+          </div>
+        )}
 
         <button
           onClick={() => setShowStats(!showStats)}
@@ -967,6 +1012,16 @@ export default function CoreRpgWidget({ state, config, generating }) {
                   </div>
                 </div>
               </section>
+
+              {/* --- Status Effects --- */}
+              {statusEffects.length > 0 && (
+                <section>
+                  <h3 className="text-xs uppercase tracking-wider text-gray-500 mb-3">
+                    Status Effects ({statusEffects.length})
+                  </h3>
+                  <StatusEffectList effects={statusEffects} nowMinutes={nowMinutes} detailed />
+                </section>
+              )}
 
               {/* --- Attributes --- */}
               <section>

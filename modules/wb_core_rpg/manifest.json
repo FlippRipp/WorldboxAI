@@ -1,11 +1,11 @@
 {
   "id": "wb_core_rpg",
   "name": "Core RPG System",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "dependencies": [],
   "consumes": {
     "state": ["input_text", "turn", "history"],
-    "module_data": [],
+    "module_data": ["wb_time_tracker"],
     "module_configs": [],
     "world_data": true
   },
@@ -124,7 +124,9 @@
     "hp_change": "integer, HP gained or lost by the player in the story. Use 0 if no player HP changed.",
     "stat_changes": "object mapping stat name (power/agility/vitality/intelligence/spirit/charm) to integer change. Empty object if none.",
     "skill_changes": "object mapping skill name to {rating: int, description: str, trigger_words: [str], type: 'active'|'passive'|'curse'}. For new skills, provide rating/description/trigger_words/type. description: 1-2 tight sentences stating what the ability actually does, how it manifests, its source, and any limits/costs/conditions shown in the story — concrete and specific to this story, never generic filler like 'skilled in X'. For existing skills, just rating. Never set a rating above 10; skill tiers are system-managed, do not modify them. Empty object if none.",
-    "xp_gained": "integer, experience points the character earned from this action. Use 0 if none. Only consulted when the module's XP Gain Condition is set to 'AI Reader decides'; otherwise XP is awarded automatically from the action assessment."
+    "xp_gained": "integer, experience points the character earned from this action. Use 0 if none. Only consulted when the module's XP Gain Condition is set to 'AI Reader decides'; otherwise XP is awarded automatically from the action assessment.",
+    "status_effects_gained": "array of temporary conditions the PLAYER gained in the story: {name: str, description: str, kind: 'good'|'bad', duration_turns: int|null, duration_minutes: int|null}. description is ONE short sentence naming the condition and its cause (e.g. 'Broken leg from the fall.' or 'Brainwashed by the cult leader.') — never longer. Injuries, poisons, diseases, mind control, buffs, blessings all count. Set at most one duration, in the unit the fiction implies (a stun lasts turns, a poison lasts in-world minutes/hours); both null means it lasts until story events end it. Empty array if none.",
+    "status_effects_removed": "array of status effect names that were cured, healed, dispelled, or otherwise ended in the story. Empty array if none."
   },
   "character_creation": {
     "default_state": {
@@ -147,7 +149,8 @@
       "unspent_attribute_points": 0,
       "unspent_skill_points": 0,
       "pending_evolutions": [],
-      "level_up_history": []
+      "level_up_history": [],
+      "status_effects": []
     }
   },
   "prompt_blocks": [

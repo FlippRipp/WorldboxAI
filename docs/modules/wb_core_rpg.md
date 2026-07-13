@@ -38,7 +38,11 @@ Stored in `state["module_data"]["wb_core_rpg"]`:
   "unspent_attribute_points": 2,
   "unspent_skill_points": 1,
   "pending_evolutions": [{"skill": "brutal bladework", "options": null, "status": "pending"}],
-  "level_up_history": [{"level": 3}]
+  "level_up_history": [{"level": 3}],
+  "status_effects": [
+    {"name": "broken leg", "description": "Broken leg from the fall.", "kind": "bad", "duration_turns": 3, "expires_at_minutes": null},
+    {"name": "blessed", "description": "Blessed by the hearth-goddess.", "kind": "good", "duration_turns": null, "expires_at_minutes": 5460}
+  ]
 }
 ```
 
@@ -46,6 +50,33 @@ Stored in `state["module_data"]["wb_core_rpg"]`:
 - Skills range from 1 to 10. New skills start at rating 3 by default.
 - Evolved skills carry a `tier` (≥ 2), a `lineage` of former names, and the `evolution_theme` chosen when they evolved. Tier 1 skills omit these fields.
 - XP curve: `XP_needed(level) = floor(50 * level ^ steepness)` where steepness is configurable (1-5, default 2).
+
+## Status Effects
+
+Temporary conditions — good (buffs, blessings) or bad (injuries, poisons, mind
+control) — with a ONE-sentence description ("Broken leg from the fall.",
+"Brainwashed by the cult leader."). The Reader applies and removes them from
+story events via the `status_effects_gained` / `status_effects_removed`
+mutation keys.
+
+Durations, at most one per effect:
+
+- `duration_turns` — remaining player turns. Ticks down once per turn in
+  `on_mutate_state`; the turn an effect is gained is not ticked, so a 1-turn
+  effect sways exactly one player action.
+- `expires_at_minutes` — an absolute point on `wb_time_tracker`'s in-world
+  clock (`clock.total_minutes_elapsed`), resolved from the Reader's
+  `duration_minutes` when the effect is gained. The effect expires once the
+  clock passes it. Without the time module there is no clock, so a
+  minutes-based effect simply lasts until story events remove it.
+- Neither set — indefinite; only `status_effects_removed` (or manual state
+  editing) ends it.
+
+Effects feed the action feasibility judge (a `[bad]` effect lowers the
+feasibility of actions it would plausibly impede, a `[good]` effect raises
+actions it aids), appear in the storyteller's character sheet as "Current
+afflictions"/"Current boons", in `/stats`, and in the sidebar widget and
+character view panel with their remaining duration.
 
 ## Settings
 
