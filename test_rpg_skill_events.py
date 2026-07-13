@@ -67,3 +67,58 @@ def test_external_grant_adds_the_skill():
     skills = result["module_data"]["wb_core_rpg"]["skills"]
     assert "emberkiss" in skills
     assert skills["emberkiss"]["rating"] == 4
+
+
+def _state_with_skill(tier: int = 1):
+    state = _state(["The god withdraws his gift; the warmth leaves your hands."])
+    skill = {"rating": 4, "description": "Fire by touch.", "trigger_words": [], "type": "active"}
+    if tier > 1:
+        skill["tier"] = tier
+    state["module_data"]["wb_core_rpg"] = {
+        "skills": {"emberkiss": skill},
+        "practice_counters": {"emberkiss": 7},
+    }
+    return state
+
+
+def test_external_removal_deletes_the_skill_and_opts_into_replace():
+    backend = _load_backend()
+    sdk = _make_sdk(json.dumps({"added": [], "removed": ["Emberkiss"], "altered": []}), {})
+
+    result = asyncio.run(backend.on_librarian(_state_with_skill(), sdk))
+
+    data = result["module_data"]["wb_core_rpg"]
+    assert "emberkiss" not in data["skills"]
+    assert "emberkiss" not in data["practice_counters"]
+    # The engine deep-merges module_data (additive), which can't delete a dict
+    # entry: without this opt-in the removed skill silently reappears on the
+    # character sheet.
+    assert "skills" in result["module_data_replace"]
+    assert "practice_counters" in result["module_data_replace"]
+
+
+def test_removal_matches_the_tier_label_shown_in_the_prompt():
+    # Evolved skills are listed to the LLM as "name [Tier N]"; the model echoes
+    # that label back, which must still resolve to the plain dict key.
+    backend = _load_backend()
+    sdk = _make_sdk(json.dumps({"added": [], "removed": ["Emberkiss [Tier 2]"], "altered": []}), {})
+
+    result = asyncio.run(backend.on_librarian(_state_with_skill(tier=2), sdk))
+
+    assert "emberkiss" not in result["module_data"]["wb_core_rpg"]["skills"]
+
+
+def test_alter_matches_the_tier_label_shown_in_the_prompt():
+    backend = _load_backend()
+    reply = json.dumps({
+        "added": [],
+        "removed": [],
+        "altered": [{"name": "Emberkiss [Tier 2]", "new_rating": 2, "description": "Weakened by the hex."}],
+    })
+    sdk = _make_sdk(reply, {})
+
+    result = asyncio.run(backend.on_librarian(_state_with_skill(tier=2), sdk))
+
+    skill = result["module_data"]["wb_core_rpg"]["skills"]["emberkiss"]
+    assert skill["rating"] == 2
+    assert skill["description"] == "Weakened by the hex."

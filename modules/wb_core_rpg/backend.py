@@ -2,6 +2,7 @@
 import math
 import random
 import json
+import re
 from dataclasses import dataclass, field
 
 
@@ -622,8 +623,8 @@ Respond with ONLY valid JSON:
         print(f"[RPG] External event granted skill '{name}' ({char.skills[name]['rating']}/10, {skill_type})")
 
     for name in parsed.get("removed", []) or []:
-        key = str(name).strip().lower()
-        if key in char.skills:
+        key = _match_skill_key(name, char.skills)
+        if key is not None:
             del char.skills[key]
             char.practice_counters.pop(key, None)
             updated = True
@@ -632,8 +633,8 @@ Respond with ONLY valid JSON:
     for entry in parsed.get("altered", []) or []:
         if not isinstance(entry, dict):
             continue
-        key = str(entry.get("name", "")).strip().lower()
-        if key not in char.skills:
+        key = _match_skill_key(entry.get("name", ""), char.skills)
+        if key is None:
             continue
         if entry.get("new_rating") is not None:
             try:
@@ -650,7 +651,13 @@ Respond with ONLY valid JSON:
 
     if updated:
         _check_evolution_ready(char)
-        return {"module_data": {"wb_core_rpg": char.to_dict()}}
+        # module_data is deep-merged into state (additive), which can't delete
+        # a dict entry — a removed skill would silently reappear. Skills and
+        # practice counters are returned complete, so replace them wholesale.
+        return {
+            "module_data": {"wb_core_rpg": char.to_dict()},
+            "module_data_replace": ["skills", "practice_counters"],
+        }
     return None
 
 
@@ -881,6 +888,17 @@ def _skill_tier(data: dict) -> int:
 def _skill_prompt_label(name: str, data: dict) -> str:
     tier = _skill_tier(data)
     return f"{name} [Tier {tier}]" if tier > 1 else name
+
+
+def _match_skill_key(name, skills: dict) -> str | None:
+    """Resolve a skill name echoed back by an LLM to its dict key. Prompts show
+    evolved skills as "name [Tier N]" (_skill_prompt_label), and models echo
+    that label, so a trailing tier tag must not break the lookup."""
+    key = str(name).strip().lower()
+    if key in skills:
+        return key
+    key = re.sub(r"\s*\[tier \d+\]$", "", key)
+    return key if key in skills else None
 
 
 def _sync_pending_evolutions(skills: dict, pending: list) -> list:

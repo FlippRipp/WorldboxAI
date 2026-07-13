@@ -149,13 +149,59 @@ async def _module_owned_mutation_dispatch():
     print("Module-owned mutation dispatch test passed.")
 
 
+async def _librarian_skill_removal_survives_merge():
+    # The hook runner deep-merges returned module_data, which is additive and
+    # can't delete a dict entry. A skill removed by wb_core_rpg's on_librarian
+    # (external curse stripping a power) used to be resurrected from the old
+    # state by that merge; the module_data_replace opt-in must make it stick.
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    registry = ModuleRegistry(os.path.join(base_dir, "modules"))
+    registry.load_all_modules()
+
+    engine = EngineGraph(registry)
+
+    async def fake_generate(prompt, model_preference="balanced", **kwargs):
+        return json.dumps({"added": [], "removed": ["emberkiss"], "altered": []})
+
+    engine.sdk.llm.generate = fake_generate
+
+    state = {
+        "active_save_id": "test",
+        "input_text": "",
+        "module_data": {"wb_core_rpg": {
+            "hp": 85, "max_hp": 85,
+            "skills": {"emberkiss": {"rating": 4, "description": "Fire by touch.",
+                                     "trigger_words": [], "type": "active"}},
+            "practice_counters": {"emberkiss": 7},
+        }},
+        "module_configs": {"__active_modules__": ["wb_core_rpg"]},
+        "characters": {},
+        "current_context": [],
+        "history": ["The god withdraws his gift; the warmth leaves your hands."],
+        "chat_messages": [],
+        "turn": 3,
+    }
+
+    accumulated = await engine._run_modules_in_levels("on_librarian", state)
+
+    rpg = accumulated["module_data"]["wb_core_rpg"]
+    assert "emberkiss" not in rpg["skills"]
+    assert "emberkiss" not in rpg["practice_counters"]
+    print("Librarian skill removal survives merge test passed.")
+
+
 async def run_all_tests():
     test_dependency_order_and_invalid_manifests()
     await _module_owned_mutation_dispatch()
+    await _librarian_skill_removal_survives_merge()
 
 
 def test_module_owned_mutation_dispatch():
     asyncio.run(_module_owned_mutation_dispatch())
+
+
+def test_librarian_skill_removal_survives_merge():
+    asyncio.run(_librarian_skill_removal_survives_merge())
 
 
 if __name__ == "__main__":

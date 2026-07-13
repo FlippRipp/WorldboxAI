@@ -250,6 +250,16 @@ class EngineGraph:
                             accumulated_state["module_data"].get(key, {}),
                             val if isinstance(val, dict) else {},
                         )
+                    # Deep-merge is additive and can't delete a dict entry (e.g. a
+                    # skill stripped by a curse). A hook may list top-level keys of
+                    # its OWN subtree to overwrite wholesale with the authoritative
+                    # value it returned, so removals actually take effect — the same
+                    # contract as the command write-back path in the API server.
+                    own_data = result["module_data"].get(mod_id)
+                    if isinstance(own_data, dict):
+                        for rkey in result.get("module_data_replace") or []:
+                            if rkey in own_data:
+                                accumulated_state["module_data"][mod_id][rkey] = own_data[rkey]
 
                 if collect:
                     collect(mod_id, mod_data, result, produces)
