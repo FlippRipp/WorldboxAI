@@ -182,13 +182,39 @@ def test_difficulty_tier_reaches_the_prompt_as_a_label_not_a_scale():
 
     assert 'Difficulty is set to "Brutal"' in captured["prompt"]
     assert "success is almost impossible" in captured["prompt"]
+    assert "1-5 = the attempt outright fails; 6-8 = partial success at a cost; 9-10 = success" in captured["prompt"]
     # Brutal is exempt from the merely-unlikely guardrail the lower tiers carry.
-    assert "Never turn a merely unlikely action into a 1-2" not in captured["prompt"]
+    assert "Never rate a merely unlikely attempt" not in captured["prompt"]
     assert "Strictness" not in captured["prompt"]
 
     state["module_configs"] = {"wb_core_rpg": {"action_rating_strictness": 1}}
     asyncio.run(backend.on_gather_context(state, sdk))
     assert 'Difficulty is set to "Power Fantasy"' in captured["prompt"]
+    assert "1 = the attempt outright fails; 2-4 = partial success at a cost; 5-10 = success" in captured["prompt"]
+
+
+def test_brutal_widens_the_failure_band_for_ruling_and_xp():
+    backend = _load_backend()
+    brutal = {"action_rating_strictness": 10}
+    balanced = {"action_rating_strictness": 5}
+    char = backend.Character.from_dict({"action_assessment": {
+        "feasibility": 5, "difficulty": "moderate",
+        "failure_reason": "the sheer cliff face offers no holds",
+    }})
+
+    # Feasibility 5 fails outright on Brutal but is a costly partial on Balanced.
+    assert "the attempt fails" in backend._build_action_feasibility_prompt(char, "I scale the cliff", brutal)
+    assert "partial success" in backend._build_action_feasibility_prompt(char, "I scale the cliff", balanced)
+
+    # Success-conditioned XP follows the same band: no reward for a Brutal failure.
+    assert backend._xp_from_assessment(char, brutal) == 0
+    assert backend._xp_from_assessment(char, balanced) > 0
+
+    # On Brutal, outright success starts at 9.
+    char8 = backend.Character.from_dict({"action_assessment": {"feasibility": 8, "difficulty": "hard"}})
+    char9 = backend.Character.from_dict({"action_assessment": {"feasibility": 9, "difficulty": "hard"}})
+    assert "the attempt succeeds" not in backend._build_action_feasibility_prompt(char8, "I strike", brutal)
+    assert "the attempt succeeds" in backend._build_action_feasibility_prompt(char9, "I strike", brutal)
 
 
 def test_character_sheet_lists_afflictions_and_boons():

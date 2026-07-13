@@ -165,13 +165,28 @@ mechanically stronger, not just renamed.
 Before the Storyteller generates narrative, a fast-model pre-assessment rates the player's action and injects an advisory `action_feasibility` block into the Storyteller prompt:
 
 1. The pre-assessment sees the character sheet, world rules/lore, **and the last two storyteller outputs** — so NPC dispositions and established story facts inform the rating (e.g. a bold ask to a bored, receptive NPC is judged against the NPC's disposition, not the player's stats).
-2. Feasibility is rated 1-10 against an explicit rubric: **1-2** = violates world rules or established facts (the only band where the attempt simply fails), **3-4** = far beyond current ability but not impossible, **5-6** = challenging, **7-8** = within demonstrated abilities, **9-10** = near-certain.
+2. Feasibility is rated 1-10 against an explicit rubric: **1-2** = violates world rules or established facts, **3-4** = far beyond current ability but not impossible, **5-6** = challenging, **7-8** = within demonstrated abilities, **9-10** = near-certain.
 3. Creative, novel approaches that fit the established fiction rate one band higher than blunt attempts — ambition is rewarded, contradiction of established facts is punished.
-4. The pre-assessment is a **referee, not a narrator**: it returns only the determination (feasibility score, difficulty, skill/curse/passive flags, and — for 1-2 only — a short factual failure reason). It writes no story prose.
-5. The injected block states the ruling derived from the feasibility band (7-10 success, 3-6 partial success/success-at-a-cost, 1-2 failure) and **fails forward**: 3-6 is never a flat refusal, and even 1-2 failures tell the Storyteller to show why in world terms and how the world reacts.
+4. The pre-assessment is a **referee, not a narrator**: it returns only the determination (feasibility score, difficulty, skill/curse/passive flags, and — for scores in the failure band — a short factual failure reason). It writes no story prose.
+5. The injected block states the ruling derived from the difficulty tier's outcome bands (see below) and **fails forward**: the middle band is never a flat refusal, and even outright failures tell the Storyteller to show why in world terms and how the world reacts.
 6. The ruling decides only *whether* the action succeeds — how it plays out is the Storyteller's to narrate, adapting specifics to the living scene, and never resolving a non-impossible action as a dead end.
 
-The `action_rating_strictness` slider (1-10) shifts judgment within the rubric. Each value is a named difficulty tier — 1 Power Fantasy, 2 Cinematic, 3 Heroic, 4 Favorable, 5 Balanced, 6 Gritty, 7 Demanding, 8 Harsh, 9 Merciless, 10 Brutal — and the judge is prompted with only the chosen tier's label and guidance (never the 1-10 scale). The top tiers escalate sharply: at 8 ambitious attempts rate a full band lower, at 9 anything beyond proven ability caps at 3-4, and at 10 (Brutal) success is almost impossible — 7+ is reserved for trivial or overwhelmingly advantaged attempts and anything beyond proven ability simply fails. Tiers 1-8 never turn a merely unlikely action into a 1-2; Merciless and Brutal may.
+The `action_rating_strictness` slider (1-10) maps each value to a named difficulty tier; the judge is prompted with only the chosen tier's label and guidance (never the 1-10 scale). Each tier also sets the outcome bands — which feasibility scores fail outright, scrape by at a cost, or succeed — and the same thresholds drive the storyteller ruling and success-conditioned XP:
+
+| Tier | Outright failure | Partial success at a cost | Success |
+|---|---|---|---|
+| 1 Power Fantasy | 1 | 2-4 | 5-10 |
+| 2 Cinematic | 1-2 | 3-5 | 6-10 |
+| 3 Heroic | 1-2 | 3-5 | 6-10 |
+| 4 Favorable | 1-2 | 3-6 | 7-10 |
+| 5 Balanced | 1-2 | 3-6 | 7-10 |
+| 6 Gritty | 1-3 | 4-6 | 7-10 |
+| 7 Demanding | 1-3 | 4-6 | 7-10 |
+| 8 Harsh | 1-4 | 5-7 | 8-10 |
+| 9 Merciless | 1-4 | 5-7 | 8-10 |
+| 10 Brutal | 1-5 | 6-8 | 9-10 |
+
+Tiers 1-8 tell the judge never to rate a merely unlikely attempt as an outright failure; Merciless and Brutal drop that guardrail — at Brutal success is almost impossible and anything beyond proven ability simply fails.
 
 Only substantive actions are assessed: pure dialog with nothing at stake or trivial everyday actions (standing up, looking around, etc.) are skipped entirely — no feasibility ruling is generated or injected for that turn. Social *attempts* with a contested outcome (persuading, proposing, deceiving, intimidating) are substantive and are assessed.
 
