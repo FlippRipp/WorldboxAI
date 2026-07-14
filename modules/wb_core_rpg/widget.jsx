@@ -717,6 +717,33 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
   // Mirrors the server-side roll lock so re-picks skip the roll animation.
   const refinedByName = React.useRef({});
 
+  // Category names render single-line at ONE shared font size, shrunk just
+  // enough that the longest name fits its grid cell - mixed sizes look worse
+  // than uniformly smaller text. Measured, not estimated: render at the base
+  // size, find the worst overflow ratio, scale all names by it.
+  const CAT_NAME_BASE_PX = 14; // matches text-sm
+  const [catNameSize, setCatNameSize] = useState(CAT_NAME_BASE_PX);
+  const catNameRefs = React.useRef([]);
+  const [measureTick, setMeasureTick] = useState(0);
+
+  React.useLayoutEffect(() => {
+    if (phase !== 'categories') return;
+    const els = catNameRefs.current.filter(Boolean);
+    if (!els.length) return;
+    let worst = 1;
+    for (const el of els) {
+      el.style.fontSize = `${CAT_NAME_BASE_PX}px`;
+      if (el.scrollWidth > 0) worst = Math.min(worst, el.clientWidth / el.scrollWidth);
+    }
+    setCatNameSize(Math.max(8, Math.floor(CAT_NAME_BASE_PX * worst * 10) / 10));
+  }, [phase, categories, measureTick]);
+
+  useEffect(() => {
+    const onResize = () => setMeasureTick((t) => t + 1);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
   // The fate roll animation: while the refine call runs, climb the rarity
   // ladder over and over (Common -> ... -> Mythic -> Common ...); the reveal
   // then lands on the tier the server actually rolled.
@@ -951,13 +978,19 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
               </div>
               <div className="text-xs text-gray-400 text-center">{'…'}or browse a category:</div>
               <div className="grid grid-cols-2 gap-2">
-                {(categories || []).map((cat) => (
+                {(categories || []).map((cat, i) => (
                   <button
                     key={cat.name}
                     onClick={() => openMenu({ name: cat.name, search: false })}
-                    className="text-left px-3 py-2.5 rounded-lg bg-gray-800/60 border border-gray-700 hover:border-indigo-500/60 hover:bg-indigo-500/10 transition-colors"
+                    className="text-left px-3 py-2.5 rounded-lg bg-gray-800/60 border border-gray-700 hover:border-indigo-500/60 hover:bg-indigo-500/10 transition-colors min-w-0"
                   >
-                    <div className="text-sm font-bold text-indigo-300">{cat.name}</div>
+                    <div
+                      ref={(el) => { catNameRefs.current[i] = el; }}
+                      className="font-bold text-indigo-300 whitespace-nowrap overflow-hidden"
+                      style={{ fontSize: `${catNameSize}px` }}
+                    >
+                      {cat.name}
+                    </div>
                     {cat.summary && <div className="text-[11px] text-gray-500 mt-0.5 leading-snug">{cat.summary}</div>}
                   </button>
                 ))}
