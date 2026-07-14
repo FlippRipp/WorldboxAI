@@ -72,9 +72,9 @@ def _make_client(mod, rpg, llm_replies=None, config=None):
     return TestClient(app), session_manager, calls
 
 
-def _fix_strengths(mod, values):
-    """Make strength rolls deterministic: cycle through the given values."""
-    mod._roll_strengths = lambda n: list(values)[:n]
+def _fix_roll(mod, value):
+    """Make the pick-time strength roll deterministic."""
+    mod._roll_strength = lambda: value
 
 
 CATEGORIES_REPLY = json.dumps({
@@ -222,9 +222,8 @@ def test_categories_duplicate_names_rejected():
 # wizard/options
 # ---------------------------------------------------------------------------
 
-def test_options_page0_returns_five_with_exclusions_and_strengths():
+def test_options_page0_returns_five_base_level_skills():
     mod = _load_backend()
-    _fix_strengths(mod, [3, 7, 1, 10, 5])
     client, _, calls = _make_client(mod, _rpg(), llm_replies=[_options_reply(_P0_NAMES)])
 
     res = client.post(f"{BASE}/skills/wizard/options", json={"menu": "Flame Arts", "page": 0})
@@ -233,19 +232,19 @@ def test_options_page0_returns_five_with_exclusions_and_strengths():
     assert body["menu"] == "Flame Arts"
     assert body["page"] == 0
     assert [s["name"] for s in body["skills"]] == _P0_NAMES
-    # Rolled strengths attach by index and reach the prompt per slot.
-    assert [s["strength"] for s in body["skills"]] == [3, 7, 1, 10, 5]
+    # Browsing is rarity-free: strength is only rolled at pick time (refine).
+    assert all("strength" not in s for s in body["skills"])
     prompt = calls[0]["prompt"]
     assert '"Flame Arts" category' in prompt
     assert "swordplay" in prompt  # existing skills excluded
     assert "exactly 5 NEW skills" in prompt
-    assert "Skill 1 has power 3/10" in prompt
-    assert "Skill 4 has power 10/10" in prompt
+    # Page skills are uniform base-level with one-sentence descriptions.
+    assert "ONE tight sentence" in prompt
+    assert "has power" not in prompt  # no per-slot power lines anymore
 
 
 def test_options_page1_excludes_page0_names():
     mod = _load_backend()
-    _fix_strengths(mod, [2, 2, 2, 2, 2])
     client, _, calls = _make_client(
         mod, _rpg(), llm_replies=[_options_reply(_P0_NAMES), _options_reply(_P1_NAMES)]
     )
@@ -263,13 +262,12 @@ def test_options_page1_excludes_page0_names():
 
 def test_options_cached_page_needs_no_llm():
     mod = _load_backend()
-    _fix_strengths(mod, [4, 4, 4, 4, 4])
     client, _, calls = _make_client(mod, _rpg(), llm_replies=[_options_reply(_P0_NAMES)])
     res = client.post(f"{BASE}/skills/wizard/options", json={"menu": "Flame Arts", "page": 0})
     assert res.status_code == 200
     res2 = client.post(f"{BASE}/skills/wizard/options", json={"menu": "Flame Arts", "page": 0})
     assert res2.status_code == 200
-    assert res2.json()["skills"] == res.json()["skills"]  # strengths stable too
+    assert res2.json()["skills"] == res.json()["skills"]
     assert len(calls) == 1
 
 
@@ -314,7 +312,6 @@ def test_options_curse_type_coerced_to_active():
 
 def test_options_search_mode_prompt_and_separate_cache():
     mod = _load_backend()
-    _fix_strengths(mod, [5, 5, 5, 5, 5])
     client, _, calls = _make_client(
         mod, _rpg(), llm_replies=[_options_reply(_P0_NAMES), _options_reply(_P1_NAMES)]
     )
@@ -335,27 +332,27 @@ def test_options_search_mode_prompt_and_separate_cache():
     assert res.json()["skills"] != res2.json()["skills"]
 
 
-def test_options_strengths_within_range():
+def test_roll_strength_always_five_to_ten():
     mod = _load_backend()
-    client, _, _ = _make_client(mod, _rpg(), llm_replies=[_options_reply(_P0_NAMES)])
-    res = client.post(f"{BASE}/skills/wizard/options", json={"menu": "Flame Arts", "page": 0})
-    assert res.status_code == 200
-    assert all(1 <= s["strength"] <= 10 for s in res.json()["skills"])
+    rolls = {mod._roll_strength() for _ in range(200)}
+    assert rolls <= set(range(5, 11))
+    # Uniform over six faces: 200 rolls hit every tier in practice.
+    assert rolls == set(range(5, 11))
 
 
 # ---------------------------------------------------------------------------
 # wizard/refine
 # ---------------------------------------------------------------------------
 
-def test_refine_returns_skill_with_draft_and_context_in_prompt():
+def test_refine_rolls_strength_and_carries_draft_and_context_in_prompt():
     mod = _load_backend()
+    _fix_roll(mod, 7)
     client, _, calls = _make_client(mod, _rpg(), llm_replies=[REFINE_REPLY])
     res = client.post(f"{BASE}/skills/wizard/refine", json={
         "name": "Ember Feint",
         "type": "active",
         "description": "A draft description.",
         "trigger_words": ["feint"],
-        "strength": 7,
         "menu": "Flame Arts",
     })
     assert res.status_code == 200
@@ -371,8 +368,31 @@ def test_refine_returns_skill_with_draft_and_context_in_prompt():
     assert "Flame Arts" in prompt
 
 
+def test_refine_ignores_client_supplied_strength():
+    mod = _load_backend()
+    _fix_roll(mod, 9)
+    client, _, _ = _make_client(mod, _rpg(), llm_replies=[REFINE_REPLY])
+    # A client trying to smuggle in its own roll gets the server's roll anyway.
+    res = client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint", "strength": 3})
+    assert res.status_code == 200
+    assert res.json()["skill"]["strength"] == 9
+
+
+def test_refine_mythic_roll_adds_peak_guidance():
+    mod = _load_backend()
+    _fix_roll(mod, 10)
+    client, _, calls = _make_client(mod, _rpg(), llm_replies=[REFINE_REPLY])
+    res = client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint"})
+    assert res.status_code == 200
+    assert res.json()["skill"]["strength"] == 10
+    prompt = calls[0]["prompt"]
+    assert "power is 10/10" in prompt
+    assert "absolute peak" in prompt
+
+
 def test_refine_falls_back_to_draft_fields():
     mod = _load_backend()
+    _fix_roll(mod, 6)
     reply = json.dumps({"name": "Ember Feint"})
     client, _, _ = _make_client(mod, _rpg(), llm_replies=[reply])
     res = client.post(f"{BASE}/skills/wizard/refine", json={
@@ -380,13 +400,12 @@ def test_refine_falls_back_to_draft_fields():
         "type": "passive",
         "description": "Draft only.",
         "trigger_words": ["feint", "flicker"],
-        "strength": 4,
     })
     assert res.status_code == 200
     skill = res.json()["skill"]
     assert skill["description"] == "Draft only."
     assert skill["trigger_words"] == ["feint", "flicker"]
-    assert skill["strength"] == 4
+    assert skill["strength"] == 6
 
 
 def test_refine_llm_garbage_502():

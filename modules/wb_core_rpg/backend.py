@@ -1237,13 +1237,12 @@ EVOLVED_RESET_RATING = 5
 # while a fresh request creates a second one, which would defeat the guard.
 _options_locks: dict[str, "asyncio.Lock"] = {}
 
-# Rarity tiers by strength (= starting rating, 1-10): 1-3 common, 4-5 uncommon,
-# 6-7 rare, 8-9 epic, 10 legendary. Weighted so high rolls stay lucky pulls.
-STRENGTH_WEIGHTS = {1: 12, 2: 14, 3: 16, 4: 13, 5: 12, 6: 10, 7: 9, 8: 7, 9: 5, 10: 2}
-
-
-def _roll_strengths(n: int) -> list[int]:
-    return random.choices(list(STRENGTH_WEIGHTS), weights=list(STRENGTH_WEIGHTS.values()), k=n)
+# Strength (= starting rating) is rolled once, when the player picks a skill,
+# uniformly over 5-10. Rarity tiers: 5 Common, 6 Uncommon, 7 Rare, 8 Epic,
+# 9 Legendary, 10 Mythic. A Mythic roll is learned at max rating, which drops
+# it straight into the normal pending-evolution flow.
+def _roll_strength() -> int:
+    return random.randint(5, 10)
 
 
 # Transient new-skill wizard state, keyed by save_id. Never persisted: the
@@ -1501,19 +1500,7 @@ JSON response:
 {{"categories": [{{"name": "1-3 words", "summary": "one short clause"}}, ... 10 total]}}"""
 
 
-def _strength_guidance(strengths: list[int]) -> str:
-    slots = "\n".join(
-        f"- Skill {i + 1} has power {s}/10" for i, s in enumerate(strengths)
-    )
-    return (
-        "Each skill slot has a pre-rolled power level, and the skill you write for that slot "
-        "MUST match it in scope: 1-3 is a modest starting ability with clear limits, 4-6 a "
-        "solid dependable talent, 7-9 an exceptional gift few possess, and 10 a legendary "
-        "power worthy of tales. Write them in order:\n" + slots
-    )
-
-
-def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], strengths: list[int], state: dict, search: bool = False) -> str:
+def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], state: dict, search: bool = False) -> str:
     world_section = _world_context_section(state.get("world_data"))
     story_section = _story_context_section(state)
     if search:
@@ -1535,12 +1522,12 @@ def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], strengths: l
 
 Do NOT propose any of these skills or trivial variants of them (already known or already offered): {exclude_line}
 
-{task}, each learnable NOW by this character. The 5 must vary widely in flavor and approach - do not make them five shades of the same idea. Most should belong squarely to the theme, but 1-2 may take a loose, sideways, or surprising interpretation of it; a skill that fits the theme imperfectly but fits the character or story well is better than a fifth on-the-nose variant. {_strength_guidance(strengths)}
+{task}, each learnable NOW by this character. The 5 must vary widely in flavor and approach - do not make them five shades of the same idea. Most should belong squarely to the theme, but 1-2 may take a loose, sideways, or surprising interpretation of it; a skill that fits the theme imperfectly but fits the character or story well is better than a fifth on-the-nose variant. Every proposal is a starting-level ability at its base form - the power each one ultimately awakens with is decided later by fate, so write none of the 5 as stronger or weaker than the others.
 
 Each skill:
 - name: 1-4 evocative words, distinct from every excluded name above and from the other 4 proposals
 - type: "active" (deliberately used) or "passive" (always on)
-- description: 1-2 tight sentences, concrete and specific to this story: what it does, how it manifests, its source, and any limit or cost - never generic filler like "skilled in X"
+- description: ONE tight sentence, concrete and specific to this story: what it does, how it manifests, and its source - never generic filler like "skilled in X"
 - trigger_words: 2-5 short words or phrases a player would naturally use
 
 JSON response:
@@ -1556,10 +1543,16 @@ def _skill_refine_prompt(rpg: dict, skill: dict, menu: str | None, state: dict) 
     strength_req = ""
     if strength:
         strength_req = (
-            f"\n- Its power is {strength}/10 and must stay exactly there: 1-3 is a modest starting "
-            "ability with clear limits, 4-6 a solid dependable talent, 7-9 an exceptional gift few "
-            "possess, and 10 a legendary power worthy of tales. Scope and limits must match."
+            f"\n- Fate has decided its power is {strength}/10 and it must stay exactly there: 5 is a "
+            "dependable starting talent with clear limits, 6-7 a notable gift, 8-9 an exceptional "
+            "power few in this world possess, and 10 a mythic power straining against its own limits. "
+            "Scope and limits must match."
         )
+        if strength >= MAX_SKILL_RATING:
+            strength_req += (
+                "\n- This skill sits at the absolute peak of its tier: write it as a fully realized "
+                "ability already trembling at the edge of transcending its current form."
+            )
     return f"""You are the game system for a text RPG. The player has chosen to learn the new skill "{name}"{menu_note}. Finalize it before it is added to their sheet. Output ONLY valid JSON, no other text.
 
 {world_section}{story_section}Character:
@@ -1639,7 +1632,6 @@ def get_router():
         description: str | None = None
         trigger_words: list[str] | None = None
         type: str | None = None
-        strength: int | None = None
         menu: str | None = None
 
     def _session_manager():
@@ -2144,9 +2136,8 @@ def get_router():
                 return {"menu": menu, "search": payload.search, "page": payload.page, "skills": pages[payload.page]}
 
             exclude = [s["name"] for page in pages for s in page] + list(rpg.get("skills", {}).keys())
-            strengths = _roll_strengths(5)
             raw = await _wizard_generate(
-                sm, _skill_options_prompt(rpg, menu, exclude, strengths, sm.state, search=payload.search)
+                sm, _skill_options_prompt(rpg, menu, exclude, sm.state, search=payload.search)
             )
             parsed = _parse_json_repair(raw)
             proposals = parsed.get("skills") if isinstance(parsed, dict) else None
@@ -2160,8 +2151,6 @@ def get_router():
                 cleaned.append(skill)
             if len(cleaned) != 5:
                 raise HTTPException(status_code=502, detail="The AI failed to produce 5 new skills. Try again.")
-            for skill, strength in zip(cleaned, strengths):
-                skill["strength"] = strength
 
             pages.append(cleaned)
             return {"menu": menu, "search": payload.search, "page": payload.page, "skills": cleaned}
@@ -2170,12 +2159,15 @@ def get_router():
     async def refine_skill(payload: SkillRefinePayload):
         sm = _session_manager()
         rpg = _rpg_data(sm)
+        # The gacha moment: strength is rolled here, when the player commits to
+        # a pick, never client-supplied - it becomes the starting rating.
+        strength = _roll_strength()
         draft = {
             "name": payload.name.strip(),
             "type": payload.type or "active",
             "description": (payload.description or "").strip(),
             "trigger_words": payload.trigger_words or [],
-            "strength": payload.strength,
+            "strength": strength,
         }
         if not draft["name"]:
             raise HTTPException(status_code=400, detail="Skill name is required.")
@@ -2193,7 +2185,7 @@ def get_router():
             "type": refined.get("type") or draft["type"],
             "description": refined.get("description") or draft["description"],
             "trigger_words": refined.get("trigger_words") or _clean_triggers([str(w) for w in draft["trigger_words"] if w]),
-            "strength": payload.strength,
+            "strength": strength,
         }}
 
     return router

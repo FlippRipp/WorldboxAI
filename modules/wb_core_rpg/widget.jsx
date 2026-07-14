@@ -41,14 +41,16 @@ const TYPE_LABELS = {
 const API_BASE = '/api/modules/wb_core_rpg';
 const NEW_SKILL = '__new__';
 
-// Rarity tiers for wizard-generated skills, keyed by rolled strength (1-10).
-// Strength becomes the starting rating; the tint sells the lucky pull.
+// Rarity tiers for wizard-generated skills, keyed by the pick-time strength
+// roll (uniform 5-10). Strength becomes the starting rating; the tint sells
+// the lucky pull. Shown as colors + names only - never numbers.
 const RARITY_TIERS = [
-  { min: 1, max: 3, label: 'Common', text: 'text-gray-300', border: 'border-gray-600', chip: 'bg-gray-500/15 text-gray-300 border-gray-500/40' },
-  { min: 4, max: 5, label: 'Uncommon', text: 'text-emerald-300', border: 'border-emerald-500/50', chip: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40' },
-  { min: 6, max: 7, label: 'Rare', text: 'text-blue-300', border: 'border-blue-500/50', chip: 'bg-blue-500/15 text-blue-300 border-blue-500/40' },
-  { min: 8, max: 9, label: 'Epic', text: 'text-purple-300', border: 'border-purple-500/50', chip: 'bg-purple-500/15 text-purple-300 border-purple-500/40' },
-  { min: 10, max: 10, label: 'Legendary', text: 'text-amber-300', border: 'border-amber-500/60', chip: 'bg-amber-500/15 text-amber-300 border-amber-500/40' },
+  { min: 0, max: 5, label: 'Common', text: 'text-gray-100', border: 'border-gray-400/60', chip: 'bg-gray-400/15 text-gray-100 border-gray-400/50' },
+  { min: 6, max: 6, label: 'Uncommon', text: 'text-emerald-300', border: 'border-emerald-500/50', chip: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40' },
+  { min: 7, max: 7, label: 'Rare', text: 'text-blue-300', border: 'border-blue-500/50', chip: 'bg-blue-500/15 text-blue-300 border-blue-500/40' },
+  { min: 8, max: 8, label: 'Epic', text: 'text-purple-300', border: 'border-purple-500/50', chip: 'bg-purple-500/15 text-purple-300 border-purple-500/40' },
+  { min: 9, max: 9, label: 'Legendary', text: 'text-yellow-300', border: 'border-yellow-400/60', chip: 'bg-yellow-400/15 text-yellow-300 border-yellow-400/50' },
+  { min: 10, max: 10, label: 'Mythic', text: 'text-red-400', border: 'border-red-500/70', chip: 'bg-red-500/15 text-red-300 border-red-500/50' },
 ];
 
 function rarityFor(strength) {
@@ -198,8 +200,10 @@ const WBRPG_CSS = `
 @keyframes wbrpg-rise { 0% { transform: translateY(0) scale(1); opacity: 0; } 15% { opacity: 1; } 100% { transform: translateY(-110px) scale(0.3); opacity: 0; } }
 @keyframes wbrpg-shimmer { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
 @keyframes wbrpg-dissolve { 0% { opacity: 1; filter: blur(0); } 100% { opacity: 0.15; filter: blur(5px); transform: translateY(-6px); } }
+@keyframes wbrpg-glow-red { 0%, 100% { box-shadow: 0 0 14px 2px rgba(239, 68, 68, 0.35); } 50% { box-shadow: 0 0 42px 12px rgba(239, 68, 68, 0.75); } }
 .wbrpg-burst { animation: wbrpg-burst 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
 .wbrpg-glow { animation: wbrpg-glow 1.2s ease-in-out infinite; }
+.wbrpg-glow-red { animation: wbrpg-glow-red 1.2s ease-in-out infinite; }
 .wbrpg-rise { animation: wbrpg-rise 1.8s ease-out infinite; }
 .wbrpg-shimmer { animation: wbrpg-shimmer 1.4s ease-in-out infinite; }
 .wbrpg-dissolve { animation: wbrpg-dissolve 2s ease-in forwards; }
@@ -420,7 +424,7 @@ function LevelUpModal({ rpg, config, generating, onClose, onApplied }) {
                         </span>
                         {newSkill.strength != null && (
                           <span className={`text-[9px] px-1.5 py-px rounded border font-semibold ${r.chip}`}>
-                            {r.label} {'•'} {newSkill.strength}/10
+                            {r.label}
                           </span>
                         )}
                       </div>
@@ -453,7 +457,7 @@ function LevelUpModal({ rpg, config, generating, onClose, onApplied }) {
               disabled={!canConfirm}
               className="flex-1 py-2 text-sm font-semibold text-amber-100 bg-amber-600/70 hover:bg-amber-600/90 disabled:opacity-40 border border-amber-500/50 rounded-lg transition-colors"
             >
-              {saving ? 'Applying…' : 'Confirm'}
+              {saving ? 'Applying…' : newSkill?.strength === 10 ? <>Confirm {'—'} something stirs{'…'}</> : 'Confirm'}
             </button>
             <button
               onClick={onClose}
@@ -684,10 +688,21 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
   const [error, setError] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [query, setQuery] = useState('');
+  const [rollIdx, setRollIdx] = useState(0); // cycles the rarity ladder while refining
 
   // StrictMode double-mounts the modal in dev, firing loadCategories twice;
   // the sequence counter makes every response but the latest a no-op.
   const loadSeq = React.useRef(0);
+
+  // The fate roll animation: while the refine call runs, climb the rarity
+  // ladder over and over (Common -> ... -> Mythic -> Common ...); the reveal
+  // then lands on the tier the server actually rolled.
+  useEffect(() => {
+    if (phase !== 'refining') return;
+    setRollIdx(0);
+    const id = setInterval(() => setRollIdx((i) => i + 1), 300);
+    return () => clearInterval(id);
+  }, [phase]);
 
   const menuKey = (m) => (m.search ? 'search:' : 'cat:') + m.name.toLowerCase();
   const pages = menu ? pagesByMenu[menuKey(menu)] || [] : [];
@@ -763,14 +778,20 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
     setChosen(skill);
     setPhase('refining');
     setError('');
+    // The refine request runs WHILE the fate-roll animation plays; the reveal
+    // waits for both so the ladder climb never gets cut short.
+    const minDelay = new Promise((resolve) => setTimeout(resolve, 2800));
     try {
-      const res = await fetch(`${API_BASE}/skills/wizard/refine`, {
+      const request = fetch(`${API_BASE}/skills/wizard/refine`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...skill, menu: menu?.name || null }),
+      }).then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `Failed to refine the skill (HTTP ${res.status})`);
+        return data;
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || `Failed to refine the skill (HTTP ${res.status})`);
+      const [data] = await Promise.all([request, minDelay]);
       setRefined(data.skill);
       setPhase('reveal');
     } catch (e) {
@@ -808,30 +829,28 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
     if (q) openMenu({ name: q, search: true });
   };
 
-  const skillButton = (skill) => {
-    const r = rarityFor(skill.strength);
-    return (
-      <button
-        key={skill.name}
-        onClick={() => pick(skill)}
-        disabled={generating}
-        className={`w-full text-left px-4 py-3 rounded-lg bg-gray-800/60 border hover:bg-indigo-500/10 disabled:opacity-50 transition-colors ${r.border}`}
-      >
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className={`text-sm font-bold ${r.text}`}>{skill.name}</span>
-          <span className={`text-[9px] px-1.5 py-px rounded border ${TYPE_STYLES[skill.type] || TYPE_STYLES.active}`}>
-            {TYPE_LABELS[skill.type] || 'Active'}
-          </span>
-          <span className={`text-[9px] px-1.5 py-px rounded border font-semibold ${r.chip}`}>
-            {r.label} {'•'} {skill.strength}/10
-          </span>
-        </div>
-        {skill.description && <div className="text-[11px] text-gray-500 mt-1 leading-snug">{skill.description}</div>}
-      </button>
-    );
-  };
+  // Browsing is rarity-free: every card is a base-level skill; fate rolls
+  // its strength only once the player commits to it.
+  const skillButton = (skill) => (
+    <button
+      key={skill.name}
+      onClick={() => pick(skill)}
+      disabled={generating}
+      className="w-full text-left px-4 py-3 rounded-lg bg-gray-800/60 border border-gray-700 hover:border-indigo-500/60 hover:bg-indigo-500/10 disabled:opacity-50 transition-colors"
+    >
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-sm font-bold text-indigo-300">{skill.name}</span>
+        <span className={`text-[9px] px-1.5 py-px rounded border ${TYPE_STYLES[skill.type] || TYPE_STYLES.active}`}>
+          {TYPE_LABELS[skill.type] || 'Active'}
+        </span>
+      </div>
+      {skill.description && <div className="text-[11px] text-gray-500 mt-1 leading-snug">{skill.description}</div>}
+    </button>
+  );
 
+  const rollingRarity = RARITY_TIERS[rollIdx % RARITY_TIERS.length];
   const revealRarity = refined ? rarityFor(refined.strength) : null;
+  const mythicReveal = phase === 'reveal' && refined?.strength === 10;
 
   return (
     <div
@@ -844,7 +863,9 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
     >
       <style>{WBRPG_CSS}</style>
       <div
-        className="bg-gray-900 border border-indigo-500/40 rounded-xl w-full max-w-md max-h-[85vh] overflow-y-auto shadow-2xl wbrpg-burst"
+        className={`bg-gray-900 border rounded-xl w-full max-w-md max-h-[85vh] overflow-y-auto shadow-2xl wbrpg-burst ${
+          phase === 'refining' ? `${rollingRarity.border}` : mythicReveal ? 'border-red-500/70 wbrpg-glow-red' : 'border-indigo-500/40'
+        }`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="px-5 pt-6 pb-4 text-center border-b border-gray-800">
@@ -921,7 +942,7 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
               <div className="text-sm text-indigo-300 wbrpg-shimmer">
                 {menu?.search ? <>Seeking skills for {'"'}{menu.name}{'"'}{'…'}</> : <>Uncovering {menu?.name} skills{'…'}</>}
               </div>
-              <div className="text-[11px] text-gray-500 mt-2">Rolling the strength of each ability.</div>
+              <div className="text-[11px] text-gray-500 mt-2">Five paths take shape{'…'}</div>
             </div>
           )}
 
@@ -984,14 +1005,20 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
           )}
 
           {phase === 'refining' && (
-            <div className="text-center py-8 space-y-3">
+            <div className="text-center py-8 space-y-4">
               <div className="text-lg font-bold text-gray-200 wbrpg-dissolve">{chosen?.name}</div>
-              <div className="text-sm text-indigo-300 wbrpg-shimmer">Refining this ability{'…'}</div>
+              <div className="text-xs text-gray-500 wbrpg-shimmer">Fate weighs this ability{'…'}</div>
+              <div key={rollIdx} className={`text-3xl font-extrabold tracking-widest uppercase wbrpg-burst ${rollingRarity.text}`}>
+                {rollingRarity.label}
+              </div>
             </div>
           )}
 
           {phase === 'reveal' && refined && (
             <div className="text-center py-4 space-y-3">
+              <div className={`text-2xl font-extrabold tracking-widest uppercase wbrpg-burst ${revealRarity.text}`}>
+                {revealRarity.label}
+              </div>
               <div className={`text-xl font-extrabold wbrpg-burst ${revealRarity.text}`}>{refined.name}</div>
               <div className="flex items-center justify-center gap-2">
                 <span className={`text-[10px] px-1.5 py-px rounded border ${TYPE_STYLES[refined.type] || TYPE_STYLES.active}`}>
@@ -999,10 +1026,15 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
                 </span>
                 {refined.strength != null && (
                   <span className={`text-[10px] px-1.5 py-px rounded border font-semibold ${revealRarity.chip}`}>
-                    {revealRarity.label} {'•'} Strength {refined.strength}/10
+                    {revealRarity.label}
                   </span>
                 )}
               </div>
+              {mythicReveal && (
+                <div className="text-[11px] text-red-300/90 font-semibold">
+                  A mythic power {'—'} the moment it is learned it will surge toward evolution.
+                </div>
+              )}
               {refined.description && (
                 <div className="text-[11px] text-gray-400 leading-relaxed px-2">{refined.description}</div>
               )}
