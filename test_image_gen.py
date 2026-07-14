@@ -571,20 +571,72 @@ def test_parallel_prompts_written_separately(tmp_path):
     assert record["id"] == record_id
     assert record["status"] == "done"
 
-    # Three independent writer calls, each pinned to its own beat of the
-    # scene in story order, so the batch reads as a sequence.
-    assert captured["n"] == 3
-    for slot, writer_input in enumerate(captured["inputs"]):
+    # Call 1 is the beat planner (its reply here is unparseable, so writers
+    # fall back to splitting the scene themselves); then three independent
+    # writer calls, each pinned to its own beat in story order.
+    assert captured["n"] == 4
+    assert "illustrated sequence" in captured["inputs"][0]
+    writer_inputs = captured["inputs"][1:]
+    for slot, writer_input in enumerate(writer_inputs):
         assert "SEQUENCE:" in writer_input
         assert f"beat {slot + 1} of 3" in writer_input
-    assert "opening beat" in captured["inputs"][0]
-    assert "final beat" in captured["inputs"][2]
+    assert "opening beat" in writer_inputs[0]
+    assert "final beat" in writer_inputs[2]
 
     # Three distinct prompts, aligned with the files they produced.
-    assert record["image_prompts"] == ["scene take 1", "scene take 2", "scene take 3"]
+    assert record["image_prompts"] == ["scene take 2", "scene take 3", "scene take 4"]
     assert record["image_prompt"] == record["image_prompts"][0]
     for filename, prompt in zip(record["filenames"], record["image_prompts"]):
         assert (tmp_path / MID / "images" / filename).read_bytes() == prompt.encode()
+
+
+def test_parse_beat_plan():
+    backend = _load_backend()
+    assert backend._parse_beat_plan("1. a\n2. b", 2) == ["a", "b"]
+    assert backend._parse_beat_plan(" 1) first \n2: second\n3 - third", 3) == \
+        ["first", "second", "third"]
+    assert backend._parse_beat_plan("no numbers here", 2) is None
+    assert backend._parse_beat_plan("1. only one of three", 3) is None
+    assert backend._parse_beat_plan("", 2) is None
+
+
+def test_batch_writers_share_one_beat_plan(tmp_path):
+    """One planner call splits the scene into N beats, and every writer gets
+    the SAME plan with its own beat assigned -- so the images agree on the
+    chronology instead of each writer splitting the scene differently."""
+    backend = _load_backend(tmp_path)
+    _enable(backend, image_num=3)
+    _fake_novita(backend)
+    captured = {"inputs": []}
+    plan = ("1. A knight draws his sword at the gate.\n"
+            "2. The duel rages in the courtyard.\n"
+            "3. The knight stands over his beaten foe.")
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        captured["inputs"].append(prompt)
+        if len(captured["inputs"]) == 1:
+            return plan
+        return f"take {len(captured['inputs'])}"
+
+    sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
+
+    async def run():
+        backend._spawn_generation(
+            save_id="mystory", turn=1, narration="a scene", history="",
+            sdk=sdk, trigger="auto")
+        await asyncio.gather(*backend._tasks)
+
+    asyncio.run(run())
+    record = backend._read_index()[0]
+    assert record["status"] == "done"
+
+    assert "exactly 3 consecutive beats" in captured["inputs"][0]
+    writer_inputs = captured["inputs"][1:]
+    assert len(writer_inputs) == 3
+    for slot, writer_input in enumerate(writer_inputs):
+        # Each writer sees the full shared plan and is pinned to its beat.
+        assert "The duel rages in the courtyard." in writer_input
+        assert f"beat {slot + 1} ONLY" in writer_input
 
 
 def test_single_image_gets_most_striking_moment_hint(tmp_path):
@@ -611,8 +663,8 @@ def test_single_image_gets_most_striking_moment_hint(tmp_path):
 
 
 def test_parallel_prompt_failure_borrows_sibling_prompt(tmp_path):
-    """A failed writer slot reuses a surviving sibling's prompt instead of
-    losing its image; only all slots failing sinks the record."""
+    """A failed writer slot reuses its nearest surviving sibling's prompt
+    instead of losing its image; only all slots failing sinks the record."""
     backend = _load_backend(tmp_path)
     backend.STEP_RETRY_BASE_DELAY_S = 0
     _enable(backend, image_num=3, step_retries=0)
@@ -622,7 +674,9 @@ def test_parallel_prompt_failure_borrows_sibling_prompt(tmp_path):
     async def generate(prompt, model_preference="balanced", max_tokens=None):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise RuntimeError("LLM unavailable")
+            raise RuntimeError("planner down")   # beat plan falls back too
+        if calls["n"] == 2:
+            raise RuntimeError("LLM unavailable")   # slot 0's writer
         return f"scene take {calls['n']}"
 
     sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
@@ -639,8 +693,9 @@ def test_parallel_prompt_failure_borrows_sibling_prompt(tmp_path):
     assert record["id"] == record_id
     assert record["status"] == "done"
     assert len(record["filenames"]) == 3
-    # Slot 0's writer failed, so it borrowed the first surviving prompt.
-    assert record["image_prompts"] == ["scene take 2", "scene take 2", "scene take 3"]
+    # Slot 0's writer failed, so it borrowed its nearest surviving sibling
+    # (slot 1), keeping the duplicated beat adjacent in the sequence.
+    assert record["image_prompts"] == ["scene take 3", "scene take 3", "scene take 4"]
 
 
 def test_all_prompt_writers_failing_marks_error(tmp_path):

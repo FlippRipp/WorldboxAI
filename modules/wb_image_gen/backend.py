@@ -234,15 +234,78 @@ SINGLE_MOMENT_HINT = (
     "text. Scenes often keep going after the interesting part, so do not "
     "default to illustrating how the scene ends.")
 
+# The shared beat plan: one LLM call splits the scene into N beats BEFORE the
+# writers run, so all of them work from the same chronology. Without it each
+# writer splits the scene on its own and the beat boundaries disagree, so a
+# "later" image can depict an earlier moment than its neighbor.
+BEAT_PLAN_PROMPT = """You are planning an illustrated sequence of {total} images for the scene below. Split the LATEST SCENE into exactly {total} consecutive beats in story order -- together they must cover the scene's arc, and its most striking action must land inside its own beat, never summarized away.
 
-def _moment_hint(slot: int, total: int) -> str:
+Rules:
+- Each beat is ONE line: "N. " followed by 1-2 sentences of concrete visual description (who is visible, what they are doing, where, the mood). No inner thoughts, no story commentary.
+- Strict story order: beat 1 is the earliest moment illustrated, beat {total} the latest.
+- Output ONLY the {total} numbered lines, nothing else.
+
+LATEST SCENE:
+{narration}"""
+
+
+def _parse_beat_plan(raw: str, total: int) -> list[str] | None:
+    """The planner's numbered lines as a list, or None when the reply does
+    not contain exactly beats 1..total (falls back to independent splits)."""
+    beats: dict[int, str] = {}
+    for line in (raw or "").splitlines():
+        m = re.match(r"\s*(\d+)\s*[.):-]\s*(.*\S)", line)
+        if m:
+            n = int(m.group(1))
+            if 1 <= n <= total and n not in beats:
+                beats[n] = m.group(2).strip()
+    if len(beats) != total:
+        return None
+    return [beats[i] for i in range(1, total + 1)]
+
+
+async def _plan_beats(cfg: dict, narration: str, sdk, total: int) -> list[str] | None:
+    """Split the latest scene into `total` consecutive beats with one LLM
+    call. Any failure returns None, which falls back to each writer splitting
+    the scene on its own (the pre-plan behavior)."""
+    if total <= 1 or sdk is None:
+        return None
+    prompt = (BEAT_PLAN_PROMPT
+              .replace("{total}", str(total))
+              .replace("{narration}", narration or ""))
+    try:
+        sdk.llm._current_module = MODULE_ID
+        raw = await sdk.llm.generate(
+            prompt, model_preference=cfg.get("prompt_model_preference", "smartest"))
+    except Exception as e:
+        print(f"[Image Gen] Beat planning failed (independent splits instead): {e}")
+        return None
+    finally:
+        sdk.llm._current_module = ""
+    beats = _parse_beat_plan(raw, total)
+    if beats is None:
+        print("[Image Gen] Unparseable beat plan (independent splits instead): "
+              f"{(raw or '')[:200]!r}")
+    return beats
+
+
+def _moment_hint(slot: int, total: int, beats: list[str] | None = None) -> str:
     if total <= 1:
         return SINGLE_MOMENT_HINT
+    preamble = (f"SEQUENCE: {total} prompts are being written independently "
+                f"for this same scene, one image each, and side by side the "
+                f"images must read as a chronological sequence of what "
+                f"happened. ")
+    if beats:
+        plan = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(beats))
+        return (preamble +
+                f"The scene is split into these consecutive beats:\n{plan}\n"
+                f"Write this prompt for beat {slot + 1} ONLY -- depict that "
+                f"beat's action, characters, and mood, and stay out of the "
+                f"other beats.")
     position = (" This is the opening beat." if slot == 0 else
                 " This is the final beat." if slot == total - 1 else "")
-    return (f"SEQUENCE: {total} prompts are being written independently for "
-            f"this same scene, one image each, and side by side the images "
-            f"must read as a chronological sequence of what happened. "
+    return (preamble +
             f"Mentally split the latest scene into {total} consecutive "
             f"beats, in story order, and depict ONLY beat {slot + 1} of "
             f"{total}.{position} Stay inside that beat's action, characters, "
@@ -3203,6 +3266,10 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                     raise RuntimeError("no LLM available to write the image prompt")
                 await _patch_record(record_id, status="prompting")
 
+                # One shared beat plan first, so every writer sees the same
+                # chronology (None falls back to independent splits).
+                beats = await _plan_beats(cfg, narration, sdk, image_num)
+
                 # One writer call per image, run concurrently: separate calls
                 # (plus a per-slot moment hint) pin each image to its own
                 # chronological beat of the scene, so a batch reads as a
@@ -3222,17 +3289,22 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
 
                 prompt_results = await asyncio.gather(
                     *(_retry_step("prompt writing",
-                                  _writer(_moment_hint(slot, image_num)),
+                                  _writer(_moment_hint(slot, image_num, beats)),
                                   retries)
                       for slot in range(image_num)),
                     return_exceptions=True)
-                good = [p for p in prompt_results if not isinstance(p, BaseException)]
-                if not good:
+                survivors = [i for i, p in enumerate(prompt_results)
+                             if not isinstance(p, BaseException)]
+                if not survivors:
                     raise prompt_results[0]
-                # A failed writer slot borrows a sibling's prompt (seed still
-                # varies) rather than sinking its image or the whole batch.
-                prompts = [p if not isinstance(p, BaseException) else good[0]
-                           for p in prompt_results]
+                # A failed writer slot borrows its NEAREST sibling's prompt
+                # (seed still varies) rather than sinking its image or the
+                # whole batch -- nearest, so the duplicated beat sits next to
+                # its twin and the sequence stays in order.
+                prompts = [p if not isinstance(p, BaseException)
+                           else prompt_results[min(survivors,
+                                                   key=lambda i: (abs(i - slot), i))]
+                           for slot, p in enumerate(prompt_results)]
 
             await _patch_record(record_id, status="generating",
                                 image_prompt=prompts[0], image_prompts=prompts)
