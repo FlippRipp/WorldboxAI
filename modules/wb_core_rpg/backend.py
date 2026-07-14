@@ -1369,6 +1369,25 @@ def _skill_record_block(name: str, data: dict) -> str:
     return "\n".join(lines)
 
 
+def _story_context_section(state: dict) -> str:
+    """Story style (themes/tags) and recent scene excerpts for the evolution
+    prompts. Offered as plain context - deliberately no directive on how to
+    use it; the model decides what, if anything, to draw from it."""
+    lines = []
+    style = state.get("story_style") or {}
+    for key, label in (("themes", "Story themes"), ("tags", "Story tags")):
+        value = style.get(key)
+        value = value.strip() if isinstance(value, str) else ""
+        if value:
+            lines.append(f"{label}: {value}")
+    history = [h for h in (state.get("history") or []) if isinstance(h, str) and h.strip()]
+    if history:
+        lines.append("Recent story (most recent last):\n" + "\n---\n".join(history[-3:]))
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n\n"
+
+
 def _character_context_block(rpg: dict) -> str:
     stats = rpg.get("stats", {})
     stats_line = ", ".join(f"{s}={stats.get(s, 10)}" for s in STAT_NAMES)
@@ -1388,12 +1407,13 @@ def _character_context_block(rpg: dict) -> str:
     return "\n".join(lines)
 
 
-def _evolution_options_prompt(rpg: dict, key: str, data: dict, world_data: dict | None) -> str:
+def _evolution_options_prompt(rpg: dict, key: str, data: dict, state: dict) -> str:
     tier = _skill_tier(data)
-    world_section = _world_context_section(world_data)
+    world_section = _world_context_section(state.get("world_data"))
+    story_section = _story_context_section(state)
     return f"""You are the game system for a text RPG. A character's skill has reached maximum rating and is ready to EVOLVE into a more powerful Tier {tier + 1} form. Output ONLY valid JSON, no other text.
 
-{world_section}Character:
+{world_section}{story_section}Character:
 {_character_context_block(rpg)}
 
 Skill ready to evolve:
@@ -1409,9 +1429,10 @@ JSON response (pure path first):
 {{"options": [{{"theme": "1-3 words", "summary": "one short clause"}}, {{"theme": "...", "summary": "..."}}, {{"theme": "...", "summary": "..."}}, {{"theme": "...", "summary": "..."}}]}}"""
 
 
-def _evolve_prompt(rpg: dict, key: str, data: dict, theme: str, world_data: dict | None, pure: bool = False) -> str:
+def _evolve_prompt(rpg: dict, key: str, data: dict, theme: str, state: dict, pure: bool = False) -> str:
     tier = _skill_tier(data)
-    world_section = _world_context_section(world_data)
+    world_section = _world_context_section(state.get("world_data"))
+    story_section = _story_context_section(state)
     if pure:
         theme_req = (
             f'- This is the PURE path: keep the skill\'s exact identity and manner of working - do NOT take it '
@@ -1422,7 +1443,7 @@ def _evolve_prompt(rpg: dict, key: str, data: dict, theme: str, world_data: dict
         theme_req = f'- It must embody the "{theme}" theme and stay true to the world\'s tone and the skill\'s history.'
     return f"""You are the game system for a text RPG. A character's maxed-out skill is evolving from Tier {tier} to Tier {tier + 1} down the "{theme}" path. Output ONLY valid JSON, no other text.
 
-{world_section}Character:
+{world_section}{story_section}Character:
 {_character_context_block(rpg)}
 
 Skill that is evolving:
@@ -1759,7 +1780,7 @@ def get_router():
 
             llm = _llm_bridge()
             config = _config(sm)
-            prompt = _evolution_options_prompt(rpg, key, data, sm.state.get("world_data"))
+            prompt = _evolution_options_prompt(rpg, key, data, sm.state)
             try:
                 llm._current_module = "wb_core_rpg"
                 raw = await llm.generate(prompt, model_preference=config.get("evolution_ai_model", "smartest"))
@@ -1813,7 +1834,7 @@ def get_router():
 
         llm = _llm_bridge()
         config = _config(sm)
-        prompt = _evolve_prompt(rpg, key, data, theme, sm.state.get("world_data"), pure=pure)
+        prompt = _evolve_prompt(rpg, key, data, theme, sm.state, pure=pure)
         try:
             llm._current_module = "wb_core_rpg"
             raw = await llm.generate(prompt, model_preference=config.get("evolution_ai_model", "smartest"))

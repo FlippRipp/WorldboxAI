@@ -342,6 +342,40 @@ def test_evolved_skill_can_evolve_again():
     assert "Tier 2 to Tier 3" in calls[0]["prompt"]
 
 
+def test_evolution_prompts_carry_story_style_and_recent_scenes():
+    mod = _load_backend()
+    client, sm, calls = _make_client(mod, _rpg(), llm_replies=[OPTIONS_REPLY, EVOLVE_REPLY])
+    sm.state["story_style"] = {"themes": "redemption, found family", "tags": "noir, heist", "pacing": "slow burn"}
+    sm.state["history"] = ["Scene one.", "Scene two.", "Scene three.", "Scene four."]
+
+    res = client.post(f"{BASE}/skills/swordplay/evolution-options")
+    assert res.status_code == 200
+    res = client.post(f"{BASE}/skills/swordplay/evolve", json={"theme": "Brutal"})
+    assert res.status_code == 200
+
+    for call in calls:
+        prompt = call["prompt"]
+        assert "Story themes: redemption, found family" in prompt
+        assert "Story tags: noir, heist" in prompt
+        # The last three scenes, in full.
+        assert "Scene two." in prompt and "Scene three." in prompt and "Scene four." in prompt
+        assert "Scene one." not in prompt
+        # Pacing is narration rhythm, not ability design.
+        assert "slow burn" not in prompt
+
+
+def test_evolution_prompts_skip_empty_story_context():
+    mod = _load_backend()
+    client, sm, calls = _make_client(mod, _rpg(), llm_replies=[OPTIONS_REPLY])
+    sm.state["story_style"] = {"themes": "  ", "tags": "", "pacing": ""}
+    res = client.post(f"{BASE}/skills/swordplay/evolution-options")
+    assert res.status_code == 200
+    prompt = calls[0]["prompt"]
+    assert "Story themes" not in prompt
+    assert "Story tags" not in prompt
+    assert "Recent story" not in prompt
+
+
 # ---------------------------------------------------------------------------
 # storyteller announcement after an evolution
 # ---------------------------------------------------------------------------

@@ -154,7 +154,10 @@ and trivial moves grant no XP.
 Skills hard-cap at rating 10 — tiers are the only way past it. When an
 `active` or `passive` skill reaches 10 (via practice, Reader mutations,
 librarian events, or skill-point spending), it is queued in
-`pending_evolutions` and the sidebar widget opens the evolution flow:
+`pending_evolutions` and the sidebar widget opens the evolution flow.
+Both AI calls below receive the world context plus the story's themes and
+tags (`story_style`) and the last three story scenes — provided as plain
+context with no directive, so the model decides what to draw from it:
 
 1. A "preparing skill progression options" screen fires `POST
    /skills/{name}/evolution-options`, which asks the AI for **exactly 4
