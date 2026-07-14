@@ -468,16 +468,24 @@ function SkillEvolutionModal({ skillName, rpg, generating, onDeferred, onEvolved
   const [result, setResult] = useState(null); // {rpg, evolved}
   const [deferring, setDeferring] = useState(false);
 
+  // StrictMode double-mounts the modal in dev, firing loadOptions twice; the
+  // sequence counter makes every response but the latest a no-op so an
+  // earlier request can never replace options the user is already reading.
+  const loadSeq = React.useRef(0);
+
   async function loadOptions() {
+    const seq = ++loadSeq.current;
     setPhase('loading');
     setError('');
     try {
       const res = await fetch(`${API_BASE}/skills/${encodeURIComponent(skillName)}/evolution-options`, { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || `Failed to prepare options (HTTP ${res.status})`);
+      if (seq !== loadSeq.current) return;
       setOptions(data.options || []);
       setPhase('choose');
     } catch (e) {
+      if (seq !== loadSeq.current) return;
       setError(e.message);
     }
   }
@@ -581,9 +589,16 @@ function SkillEvolutionModal({ skillName, rpg, generating, onDeferred, onEvolved
                     key={opt.theme}
                     onClick={() => choose(opt.theme)}
                     disabled={generating}
-                    className="w-full text-left px-4 py-3 rounded-lg bg-gray-800/60 border border-gray-700 hover:border-purple-500/60 hover:bg-purple-500/10 disabled:opacity-50 transition-colors group"
+                    className={`w-full text-left px-4 py-3 rounded-lg bg-gray-800/60 border hover:bg-purple-500/10 disabled:opacity-50 transition-colors group ${opt.kind === 'pure' ? 'border-amber-500/40 hover:border-amber-400/70' : 'border-gray-700 hover:border-purple-500/60'}`}
                   >
-                    <div className="text-sm font-bold text-purple-300 group-hover:text-purple-200">{opt.theme}</div>
+                    <div className="text-sm font-bold text-purple-300 group-hover:text-purple-200">
+                      {opt.theme}
+                      {opt.kind === 'pure' && (
+                        <span className="ml-2 align-middle text-[9px] font-semibold tracking-wider text-amber-300/90 bg-amber-500/10 border border-amber-500/30 rounded px-1.5 py-0.5 uppercase">
+                          Pure ascension
+                        </span>
+                      )}
+                    </div>
                     {opt.summary && <div className="text-[11px] text-gray-500 mt-0.5">{opt.summary}</div>}
                   </button>
                 ))}

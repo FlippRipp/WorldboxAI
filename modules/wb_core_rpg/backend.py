@@ -1,4 +1,5 @@
 """Core RPG System -- stats, skills, XP, leveling, action judgement, HP."""
+import asyncio
 import math
 import os
 import random
@@ -1176,6 +1177,11 @@ EVOLVABLE_TYPES = ("active", "passive")
 MAX_SKILL_RATING = 10
 EVOLVED_RESET_RATING = 5
 
+# In-flight guards for evolution option generation, keyed by "save_id:skill".
+# Entries are tiny and never removed; waiters may still hold a popped lock
+# while a fresh request creates a second one, which would defeat the guard.
+_options_locks: dict[str, "asyncio.Lock"] = {}
+
 
 def _skill_tier(data: dict) -> int:
     try:
@@ -1338,15 +1344,27 @@ def _evolution_options_prompt(rpg: dict, key: str, data: dict, world_data: dict 
 Skill ready to evolve:
 {_skill_record_block(key, data)}
 
-Propose exactly 3 distinct thematic directions this skill could evolve toward. Each theme is a short evocative label of 1-3 words (like "Brutal", "Efficiency", "Stealthy" - but fitting THIS skill and world), plus one short clause summarizing what that path emphasizes. The three themes must be meaningfully different from each other and from the skill's current form. Do not repeat the skill's current evolution theme.
+Propose exactly 4 evolution paths. Every path must promise a SIGNIFICANT power-up - a major leap beyond the current form, never a sidegrade, tradeoff, or flavor change.
 
-JSON response:
-{{"options": [{{"theme": "1-3 words", "summary": "one short clause"}}, {{"theme": "...", "summary": "..."}}, {{"theme": "...", "summary": "..."}}]}}"""
+The FIRST path is the pure path: the skill stays exactly what it is but grows dramatically stronger - same identity, same manner of working, pushed far past its current limits. Its theme is a short label conveying refinement or ascension of the skill as it already is (like "Perfected", "Transcendent", "True Mastery" - but fitting THIS skill), and its summary says how the skill's existing strengths intensify.
+
+The other THREE paths each take the skill in a distinct new direction. Each theme is a short evocative label of 1-3 words (like "Brutal", "Efficiency", "Stealthy" - but fitting THIS skill and world), plus one short clause summarizing what that path emphasizes. These three directions must be meaningfully different from each other, from the pure path, and from the skill's current form. Do not repeat the skill's current evolution theme.
+
+JSON response (pure path first):
+{{"options": [{{"theme": "1-3 words", "summary": "one short clause"}}, {{"theme": "...", "summary": "..."}}, {{"theme": "...", "summary": "..."}}, {{"theme": "...", "summary": "..."}}]}}"""
 
 
-def _evolve_prompt(rpg: dict, key: str, data: dict, theme: str, world_data: dict | None) -> str:
+def _evolve_prompt(rpg: dict, key: str, data: dict, theme: str, world_data: dict | None, pure: bool = False) -> str:
     tier = _skill_tier(data)
     world_section = _world_context_section(world_data)
+    if pure:
+        theme_req = (
+            f'- This is the PURE path: keep the skill\'s exact identity and manner of working - do NOT take it '
+            f'in a new direction. It becomes a dramatically more potent version of itself, in the spirit of '
+            f'"{theme}": what it already does, done at a far greater scale.'
+        )
+    else:
+        theme_req = f'- It must embody the "{theme}" theme and stay true to the world\'s tone and the skill\'s history.'
     return f"""You are the game system for a text RPG. A character's maxed-out skill is evolving from Tier {tier} to Tier {tier + 1} down the "{theme}" path. Output ONLY valid JSON, no other text.
 
 {world_section}Character:
@@ -1358,8 +1376,8 @@ Skill that is evolving:
 Chosen evolution theme: {theme}
 
 Design the evolved Tier {tier + 1} form. Requirements:
-- It MUST be strictly more powerful than the current form: broader in scope, stronger in effect, or with fewer limits - a major step up, not a rename.
-- It must embody the "{theme}" theme and stay true to the world's tone and the skill's history.
+- It MUST be a SIGNIFICANT power-up over the current form: broader in scope, stronger in effect, and with fewer limits - a dramatic leap, not a rename or minor tweak. It should feel like a new class of power.
+{theme_req}
 - Give it a new evocative name of 2-4 words. It must not be the same as the old name.
 - The description is 1-2 tight sentences: what it does, how it manifests, and any remaining limit or cost. Concrete over flowery.
 - Trigger words: 2-5 short words or phrases a player would naturally use when invoking it.
@@ -1674,32 +1692,45 @@ def get_router():
         if entry.get("options"):
             return {"skill": key, "tier": _skill_tier(data), "options": entry["options"]}
 
-        llm = _llm_bridge()
-        config = _config(sm)
-        prompt = _evolution_options_prompt(rpg, key, data, sm.state.get("world_data"))
-        try:
-            llm._current_module = "wb_core_rpg"
-            raw = await llm.generate(prompt, model_preference=config.get("evolution_ai_model", "smartest"))
-        finally:
-            llm._current_module = ""
+        # Serialize generation per skill: the widget can fire two overlapping
+        # requests (React StrictMode double-mounts the modal in dev), and
+        # without the lock both miss the cache, run separate LLM calls, and
+        # the second option set visibly replaces the first on screen.
+        lock = _options_locks.setdefault(f"{sm.active_save_id}:{key}", asyncio.Lock())
+        async with lock:
+            if entry.get("options"):
+                return {"skill": key, "tier": _skill_tier(data), "options": entry["options"]}
 
-        parsed = _parse_json_repair(raw)
-        options = parsed.get("options") if isinstance(parsed, dict) else None
-        cleaned = []
-        if isinstance(options, list):
-            for opt in options:
-                if not isinstance(opt, dict):
-                    continue
-                theme = " ".join(str(opt.get("theme", "")).strip().split()[:3])
-                if not theme:
-                    continue
-                cleaned.append({"theme": theme, "summary": str(opt.get("summary", "")).strip()})
-        if len(cleaned) != 3:
-            raise HTTPException(status_code=502, detail="The AI failed to produce 3 evolution options. Try again.")
+            llm = _llm_bridge()
+            config = _config(sm)
+            prompt = _evolution_options_prompt(rpg, key, data, sm.state.get("world_data"))
+            try:
+                llm._current_module = "wb_core_rpg"
+                raw = await llm.generate(prompt, model_preference=config.get("evolution_ai_model", "smartest"))
+            finally:
+                llm._current_module = ""
 
-        entry["options"] = cleaned
-        _persist(sm)
-        return {"skill": key, "tier": _skill_tier(data), "options": cleaned}
+            parsed = _parse_json_repair(raw)
+            options = parsed.get("options") if isinstance(parsed, dict) else None
+            cleaned = []
+            if isinstance(options, list):
+                for opt in options:
+                    if not isinstance(opt, dict):
+                        continue
+                    theme = " ".join(str(opt.get("theme", "")).strip().split()[:3])
+                    if not theme:
+                        continue
+                    cleaned.append({"theme": theme, "summary": str(opt.get("summary", "")).strip()})
+            if len(cleaned) != 4:
+                raise HTTPException(status_code=502, detail="The AI failed to produce 4 evolution options. Try again.")
+            # The prompt puts the pure path first; the other three are new
+            # directions. The kind steers the final evolve prompt.
+            for i, opt in enumerate(cleaned):
+                opt["kind"] = "pure" if i == 0 else "divergent"
+
+            entry["options"] = cleaned
+            _persist(sm)
+            return {"skill": key, "tier": _skill_tier(data), "options": cleaned}
 
     @router.post("/skills/{skill_name}/evolve")
     async def evolve_skill(skill_name: str, payload: EvolvePayload):
@@ -1717,12 +1748,16 @@ def get_router():
             raise HTTPException(status_code=400, detail="An evolution theme is required.")
         entry = _pending_entry(rpg, key)
         cached = entry.get("options") if entry else None
-        if cached and theme.lower() not in {o.get("theme", "").lower() for o in cached}:
+        chosen = next((o for o in cached or [] if o.get("theme", "").lower() == theme.lower()), None)
+        if cached and chosen is None:
             raise HTTPException(status_code=400, detail=f"'{theme}' is not one of the offered evolution themes.")
+        # Pre-4-option saves cached options without a kind; they evolve as
+        # divergent paths, same as before.
+        pure = bool(chosen) and chosen.get("kind") == "pure"
 
         llm = _llm_bridge()
         config = _config(sm)
-        prompt = _evolve_prompt(rpg, key, data, theme, sm.state.get("world_data"))
+        prompt = _evolve_prompt(rpg, key, data, theme, sm.state.get("world_data"), pure=pure)
         try:
             llm._current_module = "wb_core_rpg"
             raw = await llm.generate(prompt, model_preference=config.get("evolution_ai_model", "smartest"))

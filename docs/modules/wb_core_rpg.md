@@ -10,7 +10,7 @@ The Core RPG System module provides character stats, skills, leveling, health, a
 | **Skills** | Open-ended, AI-driven skill names with a 1-10 rating. Skills are created dynamically by the AI as they become relevant to the story. |
 | **HP** | Health points derived from Vitality and level. Formula: `(vitality * hp_per_vitality) + (level * 2)`. Configurable via settings. |
 | **Leveling** | Three progression systems selectable in settings: XP-Based, Practice-Based, Milestone-Based. Level-ups bank attribute and skill points that the player spends in a level-up popup. |
-| **Skill Evolution** | A skill that reaches rating 10 can evolve: the AI offers 3 short themes, the player picks one, and the skill becomes a renamed, more powerful Tier N+1 form. |
+| **Skill Evolution** | A skill that reaches rating 10 can evolve: the AI offers 4 short themes (a pure amplification of the skill as-is, plus 3 distinct new directions — all significant power-ups), the player picks one, and the skill becomes a renamed, more powerful Tier N+1 form. |
 | **Action Feasibility** | Before each turn, the module injects the character sheet and action context into the Storyteller prompt. The Storyteller assesses feasibility and narrates accordingly. |
 | **Stat/Skill Improvement** | After each turn, the module processes mutations from the Reader agent to update HP, stats, skills, and XP. |
 | **Slash Commands** | `/stats` — view character sheet; `/skills` — list skills with ratings; `/level` — view level and XP progress. |
@@ -157,14 +157,19 @@ librarian events, or skill-point spending), it is queued in
 `pending_evolutions` and the sidebar widget opens the evolution flow:
 
 1. A "preparing skill progression options" screen fires `POST
-   /skills/{name}/evolution-options`, which asks the AI for **exactly 3
-   short themes** (1-3 words each, e.g. *Brutal / Efficiency / Stealthy*)
-   with a one-clause summary. Options are cached on the pending entry, so
-   reopening never re-calls the AI.
+   /skills/{name}/evolution-options`, which asks the AI for **exactly 4
+   short themes** (1-3 words each) with a one-clause summary. The first is
+   always the **pure path** (`kind: "pure"`) — the skill amplified without
+   changing direction; the other three (`kind: "divergent"`) take it in
+   distinct new directions (e.g. *Brutal / Efficiency / Stealthy*). All
+   four must be significant power-ups. Options are cached on the pending
+   entry, so reopening never re-calls the AI, and generation is serialized
+   per skill so overlapping requests share one AI call.
 2. The player picks a theme; an evolve animation plays while `POST
    /skills/{name}/evolve` runs. The AI designs the evolved form — new
-   evocative name, tighter description, trigger words — required to be
-   strictly more powerful than the old form.
+   evocative name, tighter description, trigger words — required to be a
+   dramatic power-up over the old form. The pure path keeps the skill's
+   identity and amplifies it; divergent paths embody their theme.
 3. The skill is replaced: `tier + 1`, rating reset to 5, `lineage` extended
    with the old name, practice counters migrated. It can climb to 10 and
    evolve again, indefinitely.
@@ -250,7 +255,7 @@ The module owns a router mounted at `/api/modules/wb_core_rpg` (via
 | `PUT /api/modules/wb_core_rpg/skills/{skill_name}` | Update any subset of fields; `name` renames the skill (practice counters and pending evolutions follow). |
 | `DELETE /api/modules/wb_core_rpg/skills/{skill_name}` | Remove the skill and its practice counter. |
 | `POST /api/modules/wb_core_rpg/levelup/spend` | Spend banked points. Body: `{stat_allocations?, skill_allocations?, new_skill?}`. Validates totals against unspent points, stat caps, and the rating-10 ceiling before applying anything; returns the full rpg dict. |
-| `POST /api/modules/wb_core_rpg/skills/{skill_name}/evolution-options` | AI call returning `{skill, tier, options: [{theme, summary} ×3]}`. 409 unless the skill is an evolvable type at rating 10. Options are cached. |
+| `POST /api/modules/wb_core_rpg/skills/{skill_name}/evolution-options` | AI call returning `{skill, tier, options: [{theme, summary, kind} ×4]}` — first option is `kind: "pure"`, the rest `"divergent"`. 409 unless the skill is an evolvable type at rating 10. Options are cached. |
 | `POST /api/modules/wb_core_rpg/skills/{skill_name}/evolve` | Body `{theme}` (must match an offered theme when options are cached). AI call that applies the Tier N+1 form; returns `{rpg, evolved: {old_name, new_name, tier, theme, description}}`. |
 | `DELETE /api/modules/wb_core_rpg/skills/{skill_name}/evolution` | Defer the pending evolution (stops the auto-opening popup; the Evolve badge remains). |
 

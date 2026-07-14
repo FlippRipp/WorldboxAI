@@ -74,6 +74,7 @@ def _make_client(mod, rpg, llm_replies=None, config=None):
 
 OPTIONS_REPLY = json.dumps({
     "options": [
+        {"theme": "Perfected Blade", "summary": "the same swordplay, honed far past mortal limits"},
         {"theme": "Brutal", "summary": "raw overwhelming force"},
         {"theme": "Efficiency", "summary": "no wasted motion"},
         {"theme": "Stealthy", "summary": "strikes from silence"},
@@ -91,7 +92,7 @@ EVOLVE_REPLY = json.dumps({
 # evolution-options
 # ---------------------------------------------------------------------------
 
-def test_options_returns_three_themes_and_caches():
+def test_options_returns_four_themes_and_caches():
     mod = _load_backend()
     client, sm, calls = _make_client(mod, _rpg(), llm_replies=[OPTIONS_REPLY])
 
@@ -100,18 +101,52 @@ def test_options_returns_three_themes_and_caches():
     body = res.json()
     assert body["skill"] == "swordplay"
     assert body["tier"] == 1
-    assert [o["theme"] for o in body["options"]] == ["Brutal", "Efficiency", "Stealthy"]
+    assert [o["theme"] for o in body["options"]] == ["Perfected Blade", "Brutal", "Efficiency", "Stealthy"]
+    # The first option is the pure amplification path; the rest diverge.
+    assert [o["kind"] for o in body["options"]] == ["pure", "divergent", "divergent", "divergent"]
     assert len(calls) == 1
     # Full context reaches the prompt: world, character, complete skill record.
     prompt = calls[0]["prompt"]
     assert "Dark Fantasy" in prompt
     assert "Master duelist." in prompt
     assert "A wandering duelist." in prompt
+    assert "exactly 4 evolution paths" in prompt
+    assert "pure path" in prompt
 
     # Second call returns the cached options with zero extra LLM calls.
     res2 = client.post(f"{BASE}/skills/swordplay/evolution-options")
     assert res2.status_code == 200
     assert res2.json()["options"] == body["options"]
+    assert len(calls) == 1
+
+
+def test_options_concurrent_requests_share_one_generation():
+    """Two overlapping requests (StrictMode double-mount) must produce one
+    LLM call and identical option sets, not two racing generations."""
+    mod = _load_backend()
+    calls = []
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        calls.append(prompt)
+        await asyncio.sleep(0.01)  # suspend so both requests overlap
+        return OPTIONS_REPLY
+
+    llm = SimpleNamespace(generate=generate, _current_module="")
+    _, sm, _ = _make_client(mod, _rpg())
+    mod.set_services({
+        "session_manager": sm,
+        "engine": SimpleNamespace(sdk=SimpleNamespace(llm=llm)),
+    })
+    router = mod.get_router()
+    endpoint = next(
+        r.endpoint for r in router.routes if r.path == "/skills/{skill_name}/evolution-options"
+    )
+
+    async def run():
+        return await asyncio.gather(endpoint("swordplay"), endpoint("swordplay"))
+
+    first, second = asyncio.run(run())
+    assert first["options"] == second["options"]
     assert len(calls) == 1
 
 
@@ -153,11 +188,26 @@ def test_options_theme_clamped_to_three_words():
         {"theme": "Way Too Many Words Here Truly", "summary": "s"},
         {"theme": "B", "summary": "s"},
         {"theme": "C", "summary": "s"},
+        {"theme": "D", "summary": "s"},
     ]})
     client, _, _ = _make_client(mod, _rpg(), llm_replies=[reply])
     res = client.post(f"{BASE}/skills/swordplay/evolution-options")
     assert res.status_code == 200
     assert res.json()["options"][0]["theme"] == "Way Too Many"
+
+
+def test_options_wrong_count_returns_502():
+    mod = _load_backend()
+    reply = json.dumps({"options": [
+        {"theme": "A", "summary": "s"},
+        {"theme": "B", "summary": "s"},
+        {"theme": "C", "summary": "s"},
+    ]})
+    client, sm, _ = _make_client(mod, _rpg(), llm_replies=[reply])
+    res = client.post(f"{BASE}/skills/swordplay/evolution-options")
+    assert res.status_code == 502
+    entry = sm.state["module_data"]["wb_core_rpg"]["pending_evolutions"][0]
+    assert entry["options"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -169,9 +219,10 @@ def _cached_rpg():
     rpg["pending_evolutions"] = [{
         "skill": "swordplay",
         "options": [
-            {"theme": "Brutal", "summary": "raw force"},
-            {"theme": "Efficiency", "summary": "clean"},
-            {"theme": "Stealthy", "summary": "silent"},
+            {"theme": "Perfected Blade", "summary": "sharper still", "kind": "pure"},
+            {"theme": "Brutal", "summary": "raw force", "kind": "divergent"},
+            {"theme": "Efficiency", "summary": "clean", "kind": "divergent"},
+            {"theme": "Stealthy", "summary": "silent", "kind": "divergent"},
         ],
         "status": "pending",
     }]
@@ -205,6 +256,36 @@ def test_evolve_applies_tiered_form():
     assert rpg["pending_evolutions"] == []
     assert calls[0]["model_preference"] == "smartest"
     assert '"Brutal" path' in calls[0]["prompt"]
+    # Divergent path: the theme steers a new direction, not a pure upgrade.
+    assert 'embody the "Brutal" theme' in calls[0]["prompt"]
+    assert "PURE path" not in calls[0]["prompt"]
+
+
+def test_evolve_pure_path_keeps_skill_identity_in_prompt():
+    mod = _load_backend()
+    client, _, calls = _make_client(mod, _cached_rpg(), llm_replies=[EVOLVE_REPLY])
+    res = client.post(f"{BASE}/skills/swordplay/evolve", json={"theme": "Perfected Blade"})
+    assert res.status_code == 200
+    prompt = calls[0]["prompt"]
+    assert "PURE path" in prompt
+    assert "do NOT take it" in prompt
+    assert "embody the" not in prompt
+
+
+def test_evolve_legacy_cached_options_without_kind_stay_divergent():
+    # Saves from before the 4-option flow cached options without a kind.
+    mod = _load_backend()
+    rpg = _cached_rpg()
+    rpg["pending_evolutions"][0]["options"] = [
+        {"theme": "Brutal", "summary": "raw force"},
+        {"theme": "Efficiency", "summary": "clean"},
+        {"theme": "Stealthy", "summary": "silent"},
+    ]
+    client, _, calls = _make_client(mod, rpg, llm_replies=[EVOLVE_REPLY])
+    res = client.post(f"{BASE}/skills/swordplay/evolve", json={"theme": "Brutal"})
+    assert res.status_code == 200
+    assert 'embody the "Brutal" theme' in calls[0]["prompt"]
+    assert "PURE path" not in calls[0]["prompt"]
 
 
 def test_evolve_rejects_theme_not_offered():
