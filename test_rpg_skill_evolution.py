@@ -344,6 +344,42 @@ def test_evolved_skill_can_evolve_again():
     assert "Tier 2 to Tier 3" in calls[0]["prompt"]
 
 
+def test_evolve_survives_waiter_cancellation():
+    """Closing the app mid-evolution cancels only the waiting request: the
+    shielded task finishes, mutates the skill, and persists."""
+    mod = _load_backend()
+    calls = []
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        calls.append(prompt)
+        await asyncio.sleep(0.05)
+        return EVOLVE_REPLY
+
+    llm = SimpleNamespace(generate=generate, _current_module="")
+    _, sm, _ = _make_client(mod, _cached_rpg())
+    mod.set_services({"session_manager": sm, "engine": SimpleNamespace(sdk=SimpleNamespace(llm=llm))})
+    router = mod.get_router()
+    endpoint = next(r.endpoint for r in router.routes if r.path == "/skills/{skill_name}/evolve")
+
+    async def run():
+        waiter = asyncio.create_task(endpoint("swordplay", SimpleNamespace(theme="Brutal")))
+        await asyncio.sleep(0.01)
+        waiter.cancel()  # the app closed mid-evolution
+        try:
+            await waiter
+        except asyncio.CancelledError:
+            pass
+        await asyncio.sleep(0.15)  # the evolution finishes in the background
+
+    asyncio.run(run())
+    rpg = sm.state["module_data"]["wb_core_rpg"]
+    assert "swordplay" not in rpg["skills"]
+    assert "brutal bladework" in rpg["skills"]
+    # The reveal survives for the returning player via recent_evolutions.
+    assert rpg["recent_evolutions"][0]["new_name"] == "brutal bladework"
+    assert len(calls) == 1
+
+
 def test_evolution_prompts_carry_story_style_and_recent_scenes():
     mod = _load_backend()
     client, sm, calls = _make_client(mod, _rpg(), llm_replies=[OPTIONS_REPLY, EVOLVE_REPLY])

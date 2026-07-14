@@ -58,6 +58,41 @@ function rarityFor(strength) {
   return RARITY_TIERS.find((t) => s >= t.min && s <= t.max) || RARITY_TIERS[0];
 }
 
+// Resume state for the add-skill wizard and the evolution modal, per save.
+// The app can be closed mid-generation and reopened when it's done: the
+// server keeps generating (shielded tasks) and caches the result; this blob
+// remembers where the player was so the modal reopens and rejoins.
+const RESUME_KEY = 'wbrpg_resume_v1';
+
+function readResume(saveId) {
+  if (!saveId) return null;
+  try {
+    const data = JSON.parse(localStorage.getItem(RESUME_KEY) || 'null');
+    return data && data.saveId === saveId ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeResume(saveId, patch) {
+  if (!saveId) return;
+  try {
+    const cur = readResume(saveId) || { saveId };
+    localStorage.setItem(RESUME_KEY, JSON.stringify({ ...cur, ...patch, saveId }));
+  } catch { /* storage unavailable */ }
+}
+
+function clearResume(saveId, keys) {
+  if (!saveId) return;
+  try {
+    const cur = readResume(saveId);
+    if (!cur) return;
+    for (const k of keys) delete cur[k];
+    if (Object.keys(cur).every((k) => k === 'saveId')) localStorage.removeItem(RESUME_KEY);
+    else localStorage.setItem(RESUME_KEY, JSON.stringify(cur));
+  } catch { /* storage unavailable */ }
+}
+
 function effectDurationLabel(effect, nowMinutes) {
   if (effect.duration_turns != null) {
     return `${effect.duration_turns} turn${effect.duration_turns !== 1 ? 's' : ''}`;
@@ -236,7 +271,7 @@ function EvolutionParticles() {
   );
 }
 
-function LevelUpModal({ rpg, config, generating, onClose, onApplied }) {
+function LevelUpModal({ rpg, config, generating, saveId, resume, onClose, onApplied }) {
   const stats = rpg.stats || {};
   const skills = rpg.skills || {};
   const attrPts = rpg.unspent_attribute_points ?? 0;
@@ -246,10 +281,21 @@ function LevelUpModal({ rpg, config, generating, onClose, onApplied }) {
 
   const [pendingStats, setPendingStats] = useState({});
   const [pendingSkills, setPendingSkills] = useState({});
-  const [newSkill, setNewSkill] = useState(null); // wizard result: {name, type, description, trigger_words, strength}
-  const [showAddWizard, setShowAddWizard] = useState(false);
+  const [newSkill, setNewSkill] = useState(resume?.newSkill || null); // wizard result: {name, type, description, trigger_words, strength}
+  const [showAddWizard, setShowAddWizard] = useState(!!resume?.wizard);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+
+  // The interrupted-wizard state is consumed exactly once; a wizard opened
+  // fresh afterwards must not restore stale navigation.
+  const wizardResume = React.useRef(resume?.wizard || null);
+
+  // Keep the picked-but-unconfirmed skill card restorable across app closes.
+  useEffect(() => {
+    if (!saveId) return;
+    if (newSkill) writeResume(saveId, { newSkill });
+    else clearResume(saveId, ['newSkill']);
+  }, [saveId, newSkill]);
 
   useEffect(() => {
     // While the add-skill wizard is stacked on top, Escape belongs to it.
@@ -438,7 +484,7 @@ function LevelUpModal({ rpg, config, generating, onClose, onApplied }) {
                   );
                 })() : (
                   <button
-                    onClick={() => setShowAddWizard(true)}
+                    onClick={() => { wizardResume.current = null; setShowAddWizard(true); }}
                     disabled={skillLeft < newSkillCost || saving}
                     className="w-full py-1.5 px-3 text-xs text-purple-300 bg-purple-500/10 hover:bg-purple-500/20 disabled:opacity-40 border border-dashed border-purple-500/40 rounded-lg transition-colors"
                   >
@@ -476,25 +522,32 @@ function LevelUpModal({ rpg, config, generating, onClose, onApplied }) {
       {showAddWizard && (
         <AddSkillModal
           generating={generating}
+          saveId={saveId}
+          resume={wizardResume.current}
           costLabel={`${newSkillCost} pt${newSkillCost === 1 ? '' : 's'}`}
-          onCancel={() => setShowAddWizard(false)}
-          onConfirm={async (skill) => { setNewSkill(skill); setShowAddWizard(false); }}
+          onCancel={() => { wizardResume.current = null; clearResume(saveId, ['wizard']); setShowAddWizard(false); }}
+          onConfirm={async (skill) => { wizardResume.current = null; clearResume(saveId, ['wizard']); setNewSkill(skill); setShowAddWizard(false); }}
         />
       )}
     </div>
   );
 }
 
-function SkillEvolutionModal({ skillName, rpg, generating, onDeferred, onEvolved }) {
+function SkillEvolutionModal({ skillName, rpg, generating, saveId, resumeTheme, initialResult, onDeferred, onEvolved }) {
   const skill = (rpg.skills || {})[skillName] || {};
   const tier = skill.tier ?? 1;
 
-  const [phase, setPhase] = useState('loading'); // loading | choose | evolving | reveal
+  // initialResult mounts straight into the reveal - the evolution finished
+  // server-side while the app was closed, reconstructed from
+  // recent_evolutions (result.rpg is null; the server state is already
+  // current, so onEvolved just closes).
+  const [phase, setPhase] = useState(initialResult ? 'reveal' : 'loading'); // loading | choose | evolving | reveal
   const [options, setOptions] = useState(null);
   const [error, setError] = useState('');
   const [chosenTheme, setChosenTheme] = useState(null);
-  const [result, setResult] = useState(null); // {rpg, evolved}
+  const [result, setResult] = useState(initialResult ? { rpg: null, evolved: initialResult } : null); // {rpg, evolved}
   const [deferring, setDeferring] = useState(false);
+  const resumedRef = React.useRef(false);
 
   // StrictMode double-mounts the modal in dev, firing loadOptions twice; the
   // sequence counter makes every response but the latest a no-op so an
@@ -518,12 +571,27 @@ function SkillEvolutionModal({ skillName, rpg, generating, onDeferred, onEvolved
     }
   }
 
-  useEffect(() => { loadOptions(); }, [skillName]);
+  useEffect(() => { if (!initialResult) loadOptions(); }, [skillName]);
+
+  // Resume an interrupted choice: the app was closed after picking a theme.
+  // Re-firing joins the still-running server task or re-runs a cancelled one.
+  useEffect(() => {
+    if (phase !== 'choose' || !resumeTheme || resumedRef.current) return;
+    resumedRef.current = true;
+    if ((options || []).some((o) => (o.theme || '').toLowerCase() === resumeTheme.toLowerCase())) {
+      choose(resumeTheme);
+    } else {
+      clearResume(saveId, ['evolve']);
+    }
+  }, [phase, options]);
 
   async function choose(theme) {
     setChosenTheme(theme);
     setPhase('evolving');
     setError('');
+    // Remember the in-flight choice so closing the app mid-evolution can
+    // restore (or reveal) it on return.
+    writeResume(saveId, { evolve: { skill: skillName, theme } });
     // The evolve request runs WHILE the animation plays; the reveal waits for
     // both so the animation never gets cut short.
     const minDelay = new Promise((resolve) => setTimeout(resolve, 2500));
@@ -541,6 +609,7 @@ function SkillEvolutionModal({ skillName, rpg, generating, onDeferred, onEvolved
       setResult(data);
       setPhase('reveal');
     } catch (e) {
+      clearResume(saveId, ['evolve']);
       setError(e.message);
       setPhase('choose');
     }
@@ -549,6 +618,7 @@ function SkillEvolutionModal({ skillName, rpg, generating, onDeferred, onEvolved
   async function defer() {
     if (deferring) return;
     setDeferring(true);
+    clearResume(saveId, ['evolve']);
     try {
       const res = await fetch(`${API_BASE}/skills/${encodeURIComponent(skillName)}/evolution`, { method: 'DELETE' });
       const data = await res.json().catch(() => ({}));
@@ -680,7 +750,7 @@ function SkillEvolutionModal({ skillName, rpg, generating, onDeferred, onEvolved
 // skill options with rolled strength/rarity -> refine -> reveal. Mirrors
 // SkillEvolutionModal's phase machine; all generation is server-cached, so
 // back-navigation and re-requests never pay for a second LLM call.
-function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
+function AddSkillModal({ generating, costLabel, saveId, resume, onCancel, onConfirm }) {
   const [phase, setPhase] = useState('categories-loading'); // categories-loading | categories | skills-loading | skills | refining | reveal
   const [categories, setCategories] = useState(null);
   const [menu, setMenu] = useState(null); // {name, search}
@@ -781,7 +851,71 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
     }
   }
 
-  useEffect(() => { loadCategories(); }, []);
+  // Background categories fetch used while restoring straight into a skill
+  // page: fills the grid for later back-navigation without touching phase.
+  async function loadCategoriesSilent() {
+    try {
+      const res = await fetch(`${API_BASE}/skills/wizard/categories`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ regenerate: false }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) setCategories(data.categories || []);
+    } catch { /* back-nav will retry via loadCategories */ }
+  }
+
+  // Rebuild the wizard where the player left it: re-fetch the pages they had
+  // (server-cached, so this is free) and re-fire any pending pick - the
+  // server's shielded generation either finished while they were away (the
+  // reveal appears after the roll animation) or is still running (we rejoin).
+  async function restoreFrom(saved) {
+    const m = saved.menu;
+    setMenu(m);
+    if (saved.forcedTier != null) setForcedTier(saved.forcedTier);
+    loadCategoriesSilent();
+    setPhase('skills-loading');
+    setError('');
+    const key = menuKey(m);
+    const restored = [];
+    try {
+      for (let p = 0; p <= (saved.pageIndex || 0); p++) {
+        const res = await fetch(`${API_BASE}/skills/wizard/options`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ menu: m.name, search: !!m.search, page: p }),
+        });
+        if (!res.ok) break; // server cache gone (restart) - keep what we have
+        const data = await res.json().catch(() => ({}));
+        restored.push(data.skills || []);
+      }
+    } catch { /* fall through to whatever loaded */ }
+    if (restored.length === 0) { loadCategories(); return; }
+    setPagesByMenu((prev) => ({ ...prev, [key]: restored }));
+    setPageIndex(Math.min(saved.pageIndex || 0, restored.length - 1));
+    // Re-fire without a forced tier: if the original pick (forced or not)
+    // completed or is in flight, the server returns/joins it.
+    if (saved.chosen) pick(saved.chosen, null);
+    else setPhase('skills');
+  }
+
+  useEffect(() => {
+    if (resume?.menu) restoreFrom(resume);
+    else loadCategories();
+  }, []);
+
+  // Persist wizard navigation so closing the app mid-flow can restore it.
+  useEffect(() => {
+    if (!saveId) return;
+    writeResume(saveId, {
+      wizard: {
+        menu,
+        pageIndex,
+        forcedTier,
+        chosen: phase === 'refining' || phase === 'reveal' ? chosen : null,
+      },
+    });
+  }, [saveId, menu, pageIndex, forcedTier, chosen, phase]);
 
   async function loadPage(m, page) {
     const seq = ++loadSeq.current;
@@ -827,8 +961,8 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
     loadPage(menu, pages.length);
   }
 
-  async function pick(skill) {
-    const forced = cheatMode ? forcedTier : null;
+  async function pick(skill, forcedOverride) {
+    const forced = forcedOverride !== undefined ? forcedOverride : (cheatMode ? forcedTier : null);
     // Fate's roll is locked per skill (server-side too): re-picking a skill
     // already revealed this session jumps straight back to its reveal instead
     // of replaying the roll animation for a result that cannot change. A
@@ -1031,7 +1165,12 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
                   Try again
                 </button>
                 <button
-                  onClick={() => { setError(''); setPhase(pages.length > 0 ? 'skills' : 'categories'); }}
+                  onClick={() => {
+                    setError('');
+                    if (pages.length > 0) setPhase('skills');
+                    else if (categories) setPhase('categories');
+                    else loadCategories();
+                  }}
                   className="px-4 py-1.5 text-xs text-gray-400 hover:text-gray-200 bg-gray-800 border border-gray-700 rounded transition-colors"
                 >
                   Back
@@ -1044,7 +1183,7 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
             <>
               <div className="flex items-center justify-between text-xs">
                 <button
-                  onClick={() => { setError(''); setPhase('categories'); }}
+                  onClick={() => { setError(''); if (categories) setPhase('categories'); else loadCategories(); }}
                   className="text-gray-400 hover:text-indigo-300 transition-colors"
                 >
                   {'←'} Categories
@@ -1190,7 +1329,11 @@ export default function CoreRpgWidget({ state, config, generating }) {
   const [rpgOverride, setRpgOverride] = useState(null);
   const [showLevelUp, setShowLevelUp] = useState(false);
   const [evolvingSkill, setEvolvingSkill] = useState(null); // skill key
+  const [restoredEvo, setRestoredEvo] = useState(null); // recent_evolutions entry for a reveal that finished while the app was closed
   const prevLevelRef = React.useRef(null);
+  // Interrupted wizard/evolution flows, applied once when the save loads.
+  const resumeRef = React.useRef(null);
+  const resumeAppliedRef = React.useRef(false);
 
   const serverRpg = state?.module_data?.wb_core_rpg;
   useEffect(() => { setSkillsOverride(null); setRpgOverride(null); }, [serverRpg]);
@@ -1232,6 +1375,28 @@ export default function CoreRpgWidget({ state, config, generating }) {
     if (!nextPendingEvo || generating || showLevelUp || showFullSheet || evolvingSkill) return;
     setEvolvingSkill(nextPendingEvo.skill);
   }, [nextPendingEvo?.skill, generating, showLevelUp, showFullSheet, evolvingSkill]);
+
+  // Restore flows interrupted by closing the app (once, when the save loads):
+  // reopen the wizard/level-up where it was, and for an evolution that
+  // finished while away, reveal it from its recent_evolutions entry.
+  const saveId = state?.active_save_id || null;
+  useEffect(() => {
+    if (!rpg || !saveId || resumeAppliedRef.current) return;
+    resumeAppliedRef.current = true;
+    const resume = readResume(saveId);
+    resumeRef.current = resume;
+    if (!resume) return;
+    if (resume.wizard || resume.newSkill) setShowLevelUp(true);
+    if (resume.evolve?.skill) {
+      if (rpg.skills?.[resume.evolve.skill]) {
+        setEvolvingSkill(resume.evolve.skill);
+      } else {
+        const entry = (rpg.recent_evolutions || []).find((e) => e.old_name === resume.evolve.skill);
+        if (entry) setRestoredEvo(entry);
+        else clearResume(saveId, ['evolve']);
+      }
+    }
+  }, [rpg ? 1 : 0, saveId]);
 
   if (!rpg) return null;
 
@@ -1695,8 +1860,10 @@ export default function CoreRpgWidget({ state, config, generating }) {
           rpg={rpg}
           config={config}
           generating={generating}
-          onClose={() => setShowLevelUp(false)}
-          onApplied={(newRpg) => { setRpgOverride(newRpg); setSkillsOverride(null); setShowLevelUp(false); }}
+          saveId={saveId}
+          resume={resumeRef.current}
+          onClose={() => { resumeRef.current = null; clearResume(saveId, ['wizard', 'newSkill']); setShowLevelUp(false); }}
+          onApplied={(newRpg) => { resumeRef.current = null; clearResume(saveId, ['wizard', 'newSkill']); setRpgOverride(newRpg); setSkillsOverride(null); setShowLevelUp(false); }}
         />
       )}
 
@@ -1705,8 +1872,22 @@ export default function CoreRpgWidget({ state, config, generating }) {
           skillName={evolvingSkill}
           rpg={rpg}
           generating={generating}
+          saveId={saveId}
+          resumeTheme={resumeRef.current?.evolve?.skill === evolvingSkill ? resumeRef.current.evolve.theme : null}
           onDeferred={(newRpg) => { if (newRpg) { setRpgOverride(newRpg); setSkillsOverride(null); } setEvolvingSkill(null); }}
-          onEvolved={(newRpg) => { setRpgOverride(newRpg); setSkillsOverride(null); setEvolvingSkill(null); }}
+          onEvolved={(newRpg) => { clearResume(saveId, ['evolve']); if (newRpg) { setRpgOverride(newRpg); setSkillsOverride(null); } setEvolvingSkill(null); }}
+        />
+      )}
+
+      {restoredEvo && (
+        <SkillEvolutionModal
+          skillName={restoredEvo.old_name}
+          rpg={rpg}
+          generating={generating}
+          saveId={saveId}
+          initialResult={restoredEvo}
+          onDeferred={() => { clearResume(saveId, ['evolve']); setRestoredEvo(null); }}
+          onEvolved={() => { clearResume(saveId, ['evolve']); setRestoredEvo(null); }}
         />
       )}
     </>

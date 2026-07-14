@@ -166,6 +166,39 @@ def test_categories_concurrent_requests_share_one_generation():
     assert len(calls) == 1
 
 
+def test_categories_generation_survives_waiter_cancellation():
+    """Closing the app mid-generation cancels only the waiting request: the
+    shielded task finishes and caches, so coming back finds the result."""
+    mod = _load_backend()
+    calls = []
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        calls.append(prompt)
+        await asyncio.sleep(0.05)
+        return CATEGORIES_REPLY
+
+    llm = SimpleNamespace(generate=generate, _current_module="")
+    _, sm, _ = _make_client(mod, _rpg())
+    mod.set_services({"session_manager": sm, "engine": SimpleNamespace(sdk=SimpleNamespace(llm=llm))})
+    router = mod.get_router()
+    endpoint = next(r.endpoint for r in router.routes if r.path == "/skills/wizard/categories")
+
+    async def run():
+        waiter = asyncio.create_task(endpoint())
+        await asyncio.sleep(0.01)
+        waiter.cancel()  # the app closed
+        try:
+            await waiter
+        except asyncio.CancelledError:
+            pass
+        await asyncio.sleep(0.15)  # generation finishes in the background
+        return await endpoint()  # the app came back
+
+    result = asyncio.run(run())
+    assert len(result["categories"]) == 10
+    assert len(calls) == 1  # cached by the surviving task, not regenerated
+
+
 def test_categories_wrong_count_502_and_retry_recalls_llm():
     mod = _load_backend()
     short = json.dumps({"categories": [{"name": "Only One", "summary": "s"}]})

@@ -1232,10 +1232,28 @@ EVOLVABLE_TYPES = ("active", "passive")
 MAX_SKILL_RATING = 10
 EVOLVED_RESET_RATING = 5
 
-# In-flight guards for evolution option generation, keyed by "save_id:skill".
-# Entries are tiny and never removed; waiters may still hold a popped lock
-# while a fresh request creates a second one, which would defeat the guard.
-_options_locks: dict[str, "asyncio.Lock"] = {}
+# In-flight generation tasks shared across requests (evolution options,
+# wizard categories/options/refine, evolve), keyed per save + operation.
+# Requests await them through asyncio.shield, so a client disconnect (the app
+# closed mid-generation) cancels only the waiting request - the generation
+# runs to completion and its result lands in the cache for when the player
+# comes back. Duplicate requests (StrictMode double-fires, a reopened app
+# re-asking) join the same task instead of paying for a second LLM call.
+_inflight_tasks: dict[str, "asyncio.Task"] = {}
+
+
+async def _join_generation(key: str, factory, replace: bool = False):
+    task = None if replace else _inflight_tasks.get(key)
+    if task is None:
+        task = asyncio.create_task(factory())
+        _inflight_tasks[key] = task
+
+        def _pop(_t, key=key, task=task):
+            if _inflight_tasks.get(key) is task:
+                _inflight_tasks.pop(key, None)
+
+        task.add_done_callback(_pop)
+    return await asyncio.shield(task)
 
 # Rarity is rolled once, when the player picks a skill, uniformly over 5-10.
 # It shapes how well-crafted the generated skill IS (stronger benefits, weaker
@@ -1257,9 +1275,6 @@ def _roll_strength() -> int:
 # or "search:{query}" (lowercased). "rolls" locks fate's strength roll per
 # skill so re-picking can't re-roll it.
 _addskill_cache: dict[str, dict] = {}
-# Same never-removed policy as _options_locks, keyed "save_id:categories" or
-# "save_id:options:{menu_key}".
-_addskill_locks: dict[str, "asyncio.Lock"] = {}
 
 
 def _skill_tier(data: dict) -> int:
@@ -1939,12 +1954,7 @@ def get_router():
         if entry.get("options"):
             return {"skill": key, "tier": _skill_tier(data), "options": entry["options"]}
 
-        # Serialize generation per skill: the widget can fire two overlapping
-        # requests (React StrictMode double-mounts the modal in dev), and
-        # without the lock both miss the cache, run separate LLM calls, and
-        # the second option set visibly replaces the first on screen.
-        lock = _options_locks.setdefault(f"{sm.active_save_id}:{key}", asyncio.Lock())
-        async with lock:
+        async def _generate():
             if entry.get("options"):
                 return {"skill": key, "tier": _skill_tier(data), "options": entry["options"]}
 
@@ -1979,6 +1989,8 @@ def get_router():
             _persist(sm)
             return {"skill": key, "tier": _skill_tier(data), "options": cleaned}
 
+        return await _join_generation(f"{sm.active_save_id}:evo-options:{key}", _generate)
+
     @router.post("/skills/{skill_name}/evolve")
     async def evolve_skill(skill_name: str, payload: EvolvePayload):
         sm = _session_manager()
@@ -2002,71 +2014,77 @@ def get_router():
         # divergent paths, same as before.
         pure = bool(chosen) and chosen.get("kind") == "pure"
 
-        llm = _llm_bridge()
-        config = _config(sm)
-        prompt = _evolve_prompt(rpg, key, data, theme, sm.state, pure=pure)
-        try:
-            llm._current_module = "wb_core_rpg"
-            raw = await llm.generate(prompt, model_preference=config.get("evolution_ai_model", "smartest"))
-        finally:
-            llm._current_module = ""
+        async def _do_evolve():
+            llm = _llm_bridge()
+            config = _config(sm)
+            prompt = _evolve_prompt(rpg, key, data, theme, sm.state, pure=pure)
+            try:
+                llm._current_module = "wb_core_rpg"
+                raw = await llm.generate(prompt, model_preference=config.get("evolution_ai_model", "smartest"))
+            finally:
+                llm._current_module = ""
 
-        parsed = _parse_json_repair(raw)
-        if not isinstance(parsed, dict) or not str(parsed.get("name", "")).strip():
-            raise HTTPException(status_code=502, detail="The AI failed to produce the evolved skill. Try again.")
+            parsed = _parse_json_repair(raw)
+            if not isinstance(parsed, dict) or not str(parsed.get("name", "")).strip():
+                raise HTTPException(status_code=502, detail="The AI failed to produce the evolved skill. Try again.")
 
-        old_tier = _skill_tier(data)
-        new_key = _clean_name(str(parsed["name"]))
-        if new_key == key:
-            new_key = f"{new_key} {old_tier + 1}"
-        # A successful (paid) LLM call is never discarded over a name clash:
-        # disambiguate deterministically instead.
-        candidate, n = new_key, 2
-        while _find_key(skills, candidate) is not None and candidate != key:
-            candidate = f"{new_key} {n}"
-            n += 1
-        new_key = candidate
+            old_tier = _skill_tier(data)
+            new_key = _clean_name(str(parsed["name"]))
+            if new_key == key:
+                new_key = f"{new_key} {old_tier + 1}"
+            # A successful (paid) LLM call is never discarded over a name clash:
+            # disambiguate deterministically instead.
+            candidate, n = new_key, 2
+            while _find_key(skills, candidate) is not None and candidate != key:
+                candidate = f"{new_key} {n}"
+                n += 1
+            new_key = candidate
 
-        evolved = {
-            "rating": EVOLVED_RESET_RATING,
-            "description": str(parsed.get("description", "")).strip() or data.get("description", ""),
-            "trigger_words": _clean_triggers([str(w) for w in parsed.get("trigger_words", []) if w]) or data.get("trigger_words", []),
-            "type": data.get("type", "active"),
-            "tier": old_tier + 1,
-            "lineage": list(data.get("lineage") or []) + [key],
-            "evolution_theme": theme,
-        }
-        skills.pop(key)
-        skills[new_key] = evolved
-        counters = rpg.get("practice_counters")
-        if isinstance(counters, dict) and key in counters:
-            counters[new_key] = counters.pop(key)
-        # Queue a one-shot storyteller note so the next generation can
-        # acknowledge the transformation in the narrative.
-        recent = rpg.get("recent_evolutions")
-        if not isinstance(recent, list):
-            recent = []
-            rpg["recent_evolutions"] = recent
-        recent.append({
-            "old_name": key,
-            "new_name": new_key,
-            "tier": old_tier + 1,
-            "theme": theme,
-            "description": evolved["description"],
-            "announced": False,
-        })
-        _sync_evolutions(rpg)
-        _persist(sm)
-        return {
-            "rpg": rpg,
-            "evolved": {
+            evolved = {
+                "rating": EVOLVED_RESET_RATING,
+                "description": str(parsed.get("description", "")).strip() or data.get("description", ""),
+                "trigger_words": _clean_triggers([str(w) for w in parsed.get("trigger_words", []) if w]) or data.get("trigger_words", []),
+                "type": data.get("type", "active"),
+                "tier": old_tier + 1,
+                "lineage": list(data.get("lineage") or []) + [key],
+                "evolution_theme": theme,
+            }
+            skills.pop(key)
+            skills[new_key] = evolved
+            counters = rpg.get("practice_counters")
+            if isinstance(counters, dict) and key in counters:
+                counters[new_key] = counters.pop(key)
+            # Queue a one-shot storyteller note so the next generation can
+            # acknowledge the transformation in the narrative.
+            recent = rpg.get("recent_evolutions")
+            if not isinstance(recent, list):
+                recent = []
+                rpg["recent_evolutions"] = recent
+            recent.append({
                 "old_name": key,
                 "new_name": new_key,
                 "tier": old_tier + 1,
                 "theme": theme,
                 "description": evolved["description"],
-            },
-        }
+                "announced": False,
+            })
+            _sync_evolutions(rpg)
+            _persist(sm)
+            return {
+                "rpg": rpg,
+                "evolved": {
+                    "old_name": key,
+                    "new_name": new_key,
+                    "tier": old_tier + 1,
+                    "theme": theme,
+                    "description": evolved["description"],
+                },
+            }
+
+        # The evolve itself is shielded: closing the app mid-evolution lets
+        # the transformation finish and persist; the widget restores the
+        # reveal from recent_evolutions when the player returns.
+        return await _join_generation(f"{sm.active_save_id}:evolve:{key}:{theme.lower()}", _do_evolve)
 
     @router.delete("/skills/{skill_name}/evolution")
     def defer_evolution(skill_name: str):
@@ -2101,16 +2119,7 @@ def get_router():
         if entry["categories"] and not regenerate:
             return {"categories": entry["categories"]}
 
-        # Same double-fire guard as evolution_options: StrictMode mounts the
-        # modal twice in dev, and two cache misses would mean two LLM calls
-        # with the second category set visibly replacing the first. A
-        # regenerate is a deliberate click, so it skips the cache short-circuit
-        # and always pays for a fresh generation.
-        lock = _addskill_locks.setdefault(f"{sm.active_save_id}:categories", asyncio.Lock())
-        async with lock:
-            if entry["categories"] and not regenerate:
-                return {"categories": entry["categories"]}
-
+        async def _generate():
             raw = await _wizard_generate(sm, _skill_categories_prompt(rpg, sm.state))
             parsed = _parse_json_repair(raw)
             categories = parsed.get("categories") if isinstance(parsed, dict) else None
@@ -2130,6 +2139,10 @@ def get_router():
             entry["categories"] = cleaned
             return {"categories": cleaned}
 
+        # A regenerate is a deliberate click: it replaces any older in-flight
+        # generation instead of joining it.
+        return await _join_generation(f"{sm.active_save_id}:categories", _generate, replace=regenerate)
+
     @router.post("/skills/wizard/options")
     async def generate_skill_options(payload: SkillOptionsPayload):
         sm = _session_manager()
@@ -2146,8 +2159,9 @@ def get_router():
         if payload.page > len(pages):
             raise HTTPException(status_code=409, detail="Page out of order; request the next ungenerated page.")
 
-        lock = _addskill_locks.setdefault(f"{sm.active_save_id}:options:{menu_key}", asyncio.Lock())
-        async with lock:
+        async def _generate():
+            # A joined duplicate may arrive after the original already
+            # appended the page; serve it from the cache.
             if payload.page < len(pages):
                 return {"menu": menu, "search": payload.search, "page": payload.page, "skills": pages[payload.page]}
 
@@ -2170,6 +2184,8 @@ def get_router():
 
             pages.append(cleaned)
             return {"menu": menu, "search": payload.search, "page": payload.page, "skills": cleaned}
+
+        return await _join_generation(f"{sm.active_save_id}:options:{menu_key}", _generate)
 
     @router.post("/skills/wizard/refine")
     async def refine_skill(payload: SkillRefinePayload):
@@ -2197,14 +2213,12 @@ def get_router():
         if forced is None and roll_key in rolls:
             return {"skill": rolls[roll_key]}
 
-        lock = _addskill_locks.setdefault(f"{sm.active_save_id}:refine:{roll_key}", asyncio.Lock())
-        async with lock:
+        async def _generate():
             if forced is None and roll_key in rolls:
                 return {"skill": rolls[roll_key]}
 
-            # The gacha moment: strength is rolled here, when the player first
-            # commits to a pick, never client-supplied (cheats aside) - it
-            # becomes the starting rating.
+            # The gacha moment: the rarity is rolled here, when the player
+            # first commits to a pick, never client-supplied (cheats aside).
             strength = forced if forced is not None else _roll_strength()
             draft = {
                 "name": name,
@@ -2231,6 +2245,12 @@ def get_router():
             }
             rolls[roll_key] = result
             return {"skill": result}
+
+        # A forced (cheat) pick replaces any in-flight roll for this skill
+        # instead of joining it.
+        return await _join_generation(
+            f"{sm.active_save_id}:refine:{roll_key}", _generate, replace=forced is not None
+        )
 
     return router
 
