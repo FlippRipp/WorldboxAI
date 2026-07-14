@@ -1,7 +1,7 @@
 {
   "id": "wb_core_rpg",
   "name": "Core RPG System",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "dependencies": [],
   "consumes": {
     "state": ["input_text", "turn", "history"],
@@ -96,13 +96,25 @@
       "default": 3,
       "label": "New Skill Cost",
       "category": "Core RPG System",
-      "description": "Skill points required to learn a brand-new skill from the level-up screen. The new skill starts at a rating equal to this cost."
+      "description": "Skill points required to learn a brand-new skill from the level-up screen. The new skill's starting rating is the strength rolled when it was generated."
     },
     "evolution_ai_model": {
       "type": "select",
       "label": "Skill Evolution AI",
       "category": "Core RPG System",
       "description": "Model used to generate skill evolution themes and evolved forms when a skill reaches max rating.",
+      "options": [
+        {"value": "fastest", "label": "Fastest (cheapest)"},
+        {"value": "balanced", "label": "Balanced"},
+        {"value": "smartest", "label": "Smartest (most creative)"}
+      ],
+      "default": "smartest"
+    },
+    "new_skill_ai_model": {
+      "type": "select",
+      "label": "New Skill AI",
+      "category": "Core RPG System",
+      "description": "Model used to generate skill categories, skill suggestions, and the refined description when learning a brand-new skill from the level-up screen.",
       "options": [
         {"value": "fastest", "label": "Fastest (cheapest)"},
         {"value": "balanced", "label": "Balanced"},

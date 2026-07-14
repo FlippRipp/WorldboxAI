@@ -41,6 +41,21 @@ const TYPE_LABELS = {
 const API_BASE = '/api/modules/wb_core_rpg';
 const NEW_SKILL = '__new__';
 
+// Rarity tiers for wizard-generated skills, keyed by rolled strength (1-10).
+// Strength becomes the starting rating; the tint sells the lucky pull.
+const RARITY_TIERS = [
+  { min: 1, max: 3, label: 'Common', text: 'text-gray-300', border: 'border-gray-600', chip: 'bg-gray-500/15 text-gray-300 border-gray-500/40' },
+  { min: 4, max: 5, label: 'Uncommon', text: 'text-emerald-300', border: 'border-emerald-500/50', chip: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40' },
+  { min: 6, max: 7, label: 'Rare', text: 'text-blue-300', border: 'border-blue-500/50', chip: 'bg-blue-500/15 text-blue-300 border-blue-500/40' },
+  { min: 8, max: 9, label: 'Epic', text: 'text-purple-300', border: 'border-purple-500/50', chip: 'bg-purple-500/15 text-purple-300 border-purple-500/40' },
+  { min: 10, max: 10, label: 'Legendary', text: 'text-amber-300', border: 'border-amber-500/60', chip: 'bg-amber-500/15 text-amber-300 border-amber-500/40' },
+];
+
+function rarityFor(strength) {
+  const s = Number(strength) || 0;
+  return RARITY_TIERS.find((t) => s >= t.min && s <= t.max) || RARITY_TIERS[0];
+}
+
 function effectDurationLabel(effect, nowMinutes) {
   if (effect.duration_turns != null) {
     return `${effect.duration_turns} turn${effect.duration_turns !== 1 ? 's' : ''}`;
@@ -227,15 +242,17 @@ function LevelUpModal({ rpg, config, generating, onClose, onApplied }) {
 
   const [pendingStats, setPendingStats] = useState({});
   const [pendingSkills, setPendingSkills] = useState({});
-  const [newSkill, setNewSkill] = useState(null); // {name, type, description}
+  const [newSkill, setNewSkill] = useState(null); // wizard result: {name, type, description, trigger_words, strength}
+  const [showAddWizard, setShowAddWizard] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    function onKey(e) { if (e.key === 'Escape') onClose(); }
+    // While the add-skill wizard is stacked on top, Escape belongs to it.
+    function onKey(e) { if (e.key === 'Escape' && !showAddWizard) onClose(); }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, showAddWizard]);
 
   const statSpent = Object.values(pendingStats).reduce((a, b) => a + b, 0);
   const skillSpent = Object.values(pendingSkills).reduce((a, b) => a + b, 0) + (newSkill ? newSkillCost : 0);
@@ -270,6 +287,8 @@ function LevelUpModal({ rpg, config, generating, onClose, onApplied }) {
           name: newSkill.name.trim(),
           type: newSkill.type || 'active',
           description: newSkill.description || '',
+          trigger_words: newSkill.trigger_words || [],
+          rating: newSkill.strength ?? null,
         };
       }
       const res = await fetch(`${API_BASE}/levelup/spend`, {
@@ -386,40 +405,33 @@ function LevelUpModal({ rpg, config, generating, onClose, onApplied }) {
                   );
                 })}
 
-                {newSkill ? (
-                  <div className="bg-gray-800/60 rounded-lg border border-purple-500/40 p-3 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-purple-300 font-semibold">New skill {'—'} {newSkillCost} point{newSkillCost === 1 ? '' : 's'}</span>
-                      <button onClick={() => setNewSkill(null)} className="text-gray-500 hover:text-gray-200 text-sm leading-none">{'✕'}</button>
+                {newSkill ? (() => {
+                  const r = rarityFor(newSkill.strength);
+                  return (
+                    <div className={`bg-gray-800/60 rounded-lg border p-3 space-y-1.5 ${r.border}`}>
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-purple-300 font-semibold">New skill {'—'} {newSkillCost} point{newSkillCost === 1 ? '' : 's'}</span>
+                        <button onClick={() => setNewSkill(null)} className="text-gray-500 hover:text-gray-200 text-sm leading-none">{'✕'}</button>
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`text-sm font-bold ${r.text}`}>{newSkill.name}</span>
+                        <span className={`text-[9px] px-1.5 py-px rounded border ${TYPE_STYLES[newSkill.type] || TYPE_STYLES.active}`}>
+                          {TYPE_LABELS[newSkill.type] || 'Active'}
+                        </span>
+                        {newSkill.strength != null && (
+                          <span className={`text-[9px] px-1.5 py-px rounded border font-semibold ${r.chip}`}>
+                            {r.label} {'•'} {newSkill.strength}/10
+                          </span>
+                        )}
+                      </div>
+                      {newSkill.description && (
+                        <div className="text-[11px] text-gray-500 leading-snug">{newSkill.description}</div>
+                      )}
                     </div>
-                    <div className="flex gap-2">
-                      <input
-                        value={newSkill.name}
-                        onChange={(e) => setNewSkill({ ...newSkill, name: e.target.value })}
-                        placeholder="Skill name"
-                        className="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm text-gray-200 focus:border-purple-500 focus:outline-none"
-                      />
-                      <select
-                        value={newSkill.type}
-                        onChange={(e) => setNewSkill({ ...newSkill, type: e.target.value })}
-                        className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm text-gray-200 focus:border-purple-500 focus:outline-none"
-                      >
-                        <option value="active">Active</option>
-                        <option value="passive">Passive</option>
-                      </select>
-                    </div>
-                    <textarea
-                      value={newSkill.description}
-                      onChange={(e) => setNewSkill({ ...newSkill, description: e.target.value })}
-                      placeholder="What the skill does, how it manifests, its limits…"
-                      rows={2}
-                      className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 leading-relaxed resize-y focus:border-purple-500 focus:outline-none"
-                    />
-                    <div className="text-[10px] text-gray-500">Starts at rating {Math.min(10, newSkillCost)}.</div>
-                  </div>
-                ) : (
+                  );
+                })() : (
                   <button
-                    onClick={() => setNewSkill({ name: '', type: 'active', description: '' })}
+                    onClick={() => setShowAddWizard(true)}
                     disabled={skillLeft < newSkillCost || saving}
                     className="w-full py-1.5 px-3 text-xs text-purple-300 bg-purple-500/10 hover:bg-purple-500/20 disabled:opacity-40 border border-dashed border-purple-500/40 rounded-lg transition-colors"
                   >
@@ -453,6 +465,15 @@ function LevelUpModal({ rpg, config, generating, onClose, onApplied }) {
           </div>
         </div>
       </div>
+
+      {showAddWizard && (
+        <AddSkillModal
+          generating={generating}
+          costLabel={`${newSkillCost} pt${newSkillCost === 1 ? '' : 's'}`}
+          onCancel={() => setShowAddWizard(false)}
+          onConfirm={async (skill) => { setNewSkill(skill); setShowAddWizard(false); }}
+        />
+      )}
     </div>
   );
 }
@@ -640,6 +661,365 @@ function SkillEvolutionModal({ skillName, rpg, generating, onDeferred, onEvolved
               >
                 Continue
               </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Generated new-skill wizard: categories (or a free-text search) -> paged
+// skill options with rolled strength/rarity -> refine -> reveal. Mirrors
+// SkillEvolutionModal's phase machine; all generation is server-cached, so
+// back-navigation and re-requests never pay for a second LLM call.
+function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
+  const [phase, setPhase] = useState('categories-loading'); // categories-loading | categories | skills-loading | skills | refining | reveal
+  const [categories, setCategories] = useState(null);
+  const [menu, setMenu] = useState(null); // {name, search}
+  const [pagesByMenu, setPagesByMenu] = useState({}); // menuKey -> [[skill x5], ...]
+  const [pageIndex, setPageIndex] = useState(0);
+  const [chosen, setChosen] = useState(null);
+  const [refined, setRefined] = useState(null);
+  const [error, setError] = useState('');
+  const [confirming, setConfirming] = useState(false);
+  const [query, setQuery] = useState('');
+
+  // StrictMode double-mounts the modal in dev, firing loadCategories twice;
+  // the sequence counter makes every response but the latest a no-op.
+  const loadSeq = React.useRef(0);
+
+  const menuKey = (m) => (m.search ? 'search:' : 'cat:') + m.name.toLowerCase();
+  const pages = menu ? pagesByMenu[menuKey(menu)] || [] : [];
+
+  async function loadCategories() {
+    const seq = ++loadSeq.current;
+    setPhase('categories-loading');
+    setError('');
+    try {
+      const res = await fetch(`${API_BASE}/skills/wizard/categories`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `Failed to prepare categories (HTTP ${res.status})`);
+      if (seq !== loadSeq.current) return;
+      setCategories(data.categories || []);
+      setPhase('categories');
+    } catch (e) {
+      if (seq !== loadSeq.current) return;
+      setError(e.message);
+    }
+  }
+
+  useEffect(() => { loadCategories(); }, []);
+
+  async function loadPage(m, page) {
+    const seq = ++loadSeq.current;
+    setPhase('skills-loading');
+    setError('');
+    try {
+      const res = await fetch(`${API_BASE}/skills/wizard/options`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ menu: m.name, search: !!m.search, page }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `Failed to generate skills (HTTP ${res.status})`);
+      if (seq !== loadSeq.current) return;
+      setPagesByMenu((prev) => {
+        const key = menuKey(m);
+        const existing = prev[key] || [];
+        if (page !== existing.length) return prev; // stale double-fire
+        return { ...prev, [key]: [...existing, data.skills || []] };
+      });
+      setPageIndex(page);
+      setPhase('skills');
+    } catch (e) {
+      if (seq !== loadSeq.current) return;
+      setError(e.message);
+    }
+  }
+
+  function openMenu(m) {
+    setMenu(m);
+    const cached = pagesByMenu[menuKey(m)] || [];
+    if (cached.length > 0) {
+      setPageIndex(0);
+      setError('');
+      setPhase('skills');
+    } else {
+      loadPage(m, 0);
+    }
+  }
+
+  function nextPage() {
+    if (pageIndex + 1 < pages.length) { setPageIndex(pageIndex + 1); return; }
+    loadPage(menu, pages.length);
+  }
+
+  async function pick(skill) {
+    setChosen(skill);
+    setPhase('refining');
+    setError('');
+    try {
+      const res = await fetch(`${API_BASE}/skills/wizard/refine`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...skill, menu: menu?.name || null }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `Failed to refine the skill (HTTP ${res.status})`);
+      setRefined(data.skill);
+      setPhase('reveal');
+    } catch (e) {
+      setError(e.message);
+      setPhase('skills');
+    }
+  }
+
+  async function confirmPick() {
+    if (confirming) return;
+    setConfirming(true);
+    setError('');
+    try {
+      await onConfirm(refined);
+    } catch (e) {
+      setError(e.message);
+      setConfirming(false);
+    }
+  }
+
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      if (phase === 'refining' || confirming) return;
+      if (phase === 'reveal') { setRefined(null); setChosen(null); setError(''); setPhase('skills'); }
+      else onCancel();
+    }
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [phase, confirming, onCancel]);
+
+  const submitSearch = () => {
+    const q = query.trim();
+    if (q) openMenu({ name: q, search: true });
+  };
+
+  const skillButton = (skill) => {
+    const r = rarityFor(skill.strength);
+    return (
+      <button
+        key={skill.name}
+        onClick={() => pick(skill)}
+        disabled={generating}
+        className={`w-full text-left px-4 py-3 rounded-lg bg-gray-800/60 border hover:bg-indigo-500/10 disabled:opacity-50 transition-colors ${r.border}`}
+      >
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className={`text-sm font-bold ${r.text}`}>{skill.name}</span>
+          <span className={`text-[9px] px-1.5 py-px rounded border ${TYPE_STYLES[skill.type] || TYPE_STYLES.active}`}>
+            {TYPE_LABELS[skill.type] || 'Active'}
+          </span>
+          <span className={`text-[9px] px-1.5 py-px rounded border font-semibold ${r.chip}`}>
+            {r.label} {'•'} {skill.strength}/10
+          </span>
+        </div>
+        {skill.description && <div className="text-[11px] text-gray-500 mt-1 leading-snug">{skill.description}</div>}
+      </button>
+    );
+  };
+
+  const revealRarity = refined ? rarityFor(refined.strength) : null;
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+      style={{ backgroundColor: 'rgba(0,0,0,0.8)' }}
+      onClick={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (phase === 'categories' || phase === 'skills') onCancel();
+      }}
+    >
+      <style>{WBRPG_CSS}</style>
+      <div
+        className="bg-gray-900 border border-indigo-500/40 rounded-xl w-full max-w-md max-h-[85vh] overflow-y-auto shadow-2xl wbrpg-burst"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-5 pt-6 pb-4 text-center border-b border-gray-800">
+          <div className="text-2xl font-extrabold tracking-wide text-indigo-300">{'✦'} LEARN A NEW SKILL {'✦'}</div>
+          {costLabel && <div className="text-xs text-gray-400 mt-1">Costs {costLabel} {'—'} strength is rolled by fate.</div>}
+        </div>
+
+        <div className="px-5 py-5 space-y-4">
+          {phase === 'categories-loading' && !error && (
+            <div className="text-center py-6">
+              <div className="text-sm text-indigo-300 wbrpg-shimmer">Surveying what this character could learn{'…'}</div>
+              <div className="text-[11px] text-gray-500 mt-2">Ten paths of ability are taking shape.</div>
+            </div>
+          )}
+
+          {phase === 'categories-loading' && error && (
+            <div className="text-center py-4 space-y-3">
+              <div className="text-xs text-red-400">{error}</div>
+              <button
+                onClick={loadCategories}
+                className="px-4 py-1.5 text-xs text-indigo-200 bg-indigo-600/50 hover:bg-indigo-600/70 border border-indigo-500/50 rounded transition-colors"
+              >
+                Try again
+              </button>
+            </div>
+          )}
+
+          {phase === 'categories' && (
+            <>
+              <div className="flex gap-2">
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') submitSearch(); }}
+                  placeholder="Search for an ability…"
+                  className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-200 focus:border-indigo-500 focus:outline-none"
+                />
+                <button
+                  onClick={submitSearch}
+                  disabled={!query.trim()}
+                  className="px-3 py-1.5 text-xs font-semibold text-indigo-200 bg-indigo-600/50 hover:bg-indigo-600/70 disabled:opacity-40 border border-indigo-500/50 rounded transition-colors"
+                >
+                  Search
+                </button>
+              </div>
+              <div className="text-xs text-gray-400 text-center">{'…'}or browse a category:</div>
+              <div className="grid grid-cols-2 gap-2">
+                {(categories || []).map((cat) => (
+                  <button
+                    key={cat.name}
+                    onClick={() => openMenu({ name: cat.name, search: false })}
+                    className="text-left px-3 py-2.5 rounded-lg bg-gray-800/60 border border-gray-700 hover:border-indigo-500/60 hover:bg-indigo-500/10 transition-colors"
+                  >
+                    <div className="text-sm font-bold text-indigo-300">{cat.name}</div>
+                    {cat.summary && <div className="text-[11px] text-gray-500 mt-0.5 leading-snug">{cat.summary}</div>}
+                  </button>
+                ))}
+              </div>
+              <button onClick={onCancel} className="w-full py-1.5 text-xs text-gray-500 hover:text-gray-300 transition-colors">
+                Cancel
+              </button>
+            </>
+          )}
+
+          {phase === 'skills-loading' && !error && (
+            <div className="text-center py-6">
+              <div className="text-sm text-indigo-300 wbrpg-shimmer">
+                {menu?.search ? <>Seeking skills for {'"'}{menu.name}{'"'}{'…'}</> : <>Uncovering {menu?.name} skills{'…'}</>}
+              </div>
+              <div className="text-[11px] text-gray-500 mt-2">Rolling the strength of each ability.</div>
+            </div>
+          )}
+
+          {phase === 'skills-loading' && error && (
+            <div className="text-center py-4 space-y-3">
+              <div className="text-xs text-red-400">{error}</div>
+              <div className="flex items-center justify-center gap-2">
+                <button
+                  onClick={() => loadPage(menu, pages.length)}
+                  className="px-4 py-1.5 text-xs text-indigo-200 bg-indigo-600/50 hover:bg-indigo-600/70 border border-indigo-500/50 rounded transition-colors"
+                >
+                  Try again
+                </button>
+                <button
+                  onClick={() => { setError(''); setPhase(pages.length > 0 ? 'skills' : 'categories'); }}
+                  className="px-4 py-1.5 text-xs text-gray-400 hover:text-gray-200 bg-gray-800 border border-gray-700 rounded transition-colors"
+                >
+                  Back
+                </button>
+              </div>
+            </div>
+          )}
+
+          {phase === 'skills' && (
+            <>
+              <div className="flex items-center justify-between text-xs">
+                <button
+                  onClick={() => { setError(''); setPhase('categories'); }}
+                  className="text-gray-400 hover:text-indigo-300 transition-colors"
+                >
+                  {'←'} Categories
+                </button>
+                <span className={`font-semibold ${menu?.search ? 'text-cyan-300' : 'text-indigo-300'}`}>
+                  {menu?.search ? <>Search: {'"'}{menu.name}{'"'}</> : menu?.name}
+                </span>
+                <span className="text-gray-500 font-mono">Page {pageIndex + 1}</span>
+              </div>
+              <div className="space-y-2">
+                {(pages[pageIndex] || []).map(skillButton)}
+              </div>
+              {error && <div className="text-xs text-red-400 text-center">{error}</div>}
+              {generating && <div className="text-xs text-amber-400/80 text-center">Waiting for the current turn to finish{'…'}</div>}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setPageIndex(pageIndex - 1)}
+                  disabled={pageIndex === 0}
+                  className="flex-1 py-1.5 text-xs text-gray-400 hover:text-gray-200 disabled:opacity-30 bg-gray-800 border border-gray-700 rounded-lg transition-colors"
+                >
+                  {'←'} Prev
+                </button>
+                <button
+                  onClick={nextPage}
+                  disabled={generating}
+                  className="flex-1 py-1.5 text-xs font-semibold text-indigo-200 bg-indigo-600/40 hover:bg-indigo-600/60 disabled:opacity-40 border border-indigo-500/50 rounded-lg transition-colors"
+                >
+                  {pageIndex + 1 < pages.length ? <>Next {'→'}</> : <>More skills {'→'}</>}
+                </button>
+              </div>
+            </>
+          )}
+
+          {phase === 'refining' && (
+            <div className="text-center py-8 space-y-3">
+              <div className="text-lg font-bold text-gray-200 wbrpg-dissolve">{chosen?.name}</div>
+              <div className="text-sm text-indigo-300 wbrpg-shimmer">Refining this ability{'…'}</div>
+            </div>
+          )}
+
+          {phase === 'reveal' && refined && (
+            <div className="text-center py-4 space-y-3">
+              <div className={`text-xl font-extrabold wbrpg-burst ${revealRarity.text}`}>{refined.name}</div>
+              <div className="flex items-center justify-center gap-2">
+                <span className={`text-[10px] px-1.5 py-px rounded border ${TYPE_STYLES[refined.type] || TYPE_STYLES.active}`}>
+                  {TYPE_LABELS[refined.type] || 'Active'}
+                </span>
+                {refined.strength != null && (
+                  <span className={`text-[10px] px-1.5 py-px rounded border font-semibold ${revealRarity.chip}`}>
+                    {revealRarity.label} {'•'} Strength {refined.strength}/10
+                  </span>
+                )}
+              </div>
+              {refined.description && (
+                <div className="text-[11px] text-gray-400 leading-relaxed px-2">{refined.description}</div>
+              )}
+              {(refined.trigger_words || []).length > 0 && (
+                <div className="flex flex-wrap justify-center gap-1">
+                  {refined.trigger_words.map((w) => (
+                    <span key={w} className="text-[9px] px-1.5 py-px rounded bg-gray-800 border border-gray-700 text-gray-400">{w}</span>
+                  ))}
+                </div>
+              )}
+              {error && <div className="text-xs text-red-400">{error}</div>}
+              {generating && <div className="text-xs text-amber-400/80">Waiting for the current turn to finish{'…'}</div>}
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  onClick={() => { setRefined(null); setChosen(null); setError(''); setPhase('skills'); }}
+                  disabled={confirming}
+                  className="px-4 py-2 text-sm text-gray-400 hover:text-gray-200 bg-gray-800 border border-gray-700 rounded-lg transition-colors"
+                >
+                  {'←'} Pick another
+                </button>
+                <button
+                  onClick={confirmPick}
+                  disabled={confirming || generating}
+                  className="flex-1 py-2 text-sm font-semibold text-indigo-100 bg-indigo-600/70 hover:bg-indigo-600/90 disabled:opacity-40 border border-indigo-500/50 rounded-lg transition-colors"
+                >
+                  {confirming ? 'Learning…' : costLabel ? `Learn this skill (${costLabel})` : 'Learn this skill'}
+                </button>
+              </div>
             </div>
           )}
         </div>

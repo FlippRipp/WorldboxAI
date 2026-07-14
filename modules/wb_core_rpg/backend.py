@@ -1237,6 +1237,25 @@ EVOLVED_RESET_RATING = 5
 # while a fresh request creates a second one, which would defeat the guard.
 _options_locks: dict[str, "asyncio.Lock"] = {}
 
+# Rarity tiers by strength (= starting rating, 1-10): 1-3 common, 4-5 uncommon,
+# 6-7 rare, 8-9 epic, 10 legendary. Weighted so high rolls stay lucky pulls.
+STRENGTH_WEIGHTS = {1: 12, 2: 14, 3: 16, 4: 13, 5: 12, 6: 10, 7: 9, 8: 7, 9: 5, 10: 2}
+
+
+def _roll_strengths(n: int) -> list[int]:
+    return random.choices(list(STRENGTH_WEIGHTS), weights=list(STRENGTH_WEIGHTS.values()), k=n)
+
+
+# Transient new-skill wizard state, keyed by save_id. Never persisted: the
+# wizard is ad-hoc browsing with no pending_evolutions-style entry to hang it
+# on, and stale menus must not outlive a learned skill (cleared on skill add).
+# Shape: {"categories": [...]|None, "pages": {menu_key: [[5 skills], ...]}}
+# where menu_key is "cat:{name}" or "search:{query}" (lowercased).
+_addskill_cache: dict[str, dict] = {}
+# Same never-removed policy as _options_locks, keyed "save_id:categories" or
+# "save_id:options:{menu_key}".
+_addskill_locks: dict[str, "asyncio.Lock"] = {}
+
 
 def _skill_tier(data: dict) -> int:
     try:
@@ -1464,6 +1483,105 @@ JSON response:
 
 
 # --------------------------------------------------------------------------
+# New-skill wizard prompts (LLM calls made from the module router)
+# --------------------------------------------------------------------------
+
+
+def _skill_categories_prompt(rpg: dict, state: dict) -> str:
+    world_section = _world_context_section(state.get("world_data"))
+    story_section = _story_context_section(state)
+    return f"""You are the game system for a text RPG. The player wants to learn a brand-new skill and is browsing what kinds of abilities they could pursue. Output ONLY valid JSON, no other text.
+
+{world_section}{story_section}Character:
+{_character_context_block(rpg)}
+
+Propose exactly 10 skill categories - broad domains of ability this character could plausibly begin learning in this world and at this point in the story (like "Blade Arts", "Herbalism", "Shadow Magic" - but fitting THIS world and character). The 10 must be meaningfully different from each other. Favor a mix: some that extend what the character already does, some that open new ground the story has hinted at. Each has a name of 1-3 words and one short clause summary.
+
+JSON response:
+{{"categories": [{{"name": "1-3 words", "summary": "one short clause"}}, ... 10 total]}}"""
+
+
+def _strength_guidance(strengths: list[int]) -> str:
+    slots = "\n".join(
+        f"- Skill {i + 1} has power {s}/10" for i, s in enumerate(strengths)
+    )
+    return (
+        "Each skill slot has a pre-rolled power level, and the skill you write for that slot "
+        "MUST match it in scope: 1-3 is a modest starting ability with clear limits, 4-6 a "
+        "solid dependable talent, 7-9 an exceptional gift few possess, and 10 a legendary "
+        "power worthy of tales. Write them in order:\n" + slots
+    )
+
+
+def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], strengths: list[int], state: dict, search: bool = False) -> str:
+    world_section = _world_context_section(state.get("world_data"))
+    story_section = _story_context_section(state)
+    if search:
+        intro = (
+            f'The player searched for "{menu}" and is browsing skills themed on that search. '
+            "If the request is a basic ability you may match it exactly; for elaborate or very "
+            "specific requests, offer close interpretations grounded in this world rather than "
+            "an exact match."
+        )
+        task = f'Propose exactly 5 NEW skills themed on the search "{menu}"'
+    else:
+        intro = f'The player is browsing new skills to learn in the "{menu}" category.'
+        task = f'Propose exactly 5 NEW skills in the "{menu}" category'
+    exclude_line = ", ".join(exclude) if exclude else "(none)"
+    return f"""You are the game system for a text RPG. {intro} Output ONLY valid JSON, no other text.
+
+{world_section}{story_section}Character:
+{_character_context_block(rpg)}
+
+Do NOT propose any of these skills or trivial variants of them (already known or already offered): {exclude_line}
+
+{task}, each learnable NOW by this character. {_strength_guidance(strengths)}
+
+Each skill:
+- name: 1-4 evocative words, distinct from every excluded name above and from the other 4 proposals
+- type: "active" (deliberately used) or "passive" (always on)
+- description: 1-2 tight sentences, concrete and specific to this story: what it does, how it manifests, its source, and any limit or cost - never generic filler like "skilled in X"
+- trigger_words: 2-5 short words or phrases a player would naturally use
+
+JSON response:
+{{"skills": [{{"name": "...", "type": "active", "description": "...", "trigger_words": ["w1", "w2"]}}, ... 5 total]}}"""
+
+
+def _skill_refine_prompt(rpg: dict, skill: dict, menu: str | None, state: dict) -> str:
+    world_section = _world_context_section(state.get("world_data"))
+    story_section = _story_context_section(state)
+    name = skill.get("name", "")
+    strength = skill.get("strength")
+    menu_note = f" ({menu})" if menu else ""
+    strength_req = ""
+    if strength:
+        strength_req = (
+            f"\n- Its power is {strength}/10 and must stay exactly there: 1-3 is a modest starting "
+            "ability with clear limits, 4-6 a solid dependable talent, 7-9 an exceptional gift few "
+            "possess, and 10 a legendary power worthy of tales. Scope and limits must match."
+        )
+    return f"""You are the game system for a text RPG. The player has chosen to learn the new skill "{name}"{menu_note}. Finalize it before it is added to their sheet. Output ONLY valid JSON, no other text.
+
+{world_section}{story_section}Character:
+{_character_context_block(rpg)}
+
+Chosen skill (draft):
+Name: {name}
+Type: {skill.get('type', 'active')}
+Description: {skill.get('description') or '(none)'}
+Trigger words: {', '.join(skill.get('trigger_words') or []) or '(none)'}
+
+Refine this skill. Requirements:
+- Keep its identity: same ability, same manner of working. You may polish the name (1-4 words) but never change what the skill IS.
+- The description is 1-2 tight sentences and completely FREE-STANDING: exactly what the power does, how it manifests, and any limit or cost, grounded in this world and where the story stands now. Concrete over flowery.{strength_req}
+- type: "active" (deliberately used) or "passive" (always on).
+- Trigger words: 2-5 short words or phrases a player would naturally use.
+
+JSON response:
+{{"name": "1-4 words", "type": "active", "description": "1-2 tight sentences", "trigger_words": ["w1", "w2"]}}"""
+
+
+# --------------------------------------------------------------------------
 # Skill editing API (router mounted at /api/modules/wb_core_rpg)
 # --------------------------------------------------------------------------
 
@@ -1498,6 +1616,7 @@ def get_router():
         description: str | None = None
         trigger_words: list[str] | None = None
         type: str | None = None
+        rating: int | None = None  # rolled strength from the wizard
 
     class SpendPayload(BaseModel):
         stat_allocations: dict[str, int] | None = None
@@ -1506,6 +1625,19 @@ def get_router():
 
     class EvolvePayload(BaseModel):
         theme: str
+
+    class SkillOptionsPayload(BaseModel):
+        menu: str  # category name or search query
+        search: bool = False
+        page: int = 0
+
+    class SkillRefinePayload(BaseModel):
+        name: str
+        description: str | None = None
+        trigger_words: list[str] | None = None
+        type: str | None = None
+        strength: int | None = None
+        menu: str | None = None
 
     def _session_manager():
         sm = _services.get("session_manager")
@@ -1581,6 +1713,27 @@ def get_router():
                 out.append(word)
         return out
 
+    def _clean_generated_skill(item) -> dict | None:
+        """Normalize one LLM-proposed skill. Display case is kept for the
+        wizard UI; the save endpoints lowercase the name on write."""
+        if not isinstance(item, dict):
+            return None
+        name = " ".join(str(item.get("name", "")).strip().split()[:4])
+        if not name:
+            return None
+        skill_type = str(item.get("type", "")).strip().lower()
+        if skill_type not in EVOLVABLE_TYPES:  # never curse, never garbage
+            skill_type = "active"
+        return {
+            "name": name,
+            "type": skill_type,
+            "description": str(item.get("description", "")).strip(),
+            "trigger_words": _clean_triggers([str(w) for w in item.get("trigger_words", []) if w]),
+        }
+
+    def _clear_addskill_cache(sm):
+        _addskill_cache.pop(sm.active_save_id, None)
+
     @router.post("/skills")
     def add_skill(payload: SkillPayload):
         sm = _session_manager()
@@ -1599,6 +1752,7 @@ def get_router():
             "type": payload.type or "active",
         }
         _sync_evolutions(rpg)
+        _clear_addskill_cache(sm)
         _persist(sm)
         return {"skills": skills}
 
@@ -1711,6 +1865,8 @@ def get_router():
             spec = payload.new_skill
             if spec.type is not None and spec.type not in EVOLVABLE_TYPES:
                 raise HTTPException(status_code=400, detail="New skills must be active or passive.")
+            if spec.rating is not None and not (1 <= spec.rating <= MAX_SKILL_RATING):
+                raise HTTPException(status_code=400, detail=f"New skill rating must be between 1 and {MAX_SKILL_RATING}.")
             new_skill_name = _clean_name(spec.name)
             if _find_key(skills, new_skill_name) is not None:
                 raise HTTPException(status_code=409, detail=f"Skill '{new_skill_name}' already exists.")
@@ -1737,12 +1893,15 @@ def get_router():
 
         if new_skill_name:
             spec = payload.new_skill
+            # Wizard skills carry their rolled strength as the starting rating;
+            # the cost stays new_skill_cost regardless (high rolls are lucky pulls).
             skills[new_skill_name] = {
-                "rating": min(MAX_SKILL_RATING, max(1, int(new_skill_cost))),
+                "rating": spec.rating if spec.rating is not None else min(MAX_SKILL_RATING, max(1, int(new_skill_cost))),
                 "description": (spec.description or "").strip(),
                 "trigger_words": _clean_triggers(spec.trigger_words or []),
                 "type": spec.type or "active",
             }
+            _clear_addskill_cache(sm)
 
         rpg["unspent_attribute_points"] = attr_available - sum(stat_allocations.values())
         rpg["unspent_skill_points"] = skill_available - skill_cost
@@ -1912,6 +2071,124 @@ def get_router():
         entry["status"] = "deferred"
         _persist(sm)
         return rpg
+
+    async def _wizard_generate(sm, prompt: str):
+        llm = _llm_bridge()
+        config = _config(sm)
+        try:
+            llm._current_module = "wb_core_rpg"
+            return await llm.generate(prompt, model_preference=config.get("new_skill_ai_model", "smartest"))
+        finally:
+            llm._current_module = ""
+
+    @router.post("/skills/wizard/categories")
+    async def generate_skill_categories():
+        sm = _session_manager()
+        rpg = _rpg_data(sm)
+        entry = _addskill_cache.setdefault(sm.active_save_id, {"categories": None, "pages": {}})
+        if entry["categories"]:
+            return {"categories": entry["categories"]}
+
+        # Same double-fire guard as evolution_options: StrictMode mounts the
+        # modal twice in dev, and two cache misses would mean two LLM calls
+        # with the second category set visibly replacing the first.
+        lock = _addskill_locks.setdefault(f"{sm.active_save_id}:categories", asyncio.Lock())
+        async with lock:
+            if entry["categories"]:
+                return {"categories": entry["categories"]}
+
+            raw = await _wizard_generate(sm, _skill_categories_prompt(rpg, sm.state))
+            parsed = _parse_json_repair(raw)
+            categories = parsed.get("categories") if isinstance(parsed, dict) else None
+            cleaned, seen = [], set()
+            if isinstance(categories, list):
+                for cat in categories:
+                    if not isinstance(cat, dict):
+                        continue
+                    name = " ".join(str(cat.get("name", "")).strip().split()[:3])
+                    if not name or name.lower() in seen:
+                        continue
+                    seen.add(name.lower())
+                    cleaned.append({"name": name, "summary": str(cat.get("summary", "")).strip()})
+            if len(cleaned) != 10:
+                raise HTTPException(status_code=502, detail="The AI failed to produce 10 skill categories. Try again.")
+
+            entry["categories"] = cleaned
+            return {"categories": cleaned}
+
+    @router.post("/skills/wizard/options")
+    async def generate_skill_options(payload: SkillOptionsPayload):
+        sm = _session_manager()
+        rpg = _rpg_data(sm)
+        menu = payload.menu.strip()
+        if not menu:
+            raise HTTPException(status_code=400, detail="A category or search query is required.")
+        menu_key = ("search:" if payload.search else "cat:") + menu.lower()
+
+        entry = _addskill_cache.setdefault(sm.active_save_id, {"categories": None, "pages": {}})
+        pages = entry["pages"].setdefault(menu_key, [])
+        if payload.page < len(pages):
+            return {"menu": menu, "search": payload.search, "page": payload.page, "skills": pages[payload.page]}
+        if payload.page > len(pages):
+            raise HTTPException(status_code=409, detail="Page out of order; request the next ungenerated page.")
+
+        lock = _addskill_locks.setdefault(f"{sm.active_save_id}:options:{menu_key}", asyncio.Lock())
+        async with lock:
+            if payload.page < len(pages):
+                return {"menu": menu, "search": payload.search, "page": payload.page, "skills": pages[payload.page]}
+
+            exclude = [s["name"] for page in pages for s in page] + list(rpg.get("skills", {}).keys())
+            strengths = _roll_strengths(5)
+            raw = await _wizard_generate(
+                sm, _skill_options_prompt(rpg, menu, exclude, strengths, sm.state, search=payload.search)
+            )
+            parsed = _parse_json_repair(raw)
+            proposals = parsed.get("skills") if isinstance(parsed, dict) else None
+            excluded = {n.lower() for n in exclude}
+            cleaned = []
+            for item in proposals if isinstance(proposals, list) else []:
+                skill = _clean_generated_skill(item)
+                if skill is None or skill["name"].lower() in excluded:
+                    continue
+                excluded.add(skill["name"].lower())
+                cleaned.append(skill)
+            if len(cleaned) != 5:
+                raise HTTPException(status_code=502, detail="The AI failed to produce 5 new skills. Try again.")
+            for skill, strength in zip(cleaned, strengths):
+                skill["strength"] = strength
+
+            pages.append(cleaned)
+            return {"menu": menu, "search": payload.search, "page": payload.page, "skills": cleaned}
+
+    @router.post("/skills/wizard/refine")
+    async def refine_skill(payload: SkillRefinePayload):
+        sm = _session_manager()
+        rpg = _rpg_data(sm)
+        draft = {
+            "name": payload.name.strip(),
+            "type": payload.type or "active",
+            "description": (payload.description or "").strip(),
+            "trigger_words": payload.trigger_words or [],
+            "strength": payload.strength,
+        }
+        if not draft["name"]:
+            raise HTTPException(status_code=400, detail="Skill name is required.")
+
+        raw = await _wizard_generate(sm, _skill_refine_prompt(rpg, draft, payload.menu, sm.state))
+        parsed = _parse_json_repair(raw)
+        if not isinstance(parsed, dict) or not str(parsed.get("name", "")).strip():
+            raise HTTPException(status_code=502, detail="The AI failed to refine the skill. Try again.")
+
+        # A paid LLM call is never discarded over missing fields: fall back to
+        # the draft's values, same policy as evolve_skill.
+        refined = _clean_generated_skill(parsed) or {}
+        return {"skill": {
+            "name": refined.get("name") or draft["name"],
+            "type": refined.get("type") or draft["type"],
+            "description": refined.get("description") or draft["description"],
+            "trigger_words": refined.get("trigger_words") or _clean_triggers([str(w) for w in draft["trigger_words"] if w]),
+            "strength": payload.strength,
+        }}
 
     return router
 
