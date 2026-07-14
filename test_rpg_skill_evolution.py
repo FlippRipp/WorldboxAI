@@ -343,6 +343,67 @@ def test_evolved_skill_can_evolve_again():
 
 
 # ---------------------------------------------------------------------------
+# storyteller announcement after an evolution
+# ---------------------------------------------------------------------------
+
+def test_evolve_queues_storyteller_announcement():
+    mod = _load_backend()
+    client, _, _ = _make_client(mod, _cached_rpg(), llm_replies=[EVOLVE_REPLY])
+    res = client.post(f"{BASE}/skills/swordplay/evolve", json={"theme": "Brutal"})
+    assert res.status_code == 200
+    assert res.json()["rpg"]["recent_evolutions"] == [{
+        "old_name": "swordplay",
+        "new_name": "brutal bladework",
+        "tier": 2,
+        "theme": "Brutal",
+        "description": "Every cut lands with crushing force; armor and guard mean little.",
+        "announced": False,
+    }]
+
+
+def test_evolution_announcement_feeds_exactly_one_generation():
+    backend = _load_backend()
+    rpg = _rpg()
+    rpg["skills"] = {"brutal bladework": {
+        "rating": 5, "description": "Crushing cuts.", "trigger_words": [], "type": "active", "tier": 2,
+    }}
+    rpg["pending_evolutions"] = []
+    rpg["recent_evolutions"] = [{
+        "old_name": "swordplay", "new_name": "brutal bladework", "tier": 2,
+        "theme": "Brutal", "description": "Crushing cuts.", "announced": False,
+    }]
+    state = {"module_data": {"wb_core_rpg": rpg}, "module_configs": {"wb_core_rpg": {}}}
+
+    # Turn 1: gather marks the note as this generation's; the sheet carries it.
+    updates = asyncio.run(backend.on_gather_context(state, None))
+    state["module_data"]["wb_core_rpg"] = updates["module_data"]["wb_core_rpg"]
+    block = asyncio.run(backend.on_render_prompt_block({"id": "character_sheet"}, state, None))
+    assert "SKILL EVOLUTION" in block["content"]
+    assert '"swordplay" has just evolved into "brutal bladework"' in block["content"]
+    assert "Crushing cuts." in block["content"]
+
+    # Turn 2: the note was announced, so it is dropped and the sheet is clean.
+    updates = asyncio.run(backend.on_gather_context(state, None))
+    state["module_data"]["wb_core_rpg"] = updates["module_data"]["wb_core_rpg"]
+    assert state["module_data"]["wb_core_rpg"]["recent_evolutions"] == []
+    block = asyncio.run(backend.on_render_prompt_block({"id": "character_sheet"}, state, None))
+    assert "SKILL EVOLUTION" not in block["content"]
+
+
+def test_evolution_announcement_included_when_unconscious():
+    backend = _load_backend()
+    char = backend.Character()
+    char.hp = 0
+    char.recent_evolutions = [{
+        "old_name": "swordplay", "new_name": "brutal bladework", "tier": 2,
+        "theme": "Brutal", "description": "Crushing cuts.", "announced": True,
+    }]
+    sheet = backend._render_character_sheet(char, {})
+    assert "unconscious" in sheet
+    assert "SKILL EVOLUTION" in sheet
+
+
+# ---------------------------------------------------------------------------
 # defer + queueing paths
 # ---------------------------------------------------------------------------
 

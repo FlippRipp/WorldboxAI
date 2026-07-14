@@ -187,6 +187,7 @@ class Character:
     unspent_attribute_points: int = 0
     unspent_skill_points: int = 0
     pending_evolutions: list = field(default_factory=list)
+    recent_evolutions: list = field(default_factory=list)
     level_up_history: list = field(default_factory=list)
     status_effects: list = field(default_factory=list)
 
@@ -212,6 +213,7 @@ class Character:
             "unspent_attribute_points": self.unspent_attribute_points,
             "unspent_skill_points": self.unspent_skill_points,
             "pending_evolutions": list(self.pending_evolutions),
+            "recent_evolutions": [dict(e) for e in self.recent_evolutions],
             "level_up_history": list(self.level_up_history),
             "status_effects": [dict(e) for e in self.status_effects],
         }
@@ -275,6 +277,24 @@ class Character:
             c.unspent_skill_points = 0
         pending = d.get("pending_evolutions", [])
         c.pending_evolutions = [e for e in pending if isinstance(e, dict) and e.get("skill")] if isinstance(pending, list) else []
+        raw_evos = d.get("recent_evolutions", [])
+        c.recent_evolutions = []
+        if isinstance(raw_evos, list):
+            for e in raw_evos:
+                if not (isinstance(e, dict) and e.get("old_name") and e.get("new_name")):
+                    continue
+                try:
+                    tier = max(2, int(e.get("tier", 2)))
+                except (TypeError, ValueError):
+                    tier = 2
+                c.recent_evolutions.append({
+                    "old_name": str(e["old_name"]),
+                    "new_name": str(e["new_name"]),
+                    "tier": tier,
+                    "theme": str(e.get("theme", "")),
+                    "description": str(e.get("description", "")),
+                    "announced": bool(e.get("announced", False)),
+                })
         raw_effects = d.get("status_effects", [])
         c.status_effects = []
         if isinstance(raw_effects, list):
@@ -363,6 +383,12 @@ async def on_gather_context(state: dict, sdk) -> dict:
     # Start each turn with a clean assessment so a prior turn's ruling can't be
     # reused (e.g. to re-award XP) on a turn with no substantive player action.
     char.action_assessment = {}
+
+    # Evolution announcements feed exactly one generation: entries announced
+    # on a previous turn are dropped, the rest are marked as this turn's.
+    char.recent_evolutions = [e for e in char.recent_evolutions if not e.get("announced")]
+    for evo in char.recent_evolutions:
+        evo["announced"] = True
 
     # Track which stats are relevant to this action via keyword matching
     if input_text:
@@ -990,11 +1016,37 @@ async def on_command_level(args, state, sdk):
     return {"message": "\n".join(lines), "signal": "end_turn"}
 
 
+def _evolution_announcement(char: Character) -> str:
+    """One-time storyteller note about skills that evolved since the last
+    generation (recorded by the evolve endpoint, dropped after one turn)."""
+    if not char.recent_evolutions:
+        return ""
+    notes = []
+    for e in char.recent_evolutions:
+        desc = f" It now works thus: {e['description']}" if e.get("description") else ""
+        path = f', down the "{e["theme"]}" path' if e.get("theme") else ""
+        notes.append(
+            f'The skill "{e["old_name"]}" has just evolved into "{e["new_name"]}" '
+            f'(Tier {e["tier"]}{path}) - a dramatic surge in power.{desc}'
+        )
+    plural = len(notes) > 1
+    return (
+        "JUST HAPPENED - SKILL EVOLUTION (between scenes, not yet narrated): "
+        + " ".join(notes)
+        + (" Acknowledge these transformations" if plural else " Acknowledge this transformation")
+        + " in the next narration - the character feels the new power settle in. "
+        "Give it a brief but meaningful beat; refer to the skill by its new name from now on."
+    )
+
+
 def _render_character_sheet(char: Character, config: dict) -> str:
     tier_list = config.get("stat_tiers", DEFAULT_STAT_TIERS) or DEFAULT_STAT_TIERS
 
+    evolution_note = _evolution_announcement(char)
+
     if char.is_unconscious():
-        return "The character is unconscious and incapacitated. Cannot act physically."
+        sheet = "The character is unconscious and incapacitated. Cannot act physically."
+        return f"{sheet}\n{evolution_note}" if evolution_note else sheet
 
     ratio = char.hp / max(1, char.max_hp)
     if ratio > 0.8:
@@ -1089,6 +1141,9 @@ def _render_character_sheet(char: Character, config: dict) -> str:
 
     if char.backstory:
         lines.append(f"Backstory: {char.backstory}")
+
+    if evolution_note:
+        lines.append(evolution_note)
 
     return "\n".join(lines)
 
@@ -1795,6 +1850,20 @@ def get_router():
         counters = rpg.get("practice_counters")
         if isinstance(counters, dict) and key in counters:
             counters[new_key] = counters.pop(key)
+        # Queue a one-shot storyteller note so the next generation can
+        # acknowledge the transformation in the narrative.
+        recent = rpg.get("recent_evolutions")
+        if not isinstance(recent, list):
+            recent = []
+            rpg["recent_evolutions"] = recent
+        recent.append({
+            "old_name": key,
+            "new_name": new_key,
+            "tier": old_tier + 1,
+            "theme": theme,
+            "description": evolved["description"],
+            "announced": False,
+        })
         _sync_evolutions(rpg)
         _persist(sm)
         return {

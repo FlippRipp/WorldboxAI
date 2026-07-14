@@ -173,6 +173,11 @@ librarian events, or skill-point spending), it is queued in
 3. The skill is replaced: `tier + 1`, rating reset to 5, `lineage` extended
    with the old name, practice counters migrated. It can climb to 10 and
    evolve again, indefinitely.
+4. The evolve call also queues a one-shot note in `recent_evolutions`. The
+   next storyteller generation gets a "JUST HAPPENED — SKILL EVOLUTION"
+   block in the character sheet (old name → new name, tier, path,
+   description) asking it to acknowledge the transformation in the
+   narration; the note is dropped after that single generation.
 
 Curse-type skills never evolve — evolution is a player-steered reward,
 which would invert a curse's role as an affliction (the librarian already
