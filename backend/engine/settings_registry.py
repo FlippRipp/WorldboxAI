@@ -179,8 +179,14 @@ class SettingsRegistry:
             with open(self._global_path, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             for key, value in saved.items():
-                if key in self._definitions and self._is_global(key):
-                    defn = self._definitions[key]
-                    self._values[key] = self._coerce(value, defn)
+                if key in self._definitions:
+                    if self._is_global(key):
+                        self._values[key] = self._coerce(value, self._definitions[key])
+                else:
+                    # bind_global may run before the engine/modules register
+                    # their settings; keep the saved value raw (it was coerced
+                    # when written) so a later register()'s setdefault adopts
+                    # it instead of resetting to the default.
+                    self._values[key] = value
         except Exception as e:
             logger.warning(f"Failed to load global settings: {e}")

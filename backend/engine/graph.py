@@ -122,6 +122,13 @@ class EngineGraph:
             category="Storyteller",
             description="Let the AI play your character: the storyteller-grade model decides their next action from their personality and the story, and anything you type becomes hidden guidance for that decision instead of an in-character action.",
         )
+        self.settings.register(
+            "cheats.enabled", "toggle", False,
+            label="Enable Cheats",
+            category="Cheats",
+            description="Unlock cheat controls across all stories, e.g. choosing the rarity a new skill rolls instead of leaving it to fate.",
+            is_global=True,
+        )
 
     def register_story_source(self, source_type: str, provider):
         """Register a story-source provider (e.g. the world module's world source).

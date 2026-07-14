@@ -51,7 +51,7 @@ def _rpg(**overrides):
     return base
 
 
-def _make_client(mod, rpg, llm_replies=None, config=None):
+def _make_client(mod, rpg, llm_replies=None, config=None, cheats=False):
     calls = []
     llm = _fake_llm(list(llm_replies or []), calls)
     session_manager = SimpleNamespace(
@@ -65,7 +65,8 @@ def _make_client(mod, rpg, llm_replies=None, config=None):
         save_manager=SimpleNamespace(save_turn=lambda *a: None),
     )
     engine = SimpleNamespace(sdk=SimpleNamespace(llm=llm))
-    mod.set_services({"session_manager": session_manager, "engine": engine})
+    settings = SimpleNamespace(get=lambda key: cheats if key == "cheats.enabled" else None)
+    mod.set_services({"session_manager": session_manager, "engine": engine, "settings": settings})
 
     app = FastAPI()
     app.include_router(mod.get_router(), prefix=BASE)
@@ -457,6 +458,65 @@ def test_refine_llm_garbage_502():
     client, _, _ = _make_client(mod, _rpg(), llm_replies=["nope"])
     res = client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint"})
     assert res.status_code == 502
+
+
+# ---------------------------------------------------------------------------
+# cheats: forced rarity, gated by the global cheats.enabled engine setting
+# ---------------------------------------------------------------------------
+
+def _boom():
+    raise AssertionError("_roll_strength must not be called for a forced pick")
+
+
+def test_forced_strength_honored_when_cheats_on():
+    mod = _load_backend()
+    mod._roll_strength = _boom  # a forced pick must not consume a roll
+    client, _, calls = _make_client(mod, _rpg(), llm_replies=[REFINE_REPLY], cheats=True)
+    res = client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint", "forced_strength": 10})
+    assert res.status_code == 200
+    assert res.json()["skill"]["strength"] == 10
+    assert "power is 10/10" in calls[0]["prompt"]
+
+
+def test_forced_strength_out_of_range_400():
+    mod = _load_backend()
+    client, _, calls = _make_client(mod, _rpg(), llm_replies=[REFINE_REPLY], cheats=True)
+    for bad in (4, 11, 0):
+        res = client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint", "forced_strength": bad})
+        assert res.status_code == 400
+    assert calls == []
+
+
+def test_forced_repick_overwrites_locked_roll():
+    mod = _load_backend()
+    _fix_roll(mod, 5)
+    client, _, calls = _make_client(
+        mod, _rpg(), llm_replies=[REFINE_REPLY, REFINE_REPLY, REFINE_REPLY], cheats=True
+    )
+    # Honest roll first: locked at 5.
+    first = client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint"})
+    assert first.json()["skill"]["strength"] == 5
+    # Forcing bypasses and overwrites the lock.
+    forced = client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint", "forced_strength": 8})
+    assert forced.json()["skill"]["strength"] == 8
+    assert len(calls) == 2
+    # The overwritten result is what a later plain re-pick returns.
+    again = client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint"})
+    assert again.json()["skill"]["strength"] == 8
+    assert len(calls) == 2
+
+
+def test_forced_strength_ignored_when_cheats_off():
+    mod = _load_backend()
+    _fix_roll(mod, 6)
+    client, _, calls = _make_client(mod, _rpg(), llm_replies=[REFINE_REPLY], cheats=False)
+    res = client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint", "forced_strength": 10})
+    assert res.status_code == 200
+    assert res.json()["skill"]["strength"] == 6  # fate rolled, cheat ignored
+    # And the roll stays locked: a second forced attempt returns the cache.
+    res2 = client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint", "forced_strength": 10})
+    assert res2.json()["skill"]["strength"] == 6
+    assert len(calls) == 1
 
 
 # ---------------------------------------------------------------------------

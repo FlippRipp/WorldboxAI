@@ -66,6 +66,9 @@ registry = ModuleRegistry(modules_dir)
 registry.load_all_modules()
 
 backend_settings = SettingsRegistry()
+# Global-scoped settings persist app-wide (not per save); without this bind
+# they would live only in memory and reset on every server restart.
+backend_settings.bind_global(os.path.join(data_dir, "global_engine_settings.json"))
 provider_manager = ProviderManager()
 engine = EngineGraph(registry, settings_registry=backend_settings, provider_manager=provider_manager)
 session_manager = GameSessionManager(data_dir, settings=backend_settings)

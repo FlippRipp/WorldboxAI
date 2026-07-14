@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import ModelSettings from '../ModelSettings/ModelSettings';
 import AppearanceSettings from './AppearanceSettings';
+import CheatSettings from './CheatSettings';
 
 const CATEGORIES = [
   { id: 'model', label: 'Model', icon: '⚙️', description: 'AI providers, models, and API keys' },
   { id: 'appearance', label: 'Appearance', icon: '🎨', description: 'Theme colors and presets' },
+  { id: 'cheats', label: 'Cheats', icon: '🎲', description: 'Bend the rules — applies to every story' },
 ];
 
 export default function SettingsScreen({ onBack }) {
@@ -94,6 +96,7 @@ export default function SettingsScreen({ onBack }) {
               </div>
               {cat.id === 'model' && <ModelSettings embedded />}
               {cat.id === 'appearance' && <AppearanceSettings />}
+              {cat.id === 'cheats' && <CheatSettings />}
             </section>
           ))}
           {/* Tail spacer so the last section can scroll to the top */}

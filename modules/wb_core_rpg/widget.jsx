@@ -689,10 +689,29 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
   const [confirming, setConfirming] = useState(false);
   const [query, setQuery] = useState('');
   const [rollIdx, setRollIdx] = useState(0); // cycles the rarity ladder while refining
+  const [cheatMode, setCheatMode] = useState(false); // global cheats.enabled engine setting
+  const [forcedTier, setForcedTier] = useState(null); // strength 5-10, null = let fate roll
 
   // StrictMode double-mounts the modal in dev, firing loadCategories twice;
   // the sequence counter makes every response but the latest a no-op.
   const loadSeq = React.useRef(0);
+
+  // The rarity picker only appears when the global cheat toggle is on. The
+  // server enforces the same gate, so this is purely cosmetic.
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/settings?scope=global')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data?.settings) return;
+        for (const group of Object.values(data.settings)) {
+          const hit = (group || []).find((d) => d.key === 'cheats.enabled');
+          if (hit) { setCheatMode(!!hit.value); return; }
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   // Refined results already revealed this session, by lowercased skill name.
   // Mirrors the server-side roll lock so re-picks skip the roll animation.
@@ -779,11 +798,14 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
   }
 
   async function pick(skill) {
+    const forced = cheatMode ? forcedTier : null;
     // Fate's roll is locked per skill (server-side too): re-picking a skill
     // already revealed this session jumps straight back to its reveal instead
-    // of replaying the roll animation for a result that cannot change.
+    // of replaying the roll animation for a result that cannot change. A
+    // cheat-forced pick is always a fresh request - choosing a rarity is the
+    // whole point.
     const seen = refinedByName.current[skill.name.toLowerCase()];
-    if (seen) {
+    if (seen && forced == null) {
       setChosen(skill);
       setRefined(seen);
       setError('');
@@ -800,7 +822,7 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
       const request = fetch(`${API_BASE}/skills/wizard/refine`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...skill, menu: menu?.name || null }),
+        body: JSON.stringify({ ...skill, menu: menu?.name || null, forced_strength: forced }),
       }).then(async (res) => {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.detail || `Failed to refine the skill (HTTP ${res.status})`);
@@ -996,6 +1018,32 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
                 </span>
                 <span className="text-gray-500 font-mono">Page {pageIndex + 1}</span>
               </div>
+              {cheatMode && (
+                <div className="flex items-center gap-1.5 flex-wrap bg-gray-800/40 border border-dashed border-gray-700 rounded-lg px-2.5 py-2">
+                  <span className="text-[10px] text-gray-500 uppercase tracking-wider mr-0.5">Cheat {'—'} fate's hand:</span>
+                  <button
+                    onClick={() => setForcedTier(null)}
+                    className={`text-[10px] px-1.5 py-px rounded border transition-colors ${
+                      forcedTier == null
+                        ? 'bg-indigo-500/20 text-indigo-200 border-indigo-400/60 font-semibold'
+                        : 'text-gray-400 border-gray-700 hover:text-gray-200'
+                    }`}
+                  >
+                    Random
+                  </button>
+                  {RARITY_TIERS.map((t) => (
+                    <button
+                      key={t.label}
+                      onClick={() => setForcedTier(t.max)}
+                      className={`text-[10px] px-1.5 py-px rounded border transition-colors ${
+                        forcedTier === t.max ? `${t.chip} font-semibold` : `${t.text} opacity-50 border-gray-700 hover:opacity-100`
+                      }`}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="space-y-2">
                 {(pages[pageIndex] || []).map(skillButton)}
               </div>

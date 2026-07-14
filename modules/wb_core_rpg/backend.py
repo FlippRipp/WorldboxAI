@@ -1635,6 +1635,7 @@ def get_router():
         trigger_words: list[str] | None = None
         type: str | None = None
         menu: str | None = None
+        forced_strength: int | None = None  # honored only when cheats.enabled
 
     def _session_manager():
         sm = _services.get("session_manager")
@@ -1660,6 +1661,10 @@ def get_router():
         if llm is None:
             raise HTTPException(status_code=503, detail="LLM service is not available.")
         return llm
+
+    def _cheats_enabled() -> bool:
+        settings = _services.get("settings")
+        return bool(settings.get("cheats.enabled")) if settings is not None else False
 
     def _sync_evolutions(rpg: dict):
         rpg["pending_evolutions"] = _sync_pending_evolutions(
@@ -2165,24 +2170,33 @@ def get_router():
         if not name:
             raise HTTPException(status_code=400, detail="Skill name is required.")
 
+        # The cheat gate lives server-side: a forced strength from the client
+        # only counts while the global cheat toggle is on; otherwise it is
+        # silently ignored and fate rolls as usual.
+        forced = payload.forced_strength if _cheats_enabled() else None
+        if forced is not None and not (5 <= forced <= MAX_SKILL_RATING):
+            raise HTTPException(status_code=400, detail="Forced strength must be between 5 and 10.")
+
         # Fate's roll is locked per skill: going back and re-picking the same
         # skill returns the identical refined result and strength - no
-        # re-rolling your way to Mythic, and no repeat LLM cost.
+        # re-rolling your way to Mythic, and no repeat LLM cost. A cheat-forced
+        # pick bypasses the lock (and overwrites it below): choosing a rarity
+        # is the whole point of the cheat.
         entry = _addskill_cache.setdefault(sm.active_save_id, {"categories": None, "pages": {}})
         rolls = entry.setdefault("rolls", {})
         roll_key = name.lower()
-        if roll_key in rolls:
+        if forced is None and roll_key in rolls:
             return {"skill": rolls[roll_key]}
 
         lock = _addskill_locks.setdefault(f"{sm.active_save_id}:refine:{roll_key}", asyncio.Lock())
         async with lock:
-            if roll_key in rolls:
+            if forced is None and roll_key in rolls:
                 return {"skill": rolls[roll_key]}
 
             # The gacha moment: strength is rolled here, when the player first
-            # commits to a pick, never client-supplied - it becomes the
-            # starting rating.
-            strength = _roll_strength()
+            # commits to a pick, never client-supplied (cheats aside) - it
+            # becomes the starting rating.
+            strength = forced if forced is not None else _roll_strength()
             draft = {
                 "name": name,
                 "type": payload.type or "active",
