@@ -124,11 +124,16 @@ function Lightbox({ items, index, onNavigate, onClose, errorRecord }) {
         onClose();
       }}
       onTouchStart={(e) => {
+        // The lightbox mounts inside a chat message block, whose own touch
+        // handlers switch story variants (and regenerate past the newest
+        // one) — image swipes must never bubble up into that gesture.
+        e.stopPropagation();
         touchRef.current = {
           x: e.touches[0].clientX, y: e.touches[0].clientY, horizontal: null,
         };
       }}
       onTouchMove={(e) => {
+        e.stopPropagation();
         const start = touchRef.current;
         if (!start || count < 2) return;
         const dx = e.touches[0].clientX - start.x;
@@ -145,6 +150,7 @@ function Lightbox({ items, index, onNavigate, onClose, errorRecord }) {
         setDragX(atEdge ? dx / 3 : dx);
       }}
       onTouchEnd={(e) => {
+        e.stopPropagation();
         const start = touchRef.current;
         touchRef.current = null;
         setDragging(false);
