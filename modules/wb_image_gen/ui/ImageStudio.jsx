@@ -2303,6 +2303,12 @@ export default function ImageStudio({ onBack }) {
       next.add(filename);
       return next;
     });
+  const hideImage = (filename) =>
+    setRevealed((prev) => {
+      const next = new Set(prev);
+      next.delete(filename);
+      return next;
+    });
 
   if (!config) {
     return (
@@ -2563,7 +2569,8 @@ export default function ImageStudio({ onBack }) {
               <option value="blackout">Black out until clicked</option>
             </select>
             <p className="text-xs text-gray-600 mt-1">
-              New illustrations in the story arrive covered; click one to reveal it.
+              New illustrations in the story arrive covered; click one to reveal it,
+              and press its eye button to hide it again.
               Useful for surprise-sensitive scenes or reading in public.
             </p>
           </div>
@@ -3010,7 +3017,7 @@ export default function ImageStudio({ onBack }) {
           <p className="text-xs text-gray-600">
             Every image generated for this world — story illustrations and studio tests alike.
             {conceal !== 'off'
-              ? ` Images are ${conceal === 'blackout' ? 'blacked out' : 'blurred'} until clicked, matching the chat conceal setting (Output tab).`
+              ? ` Images are ${conceal === 'blackout' ? 'blacked out' : 'blurred'} until clicked, matching the chat conceal setting (Output tab); the eye button hides one again.`
               : ' Set “Hide images in chat until clicked” in the Output tab to conceal them here too.'}
           </p>
           {records.length === 0 ? (
@@ -3061,6 +3068,16 @@ export default function ImageStudio({ onBack }) {
                             <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 border border-white/10 text-[10px] text-gray-300">
                               <span aria-hidden="true">👁</span> Click to reveal
                             </span>
+                          </button>
+                        )}
+                        {!concealed && conceal !== 'off' && (
+                          <button
+                            onClick={() => hideImage(filename)}
+                            title="Hide image"
+                            aria-label="Hide image"
+                            className="absolute top-1.5 left-1.5 px-1.5 py-1 rounded text-xs leading-none bg-black/60 text-gray-300 border border-white/10 hover:bg-black/80 hover:text-white transition-colors"
+                          >
+                            <span aria-hidden="true">👁</span>
                           </button>
                         )}
                       </div>

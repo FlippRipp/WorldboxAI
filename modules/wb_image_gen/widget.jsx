@@ -331,6 +331,10 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
     store.revealed.add(filename);
     notify();
   };
+  const hide = (filename) => {
+    store.revealed.delete(filename);
+    notify();
+  };
   const isHidden = (filename) => store.conceal !== 'off' && !store.revealed.has(filename);
   const hiddenCls = (hidden) => hidden
     ? store.conceal === 'blackout'
@@ -390,6 +394,16 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
                             </span>
                           </button>
                         )}
+                        {!hidden && store.conceal !== 'off' && (
+                          <button
+                            onClick={() => hide(filename)}
+                            title="Hide illustration"
+                            aria-label="Hide illustration"
+                            className={`absolute top-2 left-2 ${overlayBtn}`}
+                          >
+                            <span aria-hidden="true">👁</span>
+                          </button>
+                        )}
                       </div>
                     );
                   })}
@@ -417,6 +431,16 @@ export default function ImageFooter({ state, slotName, message, messageTurn }) {
                   <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/60 border border-white/10 text-xs text-gray-300">
                     <span aria-hidden="true">👁</span> Click to reveal
                   </span>
+                </button>
+              )}
+              {files.length === 1 && !hidden0 && store.conceal !== 'off' && (
+                <button
+                  onClick={() => hide(files[0])}
+                  title="Hide illustration"
+                  aria-label="Hide illustration"
+                  className={`absolute top-2 left-2 ${overlayBtn}`}
+                >
+                  <span aria-hidden="true">👁</span>
                 </button>
               )}
               <div className="absolute top-2 right-2 flex gap-1">
