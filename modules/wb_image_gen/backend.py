@@ -224,8 +224,9 @@ STEP_RETRIES_MAX = 5
 STEP_RETRY_BASE_DELAY_S = 2.0
 # How many images one generation may render. Each image is its own Novita
 # task, submitted and polled concurrently, so a batch takes roughly as long
-# as a single image (but costs one generation per image).
-IMAGE_NUM_MAX = 4
+# as a single image (but costs one generation per image; the local WebUI
+# renders them one after another instead).
+IMAGE_NUM_MAX = 8
 
 # Each image in a batch gets its own prompt-writer call, so the images differ
 # in content, not just seed. The hint steers WHICH moment of the scene each
