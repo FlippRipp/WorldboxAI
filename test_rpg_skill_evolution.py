@@ -261,6 +261,8 @@ def test_evolve_applies_tiered_form():
     assert "PURE path" not in calls[0]["prompt"]
     # Power-up applies to benefits only; drawbacks must not scale with it.
     assert "must NOT grow stronger" in calls[0]["prompt"]
+    # The description must stand alone, never referencing the prior form.
+    assert "FREE-STANDING" in calls[0]["prompt"]
 
 
 def test_evolve_pure_path_keeps_skill_identity_in_prompt():

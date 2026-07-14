@@ -1456,7 +1456,7 @@ Design the evolved Tier {tier + 1} form. Requirements:
 - The power-up applies to the skill's BENEFITS only. Any costs, drawbacks, or negative side effects must NOT grow stronger with the evolution: keep them at their current severity or reduce them, and never introduce new ones.
 {theme_req}
 - Give it a new evocative name of 2-4 words. It must not be the same as the old name.
-- The description is 1-2 tight sentences: what it does, how it manifests, and any remaining limit or cost. Concrete over flowery.
+- The description is 1-2 tight sentences and completely FREE-STANDING: it states exactly what the power does, how it manifests, and any remaining limit or cost, readable by someone who has never heard of the previous form. Never mention, compare to, or assume knowledge of the old skill - no "now", "no longer", "unlike before", "twice as far", or naming the prior form. Concrete over flowery.
 - Trigger words: 2-5 short words or phrases a player would naturally use when invoking it.
 
 JSON response:
