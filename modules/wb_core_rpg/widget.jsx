@@ -692,12 +692,16 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
   const menuKey = (m) => (m.search ? 'search:' : 'cat:') + m.name.toLowerCase();
   const pages = menu ? pagesByMenu[menuKey(menu)] || [] : [];
 
-  async function loadCategories() {
+  async function loadCategories(regenerate = false) {
     const seq = ++loadSeq.current;
     setPhase('categories-loading');
     setError('');
     try {
-      const res = await fetch(`${API_BASE}/skills/wizard/categories`, { method: 'POST' });
+      const res = await fetch(`${API_BASE}/skills/wizard/categories`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ regenerate: !!regenerate }),
+      });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || `Failed to prepare categories (HTTP ${res.status})`);
       if (seq !== loadSeq.current) return;
@@ -860,7 +864,7 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
             <div className="text-center py-4 space-y-3">
               <div className="text-xs text-red-400">{error}</div>
               <button
-                onClick={loadCategories}
+                onClick={() => loadCategories()}
                 className="px-4 py-1.5 text-xs text-indigo-200 bg-indigo-600/50 hover:bg-indigo-600/70 border border-indigo-500/50 rounded transition-colors"
               >
                 Try again
@@ -899,6 +903,13 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
                   </button>
                 ))}
               </div>
+              <button
+                onClick={() => loadCategories(true)}
+                className="w-full py-1.5 text-xs text-indigo-300/80 hover:text-indigo-200 transition-colors"
+                title="Cast aside these ten paths and let fate deal a fresh hand"
+              >
+                {'🎲'} Consult the fates anew
+              </button>
               <button onClick={onCancel} className="w-full py-1.5 text-xs text-gray-500 hover:text-gray-300 transition-colors">
                 Cancel
               </button>

@@ -1626,6 +1626,9 @@ def get_router():
     class EvolvePayload(BaseModel):
         theme: str
 
+    class CategoriesPayload(BaseModel):
+        regenerate: bool = False
+
     class SkillOptionsPayload(BaseModel):
         menu: str  # category name or search query
         search: bool = False
@@ -2082,19 +2085,22 @@ def get_router():
             llm._current_module = ""
 
     @router.post("/skills/wizard/categories")
-    async def generate_skill_categories():
+    async def generate_skill_categories(payload: CategoriesPayload | None = None):
         sm = _session_manager()
         rpg = _rpg_data(sm)
+        regenerate = bool(payload and payload.regenerate)
         entry = _addskill_cache.setdefault(sm.active_save_id, {"categories": None, "pages": {}})
-        if entry["categories"]:
+        if entry["categories"] and not regenerate:
             return {"categories": entry["categories"]}
 
         # Same double-fire guard as evolution_options: StrictMode mounts the
         # modal twice in dev, and two cache misses would mean two LLM calls
-        # with the second category set visibly replacing the first.
+        # with the second category set visibly replacing the first. A
+        # regenerate is a deliberate click, so it skips the cache short-circuit
+        # and always pays for a fresh generation.
         lock = _addskill_locks.setdefault(f"{sm.active_save_id}:categories", asyncio.Lock())
         async with lock:
-            if entry["categories"]:
+            if entry["categories"] and not regenerate:
                 return {"categories": entry["categories"]}
 
             raw = await _wizard_generate(sm, _skill_categories_prompt(rpg, sm.state))

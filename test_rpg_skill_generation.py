@@ -187,6 +187,27 @@ def test_categories_llm_garbage_502():
     assert res.status_code == 502
 
 
+def test_categories_regenerate_replaces_cache():
+    mod = _load_backend()
+    fresh = json.dumps({
+        "categories": [{"name": f"Fresh {i}", "summary": "s"} for i in range(10)]
+    })
+    client, _, calls = _make_client(mod, _rpg(), llm_replies=[CATEGORIES_REPLY, fresh])
+
+    res = client.post(f"{BASE}/skills/wizard/categories")
+    assert res.json()["categories"][0]["name"] == "Category 1"
+
+    res2 = client.post(f"{BASE}/skills/wizard/categories", json={"regenerate": True})
+    assert res2.status_code == 200
+    assert res2.json()["categories"][0]["name"] == "Fresh 0"
+    assert len(calls) == 2
+
+    # The regenerated list is cached: a plain call returns it with no LLM call.
+    res3 = client.post(f"{BASE}/skills/wizard/categories")
+    assert res3.json()["categories"] == res2.json()["categories"]
+    assert len(calls) == 2
+
+
 def test_categories_duplicate_names_rejected():
     mod = _load_backend()
     dupes = json.dumps({
