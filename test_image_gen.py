@@ -571,12 +571,14 @@ def test_parallel_prompts_written_separately(tmp_path):
     assert record["id"] == record_id
     assert record["status"] == "done"
 
-    # Call 1 is the beat planner (its reply here is unparseable, so writers
-    # fall back to splitting the scene themselves); then three independent
-    # writer calls, each pinned to its own beat in story order.
-    assert captured["n"] == 4
-    assert "illustrated sequence" in captured["inputs"][0]
-    writer_inputs = captured["inputs"][1:]
+    # Call 1 is the character-notes pre-pass (rosterless batch), call 2 the
+    # beat planner (its reply here is unparseable, so writers fall back to
+    # splitting the scene themselves); then three independent writer calls,
+    # each pinned to its own beat in story order.
+    assert captured["n"] == 5
+    assert "fix each character's look ONCE" in captured["inputs"][0]
+    assert "illustrated sequence" in captured["inputs"][1]
+    writer_inputs = captured["inputs"][2:]
     for slot, writer_input in enumerate(writer_inputs):
         assert "SEQUENCE:" in writer_input
         assert f"beat {slot + 1} of 3" in writer_input
@@ -584,7 +586,7 @@ def test_parallel_prompts_written_separately(tmp_path):
     assert "final beat" in writer_inputs[2]
 
     # Three distinct prompts, aligned with the files they produced.
-    assert record["image_prompts"] == ["scene take 2", "scene take 3", "scene take 4"]
+    assert record["image_prompts"] == ["scene take 3", "scene take 4", "scene take 5"]
     assert record["image_prompt"] == record["image_prompts"][0]
     for filename, prompt in zip(record["filenames"], record["image_prompts"]):
         assert (tmp_path / MID / "images" / filename).read_bytes() == prompt.encode()
@@ -614,7 +616,7 @@ def test_batch_writers_share_one_beat_plan(tmp_path):
 
     async def generate(prompt, model_preference="balanced", max_tokens=None):
         captured["inputs"].append(prompt)
-        if len(captured["inputs"]) == 1:
+        if "illustrated sequence" in prompt:
             return plan
         return f"take {len(captured['inputs'])}"
 
@@ -630,8 +632,10 @@ def test_batch_writers_share_one_beat_plan(tmp_path):
     record = backend._read_index()[0]
     assert record["status"] == "done"
 
-    assert "exactly 3 consecutive beats" in captured["inputs"][0]
-    writer_inputs = captured["inputs"][1:]
+    assert any("exactly 3 consecutive beats" in p for p in captured["inputs"])
+    writer_inputs = [p for p in captured["inputs"]
+                     if "illustrated sequence" not in p
+                     and "fix each character's look ONCE" not in p]
     assert len(writer_inputs) == 3
     for slot, writer_input in enumerate(writer_inputs):
         # Each writer sees the full shared plan and is pinned to its beat.
@@ -667,6 +671,14 @@ def _run_batch_capturing_llm_calls(tmp_path, **cfg_overrides):
     return calls
 
 
+def _writer_calls(calls):
+    """Drop the character-notes and beat-planner pre-passes, keeping only the
+    per-image prompt-writer calls."""
+    return [c for c in calls
+            if "illustrated sequence" not in c[0]
+            and "fix each character's look ONCE" not in c[0]]
+
+
 def test_beat_planner_modes(tmp_path):
     # Default ("fast"): one planner call, on the fastest slot to keep the
     # extra latency low; writers still run on the prompt-writer slot.
@@ -674,8 +686,7 @@ def test_beat_planner_modes(tmp_path):
     planner = [c for c in calls if "illustrated sequence" in c[0]]
     assert len(planner) == 1
     assert planner[0][1] == "fastest"
-    assert [pref for p, pref in calls if "illustrated sequence" not in p] == \
-        ["smartest", "smartest"]
+    assert [pref for _, pref in _writer_calls(calls)] == ["smartest", "smartest"]
 
     # "smart": the plan is written on the prompt-writer slot instead.
     calls = _run_batch_capturing_llm_calls(tmp_path / "smart", beat_planner="smart")
@@ -685,9 +696,10 @@ def test_beat_planner_modes(tmp_path):
 
     # "off": no planner call at all; each writer splits the scene itself.
     calls = _run_batch_capturing_llm_calls(tmp_path / "off", beat_planner="off")
-    assert len(calls) == 2
     assert all("illustrated sequence" not in p for p, _ in calls)
-    assert all("Mentally split" in p for p, _ in calls)
+    writers = _writer_calls(calls)
+    assert len(writers) == 2
+    assert all("Mentally split" in p for p, _ in writers)
 
 
 def test_beat_planner_config_roundtrip(tmp_path):
@@ -745,8 +757,10 @@ def test_parallel_prompt_failure_borrows_sibling_prompt(tmp_path):
     async def generate(prompt, model_preference="balanced", max_tokens=None):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise RuntimeError("planner down")   # beat plan falls back too
+            raise RuntimeError("notes down")     # character notes fall back
         if calls["n"] == 2:
+            raise RuntimeError("planner down")   # beat plan falls back too
+        if calls["n"] == 3:
             raise RuntimeError("LLM unavailable")   # slot 0's writer
         return f"scene take {calls['n']}"
 
@@ -766,7 +780,7 @@ def test_parallel_prompt_failure_borrows_sibling_prompt(tmp_path):
     assert len(record["filenames"]) == 3
     # Slot 0's writer failed, so it borrowed its nearest surviving sibling
     # (slot 1), keeping the duplicated beat adjacent in the sequence.
-    assert record["image_prompts"] == ["scene take 3", "scene take 3", "scene take 4"]
+    assert record["image_prompts"] == ["scene take 4", "scene take 4", "scene take 5"]
 
 
 def test_all_prompt_writers_failing_marks_error(tmp_path):
@@ -2814,11 +2828,116 @@ def test_studio_generate_refine_batch_gets_beat_plan(tmp_path):
     assert len(planner_calls) == 1
     assert "a rider races home" in planner_calls[0][0]
     assert planner_calls[0][1] == "fastest"
-    writer_inputs = [p for p, _ in calls if "illustrated sequence" not in p]
+    writer_inputs = [p for p, _ in _writer_calls(calls)]
     assert len(writer_inputs) == 3
     for slot, writer_input in enumerate(writer_inputs):
         assert "The rider gallops." in writer_input      # shared plan
         assert f"beat {slot + 1} ONLY" in writer_input   # own beat
+
+
+def test_studio_batch_fixes_character_look_once(tmp_path):
+    """A multi-image studio Generate (refine on, no character roster) runs
+    ONE appearance pre-pass on the typed scene, and every writer receives the
+    same fixed notes -- so the described character looks consistent across
+    the batch."""
+    backend = _load_backend(tmp_path)
+    _enable(backend, image_num=2)
+    _fake_novita(backend)
+    calls = []
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        calls.append(prompt)
+        if "fix each character's look ONCE" in prompt:
+            return "the knight: red hair, blue eyes, silver plate armor"
+        if "illustrated sequence" in prompt:
+            return "1. The knight kneels.\n2. The knight leaps."
+        return f"take {len(calls)}"
+
+    sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
+    backend.set_services({"data_dir": str(tmp_path),
+                          "engine": SimpleNamespace(sdk=sdk)})
+
+    with _client(backend) as client:
+        resp = client.post("/generate", json={"prompt_override": "a knight duels at dawn",
+                                              "refine": True})
+        assert resp.status_code == 200
+        record_id = resp.json()["record_id"]
+        for _ in range(200):
+            record = next((r for r in backend._read_index() if r["id"] == record_id), None)
+            if record and record["status"] in ("done", "error"):
+                break
+            import time as _t
+            _t.sleep(0.02)
+    assert record["status"] == "done"
+    assert len(record["filenames"]) == 2
+
+    notes_calls = [p for p in calls if "fix each character's look ONCE" in p]
+    assert len(notes_calls) == 1                    # once per batch, not per image
+    assert "a knight duels at dawn" in notes_calls[0]
+    assert calls.index(notes_calls[0]) == 0         # before the planner and writers
+
+    writer_inputs = [p for p in calls
+                     if "fix each character's look ONCE" not in p
+                     and "illustrated sequence" not in p]
+    assert len(writer_inputs) == 2
+    for writer_input in writer_inputs:
+        assert "CHARACTER CONSISTENCY" in writer_input
+        assert "red hair, blue eyes, silver plate armor" in writer_input
+
+
+def test_character_notes_skipped_for_single_image_and_rostered_runs(tmp_path):
+    """The appearance pre-pass only fires for multi-image batches WITHOUT a
+    character roster: single images have no consistency problem, and story
+    runs pin appearances through the character reference system."""
+    def calls_for(subdir, image_num, characters):
+        backend = _load_backend(tmp_path / subdir)
+        _enable(backend, image_num=image_num)
+        _fake_novita(backend)
+        calls = []
+
+        async def generate(prompt, model_preference="balanced", max_tokens=None):
+            calls.append(prompt)
+            if "illustrated sequence" in prompt:
+                return "1. a\n2. b"
+            return "take"
+
+        sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
+
+        async def run():
+            backend._spawn_generation(
+                save_id="mystory", turn=1, narration="a scene", history="",
+                sdk=sdk, trigger="auto", characters=characters)
+            await asyncio.gather(*backend._tasks)
+
+        asyncio.run(run())
+        assert backend._read_index()[0]["status"] == "done"
+        return calls
+
+    sheet = {"key": "n1", "name": "Kira", "descriptor": "red cloak"}
+    roster = {"player": None, "npcs": [sheet], "all_npcs": [sheet]}
+    for subdir, image_num, characters in (("single", 1, None),
+                                          ("rostered", 2, roster)):
+        calls = calls_for(subdir, image_num, characters)
+        assert all("fix each character's look ONCE" not in p for p in calls)
+
+
+def test_scene_character_notes_handles_none_and_refusal(tmp_path):
+    """A 'none' reply (pure scenery) or a refusal yields no notes block."""
+    backend = _load_backend(tmp_path)
+    cfg = backend._default_config()
+
+    async def notes_for(reply):
+        async def generate(prompt, model_preference="balanced", max_tokens=None):
+            return reply
+        sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
+        return await backend._scene_character_notes(cfg, "a scene", sdk)
+
+    assert asyncio.run(notes_for("none")) == ""
+    assert asyncio.run(notes_for("I'm sorry, I can't help with that.")) == ""
+    notes = asyncio.run(notes_for("the knight: red hair\nthe mage: white robes"))
+    assert "- the knight: red hair" in notes
+    assert "- the mage: white robes" in notes
+    assert "CHARACTER CONSISTENCY" in notes
 
 
 # ---------------------------------------------------------------------------

@@ -422,6 +422,23 @@ Name: {name}
 
 Output ONLY the tag list, no quotes, no preamble, 5-15 tags."""
 
+# Multi-image batches from the studio Generate button carry no character
+# roster, so each prompt writer would re-invent any unstated trait (hair
+# color, outfit...) and the "same" character would drift between the batch's
+# images. This one pre-pass fixes each described character's look for the
+# whole batch. Unlike the cached canonical tags above, the outfit IS
+# included: every image depicts this same scene, so the clothes must match
+# too.
+SCENE_CHARACTER_TAG_PROMPT = """Several images of the SAME scene are about to be generated, each from its own independently written prompt. Your job: fix each character's look ONCE, so every image depicts them identically.
+
+From the scene below, list each distinct character it depicts (at most 3 -- the ones the scene centers on). For each, output ONE line:
+<name or a short label like "the knight">: comma-separated lowercase booru-style appearance tags -- hair color, hair length and style, eye color, skin tone, species/race features (ears, horns, tail, fur, scales), build, age impression, notable marks, AND their outfit in this scene (clothing, armor, accessories, held items).
+Where the scene leaves a trait unstated, INVENT a plausible one and state it -- an unstated hair color must not come out different in every image, so pick one now.
+Output ONLY the character lines, nothing else. If the scene depicts no characters at all, output exactly: none
+
+SCENE:
+{narration}"""
+
 _services: dict = {}
 _tasks: set = set()
 _hf_detail_cache: dict = {}   # repo_id -> (fetched_at, detail json)
@@ -1433,9 +1450,49 @@ def _character_block(cfg: dict, characters: dict | None,
     return "".join("\n\n" + p for p in parts)
 
 
+async def _scene_character_notes(cfg: dict, narration: str, sdk) -> str:
+    """Appearance notes for a multi-image batch that carries no character
+    roster (the studio Generate button): one LLM pass reads the scene text
+    and fixes each described character's look -- inventing any unstated
+    trait so it cannot vary -- and every writer gets the SAME notes, keeping
+    the character consistent across the sequence. Empty string when the
+    scene has no characters or on any failure (writers then describe
+    characters independently, as before)."""
+    if sdk is None:
+        return ""
+    prompt = SCENE_CHARACTER_TAG_PROMPT.replace("{narration}", narration or "")
+    try:
+        sdk.llm._current_module = MODULE_ID
+        raw = await sdk.llm.generate(
+            prompt, model_preference=cfg.get("prompt_model_preference", "smartest"))
+    except Exception as e:
+        print(f"[Image Gen] Scene character notes failed (skipping): {e}")
+        return ""
+    finally:
+        sdk.llm._current_module = ""
+    raw = (raw or "").strip()
+    if not raw or _looks_like_llm_refusal(raw):
+        return ""
+    # One "label: tags" line per character; anything else (a "none" reply,
+    # stray commentary) simply drops out.
+    lines = [ln.strip().lstrip("-* ").strip() for ln in raw.splitlines()]
+    lines = [ln for ln in lines if ":" in ln]
+    if not lines:
+        return ""
+    notes = "\n".join(f"- {ln}" for ln in lines)
+    print(f"[Image Gen] Scene character notes for this batch:\n{notes}")
+    return ("CHARACTER CONSISTENCY (MANDATORY): several prompts are being "
+            "written independently for images of this SAME scene, and the "
+            "appearance notes below were fixed once for the whole batch. "
+            "When you depict a character listed here, use their noted traits "
+            "EXACTLY -- never re-invent or contradict hair, eyes, skin, "
+            "species features, or outfit:\n" + notes)
+
+
 async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
                               characters: dict | None = None,
                               moment_hint: str = "",
+                              character_notes: str = "",
                               insist: bool = False) -> str:
     style = _prompt_style(cfg)
     if style == "tags":
@@ -1456,6 +1513,8 @@ async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
         prompt += ("\n\nMANDATORY: weave these trigger words into the output verbatim "
                    "(they activate style adapters): " + ", ".join(triggers))
     prompt += _character_block(cfg, characters, subject_mode)
+    if character_notes:
+        prompt += "\n\n" + character_notes
     if moment_hint:
         prompt += "\n\n" + moment_hint
     if insist:
@@ -3282,7 +3341,15 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                     raise RuntimeError("no LLM available to write the image prompt")
                 await _patch_record(record_id, status="prompting")
 
-                # One shared beat plan first, so every writer sees the same
+                # A batch with no character roster (studio Generate) first
+                # fixes the described characters' looks once, so the images
+                # agree on every trait; story runs get this from the
+                # character reference system instead.
+                character_notes = ""
+                if image_num > 1 and not characters:
+                    character_notes = await _scene_character_notes(cfg, narration, sdk)
+
+                # One shared beat plan next, so every writer sees the same
                 # chronology (None falls back to independent splits).
                 beats = await _plan_beats(cfg, narration, sdk, image_num)
 
@@ -3300,7 +3367,8 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                         attempts["n"] += 1
                         return await _write_image_prompt(
                             cfg, narration, history, sdk, characters,
-                            moment_hint=hint, insist=attempts["n"] > 1)
+                            moment_hint=hint, character_notes=character_notes,
+                            insist=attempts["n"] > 1)
                     return call
 
                 prompt_results = await asyncio.gather(
