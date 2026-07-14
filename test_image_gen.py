@@ -2775,6 +2775,52 @@ def test_generate_endpoint_refine_runs_prompt_writer(tmp_path):
     assert captured["preferences"] == ["smartest"]
 
 
+def test_studio_generate_refine_batch_gets_beat_plan(tmp_path):
+    """The Image Studio Generate button with refine on runs the full
+    pipeline: for a multi-image batch the typed scene is beat-planned and
+    each writer is pinned to its own beat, same as a story illustration."""
+    backend = _load_backend(tmp_path)
+    _enable(backend, image_num=3)
+    _fake_novita(backend)
+    calls = []
+    plan = "1. The rider crests the hill.\n2. The rider gallops.\n3. The rider arrives."
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        calls.append((prompt, model_preference))
+        if "illustrated sequence" in prompt:
+            return plan
+        return f"take {len(calls)}"
+
+    sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
+    backend.set_services({"data_dir": str(tmp_path),
+                          "engine": SimpleNamespace(sdk=sdk)})
+
+    with _client(backend) as client:
+        resp = client.post("/generate", json={"prompt_override": "a rider races home",
+                                              "refine": True})
+        assert resp.status_code == 200
+        record_id = resp.json()["record_id"]
+
+        for _ in range(200):
+            record = next((r for r in backend._read_index() if r["id"] == record_id), None)
+            if record and record["status"] in ("done", "error"):
+                break
+            import time as _t
+            _t.sleep(0.02)
+    assert record["status"] == "done"
+    assert len(record["filenames"]) == 3
+
+    planner_calls = [c for c in calls if "illustrated sequence" in c[0]]
+    assert len(planner_calls) == 1
+    assert "a rider races home" in planner_calls[0][0]
+    assert planner_calls[0][1] == "fastest"
+    writer_inputs = [p for p, _ in calls if "illustrated sequence" not in p]
+    assert len(writer_inputs) == 3
+    for slot, writer_input in enumerate(writer_inputs):
+        assert "The rider gallops." in writer_input      # shared plan
+        assert f"beat {slot + 1} ONLY" in writer_input   # own beat
+
+
 # ---------------------------------------------------------------------------
 # Hugging Face LoRA source + Novita-availability browse badges
 # ---------------------------------------------------------------------------

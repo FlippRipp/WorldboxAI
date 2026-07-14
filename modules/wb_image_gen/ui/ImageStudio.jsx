@@ -2944,6 +2944,9 @@ export default function ImageStudio({ onBack }) {
             {testRefine
               ? 'Your text is treated as a scene: the prompt-writer LLM refines it with your templates, trigger words and style — exactly like a story illustration.'
               : 'Sends your text straight to the image model, word for word (skips the prompt-writer LLM).'}
+            {(Number(draft.image_num) || 1) > 1 && (testRefine
+              ? ' With several images per generation, the scene is split into beats and the images form a chronological sequence.'
+              : ' With several images per generation, all of them use this exact text — only the seed differs (refine to get a beat sequence instead).')}
             {' '}Uses saved settings — save changes first. Results appear in the Image Library tab.
           </p>
           <div className="flex items-start gap-2">
