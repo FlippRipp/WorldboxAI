@@ -1377,6 +1377,7 @@ Chosen evolution theme: {theme}
 
 Design the evolved Tier {tier + 1} form. Requirements:
 - It MUST be a SIGNIFICANT power-up over the current form: broader in scope, stronger in effect, and with fewer limits - a dramatic leap, not a rename or minor tweak. It should feel like a new class of power.
+- The power-up applies to the skill's BENEFITS only. Any costs, drawbacks, or negative side effects must NOT grow stronger with the evolution: keep them at their current severity or reduce them, and never introduce new ones.
 {theme_req}
 - Give it a new evocative name of 2-4 words. It must not be the same as the old name.
 - The description is 1-2 tight sentences: what it does, how it manifests, and any remaining limit or cost. Concrete over flowery.
