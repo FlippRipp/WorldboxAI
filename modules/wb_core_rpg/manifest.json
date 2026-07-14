@@ -96,7 +96,7 @@
       "default": 3,
       "label": "New Skill Cost",
       "category": "Core RPG System",
-      "description": "Skill points required to learn a brand-new skill from the level-up screen. The new skill's starting rating is rolled by fate (5-10, equal odds) when the skill is chosen; a 10 (Mythic) immediately qualifies for evolution."
+      "description": "Skill points required to learn a brand-new skill from the level-up screen. Rarity (rolled by fate when the skill is chosen) shapes how powerful the skill's design is; every new skill starts at rating 5, except a Mythic, which is born at max rating and immediately qualifies for evolution."
     },
     "evolution_ai_model": {
       "type": "select",

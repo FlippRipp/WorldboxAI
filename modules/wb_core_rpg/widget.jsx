@@ -287,12 +287,15 @@ function LevelUpModal({ rpg, config, generating, onClose, onApplied }) {
       if (statSpent > 0) payload.stat_allocations = pendingStats;
       if (Object.keys(pendingSkills).length > 0) payload.skill_allocations = pendingSkills;
       if (newSkill) {
+        // Rarity shapes the skill's design, not its progression: every new
+        // skill starts at rating 5, except a Mythic (10), which is born at
+        // max rating so it immediately evolves.
         payload.new_skill = {
           name: newSkill.name.trim(),
           type: newSkill.type || 'active',
           description: newSkill.description || '',
           trigger_words: newSkill.trigger_words || [],
-          rating: newSkill.strength ?? null,
+          rating: newSkill.strength != null ? (newSkill.strength === 10 ? 10 : 5) : null,
         };
       }
       const res = await fetch(`${API_BASE}/levelup/spend`, {
@@ -935,7 +938,7 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
       >
         <div className="px-5 pt-6 pb-4 text-center border-b border-gray-800">
           <div className="text-2xl font-extrabold tracking-wide text-indigo-300">{'✦'} LEARN A NEW SKILL {'✦'}</div>
-          {costLabel && <div className="text-xs text-gray-400 mt-1">Costs {costLabel} {'—'} strength is rolled by fate.</div>}
+          {costLabel && <div className="text-xs text-gray-400 mt-1">Costs {costLabel} {'—'} rarity is rolled by fate.</div>}
         </div>
 
         <div className="px-5 py-5 space-y-4">

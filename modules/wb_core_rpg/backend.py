@@ -1237,10 +1237,14 @@ EVOLVED_RESET_RATING = 5
 # while a fresh request creates a second one, which would defeat the guard.
 _options_locks: dict[str, "asyncio.Lock"] = {}
 
-# Strength (= starting rating) is rolled once, when the player picks a skill,
-# uniformly over 5-10. Rarity tiers: 5 Common, 6 Uncommon, 7 Rare, 8 Epic,
-# 9 Legendary, 10 Mythic. A Mythic roll is learned at max rating, which drops
-# it straight into the normal pending-evolution flow.
+# Rarity is rolled once, when the player picks a skill, uniformly over 5-10.
+# It shapes how well-crafted the generated skill IS (stronger benefits, weaker
+# drawbacks) - not its rating progression: every new skill starts at rating 5,
+# except a Mythic (10), which is born at max rating and drops straight into
+# the normal pending-evolution flow.
+RARITY_LABELS = {5: "Common", 6: "Uncommon", 7: "Rare", 8: "Epic", 9: "Legendary", 10: "Mythic"}
+
+
 def _roll_strength() -> int:
     return random.randint(5, 10)
 
@@ -1544,16 +1548,21 @@ def _skill_refine_prompt(rpg: dict, skill: dict, menu: str | None, state: dict) 
     menu_note = f" ({menu})" if menu else ""
     strength_req = ""
     if strength:
+        label = RARITY_LABELS.get(strength, "Common")
         strength_req = (
-            f"\n- Fate has decided its power is {strength}/10 and it must stay exactly there: 5 is a "
-            "dependable starting talent with clear limits, 6-7 a notable gift, 8-9 an exceptional "
-            "power few in this world possess, and 10 a mythic power straining against its own limits. "
-            "Scope and limits must match."
+            f"\n- Fate has decided this skill's rarity: {label} ({strength}/10 on the quality ladder). "
+            "Rarity is how well-crafted the power itself is: the higher the rarity, the STRONGER its "
+            "positive effects and the WEAKER its costs, limits, and drawbacks - never the reverse - and "
+            "that difference must be unmistakable from the description alone. The ladder: 5 Common is a "
+            "solid, ordinary ability with real limits and costs; 6 Uncommon is notably effective with "
+            "only minor limits; 7 Rare is strong beyond most peers and its costs are slight; 8 Epic is "
+            "potent and versatile with drawbacks all but gone; 9 Legendary is overwhelming, with no "
+            "meaningful cost or limit; 10 Mythic is a world-shaking power with none at all."
         )
         if strength >= MAX_SKILL_RATING:
             strength_req += (
-                "\n- This skill sits at the absolute peak of its tier: write it as a fully realized "
-                "ability already trembling at the edge of transcending its current form."
+                "\n- This Mythic skill sits at the absolute peak of its tier: write it as a fully "
+                "realized ability already trembling at the edge of transcending its current form."
             )
     return f"""You are the game system for a text RPG. The player has chosen to learn the new skill "{name}"{menu_note}. Finalize it before it is added to their sheet. Output ONLY valid JSON, no other text.
 

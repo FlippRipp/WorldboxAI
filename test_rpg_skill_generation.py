@@ -365,7 +365,9 @@ def test_refine_rolls_strength_and_carries_draft_and_context_in_prompt():
     assert "Ember Feint" in prompt
     assert "A draft description." in prompt
     assert "FREE-STANDING" in prompt
-    assert "power is 7/10" in prompt
+    assert "rarity: Rare (7/10" in prompt
+    # Higher rarity = stronger benefits, weaker drawbacks - stated explicitly.
+    assert "STRONGER" in prompt and "WEAKER" in prompt
     assert "Flame Arts" in prompt
 
 
@@ -387,7 +389,7 @@ def test_refine_mythic_roll_adds_peak_guidance():
     assert res.status_code == 200
     assert res.json()["skill"]["strength"] == 10
     prompt = calls[0]["prompt"]
-    assert "power is 10/10" in prompt
+    assert "rarity: Mythic (10/10" in prompt
     assert "absolute peak" in prompt
 
 
@@ -475,7 +477,7 @@ def test_forced_strength_honored_when_cheats_on():
     res = client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint", "forced_strength": 10})
     assert res.status_code == 200
     assert res.json()["skill"]["strength"] == 10
-    assert "power is 10/10" in calls[0]["prompt"]
+    assert "rarity: Mythic (10/10" in calls[0]["prompt"]
 
 
 def test_forced_strength_out_of_range_400():
