@@ -1218,7 +1218,7 @@ async def _apply_lora_conditions(cfg: dict, narration: str, sdk,
     lines = "\n".join(
         _condition_line(i + 1, e) for i, e in enumerate(participating))
     prompt = (LORA_CONDITION_PROMPT
-              .replace("{narration}", (narration or "")[-3000:])
+              .replace("{narration}", narration or "")
               .replace("{characters}", _condition_character_block(characters))
               .replace("{conditions}", lines))
     try:
@@ -1363,7 +1363,7 @@ async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
         template = cfg.get("prompt_template_tags") or DEFAULT_PROMPT_TEMPLATE_TAGS
     else:
         template = cfg.get("prompt_template") or DEFAULT_PROMPT_TEMPLATE
-    prompt = _render_template(template, narration[-4000:], history[-3000:])
+    prompt = _render_template(template, narration, history)
     subject_mode = _subject_mode(cfg, characters)
     if subject_mode == "single":
         prompt += "\n\n" + BOORU_SINGLE_SUBJECT_RULE
