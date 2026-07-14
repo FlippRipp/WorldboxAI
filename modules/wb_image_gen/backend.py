@@ -1054,6 +1054,27 @@ def _applied_lora_names(cfg: dict) -> list[str]:
     ][:FLUX_LORAS_MAX if family == "flux" and provider == "novita" else SD_LORAS_MAX]
 
 
+def _union_lora_names(slot_cfgs: list[dict]) -> list[str]:
+    """Every LoRA applied to at least one image of a batch, in first-
+    appearance order -- the record stores one list for the whole batch even
+    when per-beat gating gave each image its own set."""
+    names: list[str] = []
+    for c in slot_cfgs:
+        for name in _applied_lora_names(c):
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _beat_scene(narration: str, beat: str) -> str:
+    """The scene text a per-image LoRA gate judges: the full scene for
+    context, plus the single beat this image actually depicts -- so a
+    condition like 'a battle is happening' matches the duel image but not
+    the farewell image of the same batch."""
+    return (f"{narration}\n\nTHE IMAGE BEING ILLUSTRATED DEPICTS ONLY THIS "
+            f"MOMENT OF THE SCENE: {beat}")
+
+
 def _active_trigger_words(cfg: dict) -> list[str]:
     """Trained trigger words of the LoRAs that will actually be applied, so the
     prompt-writer LLM can work them in and the LoRAs fire."""
@@ -3321,19 +3342,18 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
     retries = cfg.get("step_retries", STEP_RETRIES_DEFAULT)
     try:
         async with lock:
-            # Conditional LoRAs are gated first so both the trigger words fed
-            # to the prompt writer and the submit payload see the final set.
-            # (No retry here — the gate already fails open on any error.)
-            gated = await _apply_lora_conditions(cfg, narration, sdk, characters)
-            if gated is not cfg:
-                cfg = gated
-                await _patch_record(record_id, loras=_applied_lora_names(cfg))
-
             image_num = max(1, min(IMAGE_NUM_MAX, int(cfg.get("image_num", 1) or 1)))
 
             if prompt_override:
                 # A verbatim prompt (retry, unrefined studio text) cannot be
-                # re-varied; the batch shares it and differs by seed only.
+                # re-varied; the batch shares it and differs by seed only —
+                # one scene-level LoRA gate serves every slot. (No retry
+                # here — the gate already fails open on any error.)
+                gated = await _apply_lora_conditions(cfg, narration, sdk, characters)
+                if gated is not cfg:
+                    cfg = gated
+                    await _patch_record(record_id, loras=_applied_lora_names(cfg))
+                slot_cfgs = [cfg] * image_num
                 prompts = [_clean_image_prompt(prompt_override,
                                                cap=_prompt_cap(cfg))] * image_num
             else:
@@ -3353,6 +3373,24 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                 # chronology (None falls back to independent splits).
                 beats = await _plan_beats(cfg, narration, sdk, image_num)
 
+                # Conditional LoRAs: when each image depicts its own beat,
+                # each slot gets its own gate judged against that beat — a
+                # 'battle' LoRA can fire on the duel image and stay out of
+                # the farewell image — so the trigger words fed to each
+                # writer and each slot's submit payload see that slot's set.
+                # Without beats one scene-level gate serves the whole batch.
+                # (No retry here — the gate already fails open on any error.)
+                if beats:
+                    slot_cfgs = list(await asyncio.gather(*(
+                        _apply_lora_conditions(
+                            cfg, _beat_scene(narration, beats[slot]), sdk, characters)
+                        for slot in range(image_num))))
+                else:
+                    gated = await _apply_lora_conditions(cfg, narration, sdk, characters)
+                    slot_cfgs = [gated] * image_num
+                if any(c is not cfg for c in slot_cfgs):
+                    await _patch_record(record_id, loras=_union_lora_names(slot_cfgs))
+
                 # One writer call per image, run concurrently: separate calls
                 # (plus a per-slot moment hint) pin each image to its own
                 # chronological beat of the scene, so a batch reads as a
@@ -3360,20 +3398,20 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                 # prompt. Each slot counts its own attempts so a refusal's
                 # retries carry the fiction reminder while first attempts
                 # stay unchanged.
-                def _writer(hint):
+                def _writer(slot, hint):
                     attempts = {"n": 0}
 
                     async def call():
                         attempts["n"] += 1
                         return await _write_image_prompt(
-                            cfg, narration, history, sdk, characters,
+                            slot_cfgs[slot], narration, history, sdk, characters,
                             moment_hint=hint, character_notes=character_notes,
                             insist=attempts["n"] > 1)
                     return call
 
                 prompt_results = await asyncio.gather(
                     *(_retry_step("prompt writing",
-                                  _writer(_moment_hint(slot, image_num, beats)),
+                                  _writer(slot, _moment_hint(slot, image_num, beats)),
                                   retries)
                       for slot in range(image_num)),
                     return_exceptions=True)
@@ -3397,19 +3435,20 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
             # presigned result URL expires, so any failure past submission
             # recovers by resubmitting a fresh task. Each slot's prompt lives
             # in a mutable cell so a content-filter refusal can swap in an
-            # LLM-softened rewrite before the next step retry resubmits.
-            cells = [{"prompt": p} for p in prompts]
+            # LLM-softened rewrite before the next step retry resubmits; the
+            # cell also carries the slot's own (per-beat gated) config.
+            cells = [{"prompt": p, "cfg": slot_cfgs[i]} for i, p in enumerate(prompts)]
 
             async def _generate_once(cell):
                 try:
-                    return await _generate_image(cfg, cell["prompt"])
+                    return await _generate_image(cell["cfg"], cell["prompt"])
                 except ProviderRefusal as e:
                     # Verbatim user text is never rewritten behind the user's
                     # back; only LLM-written prompts get softened.
                     if prompt_override is not None or sdk is None:
                         raise
                     cell["prompt"] = await _soften_image_prompt(
-                        cfg, cell["prompt"], str(e), sdk)
+                        cell["cfg"], cell["prompt"], str(e), sdk)
                     raise RuntimeError(
                         f"retrying with a softened prompt after refusal: {e}")
 

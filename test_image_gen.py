@@ -2921,6 +2921,84 @@ def test_character_notes_skipped_for_single_image_and_rostered_runs(tmp_path):
         assert all("fix each character's look ONCE" not in p for p in calls)
 
 
+def test_lora_gate_runs_per_beat_in_batches(tmp_path):
+    """With a beat plan, each image gets its own LoRA gate judged against
+    ITS beat: a 'battle' LoRA fires -- trigger words in the writer's input
+    and the submit payload -- only on the image whose beat shows the battle,
+    and the record keeps the union of applied LoRAs."""
+    backend = _load_backend(tmp_path)
+    _enable(backend, image_num=2, model_name="sd_xl_base_1.0.safetensors",
+            model_base="SDXL 1.0",
+            lora_library=[_lora(llm_mode="gate", condition="a battle is happening")])
+    calls = []
+    submits = []
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        calls.append(prompt)
+        if "fix each character's look ONCE" in prompt:
+            return "none"
+        if "illustrated sequence" in prompt:
+            return ("1. The knight walks to the arena.\n"
+                    "2. The knight battles the ogre.")
+        if "You control style adapters" in prompt:
+            return '{"1": 0.9}' if "battles the ogre" in prompt else "{}"
+        return f"writer take {len(calls)}"
+
+    sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
+
+    async def submit(cfg, prompt):
+        submits.append((backend._applied_lora_names(cfg), prompt))
+        return prompt
+
+    async def poll(cfg, task_id):
+        return task_id
+
+    async def download(url):
+        return url.encode(), "jpg"
+
+    backend._novita_submit = submit
+    backend._novita_poll = poll
+    backend._download = download
+
+    async def run():
+        backend._spawn_generation(
+            save_id="mystory", turn=1, narration="A knight's day at the arena.",
+            history="", sdk=sdk, trigger="auto")
+        await asyncio.gather(*backend._tasks)
+
+    asyncio.run(run())
+    record = backend._read_index()[0]
+    assert record["status"] == "done"
+    assert len(record["filenames"]) == 2
+
+    # One gate per image, each judging the full scene plus its own beat.
+    gate_calls = [p for p in calls if "You control style adapters" in p]
+    assert len(gate_calls) == 2
+    assert all("DEPICTS ONLY THIS MOMENT" in p for p in gate_calls)
+    assert all("A knight's day at the arena." in p for p in gate_calls)
+    assert any("walks to the arena" in p for p in gate_calls)
+    assert any("battles the ogre" in p for p in gate_calls)
+
+    # The LoRA rides only the battle image's submit payload...
+    by_slot = {record["image_prompts"].index(prompt): loras
+               for loras, prompt in submits}
+    assert by_slot[0] == []
+    assert by_slot[1] == ["Detail Tweaker"]
+    # ...and only that image's writer is told to weave the trigger words in.
+    writer_inputs = [p for p in calls
+                     if "You control style adapters" not in p
+                     and "illustrated sequence" not in p
+                     and "fix each character's look ONCE" not in p]
+    assert len(writer_inputs) == 2
+    walk_writer = next(p for p in writer_inputs if "beat 1 ONLY" in p)
+    battle_writer = next(p for p in writer_inputs if "beat 2 ONLY" in p)
+    assert "detailed, sharp focus" not in walk_writer
+    assert "detailed, sharp focus" in battle_writer
+
+    # The record's one lora list is the union across the batch's images.
+    assert record["loras"] == ["Detail Tweaker"]
+
+
 def test_scene_character_notes_handles_none_and_refusal(tmp_path):
     """A 'none' reply (pure scenery) or a refusal yields no notes block."""
     backend = _load_backend(tmp_path)
