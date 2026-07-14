@@ -2203,6 +2203,7 @@ export default function ImageStudio({ onBack }) {
         interval: Number(draft.interval) || 3,
         step_retries: Math.max(0, Number(draft.step_retries) || 0),
         prompt_model_preference: draft.prompt_model_preference,
+        beat_planner: draft.beat_planner || 'fast',
         prompt_template: draft.prompt_template,
         prompt_template_tags: draft.prompt_template_tags,
         pony_quality_tags: draft.pony_quality_tags,
@@ -2590,8 +2591,9 @@ export default function ImageStudio({ onBack }) {
               className="w-full accent-purple-500"
             />
             <p className="text-xs text-gray-600 mt-1">
-              Each image gets its own AI-written prompt — a different angle,
-              beat, or focus of the same scene — and its own generation
+              Each image gets its own AI-written prompt covering its own
+              consecutive beat of the scene, so the batch reads as a
+              chronological sequence of what happened
               {isLocal
                 ? ' (the local WebUI renders them one after another)'
                 : ', all run in parallel on Novita (cost scales with the count)'}.
@@ -2599,6 +2601,27 @@ export default function ImageStudio({ onBack }) {
               through them.
             </p>
           </div>
+          {(Number(draft.image_num) || 1) > 1 && (
+            <div>
+              <label className={labelCls}>Beat planner (multi-image batches)</label>
+              <select
+                value={draft.beat_planner || 'fast'}
+                onChange={(e) => set('beat_planner', e.target.value)}
+                className={inputCls}
+              >
+                <option value="fast">Fast model slot (default)</option>
+                <option value="smart">Prompt-writer model slot</option>
+                <option value="off">Off</option>
+              </select>
+              <p className="text-xs text-gray-600 mt-1">
+                One extra LLM call that splits the scene into as many beats as
+                there are images before the prompt writers run, so every image
+                agrees on the chronology. Fast keeps the added latency low;
+                Off lets each writer split the scene on its own (images may
+                disagree on the order of events).
+              </p>
+            </div>
+          )}
           <div>
             <label className={labelCls}>
               Retries per failed step: {draft.step_retries ?? 1}

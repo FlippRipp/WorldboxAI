@@ -147,7 +147,8 @@ PROFILE_FIELDS = (
 )
 GLOBAL_FIELDS = (
     "enabled", "api_key", "civitai_api_key", "hf_api_key", "interval",
-    "step_retries", "prompt_model_preference", "character_reference_enabled",
+    "step_retries", "prompt_model_preference", "beat_planner",
+    "character_reference_enabled",
     "player_in_images", "chat_image_conceal", "civitai_nsfw",
     "provider", "local_base_url", "local_auth_user", "local_auth_pass",
     "local_checkpoint_dir", "local_lora_dir",
@@ -161,6 +162,11 @@ PROFILE_NAME_MAX = 60
 # character reaches the prompt writer and the LoRA gate in full (see
 # CLAUDE.md -- no token caps on LLM input context).
 PLAYER_IN_IMAGES_MODES = ("show", "pov")
+# Multi-image batches: how the shared beat plan is written. "fast" uses the
+# fastest LLM slot (default -- the plan is a simple chronology split and the
+# extra call adds latency before the writers), "smart" the configured prompt
+# writer slot, "off" skips planning (each writer splits the scene itself).
+BEAT_PLANNER_MODES = ("off", "fast", "smart")
 # How finished images appear in chat before the user clicks to reveal them.
 CHAT_IMAGE_CONCEAL_MODES = ("off", "blur", "blackout")
 # Tag models: how many characters a prompt may depict. "auto" picks single or
@@ -266,17 +272,20 @@ def _parse_beat_plan(raw: str, total: int) -> list[str] | None:
 
 async def _plan_beats(cfg: dict, narration: str, sdk, total: int) -> list[str] | None:
     """Split the latest scene into `total` consecutive beats with one LLM
-    call. Any failure returns None, which falls back to each writer splitting
-    the scene on its own (the pre-plan behavior)."""
-    if total <= 1 or sdk is None:
+    call, on the slot the beat_planner mode picks. "off", a single image, or
+    any failure returns None, which falls back to each writer splitting the
+    scene on its own."""
+    mode = cfg.get("beat_planner", "fast")
+    if mode == "off" or total <= 1 or sdk is None:
         return None
+    preference = ("fastest" if mode == "fast"
+                  else cfg.get("prompt_model_preference", "smartest"))
     prompt = (BEAT_PLAN_PROMPT
               .replace("{total}", str(total))
               .replace("{narration}", narration or ""))
     try:
         sdk.llm._current_module = MODULE_ID
-        raw = await sdk.llm.generate(
-            prompt, model_preference=cfg.get("prompt_model_preference", "smartest"))
+        raw = await sdk.llm.generate(prompt, model_preference=preference)
     except Exception as e:
         print(f"[Image Gen] Beat planning failed (independent splits instead): {e}")
         return None
@@ -286,6 +295,9 @@ async def _plan_beats(cfg: dict, narration: str, sdk, total: int) -> list[str] |
     if beats is None:
         print("[Image Gen] Unparseable beat plan (independent splits instead): "
               f"{(raw or '')[:200]!r}")
+    else:
+        print(f"[Image Gen] Beat plan ({mode}, {total} beats): "
+              + " | ".join(b[:60] for b in beats))
     return beats
 
 
@@ -450,6 +462,7 @@ def _default_config() -> dict:
         "interval": 3,
         "step_retries": STEP_RETRIES_DEFAULT,
         "prompt_model_preference": "smartest",
+        "beat_planner": "fast",         # one of BEAT_PLANNER_MODES
         "prompt_template": DEFAULT_PROMPT_TEMPLATE,
         "prompt_template_tags": DEFAULT_PROMPT_TEMPLATE_TAGS,
         "pony_quality_tags": DEFAULT_PONY_QUALITY_TAGS,
@@ -610,6 +623,8 @@ def _effective_config(store: dict) -> dict:
         cfg["booru_subject_mode"] = "single"
     if cfg.get("prompt_style_mode") not in PROMPT_STYLE_MODES:
         cfg["prompt_style_mode"] = "auto"
+    if cfg.get("beat_planner") not in BEAT_PLANNER_MODES:
+        cfg["beat_planner"] = "fast"
     # A stored tags template that still equals an old default was never
     # customized; keep it tracking the current default.
     if cfg.get("prompt_template_tags") in LEGACY_PROMPT_TEMPLATES_TAGS:
@@ -3520,6 +3535,7 @@ def get_router():
         interval: int | None = None
         step_retries: int | None = None
         prompt_model_preference: str | None = None
+        beat_planner: str | None = None
         prompt_template: str | None = None
         prompt_template_tags: str | None = None
         pony_quality_tags: str | None = None
@@ -3726,6 +3742,10 @@ def get_router():
         if ("prompt_model_preference" in incoming
                 and incoming["prompt_model_preference"] not in ("fastest", "balanced", "smartest")):
             raise HTTPException(status_code=400, detail="prompt_model_preference must be a model slot")
+        if ("beat_planner" in incoming
+                and incoming["beat_planner"] not in BEAT_PLANNER_MODES):
+            raise HTTPException(status_code=400,
+                                detail=f"beat_planner must be one of {BEAT_PLANNER_MODES}")
         if "civitai_nsfw" in incoming and incoming["civitai_nsfw"] not in CIVITAI_NSFW_MODES:
             raise HTTPException(status_code=400,
                                 detail=f"civitai_nsfw must be one of {CIVITAI_NSFW_MODES}")

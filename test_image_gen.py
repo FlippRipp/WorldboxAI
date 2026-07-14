@@ -639,6 +639,77 @@ def test_batch_writers_share_one_beat_plan(tmp_path):
         assert f"beat {slot + 1} ONLY" in writer_input
 
 
+def _run_batch_capturing_llm_calls(tmp_path, **cfg_overrides):
+    """Run a 2-image batch and return every (prompt, model_preference) pair
+    the pipeline sent to the LLM. The planner call is recognizable by its
+    template text and answers with a valid 2-beat plan."""
+    backend = _load_backend(tmp_path)
+    _enable(backend, image_num=2, **cfg_overrides)
+    _fake_novita(backend)
+    calls = []
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        calls.append((prompt, model_preference))
+        if "illustrated sequence" in prompt:
+            return "1. first beat\n2. second beat"
+        return "an image prompt"
+
+    sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
+
+    async def run():
+        backend._spawn_generation(
+            save_id="mystory", turn=1, narration="a scene", history="",
+            sdk=sdk, trigger="auto")
+        await asyncio.gather(*backend._tasks)
+
+    asyncio.run(run())
+    assert backend._read_index()[0]["status"] == "done"
+    return calls
+
+
+def test_beat_planner_modes(tmp_path):
+    # Default ("fast"): one planner call, on the fastest slot to keep the
+    # extra latency low; writers still run on the prompt-writer slot.
+    calls = _run_batch_capturing_llm_calls(tmp_path / "fast")
+    planner = [c for c in calls if "illustrated sequence" in c[0]]
+    assert len(planner) == 1
+    assert planner[0][1] == "fastest"
+    assert [pref for p, pref in calls if "illustrated sequence" not in p] == \
+        ["smartest", "smartest"]
+
+    # "smart": the plan is written on the prompt-writer slot instead.
+    calls = _run_batch_capturing_llm_calls(tmp_path / "smart", beat_planner="smart")
+    planner = [c for c in calls if "illustrated sequence" in c[0]]
+    assert len(planner) == 1
+    assert planner[0][1] == "smartest"
+
+    # "off": no planner call at all; each writer splits the scene itself.
+    calls = _run_batch_capturing_llm_calls(tmp_path / "off", beat_planner="off")
+    assert len(calls) == 2
+    assert all("illustrated sequence" not in p for p, _ in calls)
+    assert all("Mentally split" in p for p, _ in calls)
+
+
+def test_beat_planner_config_roundtrip(tmp_path):
+    backend = _load_backend(tmp_path)
+    assert backend._default_config()["beat_planner"] == "fast"
+    client = _client(backend)
+
+    resp = client.put("/config", json={"beat_planner": "bogus"})
+    assert resp.status_code == 400
+
+    resp = client.put("/config", json={"beat_planner": "off"})
+    assert resp.status_code == 200
+    assert resp.json()["beat_planner"] == "off"
+    assert backend._load_config()["beat_planner"] == "off"
+
+    # Junk landing in the store falls back to the default on load.
+    store = backend._load_store()
+    store["beat_planner"] = "nonsense"
+    backend._save_store(store)
+    assert backend._load_config()["beat_planner"] == "fast"
+
+
 def test_single_image_gets_most_striking_moment_hint(tmp_path):
     """A one-image generation steers the writer toward the scene's most
     striking beat instead of its default habit of illustrating the ending."""
