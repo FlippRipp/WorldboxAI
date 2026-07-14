@@ -1953,6 +1953,7 @@ def get_router():
             rpg["pending_evolutions"].append(entry)
         if entry.get("options"):
             return {"skill": key, "tier": _skill_tier(data), "options": entry["options"]}
+        save_id = sm.active_save_id
 
         async def _generate():
             if entry.get("options"):
@@ -1985,11 +1986,20 @@ def get_router():
             for i, opt in enumerate(cleaned):
                 opt["kind"] = "pure" if i == 0 else "divergent"
 
-            entry["options"] = cleaned
-            _persist(sm)
+            # A reload while the LLM ran replaces the state dicts this closure
+            # captured; cache the options on the LIVE pending entry so they
+            # survive (the captured one may be an orphan).
+            if sm.active_save_id != save_id:
+                return {"skill": key, "tier": _skill_tier(data), "options": cleaned}
+            live_rpg = _rpg_data(sm)
+            _sync_evolutions(live_rpg)
+            live_entry = _pending_entry(live_rpg, key)
+            if live_entry is not None:
+                live_entry["options"] = cleaned
+                _persist(sm)
             return {"skill": key, "tier": _skill_tier(data), "options": cleaned}
 
-        return await _join_generation(f"{sm.active_save_id}:evo-options:{key}", _generate)
+        return await _join_generation(f"{save_id}:evo-options:{key}", _generate)
 
     @router.post("/skills/{skill_name}/evolve")
     async def evolve_skill(skill_name: str, payload: EvolvePayload):
@@ -2013,6 +2023,7 @@ def get_router():
         # Pre-4-option saves cached options without a kind; they evolve as
         # divergent paths, same as before.
         pure = bool(chosen) and chosen.get("kind") == "pure"
+        save_id = sm.active_save_id
 
         async def _do_evolve():
             llm = _llm_bridge()
@@ -2028,52 +2039,67 @@ def get_router():
             if not isinstance(parsed, dict) or not str(parsed.get("name", "")).strip():
                 raise HTTPException(status_code=502, detail="The AI failed to produce the evolved skill. Try again.")
 
-            old_tier = _skill_tier(data)
+            # The app may have been closed and reopened while the LLM ran,
+            # which reloads the save from disk and REPLACES the state dicts
+            # this closure captured. Mutating the captured `rpg`/`skills`
+            # would edit an orphan and the evolution would silently vanish
+            # from the character sheet - so re-resolve the live state here
+            # and mutate that, never the captured references.
+            if sm.active_save_id != save_id:
+                raise HTTPException(status_code=409, detail="A different story was loaded while evolving. Try again.")
+            live_rpg = _rpg_data(sm)
+            live_skills = live_rpg.setdefault("skills", {})
+            live_key = _find_key(live_skills, key)
+            if live_key is None:
+                raise HTTPException(status_code=409, detail=f"Skill '{key}' is no longer available to evolve.")
+            live_data = live_skills[live_key]
+
+            old_tier = _skill_tier(live_data)
             new_key = _clean_name(str(parsed["name"]))
-            if new_key == key:
+            if new_key == live_key:
                 new_key = f"{new_key} {old_tier + 1}"
             # A successful (paid) LLM call is never discarded over a name clash:
             # disambiguate deterministically instead.
             candidate, n = new_key, 2
-            while _find_key(skills, candidate) is not None and candidate != key:
+            while _find_key(live_skills, candidate) is not None and candidate != live_key:
                 candidate = f"{new_key} {n}"
                 n += 1
             new_key = candidate
 
             evolved = {
                 "rating": EVOLVED_RESET_RATING,
-                "description": str(parsed.get("description", "")).strip() or data.get("description", ""),
-                "trigger_words": _clean_triggers([str(w) for w in parsed.get("trigger_words", []) if w]) or data.get("trigger_words", []),
-                "type": data.get("type", "active"),
+                "description": str(parsed.get("description", "")).strip() or live_data.get("description", ""),
+                "trigger_words": _clean_triggers([str(w) for w in parsed.get("trigger_words", []) if w]) or live_data.get("trigger_words", []),
+                "type": live_data.get("type", "active"),
                 "tier": old_tier + 1,
-                "lineage": list(data.get("lineage") or []) + [key],
+                "lineage": list(live_data.get("lineage") or []) + [live_key],
                 "evolution_theme": theme,
             }
-            skills.pop(key)
-            skills[new_key] = evolved
-            counters = rpg.get("practice_counters")
-            if isinstance(counters, dict) and key in counters:
-                counters[new_key] = counters.pop(key)
+            live_skills.pop(live_key)
+            live_skills[new_key] = evolved
+            counters = live_rpg.get("practice_counters")
+            if isinstance(counters, dict) and live_key in counters:
+                counters[new_key] = counters.pop(live_key)
             # Queue a one-shot storyteller note so the next generation can
             # acknowledge the transformation in the narrative.
-            recent = rpg.get("recent_evolutions")
+            recent = live_rpg.get("recent_evolutions")
             if not isinstance(recent, list):
                 recent = []
-                rpg["recent_evolutions"] = recent
+                live_rpg["recent_evolutions"] = recent
             recent.append({
-                "old_name": key,
+                "old_name": live_key,
                 "new_name": new_key,
                 "tier": old_tier + 1,
                 "theme": theme,
                 "description": evolved["description"],
                 "announced": False,
             })
-            _sync_evolutions(rpg)
+            _sync_evolutions(live_rpg)
             _persist(sm)
             return {
-                "rpg": rpg,
+                "rpg": live_rpg,
                 "evolved": {
-                    "old_name": key,
+                    "old_name": live_key,
                     "new_name": new_key,
                     "tier": old_tier + 1,
                     "theme": theme,
@@ -2084,7 +2110,7 @@ def get_router():
         # The evolve itself is shielded: closing the app mid-evolution lets
         # the transformation finish and persist; the widget restores the
         # reveal from recent_evolutions when the player returns.
-        return await _join_generation(f"{sm.active_save_id}:evolve:{key}:{theme.lower()}", _do_evolve)
+        return await _join_generation(f"{save_id}:evolve:{key}:{theme.lower()}", _do_evolve)
 
     @router.delete("/skills/{skill_name}/evolution")
     def defer_evolution(skill_name: str):

@@ -380,6 +380,101 @@ def test_evolve_survives_waiter_cancellation():
     assert len(calls) == 1
 
 
+def test_evolve_mutates_reloaded_state_not_the_orphan():
+    """Reopening the app mid-evolution reloads the save from disk, replacing
+    the state dicts the shielded evolve task captured at request time. The
+    finished evolution must land in the LIVE state - mutating the orphan made
+    the evolved skill silently vanish from the character sheet."""
+    import copy
+    mod = _load_backend()
+    calls = []
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        calls.append(prompt)
+        await asyncio.sleep(0.05)
+        return EVOLVE_REPLY
+
+    llm = SimpleNamespace(generate=generate, _current_module="")
+    _, sm, _ = _make_client(mod, _cached_rpg())
+    mod.set_services({"session_manager": sm, "engine": SimpleNamespace(sdk=SimpleNamespace(llm=llm))})
+    router = mod.get_router()
+    endpoint = next(r.endpoint for r in router.routes if r.path == "/skills/{skill_name}/evolve")
+
+    async def run():
+        waiter = asyncio.create_task(endpoint("swordplay", SimpleNamespace(theme="Brutal")))
+        await asyncio.sleep(0.01)
+        # The app reopened: same content reloaded from disk, new dict objects.
+        sm.state = copy.deepcopy(sm.state)
+        return await waiter
+
+    result = asyncio.run(run())
+    live = sm.state["module_data"]["wb_core_rpg"]
+    assert "brutal bladework" in live["skills"]
+    assert "swordplay" not in live["skills"]
+    assert live["recent_evolutions"][0]["new_name"] == "brutal bladework"
+    assert result["rpg"] is live
+
+
+def test_evolve_aborts_when_a_different_save_loads():
+    mod = _load_backend()
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        await asyncio.sleep(0.05)
+        return EVOLVE_REPLY
+
+    llm = SimpleNamespace(generate=generate, _current_module="")
+    _, sm, _ = _make_client(mod, _cached_rpg())
+    other_rpg = {"skills": {"weaving": {"rating": 3, "description": "", "trigger_words": [], "type": "active"}}}
+    mod.set_services({"session_manager": sm, "engine": SimpleNamespace(sdk=SimpleNamespace(llm=llm))})
+    router = mod.get_router()
+    endpoint = next(r.endpoint for r in router.routes if r.path == "/skills/{skill_name}/evolve")
+
+    async def run():
+        waiter = asyncio.create_task(endpoint("swordplay", SimpleNamespace(theme="Brutal")))
+        await asyncio.sleep(0.01)
+        # The player switched to a different story mid-evolution.
+        sm.active_save_id = "save2"
+        sm.state["module_data"]["wb_core_rpg"] = other_rpg
+        try:
+            await waiter
+            return None
+        except Exception as e:
+            return e
+
+    err = asyncio.run(run())
+    assert getattr(err, "status_code", None) == 409
+    # The other story's character was never touched.
+    assert set(other_rpg["skills"]) == {"weaving"}
+
+
+def test_options_cache_lands_in_reloaded_state():
+    import copy
+    mod = _load_backend()
+    calls = []
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        calls.append(prompt)
+        await asyncio.sleep(0.05)
+        return OPTIONS_REPLY
+
+    llm = SimpleNamespace(generate=generate, _current_module="")
+    _, sm, _ = _make_client(mod, _rpg())
+    mod.set_services({"session_manager": sm, "engine": SimpleNamespace(sdk=SimpleNamespace(llm=llm))})
+    router = mod.get_router()
+    endpoint = next(r.endpoint for r in router.routes if r.path == "/skills/{skill_name}/evolution-options")
+
+    async def run():
+        waiter = asyncio.create_task(endpoint("swordplay"))
+        await asyncio.sleep(0.01)
+        sm.state = copy.deepcopy(sm.state)
+        return await waiter
+
+    result = asyncio.run(run())
+    assert len(result["options"]) == 4
+    live_entry = sm.state["module_data"]["wb_core_rpg"]["pending_evolutions"][0]
+    assert live_entry["options"] == result["options"]
+
+
 def test_evolution_prompts_carry_story_style_and_recent_scenes():
     mod = _load_backend()
     client, sm, calls = _make_client(mod, _rpg(), llm_replies=[OPTIONS_REPLY, EVOLVE_REPLY])
