@@ -13,6 +13,8 @@ the first session's loop — exactly the coupling this feature removes.
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
 from starlette.websockets import WebSocketDisconnect
 
 import backend.api.server as server
@@ -220,6 +222,67 @@ def test_stop_still_works_from_reconnected_socket(tmp_path, monkeypatch):
 
     assert session_manager.state.get("history", []) == history_before
     assert not server.chat_hub.turn_running()
+
+
+def test_reopen_story_mid_turn_keeps_player_input(tmp_path, monkeypatch):
+    # Closing the app mid-turn leaves the turn generating headless. Reopening
+    # the story calls the REST load endpoint; reloading the session from disk
+    # there used to blank input_text, so the finished turn saved its AI reply
+    # without the player message that produced it — inputs silently vanished
+    # from the transcript on every close-and-reopen mid-generation.
+    session_manager = setup_session(tmp_path, monkeypatch)
+    gated = GatedInvoke()
+    monkeypatch.setattr(server.engine, "app", SimpleNamespace(ainvoke=gated.ainvoke))
+
+    async def scenario():
+        await start_turn_and_disconnect(gated)
+
+        # The client's reopen flow: REST load of the same story. It must hand
+        # back the live session instead of clobbering it from disk.
+        response = await server.load_save("autosave")
+        assert response["session"]["active_save_id"] == "autosave"
+
+        gated.gate.set()
+        await asyncio.wait_for(server.chat_hub.turn_task, 5)
+
+    asyncio.run(scenario())
+
+    msgs = session_manager.state["chat_messages"]
+    assert msgs[-2]["role"] == "user"
+    assert msgs[-2]["content"] == "I open the vault."
+    assert msgs[-1]["role"] == "ai"
+    assert msgs[-1]["content"] == GatedInvoke.STORY
+
+
+def test_switching_saves_mid_turn_is_refused(tmp_path, monkeypatch):
+    # Loading or creating a DIFFERENT save mid-turn would re-point the active
+    # session, so the headless turn would save into the wrong story. Both
+    # endpoints must refuse with 409 while a turn is running.
+    session_manager = setup_session(tmp_path, monkeypatch)
+    session_manager.create_save("other")
+    session_manager.load_save("autosave")
+    gated = GatedInvoke()
+    monkeypatch.setattr(server.engine, "app", SimpleNamespace(ainvoke=gated.ainvoke))
+
+    async def scenario():
+        await start_turn_and_disconnect(gated)
+
+        with pytest.raises(HTTPException) as exc:
+            await server.load_save("other")
+        assert exc.value.status_code == 409
+
+        with pytest.raises(HTTPException) as exc:
+            await server.create_save(server.CreateSaveRequest(save_id="brand_new"))
+        assert exc.value.status_code == 409
+
+        gated.gate.set()
+        await asyncio.wait_for(server.chat_hub.turn_task, 5)
+
+    asyncio.run(scenario())
+
+    # The turn still landed in the story it started in.
+    assert session_manager.active_save_id == "autosave"
+    assert session_manager.state["chat_messages"][-2]["content"] == "I open the vault."
 
 
 def test_error_while_disconnected_is_delivered_on_sync(tmp_path, monkeypatch):

@@ -257,9 +257,16 @@ class GameSessionManager:
                 meta["tokens"] = tokens
         return meta
 
-    def save_completed_turn(self, final_state: dict[str, Any]) -> dict[str, Any]:
+    def save_completed_turn(self, final_state: dict[str, Any],
+                            user_text: Optional[str] = None) -> dict[str, Any]:
+        """Persist a finished turn. Callers that know the input that started
+        the turn pass it as `user_text`: the session state can be reloaded
+        while a turn generates headless (client closed mid-turn, then reopened
+        the story), which resets input_text — reading it back here would
+        silently drop the player's message from the transcript."""
         self._require_active_save()
-        user_text = self.state.get("input_text", "")
+        if user_text is None:
+            user_text = self.state.get("input_text", "")
         previous_history = self.state.get("history", [])
         final_history = final_state.get("history", previous_history)
         assistant_text = final_history[-1] if len(final_history) > len(previous_history) and final_history else None

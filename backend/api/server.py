@@ -849,8 +849,22 @@ async def update_settings(request: SettingsUpdateRequest):
 async def list_saves():
     return {"saves": session_manager.list_saves()}
 
+def _refuse_session_switch_mid_turn():
+    """Creating or loading a save replaces the live session state. A turn can
+    outlive its client (the app may be closed mid-generation and the turn
+    finishes headless), and `save_completed_turn` writes into whatever save is
+    active when it lands — so switching the session mid-turn would bleed the
+    finished turn into the wrong story."""
+    if chat_hub.turn_running():
+        raise HTTPException(
+            status_code=409,
+            detail="A turn is still generating in the active story. Stop it or wait for it to finish first.",
+        )
+
+
 @app.post("/api/saves")
 async def create_save(request: CreateSaveRequest):
+    _refuse_session_switch_mid_turn()
     try:
         player_location_node_id = None
         player_location_region = None
@@ -985,6 +999,16 @@ async def create_save(request: CreateSaveRequest):
 
 @app.post("/api/saves/{save_id}/load")
 async def load_save(save_id: str):
+    if chat_hub.turn_running():
+        if save_id == session_manager.active_save_id:
+            # Reopening the story whose turn is still generating (the client
+            # closed mid-turn and came back). Reloading from disk here would
+            # clobber the live session — including the pending input_text, so
+            # the player's message would vanish from the transcript when the
+            # turn completes. Hand back the live state instead; the websocket
+            # intro/sync path re-attaches the client to the running stream.
+            return {"session": session_manager.get_status(), "state": session_manager.state}
+        _refuse_session_switch_mid_turn()
     try:
         state = session_manager.load_save(save_id)
         engine.set_memory_path(session_manager.get_memory_path())
@@ -1822,12 +1846,16 @@ async def websocket_endpoint(websocket: WebSocket):
                 "state": session_manager.state,
             })
             return
+        # Capture the re-seated input now: the live session state could be
+        # reloaded while this turn generates (client closed and reopened the
+        # story), which would blank input_text before the save.
+        regen_input = session_manager.state.get("input_text", "")
         try:
             engine.rollback_memory(regen_turn - 1)
             engine.set_memory_path(session_manager.get_memory_path())
             _init_world_index_for_save(session_manager.active_save_id)
             final_state = await engine.app.ainvoke(session_manager.state)
-            active_state = session_manager.save_completed_turn(final_state)
+            active_state = session_manager.save_completed_turn(final_state, user_text=regen_input)
             session_manager.add_regenerated_swipe()
             active_state["swipes"] = session_manager.swipes_meta()
             await chat_hub.send({"type": "done", "state": active_state})
@@ -1879,7 +1907,7 @@ async def websocket_endpoint(websocket: WebSocket):
         try:
             # Execute the LangGraph pipeline
             final_state = await engine.app.ainvoke(session_manager.state)
-            active_state = session_manager.save_completed_turn(final_state)
+            active_state = session_manager.save_completed_turn(final_state, user_text=text)
             session_manager.begin_turn_swipes()
             active_state["swipes"] = session_manager.swipes_meta()
 
