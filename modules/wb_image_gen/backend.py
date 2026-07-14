@@ -222,23 +222,32 @@ STEP_RETRY_BASE_DELAY_S = 2.0
 IMAGE_NUM_MAX = 4
 
 # Each image in a batch gets its own prompt-writer call, so the images differ
-# in content, not just seed. Identical writer input tends to converge on the
-# same obvious shot, so every slot past the first also carries one of these
-# nudges (slot 0 stays the canonical take).
-PROMPT_VARIATION_HINTS = (
-    "Favor a different camera angle or distance than the obvious choice: a "
-    "close-up, a wide establishing shot, from above, or from behind.",
-    "Favor a different beat of the scene than the obvious choice: the moment "
-    "just before or just after the peak of the action.",
-    "Favor a different focus than the obvious choice: another character "
-    "present, a telling detail, or the setting itself.",
-)
+# in content, not just seed. The hint steers WHICH moment of the scene each
+# prompt depicts: a batch splits the latest scene into as many consecutive
+# beats as there are images, so side by side the images read as a sequence
+# of what happened; a single image is pointed at the scene's most striking
+# beat instead -- left alone, the writer gravitates to the scene's final
+# lines, which often land after the action has already resolved.
+SINGLE_MOMENT_HINT = (
+    "MOMENT CHOICE: depict the single most striking moment of the latest "
+    "scene -- the peak of its action or emotion -- wherever it falls in the "
+    "text. Scenes often keep going after the interesting part, so do not "
+    "default to illustrating how the scene ends.")
 
 
-def _variation_hint(slot: int, total: int) -> str:
-    if total <= 1 or slot == 0:
-        return ""
-    return PROMPT_VARIATION_HINTS[(slot - 1) % len(PROMPT_VARIATION_HINTS)]
+def _moment_hint(slot: int, total: int) -> str:
+    if total <= 1:
+        return SINGLE_MOMENT_HINT
+    position = (" This is the opening beat." if slot == 0 else
+                " This is the final beat." if slot == total - 1 else "")
+    return (f"SEQUENCE: {total} prompts are being written independently for "
+            f"this same scene, one image each, and side by side the images "
+            f"must read as a chronological sequence of what happened. "
+            f"Mentally split the latest scene into {total} consecutive "
+            f"beats, in story order, and depict ONLY beat {slot + 1} of "
+            f"{total}.{position} Stay inside that beat's action, characters, "
+            f"and mood -- do not summarize the whole scene or drift into a "
+            f"neighboring beat.")
 
 
 INDEX_MAX_RECORDS = 500
@@ -1347,7 +1356,7 @@ def _character_block(cfg: dict, characters: dict | None,
 
 async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
                               characters: dict | None = None,
-                              variation_hint: str = "",
+                              moment_hint: str = "",
                               insist: bool = False) -> str:
     style = _prompt_style(cfg)
     if style == "tags":
@@ -1368,10 +1377,8 @@ async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
         prompt += ("\n\nMANDATORY: weave these trigger words into the output verbatim "
                    "(they activate style adapters): " + ", ".join(triggers))
     prompt += _character_block(cfg, characters, subject_mode)
-    if variation_hint:
-        prompt += ("\n\nVARIATION: several prompts are being written "
-                   "independently for this same scene, and this one must "
-                   "stand apart. " + variation_hint)
+    if moment_hint:
+        prompt += "\n\n" + moment_hint
     if insist:
         # Only added on retries after the writer refused: the first attempt
         # keeps the instructions exactly as configured.
@@ -3197,10 +3204,12 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                 await _patch_record(record_id, status="prompting")
 
                 # One writer call per image, run concurrently: separate calls
-                # (plus a per-slot variation hint) give each image its own
-                # take on the scene instead of N seeds of one prompt. Each
-                # slot counts its own attempts so a refusal's retries carry
-                # the fiction reminder while first attempts stay unchanged.
+                # (plus a per-slot moment hint) pin each image to its own
+                # chronological beat of the scene, so a batch reads as a
+                # sequence of what happened rather than N seeds of one
+                # prompt. Each slot counts its own attempts so a refusal's
+                # retries carry the fiction reminder while first attempts
+                # stay unchanged.
                 def _writer(hint):
                     attempts = {"n": 0}
 
@@ -3208,12 +3217,12 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                         attempts["n"] += 1
                         return await _write_image_prompt(
                             cfg, narration, history, sdk, characters,
-                            variation_hint=hint, insist=attempts["n"] > 1)
+                            moment_hint=hint, insist=attempts["n"] > 1)
                     return call
 
                 prompt_results = await asyncio.gather(
                     *(_retry_step("prompt writing",
-                                  _writer(_variation_hint(slot, image_num)),
+                                  _writer(_moment_hint(slot, image_num)),
                                   retries)
                       for slot in range(image_num)),
                     return_exceptions=True)

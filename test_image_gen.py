@@ -531,8 +531,8 @@ def test_parallel_image_num_writes_all_files(tmp_path):
 
 
 def test_parallel_prompts_written_separately(tmp_path):
-    """Each image in a batch gets its own prompt-writer call (with a variation
-    hint past slot 0), and image_prompts stays aligned with filenames."""
+    """Each image in a batch gets its own prompt-writer call pinned to its
+    own chronological beat, and image_prompts stays aligned with filenames."""
     backend = _load_backend(tmp_path)
     _enable(backend, image_num=3)
     captured = {"inputs": [], "n": 0}
@@ -571,16 +571,43 @@ def test_parallel_prompts_written_separately(tmp_path):
     assert record["id"] == record_id
     assert record["status"] == "done"
 
-    # Three independent writer calls: slot 0 canonical, the rest nudged.
+    # Three independent writer calls, each pinned to its own beat of the
+    # scene in story order, so the batch reads as a sequence.
     assert captured["n"] == 3
-    assert "VARIATION:" not in captured["inputs"][0]
-    assert all("VARIATION:" in p for p in captured["inputs"][1:])
+    for slot, writer_input in enumerate(captured["inputs"]):
+        assert "SEQUENCE:" in writer_input
+        assert f"beat {slot + 1} of 3" in writer_input
+    assert "opening beat" in captured["inputs"][0]
+    assert "final beat" in captured["inputs"][2]
 
     # Three distinct prompts, aligned with the files they produced.
     assert record["image_prompts"] == ["scene take 1", "scene take 2", "scene take 3"]
     assert record["image_prompt"] == record["image_prompts"][0]
     for filename, prompt in zip(record["filenames"], record["image_prompts"]):
         assert (tmp_path / MID / "images" / filename).read_bytes() == prompt.encode()
+
+
+def test_single_image_gets_most_striking_moment_hint(tmp_path):
+    """A one-image generation steers the writer toward the scene's most
+    striking beat instead of its default habit of illustrating the ending."""
+    backend = _load_backend(tmp_path)
+    _enable(backend, image_num=1)
+    _fake_novita(backend)
+    captured = {}
+    sdk = _make_sdk(captured=captured)
+
+    async def run():
+        backend._spawn_generation(
+            save_id="mystory", turn=1, narration="a scene", history="",
+            sdk=sdk, trigger="auto")
+        await asyncio.gather(*backend._tasks)
+
+    asyncio.run(run())
+    record = backend._read_index()[0]
+    assert record["status"] == "done"
+    assert len(captured["prompts"]) == 1
+    assert "MOMENT CHOICE:" in captured["prompts"][0]
+    assert "SEQUENCE:" not in captured["prompts"][0]
 
 
 def test_parallel_prompt_failure_borrows_sibling_prompt(tmp_path):
