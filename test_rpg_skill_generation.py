@@ -390,6 +390,50 @@ def test_refine_mythic_roll_adds_peak_guidance():
     assert "absolute peak" in prompt
 
 
+def test_refine_roll_is_locked_per_skill():
+    """Re-picking the same skill can't re-roll: the cached refined result
+    (same strength, same text) comes back with no second LLM call."""
+    mod = _load_backend()
+    rolls = iter([6, 10])
+    mod._roll_strength = lambda: next(rolls)
+    client, _, calls = _make_client(mod, _rpg(), llm_replies=[REFINE_REPLY, REFINE_REPLY])
+
+    first = client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint"})
+    assert first.status_code == 200
+    assert first.json()["skill"]["strength"] == 6
+
+    again = client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint"})
+    assert again.status_code == 200
+    assert again.json() == first.json()
+    assert len(calls) == 1  # no second generation, no second roll
+
+    # A different skill still gets its own fresh roll.
+    other = client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ash Veil"})
+    assert other.status_code == 200
+    assert other.json()["skill"]["strength"] == 10
+    assert len(calls) == 2
+
+
+def test_refine_roll_lock_clears_after_learning():
+    mod = _load_backend()
+    rolls = iter([6, 9])
+    mod._roll_strength = lambda: next(rolls)
+    client, _, calls = _make_client(mod, _rpg(), llm_replies=[REFINE_REPLY, REFINE_REPLY])
+
+    assert client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint"}).status_code == 200
+    res = client.post(f"{BASE}/levelup/spend", json={
+        "new_skill": {"name": "Ember Feint", "description": "d", "rating": 6}
+    })
+    assert res.status_code == 200
+
+    # Learning a skill clears the wizard cache, so a fresh wizard session
+    # rolls anew (the learned name would be rejected as a duplicate anyway).
+    res2 = client.post(f"{BASE}/skills/wizard/refine", json={"name": "Cinder Step"})
+    assert res2.status_code == 200
+    assert res2.json()["skill"]["strength"] == 9
+    assert len(calls) == 2
+
+
 def test_refine_falls_back_to_draft_fields():
     mod = _load_backend()
     _fix_roll(mod, 6)

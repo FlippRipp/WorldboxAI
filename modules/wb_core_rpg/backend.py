@@ -1248,8 +1248,10 @@ def _roll_strength() -> int:
 # Transient new-skill wizard state, keyed by save_id. Never persisted: the
 # wizard is ad-hoc browsing with no pending_evolutions-style entry to hang it
 # on, and stale menus must not outlive a learned skill (cleared on skill add).
-# Shape: {"categories": [...]|None, "pages": {menu_key: [[5 skills], ...]}}
-# where menu_key is "cat:{name}" or "search:{query}" (lowercased).
+# Shape: {"categories": [...]|None, "pages": {menu_key: [[5 skills], ...]},
+# "rolls": {skill_name_lower: refined skill}} where menu_key is "cat:{name}"
+# or "search:{query}" (lowercased). "rolls" locks fate's strength roll per
+# skill so re-picking can't re-roll it.
 _addskill_cache: dict[str, dict] = {}
 # Same never-removed policy as _options_locks, keyed "save_id:categories" or
 # "save_id:options:{menu_key}".
@@ -2159,34 +2161,53 @@ def get_router():
     async def refine_skill(payload: SkillRefinePayload):
         sm = _session_manager()
         rpg = _rpg_data(sm)
-        # The gacha moment: strength is rolled here, when the player commits to
-        # a pick, never client-supplied - it becomes the starting rating.
-        strength = _roll_strength()
-        draft = {
-            "name": payload.name.strip(),
-            "type": payload.type or "active",
-            "description": (payload.description or "").strip(),
-            "trigger_words": payload.trigger_words or [],
-            "strength": strength,
-        }
-        if not draft["name"]:
+        name = payload.name.strip()
+        if not name:
             raise HTTPException(status_code=400, detail="Skill name is required.")
 
-        raw = await _wizard_generate(sm, _skill_refine_prompt(rpg, draft, payload.menu, sm.state))
-        parsed = _parse_json_repair(raw)
-        if not isinstance(parsed, dict) or not str(parsed.get("name", "")).strip():
-            raise HTTPException(status_code=502, detail="The AI failed to refine the skill. Try again.")
+        # Fate's roll is locked per skill: going back and re-picking the same
+        # skill returns the identical refined result and strength - no
+        # re-rolling your way to Mythic, and no repeat LLM cost.
+        entry = _addskill_cache.setdefault(sm.active_save_id, {"categories": None, "pages": {}})
+        rolls = entry.setdefault("rolls", {})
+        roll_key = name.lower()
+        if roll_key in rolls:
+            return {"skill": rolls[roll_key]}
 
-        # A paid LLM call is never discarded over missing fields: fall back to
-        # the draft's values, same policy as evolve_skill.
-        refined = _clean_generated_skill(parsed) or {}
-        return {"skill": {
-            "name": refined.get("name") or draft["name"],
-            "type": refined.get("type") or draft["type"],
-            "description": refined.get("description") or draft["description"],
-            "trigger_words": refined.get("trigger_words") or _clean_triggers([str(w) for w in draft["trigger_words"] if w]),
-            "strength": strength,
-        }}
+        lock = _addskill_locks.setdefault(f"{sm.active_save_id}:refine:{roll_key}", asyncio.Lock())
+        async with lock:
+            if roll_key in rolls:
+                return {"skill": rolls[roll_key]}
+
+            # The gacha moment: strength is rolled here, when the player first
+            # commits to a pick, never client-supplied - it becomes the
+            # starting rating.
+            strength = _roll_strength()
+            draft = {
+                "name": name,
+                "type": payload.type or "active",
+                "description": (payload.description or "").strip(),
+                "trigger_words": payload.trigger_words or [],
+                "strength": strength,
+            }
+
+            raw = await _wizard_generate(sm, _skill_refine_prompt(rpg, draft, payload.menu, sm.state))
+            parsed = _parse_json_repair(raw)
+            if not isinstance(parsed, dict) or not str(parsed.get("name", "")).strip():
+                raise HTTPException(status_code=502, detail="The AI failed to refine the skill. Try again.")
+
+            # A paid LLM call is never discarded over missing fields: fall back
+            # to the draft's values, same policy as evolve_skill.
+            refined = _clean_generated_skill(parsed) or {}
+            result = {
+                "name": refined.get("name") or draft["name"],
+                "type": refined.get("type") or draft["type"],
+                "description": refined.get("description") or draft["description"],
+                "trigger_words": refined.get("trigger_words") or _clean_triggers([str(w) for w in draft["trigger_words"] if w]),
+                "strength": strength,
+            }
+            rolls[roll_key] = result
+            return {"skill": result}
 
     return router
 

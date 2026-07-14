@@ -694,6 +694,10 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
   // the sequence counter makes every response but the latest a no-op.
   const loadSeq = React.useRef(0);
 
+  // Refined results already revealed this session, by lowercased skill name.
+  // Mirrors the server-side roll lock so re-picks skip the roll animation.
+  const refinedByName = React.useRef({});
+
   // The fate roll animation: while the refine call runs, climb the rarity
   // ladder over and over (Common -> ... -> Mythic -> Common ...); the reveal
   // then lands on the tier the server actually rolled.
@@ -775,6 +779,17 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
   }
 
   async function pick(skill) {
+    // Fate's roll is locked per skill (server-side too): re-picking a skill
+    // already revealed this session jumps straight back to its reveal instead
+    // of replaying the roll animation for a result that cannot change.
+    const seen = refinedByName.current[skill.name.toLowerCase()];
+    if (seen) {
+      setChosen(skill);
+      setRefined(seen);
+      setError('');
+      setPhase('reveal');
+      return;
+    }
     setChosen(skill);
     setPhase('refining');
     setError('');
@@ -792,6 +807,7 @@ function AddSkillModal({ generating, costLabel, onCancel, onConfirm }) {
         return data;
       });
       const [data] = await Promise.all([request, minDelay]);
+      refinedByName.current[skill.name.toLowerCase()] = data.skill;
       setRefined(data.skill);
       setPhase('reveal');
     } catch (e) {
