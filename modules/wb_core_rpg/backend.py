@@ -1592,6 +1592,14 @@ JSON response:
 def _skill_refine_prompt(rpg: dict, skill: dict, menu: str | None, state: dict) -> str:
     world_section = _world_context_section(state.get("world_data"))
     story_section = _story_context_section(state)
+    plot_section = _plot_challenge_section(state)
+    plot_req = ""
+    if plot_section:
+        plot_req = (
+            "\n- If this ability could bear on the current plot thread's challenge, you may sharpen the "
+            "description toward the ways it would matter there - but never at the cost of its identity, "
+            "and never mention the thread or echo the hidden challenge in the name or description."
+        )
     name = skill.get("name", "")
     strength = skill.get("strength")
     menu_note = f" ({menu})" if menu else ""
@@ -1615,7 +1623,7 @@ def _skill_refine_prompt(rpg: dict, skill: dict, menu: str | None, state: dict) 
             )
     return f"""You are the game system for a text RPG. The player has chosen to learn the new skill "{name}"{menu_note}. Finalize it before it is added to their sheet. Output ONLY valid JSON, no other text.
 
-{world_section}{story_section}Character:
+{world_section}{story_section}{plot_section}Character:
 {_character_context_block(rpg)}
 
 Chosen skill (draft):
@@ -1626,7 +1634,7 @@ Trigger words: {', '.join(skill.get('trigger_words') or []) or '(none)'}
 
 Refine this skill. Requirements:
 - Keep its identity: same ability, same manner of working. You may polish the name (1-4 words) but never change what the skill IS.
-- The description is 1-2 tight sentences and completely FREE-STANDING: exactly what the power does, how it manifests, and any limit or cost, grounded in this world and where the story stands now. Concrete over flowery.{strength_req}
+- The description is 1-2 tight sentences and completely FREE-STANDING: exactly what the power does, how it manifests, and any limit or cost, grounded in this world and where the story stands now. Concrete over flowery.{plot_req}{strength_req}
 - type: "active" (deliberately used) or "passive" (always on).
 - Trigger words: 2-5 short words or phrases a player would naturally use.
 

@@ -595,14 +595,15 @@ def _plot_thread(status="active", challenge="A masked cabal controls the ferry r
 def test_wizard_prompts_carry_active_plot_challenge():
     mod = _load_backend()
     client, sm, calls = _make_client(
-        mod, _rpg(), llm_replies=[CATEGORIES_REPLY, _options_reply(_P0_NAMES)]
+        mod, _rpg(), llm_replies=[CATEGORIES_REPLY, _options_reply(_P0_NAMES), REFINE_REPLY]
     )
     sm.state["module_data"]["wb_plot_director"] = {"thread": _plot_thread()}
 
     assert client.post(f"{BASE}/skills/wizard/categories").status_code == 200
     assert client.post(f"{BASE}/skills/wizard/options", json={"menu": "Flame Arts", "page": 0}).status_code == 200
+    assert client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint"}).status_code == 200
 
-    assert len(calls) == 2
+    assert len(calls) == 3
     for call in calls:
         prompt = call["prompt"]
         assert "Current plot thread" in prompt
@@ -616,6 +617,8 @@ def test_wizard_prompts_carry_active_plot_challenge():
     assert "2-3 of them domains whose skills could genuinely help" in calls[0]["prompt"]
     # Options: a couple of the five skills should be able to help.
     assert "1-2 of the 5 be skills that could genuinely help" in calls[1]["prompt"]
+    # Refine: may sharpen toward the challenge, never at the cost of identity.
+    assert "could bear on the current plot thread's challenge" in calls[2]["prompt"]
 
 
 def test_wizard_prompts_skip_inactive_or_missing_plot_thread():
@@ -626,14 +629,17 @@ def test_wizard_prompts_skip_inactive_or_missing_plot_thread():
     ):
         # Fresh backend each round: the categories cache is module-level.
         mod = _load_backend()
-        client, sm, calls = _make_client(mod, _rpg(), llm_replies=[CATEGORIES_REPLY])
+        client, sm, calls = _make_client(mod, _rpg(), llm_replies=[CATEGORIES_REPLY, REFINE_REPLY])
         if module_data is not None:
             sm.state["module_data"]["wb_plot_director"] = module_data
         assert client.post(f"{BASE}/skills/wizard/categories").status_code == 200
-        prompt = calls[0]["prompt"]
-        assert "Current plot thread" not in prompt
-        assert "The Silent Toll" not in prompt
-        assert "genuinely help" not in prompt
+        assert client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint"}).status_code == 200
+        for call in calls:
+            prompt = call["prompt"]
+            assert "Current plot thread" not in prompt
+            assert "The Silent Toll" not in prompt
+            assert "genuinely help" not in prompt
+            assert "plot thread's challenge" not in prompt
 
 
 def test_wizard_prompts_skip_empty_story_context():
