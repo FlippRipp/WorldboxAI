@@ -568,6 +568,14 @@ function LocalConnectionCard({ config, draft, set }) {
               : 'Batch script not installed — multi-image generations render one by one (copy modules/wb_image_gen/wb_prompt_batch.py into the WebUI\'s scripts folder and restart it)'}
           </p>
         )}
+        {status && status.vpred && (
+          <p className={`text-xs mt-1 ${status.vpred_warning ? 'text-yellow-400' : 'text-green-400'}`}>
+            {status.vpred_warning
+              || (status.vpred_file_check
+                ? 'v-pred checkpoint ✓ — the file carries the v_pred key the WebUI auto-detects'
+                : 'v-pred checkpoint — the WebUI auto-detects v-prediction from the file itself (set the checkpoint folder to let the Studio verify the file)')}
+          </p>
+        )}
         {status && status.helper && (
           <p className={`text-xs mt-1 ${status.helper.ok ? 'text-green-400' : 'text-red-400'}`}>
             {status.helper.ok
@@ -2777,10 +2785,16 @@ export default function ImageStudio({ onBack }) {
     ['pony', 'illustrious', 'noob', 'animagine'].find((m) => modelIdent.includes(m)) || null;
   const qualityDefault =
     (config?.quality_tag_defaults || {})[qualityMarker || 'pony'] || 'score_9, score_8_up, score_7_up';
+  // Mirror of the backend's _is_vpred: v-prediction finetunes layer
+  // VPRED_RENDER_OVERRIDES (lower CFG, SGM Uniform schedule) on the family.
+  const isVpred = /v[\s_-]?pred/i.test(modelIdent);
   // Mirror of the backend's RENDER_DEFAULTS resolution: the family's
-  // recommended sampler/CFG/negative prompt. Null for natural-language and
-  // unrecognized models, which keep whatever is stored.
-  const renderDefaults = (config?.render_defaults || {})[qualityMarker] || null;
+  // recommended sampler/CFG/scheduler/negative prompt. Null for
+  // natural-language and unrecognized models, which keep whatever is stored.
+  const familyRenderDefaults = (config?.render_defaults || {})[qualityMarker] || null;
+  const renderDefaults = familyRenderDefaults
+    ? { ...familyRenderDefaults, ...(isVpred ? (config?.vpred_render_overrides || {}) : {}) }
+    : null;
   const negativeDefault =
     renderDefaults?.negative_prompt
     || config?.default_negative_prompt
@@ -2807,6 +2821,20 @@ export default function ImageStudio({ onBack }) {
   }, [isLocal]);
   const samplerOptions = (isLocal && localSamplers) || config?.samplers || [];
 
+  // Scheduler labels the WebUI supports; null until answered. supported:false
+  // means the WebUI predates the scheduler API (the field is never sent).
+  const [localSchedulers, setLocalSchedulers] = useState(null);
+  useEffect(() => {
+    if (!isLocal) return undefined;
+    let cancelled = false;
+    fetch(`${API_BASE}/local/schedulers`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => { if (!cancelled && data) setLocalSchedulers(data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [isLocal]);
+  const schedulerOptions = localSchedulers?.schedulers || ['Automatic', 'SGM Uniform', 'Karras', 'Uniform', 'Simple'];
+
   const save = async () => {
     setSaving(true);
     setSaveError('');
@@ -2821,6 +2849,7 @@ export default function ImageStudio({ onBack }) {
         steps: Number(draft.steps) || 28,
         guidance_scale: Number(draft.guidance_scale) || 7,
         sampler_name: draft.sampler_name,
+        scheduler: draft.scheduler || 'Automatic',
         negative_prompt: draft.negative_prompt,
         interval: Number(draft.interval) || 3,
         step_retries: Math.max(0, Number(draft.step_retries) || 0),
@@ -3293,6 +3322,13 @@ export default function ImageStudio({ onBack }) {
                 className={inputCls}
               />
             </div>
+            {qualityMarker && Number(draft.width) === Number(draft.height) && (
+              <p className="text-xs text-gray-600 mt-1">
+                Tip: tag-family SDXL checkpoints frame characters better at 832×1216
+                (or 1216×832 for landscapes) — square renders bias toward zoomed-out
+                full-body shots.
+              </p>
+            )}
           </div>
           <div className="grid sm:grid-cols-2 gap-4">
             <div>
@@ -3329,21 +3365,55 @@ export default function ImageStudio({ onBack }) {
               ))}
             </select>
           </div>
+          {isLocal && (
+            <div>
+              <label className={labelCls}>Scheduler (noise schedule)</label>
+              <select
+                value={draft.scheduler || 'Automatic'}
+                onChange={(e) => set('scheduler', e.target.value)}
+                className={inputCls}
+              >
+                {draft.scheduler && !schedulerOptions.includes(draft.scheduler) && (
+                  <option value={draft.scheduler}>{draft.scheduler}</option>
+                )}
+                {schedulerOptions.map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-600 mt-1">
+                {localSchedulers?.supported === false
+                  ? 'Your WebUI predates the scheduler API (A1111 1.9+) — this setting is not sent.'
+                  : 'v-pred checkpoints need SGM Uniform — never Karras or Beta. Automatic lets the WebUI pick.'}
+              </p>
+            </div>
+          )}
           {renderDefaults && (
             <div className="text-xs text-gray-500 bg-gray-950/60 border border-gray-800 rounded-lg px-3 py-2 flex items-center justify-between gap-3">
               <span>
                 This checkpoint family's recommended settings:{' '}
                 <span className="text-purple-300 font-medium">{renderDefaults.sampler_name}</span> at
-                guidance <span className="text-purple-300 font-medium">{renderDefaults.guidance_scale}</span>.
-                Left at stock values, sampler, guidance and negative prompt follow the
-                family automatically; edited values are kept as-is.
+                guidance <span className="text-purple-300 font-medium">{renderDefaults.guidance_scale}</span>
+                {isLocal && renderDefaults.scheduler !== 'Automatic' && (
+                  <>, <span className="text-purple-300 font-medium">{renderDefaults.scheduler}</span> schedule</>
+                )}.
+                Left at stock values, sampler, guidance, scheduler and negative prompt
+                follow the family automatically; edited values are kept as-is.
+                {isVpred && (
+                  <>
+                    {' '}v-pred checkpoint detected: guidance stays at{' '}
+                    {renderDefaults.guidance_scale} (higher oversaturates — CFG-rescale
+                    isn't reachable through the WebUI API) with the {renderDefaults.scheduler} schedule.
+                  </>
+                )}
               </span>
               {(draft.sampler_name !== renderDefaults.sampler_name
-                || Number(draft.guidance_scale) !== renderDefaults.guidance_scale) && (
+                || Number(draft.guidance_scale) !== renderDefaults.guidance_scale
+                || (isLocal && (draft.scheduler || 'Automatic') !== renderDefaults.scheduler)) && (
                 <button
                   onClick={() => {
                     set('sampler_name', renderDefaults.sampler_name);
                     set('guidance_scale', renderDefaults.guidance_scale);
+                    if (isLocal) set('scheduler', renderDefaults.scheduler);
                   }}
                   className="text-xs text-purple-400 hover:text-purple-300 whitespace-nowrap"
                 >

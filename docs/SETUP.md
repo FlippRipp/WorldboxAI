@@ -110,13 +110,28 @@ All the booru-tag checkpoint families the module recognizes (Pony,
 Illustrious, NoobAI, Animagine) work on the default Forge install, which the
 Studio pairs with tag-style prompts, the family's own quality tags, AND the
 family's recommended render settings automatically: sampler, guidance scale,
-and negative prompt follow the model card of the selected checkpoint's family
-(e.g. NoobAI renders with Euler a at CFG 5 and its own negative vocabulary
-instead of the generic DPM++ 2M Karras at CFG 7) as long as they are left at
-stock values — edit any of them in the Studio to pin your own. Note that
-NoobAI v-pred checkpoints need a WebUI with SDXL v-prediction support — Forge
-handles them out of the box, classic AUTOMATIC1111 does not, so keep the
-default `WB_WEBUI_REPO` if you plan to use them.
+scheduler, and negative prompt follow the model card of the selected
+checkpoint's family (e.g. NoobAI renders with Euler a at CFG 5 and its own
+negative vocabulary instead of the generic DPM++ 2M Karras at CFG 7) as long
+as they are left at stock values — edit any of them in the Studio to pin your
+own.
+
+**v-pred checkpoints** (NoobAI-XL vPred and its merges — "vpred" in the
+filename) deserve extra care:
+
+- The WebUI detects v-prediction **only from keys inside the checkpoint
+  file** (`v_pred` in the safetensors header). The official Civitai release
+  carries the key; merges and re-uploads often strip it, and a keyless file
+  silently renders as an epsilon model — dark, blurry, washed-out images no
+  setting can fix. The Studio's connection test verifies the file when the
+  checkpoint folder is configured; if it warns, re-download the official
+  file.
+- The module automatically renders v-pred-named checkpoints at CFG 4 with
+  the SGM Uniform scheduler (Karras and Beta schedules break v-pred; CFG
+  above ~4 oversaturates because CFG-rescale is not reachable through the
+  WebUI API) when the settings are at stock values.
+- Classic AUTOMATIC1111 cannot sample SDXL v-pred at all — keep the default
+  `WB_WEBUI_REPO` (Forge) if you plan to use these checkpoints.
 
 Start the backend:
 

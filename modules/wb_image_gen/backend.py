@@ -34,6 +34,7 @@ import hashlib
 import json
 import os
 import re
+import struct
 import time
 import uuid
 from datetime import datetime, timezone
@@ -122,6 +123,20 @@ SAMPLERS = [
     "UniPC",
     "LMS",
 ]
+# Static fallback for the scheduler dropdown (A1111 1.9+ label set). The
+# local WebUI reports its own list via /local/schedulers; pre-1.9 WebUIs
+# have no scheduler API at all and the field is never sent to them.
+SCHEDULERS = [
+    "Automatic",
+    "Uniform",
+    "Karras",
+    "Exponential",
+    "SGM Uniform",
+    "Simple",
+    "Normal",
+    "DDIM",
+    "Beta",
+]
 KEY_MASK_PREFIX = "****"
 
 # Novita rejects prompts over 1024 characters.
@@ -143,7 +158,7 @@ LORA_LLM_MODES = ("off", "gate", "weight", "both")
 # together cover every key of _default_config() except lora_library.
 PROFILE_FIELDS = (
     "model_name", "model_base", "width", "height", "image_num", "steps",
-    "guidance_scale", "sampler_name", "negative_prompt", "style_suffix",
+    "guidance_scale", "sampler_name", "scheduler", "negative_prompt", "style_suffix",
     "quality_tags", "booru_subject_mode", "booru_break_separator",
     "tag_usage_filter", "tag_usage_min_count", "prompt_template",
     "prompt_template_tags", "prompt_style_mode",
@@ -359,7 +374,8 @@ LATEST SCENE (illustrate this):
 DEFAULT_PROMPT_TEMPLATE_TAGS = """You write prompts for an AI image generator that expects BOORU-STYLE TAGS (danbooru and e621 conventions). Turn the scene below into ONE comma-separated tag list depicting a single striking moment from the latest scene.
 
 Rules:
-- Output comma-separated booru tags, most important first: subject count (1girl, 1boy, 2girls, no humans...), then appearance (hair, eyes, clothing, species), action/pose, expression, setting, lighting, mood, composition (close-up, from above, wide shot...).
+- Output comma-separated booru tags, most important first: subject count (1girl, 1boy, 2girls, no humans...), then appearance (hair, eyes, clothing, species), action/pose, expression, setting, lighting, mood, composition.
+- Include EXACTLY ONE framing tag matched to the moment: close-up, portrait, upper body, cowboy shot, full body, or wide shot. Default to the tightest framing that still shows the action (upper body or cowboy shot for dialogue and emotion); use full body or wide shot only when the whole figure or the scale of the scene is the point.
 - Lowercase tag conventions: danbooru tags for human and anime-style subjects, e621 tags for anthro, feral, or creature subjects (anthro, feral, the species, fur and scale colors...). Mixing both vocabularies in one list is fine -- use whichever site's tag names the visual best.
 - Concrete visual tags only -- no story summary, no proper-noun lore the image model cannot know; describe what things LOOK like instead.
 - Output ONLY the tag list, no quotes, no preamble, 20-40 tags.
@@ -384,7 +400,23 @@ EARLIER CONTEXT (for continuity only):
 {history}
 
 LATEST SCENE (illustrate this):
-{narration}""",)
+{narration}""",
+                                # Pre-framing-rule default: without a required
+                                # framing tag the writer rarely picks one and
+                                # tag checkpoints drift to zoomed-out wides.
+                                """You write prompts for an AI image generator that expects BOORU-STYLE TAGS (danbooru and e621 conventions). Turn the scene below into ONE comma-separated tag list depicting a single striking moment from the latest scene.
+
+Rules:
+- Output comma-separated booru tags, most important first: subject count (1girl, 1boy, 2girls, no humans...), then appearance (hair, eyes, clothing, species), action/pose, expression, setting, lighting, mood, composition (close-up, from above, wide shot...).
+- Lowercase tag conventions: danbooru tags for human and anime-style subjects, e621 tags for anthro, feral, or creature subjects (anthro, feral, the species, fur and scale colors...). Mixing both vocabularies in one list is fine -- use whichever site's tag names the visual best.
+- Concrete visual tags only -- no story summary, no proper-noun lore the image model cannot know; describe what things LOOK like instead.
+- Output ONLY the tag list, no quotes, no preamble, 20-40 tags.
+
+EARLIER CONTEXT (for continuity only):
+{history}
+
+LATEST SCENE (illustrate this):
+{narration}""")
 
 # Booru-tag checkpoint families each expect their own quality tags up front:
 # score_* is Pony vocabulary; Illustrious/NoobAI/Animagine were trained on
@@ -416,10 +448,12 @@ STOCK_QUALITY_TAGS = frozenset(QUALITY_TAG_DEFAULTS.values())
 DEFAULT_SAMPLER_NAME = "DPM++ 2M Karras"
 DEFAULT_GUIDANCE_SCALE = 7.0
 DEFAULT_NEGATIVE_PROMPT = "blurry, low quality, watermark, text, deformed"
+DEFAULT_SCHEDULER = "Automatic"
 RENDER_DEFAULTS = {
     "pony": {
         "sampler_name": "Euler a",
         "guidance_scale": 7.0,
+        "scheduler": DEFAULT_SCHEDULER,
         "negative_prompt": ("score_6, score_5, score_4, worst quality, "
                             "low quality, jpeg artifacts, signature, "
                             "watermark, username"),
@@ -427,6 +461,7 @@ RENDER_DEFAULTS = {
     "illustrious": {
         "sampler_name": "Euler a",
         "guidance_scale": 6.0,
+        "scheduler": DEFAULT_SCHEDULER,
         "negative_prompt": ("worst quality, low quality, lowres, bad anatomy, "
                             "bad hands, extra digits, jpeg artifacts, "
                             "signature, watermark, username"),
@@ -434,6 +469,7 @@ RENDER_DEFAULTS = {
     "noob": {
         "sampler_name": "Euler a",
         "guidance_scale": 5.0,
+        "scheduler": DEFAULT_SCHEDULER,
         "negative_prompt": ("worst quality, old, early, low quality, lowres, "
                             "signature, username, logo, bad hands, "
                             "mutated hands, ambiguous form, watermark"),
@@ -441,17 +477,29 @@ RENDER_DEFAULTS = {
     "animagine": {
         "sampler_name": "Euler a",
         "guidance_scale": 6.0,
+        "scheduler": DEFAULT_SCHEDULER,
         "negative_prompt": ("lowres, bad anatomy, bad hands, text, error, "
                             "missing fingers, extra digit, fewer digits, "
                             "cropped, worst quality, low quality, "
                             "jpeg artifacts, signature, watermark, username"),
     },
 }
+# v-pred finetunes (NoobAI-XL vPred and its merges, detected by _is_vpred)
+# layer their own knobs on top of the family card: CFG must drop to 4.0
+# (higher oversaturates without CFG-rescale, which the stock WebUI API cannot
+# reach) and the noise schedule must be SGM Uniform (the Karras and Beta
+# schedules break v-pred sampling). The override values are stock too, so
+# eps<->vpred model switches keep tracking in both directions.
+VPRED_RENDER_OVERRIDES = {"guidance_scale": 4.0, "scheduler": "SGM Uniform"}
 STOCK_RENDER_SETTINGS = {
-    field: frozenset({default, *(d[field] for d in RENDER_DEFAULTS.values())})
+    field: frozenset({default,
+                      *(d[field] for d in RENDER_DEFAULTS.values()),
+                      *((VPRED_RENDER_OVERRIDES[field],)
+                        if field in VPRED_RENDER_OVERRIDES else ())})
     for field, default in (("sampler_name", DEFAULT_SAMPLER_NAME),
                            ("guidance_scale", DEFAULT_GUIDANCE_SCALE),
-                           ("negative_prompt", DEFAULT_NEGATIVE_PROMPT))
+                           ("negative_prompt", DEFAULT_NEGATIVE_PROMPT),
+                           ("scheduler", DEFAULT_SCHEDULER))
 }
 
 # Tag-trained checkpoints blend features badly when asked for several distinct
@@ -557,6 +605,7 @@ def _default_config() -> dict:
         "steps": 28,
         "guidance_scale": DEFAULT_GUIDANCE_SCALE,
         "sampler_name": DEFAULT_SAMPLER_NAME,
+        "scheduler": DEFAULT_SCHEDULER,   # local only; Novita never sees it
         "negative_prompt": DEFAULT_NEGATIVE_PROMPT,
         "interval": 3,
         "step_retries": STEP_RETRIES_DEFAULT,
@@ -746,16 +795,22 @@ def _effective_config(store: dict) -> dict:
     if cfg.get("quality_tags") in STOCK_QUALITY_TAGS:
         cfg["quality_tags"] = QUALITY_TAG_DEFAULTS.get(
             _tag_model_marker(cfg) or "", DEFAULT_QUALITY_TAGS)
-    # Sampler, guidance scale and negative prompt follow the checkpoint
-    # family the same way (RENDER_DEFAULTS): a stored value still equal to
-    # ANY stock default was never customized, so it keeps tracking the
-    # active checkpoint's recommended settings. Unrecognized families keep
-    # their values verbatim -- there is no render-time withholding like
+    # Sampler, guidance scale, scheduler and negative prompt follow the
+    # checkpoint family the same way (RENDER_DEFAULTS): a stored value still
+    # equal to ANY stock default was never customized, so it keeps tracking
+    # the active checkpoint's recommended settings. Unrecognized families
+    # keep their values verbatim -- there is no render-time withholding like
     # _quality_tags, and snapping a hand-picked sampler back to the generic
     # default would discard user input on every Flux/SD1.5/unmarked
     # checkpoint.
+    if not str(cfg.get("scheduler") or "").strip():
+        cfg["scheduler"] = DEFAULT_SCHEDULER
     family_render = RENDER_DEFAULTS.get(_tag_model_marker(cfg) or "")
     if family_render:
+        # v-pred finetunes layer their own guidance/scheduler on top of the
+        # family card (see VPRED_RENDER_OVERRIDES).
+        if _is_vpred(cfg):
+            family_render = {**family_render, **VPRED_RENDER_OVERRIDES}
         for field, stock in STOCK_RENDER_SETTINGS.items():
             if cfg.get(field) in stock:
                 cfg[field] = family_render[field]
@@ -1007,6 +1062,19 @@ def _tag_model_marker(cfg: dict) -> str | None:
     QUALITY_TAG_DEFAULTS."""
     ident = _model_ident(cfg)
     return next((m for m in BOORU_TAG_MODEL_MARKERS if m in ident), None)
+
+
+# "vPred10", "v-pred", "v_pred", "v pred"... — the naming Civitai/HF releases
+# actually use. Keep the mirror in ui/ImageStudio.jsx in sync.
+_VPRED_RE = re.compile(r"v[\s_-]?pred", re.IGNORECASE)
+
+
+def _is_vpred(cfg: dict) -> bool:
+    """Whether the checkpoint self-identifies as v-prediction in its name or
+    base metadata. Drives VPRED_RENDER_OVERRIDES and the /local/status
+    diagnostics; rendering itself stays with the WebUI, which detects v-pred
+    from the checkpoint file's own keys."""
+    return bool(_VPRED_RE.search(_model_ident(cfg)))
 
 
 def _prompt_style(cfg: dict) -> str:
@@ -1795,6 +1863,12 @@ class NonRetryableError(RuntimeError):
     burning attempts (and Novita credits) on a lost cause."""
 
 
+class LocalNotFoundError(RuntimeError):
+    """A local WebUI route answered 404. Capability probes catch this to tell
+    "this WebUI genuinely lacks the endpoint" (a real, cacheable answer) apart
+    from transport failures; plain-RuntimeError handlers keep working."""
+
+
 class ProviderRefusal(NonRetryableError):
     """The image provider's content filter rejected the prompt. Resubmitting
     the identical prompt is pointless (hence NonRetryable), but the pipeline
@@ -2033,8 +2107,8 @@ async def _local_request(cfg: dict, method: str, path: str,
         raise RuntimeError("The local WebUI rejected the credentials "
                            "(--api-auth username/password)")
     if resp.status_code == 404:
-        raise RuntimeError(f"{path} not found at {_local_base(cfg)} — "
-                           "launch the WebUI with --api")
+        raise LocalNotFoundError(f"{path} not found at {_local_base(cfg)} — "
+                                 "launch the WebUI with --api")
     if resp.status_code not in (200, 204):
         raise RuntimeError(f"Local WebUI error {resp.status_code}: "
                            f"{_local_error_detail(resp)}")
@@ -2127,6 +2201,47 @@ async def _local_batch_script_available(cfg: dict, force: bool = False) -> bool:
     return ok
 
 
+# Scheduler-support probe results by base URL ({"labels": list|None, "at":
+# monotonic s}). Pre-1.9 A1111 has no /sdapi/v1/schedulers and 422s on a
+# payload "scheduler" field, so the field is only sent after a probe.
+_local_schedulers_probe: dict = {}
+
+
+async def _local_list_schedulers(cfg: dict, force: bool = False) -> list[str] | None:
+    """Scheduler labels from /sdapi/v1/schedulers, or None when the WebUI has
+    no scheduler API (sending the payload field there would 422). A 404 is a
+    real answer and caches for the TTL; transport failures return None
+    WITHOUT caching, mirroring _local_batch_script_available -- the scheduler
+    is an enhancement and one hiccup must not disable it for a TTL window."""
+    base = _local_base(cfg)
+    cached = _local_schedulers_probe.get(base)
+    if not force and cached \
+            and time.monotonic() - cached["at"] < LOCAL_SCRIPTS_PROBE_TTL_S:
+        return cached["labels"]
+    try:
+        body = await _local_get(cfg, "/sdapi/v1/schedulers")
+    except LocalNotFoundError:
+        _local_schedulers_probe[base] = {"labels": None, "at": time.monotonic()}
+        return None
+    except Exception:
+        return None
+    labels = [str(s.get("label") or s.get("name")).strip()
+              for s in (body if isinstance(body, list) else [])
+              if isinstance(s, dict) and (s.get("label") or s.get("name"))]
+    _local_schedulers_probe[base] = {"labels": labels, "at": time.monotonic()}
+    return labels
+
+
+async def _local_scheduler_ok(cfg: dict) -> bool:
+    """Whether the payload may carry cfg's scheduler: skipped without any
+    HTTP for empty/Automatic (nothing to send -- the WebUI's automatic choice
+    IS the default), otherwise gated on the schedulers API existing."""
+    scheduler = str(cfg.get("scheduler") or "").strip()
+    if not scheduler or scheduler.lower() == "automatic":
+        return False
+    return await _local_list_schedulers(cfg) is not None
+
+
 # The WebUI's APIs expose no usable file hashes (/sdapi/v1/loras only has
 # kohya's sshs_model_hash, a weights hash — never the file SHA256 that
 # Civitai/HF publish) — so matching browse results and library entries to
@@ -2197,6 +2312,72 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+# Sanity cap for a safetensors header; real headers are a few MB at most,
+# so anything bigger means a corrupt or non-safetensors file.
+_SAFETENSORS_HEADER_MAX = 100 * (1 << 20)
+
+
+def _safetensors_header_keys(path: Path) -> frozenset[str] | None:
+    """Key names from a safetensors header (tensor names plus __metadata__
+    keys — tools stash flags like v_pred in either place), reading only the
+    8-byte length prefix and the JSON header, never the tensors. None for
+    non-.safetensors files, unreadable files, or implausible headers."""
+    if path.suffix.lower() != ".safetensors":
+        return None
+    try:
+        with open(path, "rb") as f:
+            (length,) = struct.unpack("<Q", f.read(8))
+            if not 0 < length <= _SAFETENSORS_HEADER_MAX:
+                return None
+            header = json.loads(f.read(length).decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError, struct.error):
+        return None
+    if not isinstance(header, dict):
+        return None
+    meta = header.get("__metadata__")
+    return frozenset(header) | frozenset(meta if isinstance(meta, dict) else ())
+
+
+_CKPT_TITLE_HASH_RE = re.compile(r"\s*\[[0-9a-f]{6,12}\]\s*$", re.I)
+
+
+def _local_checkpoint_file(cfg: dict) -> Path | None:
+    """The selected checkpoint's file under local_checkpoint_dir, or None
+    (dir unset/unreadable — e.g. a WebUI on another machine — or file not
+    found). model_name for the local provider is the WebUI title: a path
+    relative to the model folder plus an optional " [shorthash]" suffix."""
+    root = _local_install_dir(cfg, "checkpoint")
+    if root is None:
+        return None
+    name = _CKPT_TITLE_HASH_RE.sub("", str(cfg.get("model_name") or "")).strip()
+    if not name:
+        return None
+    direct = root / Path(name.replace("\\", "/"))
+    if direct.is_file():
+        return direct
+    # Titles are sometimes bare filenames while the file sits in a subfolder.
+    try:
+        return next(root.rglob(Path(name.replace("\\", "/")).name), None)
+    except OSError:
+        return None
+
+
+def _vpred_checkpoint_diagnosis(cfg: dict) -> dict | None:
+    """For a v-pred-named checkpoint whose file this machine can read:
+    whether the file carries the "v_pred" key WebUIs auto-detect v-prediction
+    from. None when there is nothing to say (not v-pred-named, remote WebUI,
+    .ckpt file, unreadable header) — absence of evidence is not a warning."""
+    if not _is_vpred(cfg):
+        return None
+    path = _local_checkpoint_file(cfg)
+    if path is None:
+        return None
+    keys = _safetensors_header_keys(path)
+    if keys is None:
+        return None
+    return {"file": path.name, "has_vpred_key": "v_pred" in keys}
 
 
 async def _scan_local_hashes(folder: str,
@@ -2655,7 +2836,8 @@ def _local_prompt_with_tags(cfg: dict, image_prompt: str) -> str:
     return image_prompt
 
 
-def _local_payload(cfg: dict, image_prompt: str) -> dict:
+def _local_payload(cfg: dict, image_prompt: str,
+                   scheduler_ok: bool = False) -> dict:
     # No prompt cap here: local WebUIs chunk long prompts themselves.
     payload = {
         "prompt": _local_prompt_with_tags(cfg, image_prompt),
@@ -2670,13 +2852,29 @@ def _local_payload(cfg: dict, image_prompt: str) -> dict:
         "send_images": True,
         "save_images": False,
         # Selecting the checkpoint per request keeps profiles self-contained;
-        # not restoring afterwards keeps it loaded across a batch.
-        "override_settings": {"sd_model_checkpoint": str(cfg.get("model_name", ""))},
+        # not restoring afterwards keeps it loaded across a batch. The two
+        # extra pins neutralize stale WebUI globals that silently corrupt
+        # renders: clip-skip back to 1 (the SDXL-correct value; a leftover 2
+        # from SD1.5 use degrades output on WebUIs that apply it) and the VAE
+        # to Automatic (prefers the checkpoint's baked/matching VAE; a stale
+        # global VAE washes colors out). Deliberately not config-exposed
+        # until someone actually needs to pin a custom VAE per profile.
+        "override_settings": {
+            "sd_model_checkpoint": str(cfg.get("model_name", "")),
+            "CLIP_stop_at_last_layers": 1,
+            "sd_vae": "Automatic",
+        },
         "override_settings_restore_afterwards": False,
     }
     negative = str(cfg.get("negative_prompt") or "").strip()
     if negative:
         payload["negative_prompt"] = negative
+    # The scheduler field 422s on pre-1.9 A1111, so it rides only when the
+    # caller probed support (_local_scheduler_ok). "Automatic" is what the
+    # WebUI does without the field, so it is never sent.
+    scheduler = str(cfg.get("scheduler") or "").strip()
+    if scheduler_ok and scheduler and scheduler.lower() != "automatic":
+        payload["scheduler"] = scheduler
     return payload
 
 
@@ -2725,17 +2923,20 @@ def _local_b64_decode(image: str) -> bytes:
 
 async def _local_generate(cfg: dict, image_prompt: str) -> tuple[bytes, str]:
     """One synchronous txt2img render against the local WebUI."""
-    images = await _local_txt2img(cfg, _local_payload(cfg, image_prompt))
+    payload = _local_payload(cfg, image_prompt,
+                             scheduler_ok=await _local_scheduler_ok(cfg))
+    images = await _local_txt2img(cfg, payload)
     return _local_b64_decode(images[0]), "png"
 
 
-def _local_batch_payload(cfg: dict, image_prompts: list[str]) -> dict:
+def _local_batch_payload(cfg: dict, image_prompts: list[str],
+                         scheduler_ok: bool = False) -> dict:
     """A txt2img payload that renders every prompt in one GPU batch via the
     bundled wb_prompt_batch.py script. The script reads the JSON prompt list
     from script_args and sets batch_size itself; the top-level prompt and
     batch_size stay in their single-image shape so the request remains a
     valid (if single-image) txt2img body."""
-    payload = _local_payload(cfg, image_prompts[0])
+    payload = _local_payload(cfg, image_prompts[0], scheduler_ok=scheduler_ok)
     payload["script_name"] = LOCAL_BATCH_SCRIPT_TITLE
     payload["script_args"] = [json.dumps(
         [_local_prompt_with_tags(cfg, p) for p in image_prompts])]
@@ -2747,7 +2948,9 @@ async def _local_generate_batch(cfg: dict,
     """One batched txt2img render: all prompts share a single GPU batch and
     therefore a single LoRA set -- the caller groups prompts so only cells
     with identical tag strings arrive here together."""
-    images = await _local_txt2img(cfg, _local_batch_payload(cfg, image_prompts))
+    payload = _local_batch_payload(cfg, image_prompts,
+                                   scheduler_ok=await _local_scheduler_ok(cfg))
+    images = await _local_txt2img(cfg, payload)
     # The script suppresses the grid, but a fork that ignores
     # do_not_save_grid prepends one; drop it by count.
     if len(images) == len(image_prompts) + 1:
@@ -4211,6 +4414,7 @@ def get_router():
         steps: int | None = None
         guidance_scale: float | None = None
         sampler_name: str | None = None
+        scheduler: str | None = None
         negative_prompt: str | None = None
         interval: int | None = None
         step_retries: int | None = None
@@ -4351,7 +4555,9 @@ def get_router():
         out["default_prompt_template_tags"] = DEFAULT_PROMPT_TEMPLATE_TAGS
         out["quality_tag_defaults"] = QUALITY_TAG_DEFAULTS
         out["render_defaults"] = RENDER_DEFAULTS
+        out["vpred_render_overrides"] = VPRED_RENDER_OVERRIDES
         out["default_negative_prompt"] = DEFAULT_NEGATIVE_PROMPT
+        out["default_scheduler"] = DEFAULT_SCHEDULER
         out["prompt_style"] = _prompt_style(cfg)   # resolved; the stored mode rides in as prompt_style_mode
         out["prompt_style_modes"] = PROMPT_STYLE_MODES
         out["civitai_sorts"] = CIVITAI_SORTS
@@ -4431,6 +4637,13 @@ def get_router():
                 incoming["sampler_name"] = name
             elif incoming["sampler_name"] not in SAMPLERS:
                 raise HTTPException(status_code=400, detail=f"Unknown sampler. Allowed: {SAMPLERS}")
+        if "scheduler" in incoming:
+            # Local-only field; the WebUI defines the valid label set, so any
+            # short non-empty string passes (Novita simply never sees it).
+            name = str(incoming["scheduler"]).strip()
+            if len(name) > 100:
+                raise HTTPException(status_code=400, detail="Invalid scheduler name")
+            incoming["scheduler"] = name or DEFAULT_SCHEDULER
         for side in ("width", "height"):
             if side in incoming:
                 incoming[side] = max(128, min(2048, (int(incoming[side]) // 8) * 8))
@@ -4748,6 +4961,33 @@ def get_router():
                    # not a cached "not installed" from before the restart.
                    "batch_script": await _local_batch_script_available(
                        cfg, force=True)}
+            if _is_vpred(cfg):
+                out["vpred"] = True
+                # v-prediction SDXL needs a Forge-family WebUI; Forge builds
+                # expose forge_* option keys, classic A1111 does not (and
+                # renders v-pred checkpoints as epsilon: dark, blurry,
+                # washed-out output).
+                if not any(str(k).startswith("forge")
+                           for k in (options if isinstance(options, dict) else {})):
+                    out["vpred_warning"] = (
+                        "This checkpoint is v-prediction but the WebUI does "
+                        "not look like Forge — classic AUTOMATIC1111 cannot "
+                        "sample SDXL v-pred and renders it as epsilon (dark, "
+                        "blurry, washed-out images). Use SD WebUI Forge for "
+                        "v-pred checkpoints.")
+                diag = await asyncio.to_thread(_vpred_checkpoint_diagnosis, cfg)
+                if diag is not None:
+                    out["vpred_file_check"] = diag
+                    # The missing key is the more specific diagnosis, so it
+                    # overwrites the softer WebUI notice.
+                    if not diag["has_vpred_key"]:
+                        out["vpred_warning"] = (
+                            f"{diag['file']} is named v-pred but its "
+                            "safetensors header lacks the 'v_pred' key the "
+                            "WebUI auto-detects v-prediction from — it will "
+                            "be sampled as epsilon (dark, blurry output). "
+                            "Re-download the official file from Civitai; "
+                            "merges and re-uploads often strip the key.")
         if _helper_url(cfg):
             try:
                 health = await _helper_request(cfg, "GET", "/wb-helper/health",
@@ -5026,6 +5266,18 @@ def get_router():
         except RuntimeError:
             names = []
         return {"samplers": names or list(SAMPLERS)}
+
+    @router.get("/local/schedulers")
+    async def local_schedulers():
+        """The WebUI's scheduler labels plus whether the WebUI supports the
+        scheduler API at all (pre-1.9 A1111 doesn't; the payload field is
+        withheld there). The static list keeps the select usable when the
+        WebUI is merely unreachable. force=True for the same reason as
+        /local/status: a settings screen probe deserves fresh truth."""
+        cfg = _load_config()
+        labels = await _local_list_schedulers(cfg, force=True)
+        return {"schedulers": labels or list(SCHEDULERS),
+                "supported": labels is not None}
 
     @router.post("/local/refresh")
     async def local_refresh():

@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import json
+import struct
 import threading
 import time
 
@@ -4128,12 +4129,15 @@ def test_prompt_writer_applies_tag_usage_filter(tmp_path):
 def test_legacy_tags_template_upgrades_on_load(tmp_path):
     backend = _load_backend(tmp_path)
 
-    # A stored template equal to an old default follows the default.
-    cfg = backend._default_config()
-    cfg["prompt_template_tags"] = backend.LEGACY_PROMPT_TEMPLATES_TAGS[0]
-    backend._save_config(cfg)
-    assert backend._load_config()["prompt_template_tags"] \
-        == backend.DEFAULT_PROMPT_TEMPLATE_TAGS
+    # A stored template equal to ANY old default follows the current default,
+    # which now demands a framing tag (the zoomed-out fix).
+    assert "EXACTLY ONE framing tag" in backend.DEFAULT_PROMPT_TEMPLATE_TAGS
+    for legacy in backend.LEGACY_PROMPT_TEMPLATES_TAGS:
+        cfg = backend._default_config()
+        cfg["prompt_template_tags"] = legacy
+        backend._save_config(cfg)
+        assert backend._load_config()["prompt_template_tags"] \
+            == backend.DEFAULT_PROMPT_TEMPLATE_TAGS
 
     # A customized template is left alone.
     cfg["prompt_template_tags"] = "my custom template {narration} {history}"
@@ -4264,6 +4268,292 @@ def test_render_settings_follow_family(tmp_path):
     body = client.get("/config").json()
     assert body["render_defaults"] == backend.RENDER_DEFAULTS
     assert body["default_negative_prompt"] == backend.DEFAULT_NEGATIVE_PROMPT
+
+
+def test_vpred_render_settings_follow_checkpoint(tmp_path):
+    backend = _load_backend(tmp_path)
+
+    # Detection covers the naming variants Civitai/HF releases actually use.
+    def cfg_for(name, base=""):
+        return {**backend._default_config(), "model_base": base, "model_name": name}
+    assert backend._is_vpred(cfg_for("noobaiXLNAIXL_vPred10Version.safetensors"))
+    assert backend._is_vpred(cfg_for("noob_v_pred.safetensors"))
+    assert backend._is_vpred(cfg_for("m.safetensors", "NoobAI v-pred"))
+    assert not backend._is_vpred(cfg_for("noobaiXLNAIXL_epsilon11.safetensors"))
+
+    # A stock config on a v-pred NoobAI gets the family card plus the v-pred
+    # layer: CFG 4 and SGM Uniform, same sampler and negative as eps NoobAI.
+    cfg = backend._load_config()
+    cfg["model_base"] = "NoobAI"
+    cfg["model_name"] = "noobaiXLNAIXL_vPred10Version.safetensors"
+    backend._save_config(cfg)
+    cfg = backend._load_config()
+    noob = backend.RENDER_DEFAULTS["noob"]
+    assert cfg["guidance_scale"] == backend.VPRED_RENDER_OVERRIDES["guidance_scale"]
+    assert cfg["scheduler"] == backend.VPRED_RENDER_OVERRIDES["scheduler"]
+    assert cfg["sampler_name"] == noob["sampler_name"]
+    assert cfg["negative_prompt"] == noob["negative_prompt"]
+
+    # Stock values track eps <-> vpred switches in both directions.
+    cfg["model_name"] = "noobaiXLNAIXL_epsilon11.safetensors"
+    backend._save_config(cfg)
+    cfg = backend._load_config()
+    assert cfg["guidance_scale"] == noob["guidance_scale"]
+    assert cfg["scheduler"] == "Automatic"
+    cfg["model_name"] = "noobaiXLNAIXL_vPred10Version.safetensors"
+    backend._save_config(cfg)
+    cfg = backend._load_config()
+    assert cfg["guidance_scale"] == 4.0
+    assert cfg["scheduler"] == "SGM Uniform"
+
+    # A pinned value survives the switches.
+    cfg["guidance_scale"] = 3.5
+    backend._save_config(cfg)
+    cfg = backend._load_config()
+    cfg["model_name"] = "noobaiXLNAIXL_epsilon11.safetensors"
+    backend._save_config(cfg)
+    assert backend._load_config()["guidance_scale"] == 3.5
+
+    # The override layers onto any recognized family, not just NoobAI.
+    cfg = backend._load_config()
+    cfg["model_base"] = "Illustrious"
+    cfg["model_name"] = "illustriousVpredMix.safetensors"
+    cfg["guidance_scale"] = backend.DEFAULT_GUIDANCE_SCALE
+    backend._save_config(cfg)
+    cfg = backend._load_config()
+    assert cfg["guidance_scale"] == 4.0
+    assert cfg["scheduler"] == "SGM Uniform"
+
+
+def test_local_payload_scheduler_and_override_pins(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = {**backend._default_config(), "provider": "local",
+           "model_name": "noob.safetensors", "scheduler": "SGM Uniform"}
+
+    # The pins ride on every local payload; the scheduler only after a probe.
+    payload = backend._local_payload(cfg, "1girl")
+    assert payload["override_settings"] == {
+        "sd_model_checkpoint": "noob.safetensors",
+        "CLIP_stop_at_last_layers": 1,
+        "sd_vae": "Automatic",
+    }
+    assert "scheduler" not in payload
+
+    payload = backend._local_payload(cfg, "1girl", scheduler_ok=True)
+    assert payload["scheduler"] == "SGM Uniform"
+    # "Automatic" is the WebUI's own default: never sent even when supported.
+    assert "scheduler" not in backend._local_payload(
+        {**cfg, "scheduler": "Automatic"}, "1girl", scheduler_ok=True)
+
+    batch = backend._local_batch_payload(cfg, ["a", "b"], scheduler_ok=True)
+    assert batch["scheduler"] == "SGM Uniform"
+    assert batch["script_name"] == backend.LOCAL_BATCH_SCRIPT_TITLE
+
+
+def test_local_schedulers_probe_and_cache(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = {**backend._default_config(), "provider": "local",
+           "scheduler": "SGM Uniform"}
+    holder = {"body": [{"name": "sgm_uniform", "label": "SGM Uniform"},
+                       {"name": "karras", "label": "Karras"}, {"nope": 1}],
+              "exc": None, "n": 0}
+
+    async def fake_get(cfg, path, timeout=backend.LOCAL_API_TIMEOUT_S):
+        holder["n"] += 1
+        assert path == "/sdapi/v1/schedulers"
+        if holder["exc"] is not None:
+            raise holder["exc"]
+        return holder["body"]
+
+    backend._local_get = fake_get
+
+    # Labels come back once, then from the cache.
+    assert asyncio.run(backend._local_list_schedulers(cfg)) == ["SGM Uniform", "Karras"]
+    assert asyncio.run(backend._local_scheduler_ok(cfg)) is True
+    assert holder["n"] == 1
+
+    # Empty/"Automatic" never probes at all.
+    holder["n"] = 0
+    backend._local_schedulers_probe.clear()
+    assert asyncio.run(backend._local_scheduler_ok(
+        {**cfg, "scheduler": "Automatic"})) is False
+    assert asyncio.run(backend._local_scheduler_ok({**cfg, "scheduler": ""})) is False
+    assert holder["n"] == 0
+
+    # A 404 is a real "no scheduler API here" answer and caches; force
+    # bypasses (the /local/schedulers settings probe).
+    holder["exc"] = backend.LocalNotFoundError("/sdapi/v1/schedulers not found")
+    assert asyncio.run(backend._local_list_schedulers(cfg)) is None
+    holder["exc"] = None
+    assert asyncio.run(backend._local_list_schedulers(cfg)) is None
+    assert asyncio.run(backend._local_scheduler_ok(cfg)) is False
+    assert asyncio.run(backend._local_list_schedulers(cfg, force=True)) \
+        == ["SGM Uniform", "Karras"]
+
+    # Transport failures do NOT cache -- the next call asks again.
+    backend._local_schedulers_probe.clear()
+    holder["exc"] = RuntimeError("WebUI restarting")
+    assert asyncio.run(backend._local_list_schedulers(cfg)) is None
+    holder["exc"] = None
+    assert asyncio.run(backend._local_list_schedulers(cfg)) \
+        == ["SGM Uniform", "Karras"]
+
+
+def test_scheduler_config_field_and_endpoint(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    resp = client.put("/config", json={"scheduler": "SGM Uniform"})
+    assert resp.status_code == 200
+    assert resp.json()["scheduler"] == "SGM Uniform"
+    assert client.put("/config", json={"scheduler": "  "}).json()["scheduler"] \
+        == "Automatic"
+    assert client.put("/config", json={"scheduler": "x" * 101}).status_code == 400
+
+    body = client.get("/config").json()
+    assert body["vpred_render_overrides"] == backend.VPRED_RENDER_OVERRIDES
+    assert body["default_scheduler"] == "Automatic"
+    assert body["render_defaults"]["noob"]["scheduler"] == "Automatic"
+
+    async def fake_get(cfg, path, timeout=None):
+        assert path == "/sdapi/v1/schedulers"
+        return [{"name": "automatic", "label": "Automatic"},
+                {"name": "sgm_uniform", "label": "SGM Uniform"}]
+
+    backend._local_get = fake_get
+    assert client.get("/local/schedulers").json() \
+        == {"schedulers": ["Automatic", "SGM Uniform"], "supported": True}
+
+    async def gone_get(cfg, path, timeout=None):
+        raise backend.LocalNotFoundError("nope")
+
+    backend._local_get = gone_get
+    body = client.get("/local/schedulers").json()
+    assert body["schedulers"] == list(backend.SCHEDULERS)
+    assert body["supported"] is False
+
+
+def _write_safetensors(path, header: dict) -> None:
+    blob = json.dumps(header).encode("utf-8")
+    path.write_bytes(struct.pack("<Q", len(blob)) + blob)
+
+
+def test_safetensors_header_and_vpred_diagnosis(tmp_path):
+    backend = _load_backend(tmp_path)
+    ckpt_dir = tmp_path / "ckpts"
+    ckpt_dir.mkdir()
+
+    good = ckpt_dir / "noobaiXLNAIXL_vPred10Version.safetensors"
+    _write_safetensors(good, {"v_pred": {"dtype": "F32", "shape": [0]},
+                              "__metadata__": {}})
+    assert "v_pred" in backend._safetensors_header_keys(good)
+
+    stripped = ckpt_dir / "vpredMerge.safetensors"
+    _write_safetensors(stripped, {"model.diffusion_model.x": {}})
+    assert "v_pred" not in backend._safetensors_header_keys(stripped)
+
+    # Tools that stash the flag in __metadata__ count too.
+    meta = ckpt_dir / "metaVpred.safetensors"
+    _write_safetensors(meta, {"__metadata__": {"v_pred": "true"}})
+    assert "v_pred" in backend._safetensors_header_keys(meta)
+
+    # Garbage in, None out: truncated, absurd length prefix, non-safetensors.
+    trunc = ckpt_dir / "trunc.safetensors"
+    trunc.write_bytes(b"\x08")
+    assert backend._safetensors_header_keys(trunc) is None
+    huge = ckpt_dir / "huge.safetensors"
+    huge.write_bytes(struct.pack("<Q", 1 << 40) + b"{}")
+    assert backend._safetensors_header_keys(huge) is None
+    ckpt = ckpt_dir / "old_vpred.ckpt"
+    ckpt.write_bytes(b"whatever")
+    assert backend._safetensors_header_keys(ckpt) is None
+
+    # Diagnosis: hash-suffixed titles resolve, subfolders resolve via rglob.
+    cfg = {**backend._default_config(), "provider": "local",
+           "local_checkpoint_dir": str(ckpt_dir), "model_base": "NoobAI",
+           "model_name": "noobaiXLNAIXL_vPred10Version.safetensors [abc123def0]"}
+    assert backend._vpred_checkpoint_diagnosis(cfg) \
+        == {"file": "noobaiXLNAIXL_vPred10Version.safetensors",
+            "has_vpred_key": True}
+    cfg["model_name"] = "vpredMerge.safetensors"
+    assert backend._vpred_checkpoint_diagnosis(cfg)["has_vpred_key"] is False
+    sub = ckpt_dir / "anime"
+    sub.mkdir()
+    _write_safetensors(sub / "deepVpred.safetensors", {"v_pred": {}})
+    cfg["model_name"] = "deepVpred.safetensors"
+    assert backend._vpred_checkpoint_diagnosis(cfg)["has_vpred_key"] is True
+
+    # Nothing to say: eps-named model, missing file, .ckpt, or unset dir.
+    cfg["model_name"] = "noobaiXLNAIXL_epsilon.safetensors"
+    assert backend._vpred_checkpoint_diagnosis(cfg) is None
+    cfg["model_name"] = "gone_vpred.safetensors"
+    assert backend._vpred_checkpoint_diagnosis(cfg) is None
+    cfg["model_name"] = "old_vpred.ckpt"
+    assert backend._vpred_checkpoint_diagnosis(cfg) is None
+    cfg["model_name"] = "vpredMerge.safetensors"
+    cfg["local_checkpoint_dir"] = str(tmp_path / "nope")
+    assert backend._vpred_checkpoint_diagnosis(cfg) is None
+
+
+def test_local_status_vpred_warnings(tmp_path):
+    backend = _load_backend(tmp_path)
+    ckpt_dir = tmp_path / "sd_models"
+    ckpt_dir.mkdir()
+    _write_safetensors(ckpt_dir / "vp.safetensors", {"v_pred": {}})
+    _enable_local(backend, model_name="vp.safetensors", model_base="NoobAI VPred",
+                  local_checkpoint_dir=str(ckpt_dir))
+
+    holder = {"options": {"sd_model_checkpoint": "vp.safetensors",
+                          "forge_preset": "sd"}}
+
+    async def fake_get(cfg, path, timeout=None):
+        if path == "/sdapi/v1/options":
+            return holder["options"]
+        if path == "/sdapi/v1/sd-models":
+            return []
+        if path == "/sdapi/v1/scripts":
+            return {"txt2img": []}
+        raise AssertionError(path)
+
+    backend._local_get = fake_get
+    client = _client(backend)
+
+    # Forge + a file carrying the key: reported healthy, no warning.
+    body = client.get("/local/status").json()
+    assert body["vpred"] is True
+    assert body["vpred_file_check"] == {"file": "vp.safetensors",
+                                        "has_vpred_key": True}
+    assert "vpred_warning" not in body
+
+    # The key stripped from the file: the specific re-download warning.
+    _write_safetensors(ckpt_dir / "vp.safetensors", {"other": {}})
+    body = client.get("/local/status").json()
+    assert body["vpred_file_check"]["has_vpred_key"] is False
+    assert "Re-download" in body["vpred_warning"]
+
+    # Classic A1111 (no forge_* option keys): the WebUI warning.
+    holder["options"] = {"sd_model_checkpoint": "vp.safetensors"}
+    _write_safetensors(ckpt_dir / "vp.safetensors", {"v_pred": {}})
+    body = client.get("/local/status").json()
+    assert "Forge" in body["vpred_warning"]
+
+    # No checkpoint dir: the file check silently disappears, no crash.
+    cfg = backend._load_config()
+    cfg["local_checkpoint_dir"] = ""
+    backend._save_config(cfg)
+    body = client.get("/local/status").json()
+    assert "vpred_file_check" not in body
+    assert "Forge" in body["vpred_warning"]
+
+    # Epsilon checkpoints carry no vpred block at all.
+    cfg = backend._load_config()
+    cfg["model_name"] = "noob_eps.safetensors"
+    cfg["model_base"] = "NoobAI"
+    backend._save_config(cfg)
+    holder["options"] = {"sd_model_checkpoint": "noob_eps.safetensors",
+                         "forge_preset": "sd"}
+    body = client.get("/local/status").json()
+    assert "vpred" not in body and "vpred_warning" not in body
 
 
 def test_clean_character_tags_usage_filter(tmp_path):
