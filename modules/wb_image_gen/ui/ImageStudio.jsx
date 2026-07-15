@@ -3536,7 +3536,8 @@ export default function ImageStudio({ onBack }) {
                       {!upscalerCatalog.can_install && (
                         <p className="text-xs text-gray-600">
                           Set your WebUI's checkpoint folder (or a dedicated upscaler
-                          folder) in the Setup tab to enable installs — files land in
+                          folder) in the Setup tab — or the install helper URL for a
+                          WebUI on another machine — to enable installs. Files land in
                           the WebUI's models/ESRGAN.
                         </p>
                       )}

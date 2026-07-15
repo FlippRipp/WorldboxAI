@@ -4665,12 +4665,11 @@ def get_router():
         out["local_helper_token"] = _mask_key(cfg.get("local_helper_token", ""))
         out["has_helper"] = bool(str(cfg.get("local_helper_url") or "").strip())
         # Whether one-click installs can work per kind: a folder this machine
-        # can write to, or an install helper next to a remote WebUI. The
-        # helper predates the upscaler kind and can't service it, so that
-        # kind counts the local folder only.
+        # can write to, or an install helper next to a remote WebUI. (A
+        # pre-v2 helper has no upscaler folder; its install command then
+        # fails with an actionable "update the launcher" message.)
         out["local_install"] = {
-            kind: _local_install_dir(cfg, kind) is not None
-                  or (out["has_helper"] and kind != "upscaler")
+            kind: _local_install_dir(cfg, kind) is not None or out["has_helper"]
             for kind in LOCAL_INSTALL_KINDS
         }
         out["providers"] = PROVIDERS
@@ -5296,14 +5295,6 @@ def get_router():
             expected_hashes = [sha] if sha else []
             lora_id = None
 
-        if remote and kind == "upscaler":
-            # The install helper predates the upscaler kind; its folder map
-            # has no entry to receive the file.
-            raise HTTPException(
-                status_code=400,
-                detail="Upscaler installs need a checkpoint or upscaler folder "
-                       "this machine can write to — the install helper does "
-                       "not support them yet")
         if remote:
             # The helper streams the file on the WebUI's machine and tracks
             # byte progress in the same status shape; the merged
@@ -5425,8 +5416,9 @@ def get_router():
     @router.get("/local/upscaler-catalog")
     async def local_upscaler_catalog():
         """The curated one-click upscaler list with per-entry install state.
-        "installed" is file presence in the upscaler folder — immediate and
-        restart-independent; whether the WebUI has LOADED the file is the
+        "installed" is file presence in the upscaler folder (or, for a
+        remote WebUI, a SHA256 hit in the install helper's index) — immediate
+        and restart-independent; whether the WebUI has LOADED the file is the
         /local/upscalers dropdown's business (new files appear there only
         after a WebUI restart, since no upscaler rescan route exists)."""
         cfg = _load_config()
@@ -5434,10 +5426,19 @@ def get_router():
         present: set[str] = set()
         if root is not None and root.is_dir():
             present = {p.name.lower() for p in root.rglob("*") if p.is_file()}
-        entries = [{**entry, "installed": entry["filename"].lower() in present}
+        helper_shas: set[str] = set()
+        if root is None and _helper_url(cfg):
+            try:
+                helper_shas = set((await _helper_hash_indexes(cfg))
+                                  .get("upscaler") or {})
+            except RuntimeError as e:
+                print(f"[Image Gen] Helper hash index failed: {e}")
+        entries = [{**entry,
+                    "installed": entry["filename"].lower() in present
+                                 or entry["sha256"] in helper_shas}
                    for entry in UPSCALER_CATALOG]
         return {"entries": entries,
-                "can_install": root is not None,
+                "can_install": root is not None or bool(_helper_url(cfg)),
                 "dir": str(root) if root is not None else None}
 
     @router.get("/local/upscalers")

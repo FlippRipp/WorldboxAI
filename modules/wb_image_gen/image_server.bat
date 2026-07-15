@@ -194,6 +194,7 @@ if not "%WB_HELPER%"=="0" (
     if not exist "%WEBUI_DIR%\models\Lora" mkdir "%WEBUI_DIR%\models\Lora"
     set "WB_HELPER_CKPT_DIR=%WEBUI_DIR%\models\Stable-diffusion"
     set "WB_HELPER_LORA_DIR=%WEBUI_DIR%\models\Lora"
+    set "WB_HELPER_UPSCALER_DIR=%WEBUI_DIR%\models\ESRGAN"
     start "WorldBox Install Helper" /b python "%REPO_ROOT%\modules\wb_image_gen\helper_server.py"
 )
 

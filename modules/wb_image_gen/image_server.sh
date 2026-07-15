@@ -183,6 +183,7 @@ if [ "${WB_HELPER:-1}" != "0" ]; then
     mkdir -p "$WEBUI_DIR/models/Stable-diffusion" "$WEBUI_DIR/models/Lora"
     WB_HELPER_CKPT_DIR="$WEBUI_DIR/models/Stable-diffusion" \
     WB_HELPER_LORA_DIR="$WEBUI_DIR/models/Lora" \
+    WB_HELPER_UPSCALER_DIR="$WEBUI_DIR/models/ESRGAN" \
     WB_HELPER_PORT="$WB_HELPER_PORT" \
     WB_HELPER_LISTEN="${WB_HELPER_LISTEN:-${WB_WEBUI_LISTEN:-1}}" \
         "$PY_CMD" "$REPO_ROOT/modules/wb_image_gen/helper_server.py" &

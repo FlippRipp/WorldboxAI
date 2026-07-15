@@ -148,8 +148,10 @@ people otherwise hunt down by hand). Installs download into the WebUI's
 (or set the optional upscaler folder in Setup); every file is verified
 against its published SHA256. One caveat: the WebUI only scans for new
 upscalers at startup, so restart it after an install before the new name
-appears in the upscaler dropdown. The install helper does not support
-upscaler installs yet — they need a folder this machine can write to.
+appears in the upscaler dropdown. Remote WebUIs work too: the install
+helper downloads upscalers on its machine (helpers started by a pre-update
+launcher don't know the folder yet — update the repo and restart
+`image_server` once, or pass `--upscaler-dir`).
 
 Start the backend:
 

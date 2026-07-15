@@ -6386,24 +6386,47 @@ def test_upscaler_install_kind_and_catalog(tmp_path):
     assert all(e["url"].startswith("https://huggingface.co/")
                and len(e["sha256"]) == 64 for e in body["entries"])
 
-    # config exposes the upscaler install capability from the derived dir
-    # (helper-only setups don't count: the helper can't service this kind).
+    # config exposes the upscaler install capability from the derived dir.
     assert client.get("/config").json()["local_install"]["upscaler"] is True
+
+    # Helper-only setups (WebUI on another machine) work too: the capability
+    # comes from the helper, "installed" badges from its SHA256 index, and
+    # the install command is forwarded like any other kind.
     cfg = backend._load_config()
     cfg["local_checkpoint_dir"] = ""
     cfg["local_helper_url"] = "http://192.168.1.20:7861"
     backend._save_config(cfg)
-    conf = client.get("/config").json()
-    assert conf["local_install"]["upscaler"] is False
-    assert conf["local_install"]["checkpoint"] is True   # helper still serves these
+    assert client.get("/config").json()["local_install"]["upscaler"] is True
+
+    async def fake_indexes(cfg):
+        return {"scanning": False, "checkpoint": {}, "lora": {},
+                "upscaler": {backend.UPSCALER_CATALOG[0]["sha256"]:
+                             "4x-AnimeSharp"}}
+
+    backend._helper_hash_indexes = fake_indexes
     body = client.get("/local/upscaler-catalog").json()
-    assert body["can_install"] is False
-    # And the endpoint refuses to route an upscaler install to the helper.
-    resp = client.post("/local/downloads", json={
+    assert body["can_install"] is True
+    by_name = {e["name"]: e for e in body["entries"]}
+    assert by_name["4x-AnimeSharp"]["installed"] is True
+    assert by_name["4x_foolhardy_Remacri"]["installed"] is False
+
+    sent = {}
+
+    async def fake_helper_request(cfg, method, path, json_body=None,
+                                  timeout=None):
+        sent.update({"method": method, "path": path, "body": json_body})
+        return {"download": {"id": "h1", "kind": "upscaler",
+                             "status": "downloading"}}
+
+    backend._helper_request = fake_helper_request
+    body = client.post("/local/downloads", json={
         "kind": "upscaler", "url": "https://huggingface.co/x/y.pth",
-        "filename": "4x-UltraSharp.pth", "label": "4x-UltraSharp"})
-    assert resp.status_code == 400
-    assert "helper" in resp.json()["detail"].lower()
+        "sha256": "ab" * 32, "filename": "4x-UltraSharp.pth",
+        "label": "4x-UltraSharp"}).json()["download"]
+    assert body["remote"] is True
+    assert sent["path"] == "/wb-helper/downloads"
+    assert sent["body"]["kind"] == "upscaler"
+    assert sent["body"]["expected_hashes"] == ["ab" * 32]
 
 
 def test_install_endpoint_checkpoint_kind_validates_and_dedupes(tmp_path):
@@ -6750,10 +6773,9 @@ def test_public_config_reports_install_capability_and_masks_token(tmp_path):
     assert resp["local_helper_token"].startswith("****")
     assert "secret-tok" not in json.dumps(resp)
     assert resp["has_helper"] is True
-    # Helper configured -> checkpoint/LoRA installable even with no local
-    # folders; upscalers stay off (the helper can't service that kind).
+    # Helper configured -> every kind installable even with no local folders.
     assert resp["local_install"] == {"checkpoint": True, "lora": True,
-                                     "upscaler": False}
+                                     "upscaler": True}
 
     # Masked round-trip keeps the stored token; clearing the URL drops the
     # capability unless a folder on this machine exists.
@@ -6964,7 +6986,7 @@ def test_remote_install_end_to_end_through_real_helper(tmp_path):
     try:
         with _client(backend) as client:
             assert client.get("/config").json()["local_install"] == {
-                "checkpoint": True, "lora": True, "upscaler": False}
+                "checkpoint": True, "lora": True, "upscaler": True}
             body = client.post("/local/downloads", json={
                 "kind": "checkpoint", "url": file_url, "sha256": sha,
                 "label": "Juggernaut XL", "item_id": "901",

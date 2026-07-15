@@ -24,9 +24,11 @@ into the Image Studio -- every request must then carry it as a bearer token.
 
 Usage:
   python3 helper_server.py --checkpoint-dir <models/Stable-diffusion> \
-                           --lora-dir <models/Lora> [--port 7861] [--token T]
+                           --lora-dir <models/Lora> [--upscaler-dir <models/ESRGAN>] \
+                           [--port 7861] [--token T]
 
 Environment overrides (flags win): WB_HELPER_CKPT_DIR, WB_HELPER_LORA_DIR,
+WB_HELPER_UPSCALER_DIR (derived from the checkpoint dir when unset),
 WB_HELPER_PORT (default 7861), WB_HELPER_LISTEN (0 binds to 127.0.0.1 only),
 WB_HELPER_TOKEN, WB_HELPER_CACHE (hash-cache file path).
 """
@@ -44,17 +46,21 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-HELPER_VERSION = 1
+HELPER_VERSION = 2
 DEFAULT_PORT = 7861
 DOWNLOAD_CHUNK = 1 << 20
 DOWNLOADS_KEEP_FINISHED = 20
 MAX_BODY_BYTES = 1 << 16
 INSTALL_EXTS = (".safetensors", ".ckpt")
-SCAN_EXTS = (".safetensors", ".ckpt", ".pt")
+# Hires-fix upscalers are .pth/.pt ESRGAN files; the kind gets its own
+# whitelist (same rules as the app's local installs).
+KIND_INSTALL_EXTS = {"upscaler": (".pth", ".pt", ".safetensors")}
+KIND_DEFAULT_EXT = {"upscaler": ".pth"}
+SCAN_EXTS = (".safetensors", ".ckpt", ".pt", ".pth")
 _CONTENT_DISPOSITION_RE = re.compile(r'filename\*?="?([^";]+)"?')
 
 # Populated by main() before the server starts.
-KIND_DIRS: dict = {}        # "checkpoint"/"lora" -> Path | None
+KIND_DIRS: dict = {}        # "checkpoint"/"lora"/"upscaler" -> Path | None
 AUTH_TOKEN = ""
 CACHE_PATH: "Path | None" = None
 
@@ -167,8 +173,9 @@ def _register_file(path: Path, kind: str) -> None:
 
 
 def _hash_indexes() -> dict:
-    """{"checkpoint": {sha256 -> file stem}, "lora": {...}} from the cache."""
-    out: dict = {"checkpoint": {}, "lora": {}}
+    """{"checkpoint": {sha256 -> file stem}, "lora": {...}, "upscaler":
+    {...}} from the cache."""
+    out: dict = {"checkpoint": {}, "lora": {}, "upscaler": {}}
     with _hash_lock:
         entries = list(_hash_cache["files"].items())
     for file_path, meta in entries:
@@ -183,14 +190,18 @@ def _hash_indexes() -> dict:
 # Downloads (mirrors the app's _download_file_pipeline, with threads)
 # --------------------------------------------------------------------------
 
-def _safe_filename(raw: str, fallback: str) -> str:
+def _safe_filename(raw: str, fallback: str, kind: str = "lora") -> str:
     """A bare, whitelisted-extension filename that cannot escape the install
-    folder (same rules as the app's local installs)."""
+    folder (same rules as the app's local installs, per kind)."""
+    exts = KIND_INSTALL_EXTS.get(kind, INSTALL_EXTS)
     name = Path(str(raw or "").strip().replace("\\", "/")).name
     name = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip(" .")
-    if not name or not name.lower().endswith(INSTALL_EXTS):
+    if not name or not name.lower().endswith(exts):
         base = re.sub(r"[^A-Za-z0-9._ -]+", "_", str(fallback or "model")).strip(" .")
-        name = (base or "model") + ".safetensors"
+        if base.lower().endswith(exts):
+            name = base
+        else:
+            name = (base or "model") + KIND_DEFAULT_EXT.get(kind, ".safetensors")
     return name
 
 
@@ -223,7 +234,8 @@ def _download_worker(dl_id: str, url: str, dest_dir: Path, fallback_name: str,
         with resp:
             disposition = resp.headers.get("content-disposition", "")
             match = _CONTENT_DISPOSITION_RE.search(disposition)
-            filename = _safe_filename(match.group(1) if match else "", fallback_name)
+            filename = _safe_filename(match.group(1) if match else "",
+                                      fallback_name, kind=kind)
             final_path = (dest_dir / filename).resolve()
             if dest_dir.resolve() not in final_path.parents:
                 raise RuntimeError("Refusing a filename outside the install folder")
@@ -278,9 +290,17 @@ def _start_download(body: dict) -> dict:
     kind = body.get("kind") if body.get("kind") in KIND_DIRS else "lora"
     dest_dir = KIND_DIRS.get(kind)
     if dest_dir is None:
-        raise ValueError(f"No {kind} folder configured on the helper")
+        raise ValueError(
+            f"No {kind} folder configured on the helper"
+            + (" — update the repo and restart the image_server launcher "
+               "(or pass --upscaler-dir)" if kind == "upscaler" else ""))
     if not dest_dir.is_dir():
-        raise ValueError(f"{kind} folder not found on this machine: {dest_dir}")
+        # models/ESRGAN often doesn't exist on a fresh WebUI; creating it is
+        # exactly what a manual install would do.
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise ValueError(f"Cannot create {kind} folder {dest_dir}: {e}")
     url = str(body.get("url") or "").strip()
     if not url.startswith(("http://", "https://")):
         raise ValueError("Installs need an http(s) URL")
@@ -422,6 +442,8 @@ def main() -> int:
                         default=os.environ.get("WB_HELPER_CKPT_DIR", ""))
     parser.add_argument("--lora-dir",
                         default=os.environ.get("WB_HELPER_LORA_DIR", ""))
+    parser.add_argument("--upscaler-dir",
+                        default=os.environ.get("WB_HELPER_UPSCALER_DIR", ""))
     parser.add_argument("--port", type=int,
                         default=int(os.environ.get("WB_HELPER_PORT", DEFAULT_PORT)))
     parser.add_argument("--listen",
@@ -432,11 +454,19 @@ def main() -> int:
                         default=os.environ.get("WB_HELPER_CACHE", ""))
     args = parser.parse_args()
 
-    for kind, raw in (("checkpoint", args.checkpoint_dir), ("lora", args.lora_dir)):
+    for kind, raw in (("checkpoint", args.checkpoint_dir), ("lora", args.lora_dir),
+                      ("upscaler", args.upscaler_dir)):
         folder = Path(os.path.expanduser(raw)).resolve() if str(raw).strip() else None
         KIND_DIRS[kind] = folder
         if folder is not None and not folder.is_dir():
             log(f"warning: {kind} folder does not exist yet: {folder}")
+    # An unset upscaler folder derives the WebUI-standard sibling of the
+    # checkpoint folder (models/Stable-diffusion -> models/ESRGAN), same as
+    # the app does for its own local installs.
+    ckpt = KIND_DIRS.get("checkpoint")
+    if KIND_DIRS.get("upscaler") is None and ckpt is not None \
+            and ckpt.name.lower() == "stable-diffusion":
+        KIND_DIRS["upscaler"] = ckpt.parent / "ESRGAN"
     if all(v is None for v in KIND_DIRS.values()):
         log("error: pass --checkpoint-dir and/or --lora-dir")
         return 1
