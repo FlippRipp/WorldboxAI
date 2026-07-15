@@ -1507,15 +1507,40 @@ JSON response:
 # --------------------------------------------------------------------------
 
 
+def _plot_challenge_section(state: dict) -> str:
+    """The plot director's active thread, so the wizard can seed abilities
+    that could matter against the current challenge. The challenge line is a
+    spoiler the player may not have revealed yet, so prompts that use this
+    section must forbid leaking it into player-visible text."""
+    thread = state.get("module_data", {}).get("wb_plot_director", {}).get("thread") or {}
+    if thread.get("status") != "active" or not str(thread.get("challenge") or "").strip():
+        return ""
+    lines = ["Current plot thread (the Challenge line is a spoiler hidden from the player):"]
+    for key, label in (("title", "Title"), ("hook", "Hook"), ("challenge", "Challenge"), ("stakes", "Stakes")):
+        value = str(thread.get(key) or "").strip()
+        if value:
+            lines.append(f"{label}: {value}")
+    return "\n".join(lines) + "\n\n"
+
+
 def _skill_categories_prompt(rpg: dict, state: dict) -> str:
     world_section = _world_context_section(state.get("world_data"))
     story_section = _story_context_section(state)
+    plot_section = _plot_challenge_section(state)
+    plot_req = ""
+    if plot_section:
+        plot_req = (
+            " Among the 5 story-drawn categories, make 2-3 of them domains whose skills could "
+            "genuinely help this character overcome the current plot thread's challenge - but the "
+            "connection must show only in what the domain is good for: never name the thread or "
+            "echo the hidden challenge in a category name or summary."
+        )
     return f"""You are the game system for a text RPG. The player wants to learn a brand-new skill and is browsing what kinds of abilities they could pursue. Output ONLY valid JSON, no other text.
 
-{world_section}{story_section}Character:
+{world_section}{story_section}{plot_section}Character:
 {_character_context_block(rpg)}
 
-Propose exactly 10 skill categories - BROAD domains of ability this character could plausibly begin learning in this world and at this point in the story. Each category is a wide umbrella that could hold dozens of very different skills - broad strokes, never narrow specialties like "dagger throwing" or "rose gardening". But name them with imagination, in this world's own voice: "The Red Trades" beats "Combat", "Whisperwork" beats "Stealth", "Hearth & Harvest" beats "Survival". A bland textbook label is a failure; so is a name so cryptic the summary can't rescue it. Let the one-clause summary make plain what broad ground the name covers. The 10 must be meaningfully different from each other and together should span most of what anyone could learn in this world. Split them evenly: 5 drawn from the story - its themes, its current events, what this character already does or what the tale has hinted at - and 5 that stand apart from all of that, ability domains this world supports regardless of where the story happens to be right now. Do not mark or group which is which. Each has a name of 1-3 words and one short clause summary.
+Propose exactly 10 skill categories - BROAD domains of ability this character could plausibly begin learning in this world and at this point in the story. Each category is a wide umbrella that could hold dozens of very different skills - broad strokes, never narrow specialties like "dagger throwing" or "rose gardening". But name them with imagination, in this world's own voice: "The Red Trades" beats "Combat", "Whisperwork" beats "Stealth", "Hearth & Harvest" beats "Survival". A bland textbook label is a failure; so is a name so cryptic the summary can't rescue it. Let the one-clause summary make plain what broad ground the name covers. The 10 must be meaningfully different from each other and together should span most of what anyone could learn in this world. Split them evenly: 5 drawn from the story - its themes, its current events, what this character already does or what the tale has hinted at - and 5 that stand apart from all of that, ability domains this world supports regardless of where the story happens to be right now.{plot_req} Do not mark or group which is which. Each has a name of 1-3 words and one short clause summary.
 
 JSON response:
 {{"categories": [{{"name": "1-3 words", "summary": "one short clause"}}, ... 10 total]}}"""
@@ -1524,6 +1549,15 @@ JSON response:
 def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], state: dict, search: bool = False) -> str:
     world_section = _world_context_section(state.get("world_data"))
     story_section = _story_context_section(state)
+    plot_section = _plot_challenge_section(state)
+    plot_req = ""
+    if plot_section:
+        plot_req = (
+            " Where the theme plausibly allows it, let 1-2 of the 5 be skills that could genuinely "
+            "help this character against the current plot thread's challenge - each must still fit "
+            "the theme and stand on its own as an ability, and no name or description may mention "
+            "the thread or echo the hidden challenge."
+        )
     if search:
         intro = (
             f'The player searched for "{menu}" and is browsing skills themed on that search. '
@@ -1538,12 +1572,12 @@ def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], state: dict,
     exclude_line = ", ".join(exclude) if exclude else "(none)"
     return f"""You are the game system for a text RPG. {intro} Output ONLY valid JSON, no other text.
 
-{world_section}{story_section}Character:
+{world_section}{story_section}{plot_section}Character:
 {_character_context_block(rpg)}
 
 Do NOT propose any of these skills or trivial variants of them (already known or already offered): {exclude_line}
 
-{task}, each learnable NOW by this character. The 5 must vary widely in flavor and approach - do not make them five shades of the same idea. Most should belong squarely to the theme, but 1-2 may take a loose, sideways, or surprising interpretation of it; a skill that fits the theme imperfectly but fits the character or story well is better than a fifth on-the-nose variant. Every proposal is a starting-level ability at its base form - the power each one ultimately awakens with is decided later by fate, so write none of the 5 as stronger or weaker than the others.
+{task}, each learnable NOW by this character. The 5 must vary widely in flavor and approach - do not make them five shades of the same idea. Most should belong squarely to the theme, but 1-2 may take a loose, sideways, or surprising interpretation of it; a skill that fits the theme imperfectly but fits the character or story well is better than a fifth on-the-nose variant.{plot_req} Every proposal is a starting-level ability at its base form - the power each one ultimately awakens with is decided later by fate, so write none of the 5 as stronger or weaker than the others.
 
 Each skill:
 - name: 1-4 evocative words, distinct from every excluded name above and from the other 4 proposals

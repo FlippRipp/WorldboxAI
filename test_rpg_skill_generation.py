@@ -582,6 +582,60 @@ def test_wizard_prompts_carry_story_style_and_recent_scenes():
         assert "slow burn" not in prompt
 
 
+def _plot_thread(status="active", challenge="A masked cabal controls the ferry routes."):
+    return {
+        "title": "The Silent Toll",
+        "hook": "Ferrymen vanish at the third bell.",
+        "challenge": challenge,
+        "stakes": "The river trade strangles and the city starves.",
+        "status": status,
+    }
+
+
+def test_wizard_prompts_carry_active_plot_challenge():
+    mod = _load_backend()
+    client, sm, calls = _make_client(
+        mod, _rpg(), llm_replies=[CATEGORIES_REPLY, _options_reply(_P0_NAMES)]
+    )
+    sm.state["module_data"]["wb_plot_director"] = {"thread": _plot_thread()}
+
+    assert client.post(f"{BASE}/skills/wizard/categories").status_code == 200
+    assert client.post(f"{BASE}/skills/wizard/options", json={"menu": "Flame Arts", "page": 0}).status_code == 200
+
+    assert len(calls) == 2
+    for call in calls:
+        prompt = call["prompt"]
+        assert "Current plot thread" in prompt
+        assert "The Silent Toll" in prompt
+        assert "Ferrymen vanish at the third bell." in prompt
+        assert "A masked cabal controls the ferry routes." in prompt
+        assert "The river trade strangles and the city starves." in prompt
+        # The challenge is spoiler territory: the prompt must forbid leaking it.
+        assert "spoiler hidden from the player" in prompt
+    # Categories: a few of the story-drawn domains should bite on the challenge.
+    assert "2-3 of them domains whose skills could genuinely help" in calls[0]["prompt"]
+    # Options: a couple of the five skills should be able to help.
+    assert "1-2 of the 5 be skills that could genuinely help" in calls[1]["prompt"]
+
+
+def test_wizard_prompts_skip_inactive_or_missing_plot_thread():
+    for module_data in (
+        None,  # plot director absent entirely
+        {"thread": _plot_thread(status="resolved")},
+        {"thread": _plot_thread(challenge="  ")},
+    ):
+        # Fresh backend each round: the categories cache is module-level.
+        mod = _load_backend()
+        client, sm, calls = _make_client(mod, _rpg(), llm_replies=[CATEGORIES_REPLY])
+        if module_data is not None:
+            sm.state["module_data"]["wb_plot_director"] = module_data
+        assert client.post(f"{BASE}/skills/wizard/categories").status_code == 200
+        prompt = calls[0]["prompt"]
+        assert "Current plot thread" not in prompt
+        assert "The Silent Toll" not in prompt
+        assert "genuinely help" not in prompt
+
+
 def test_wizard_prompts_skip_empty_story_context():
     mod = _load_backend()
     client, sm, calls = _make_client(mod, _rpg(), llm_replies=[CATEGORIES_REPLY])
