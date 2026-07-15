@@ -22,6 +22,8 @@ setlocal enabledelayedexpansion
 ::                     webui.bat launcher works)
 ::   WB_WEBUI_PORT     port to listen on (default 7860; if you change it,
 ::                     change the server address in the Image Studio too)
+::   WB_WEBUI_LISTEN   1 (default) also accepts connections from other devices
+::                     on the network (--listen); 0 binds to 127.0.0.1 only
 ::   WEBUI_EXTRA_ARGS  extra launch flags, e.g. "--api-auth user:pass" or,
 ::                     without an NVIDIA GPU, "--skip-torch-cuda-test --use-cpu all"
 
@@ -114,8 +116,19 @@ if not exist "%WEBUI_DIR%\webui.bat" (
 :: On Windows the WebUI's own entry point is webui-user.bat, which just sets
 :: these variables and calls webui.bat -- this script takes its place, so a
 :: stock webui-user.bat never overrides us.
+:: --listen accepts connections from the local network (the WebUI then blocks
+:: installing ITS OWN extensions from its UI as a precaution; pass
+:: WEBUI_EXTRA_ARGS=--enable-insecure-extension-access if you need that --
+:: WorldBox's Studio installs don't go through the WebUI and are unaffected).
+if not defined WB_WEBUI_LISTEN set WB_WEBUI_LISTEN=1
 set "COMMANDLINE_ARGS=--api --port %WB_WEBUI_PORT%"
+if not "%WB_WEBUI_LISTEN%"=="0" set "COMMANDLINE_ARGS=%COMMANDLINE_ARGS% --listen"
 if defined WEBUI_EXTRA_ARGS set "COMMANDLINE_ARGS=%COMMANDLINE_ARGS% %WEBUI_EXTRA_ARGS%"
+:: The WebUI auto-opens a browser tab on start (its auto_launch_browser
+:: setting defaults to "Local"). WorldBox only needs the API, so suppress it
+:: with the same switch the WebUI's own in-place restarts use; the interface
+:: stays reachable at the printed address.
+set SD_WEBUI_RESTARTING=1
 
 :: ── Pin packages for the WebUI's pip installs ──
 :: setuptools<81: the launcher builds openai/CLIP from an old source zip
@@ -157,6 +170,14 @@ if not exist "%WEBUI_DIR%\venv" (
 )
 echo ==== WorldBox Image Studio settings (Setup tab, provider 'Local'):  ====
 echo ====   Server address:    http://127.0.0.1:%WB_WEBUI_PORT%
+echo ====   (also the WebUI's own interface -- open it manually if      ====
+echo ====   needed; no browser tab is auto-opened)                      ====
+if not "%WB_WEBUI_LISTEN%"=="0" (
+    echo ====   From other devices on the same network:                      ====
+    for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /c:"IPv4"') do (
+        for /f "tokens=* delims= " %%b in ("%%a") do echo ====     http://%%b:%WB_WEBUI_PORT%
+    )
+)
 echo ====   Checkpoint folder: %WEBUI_DIR%\models\Stable-diffusion
 echo ====   LoRA folder:       %WEBUI_DIR%\models\Lora
 echo ==== No checkpoints ship with the WebUI -- set the folders above in ====

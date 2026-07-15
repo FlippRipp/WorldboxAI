@@ -81,6 +81,10 @@ first argument, and `WB_WEBUI_REPO` / `WB_WEBUI_PORT` / `WEBUI_EXTRA_ARGS`
 environment variables select a different A1111-compatible fork, port, or
 extra launch flags (e.g. `--api-auth user:pass`, or
 `--skip-torch-cuda-test --use-cpu all` on machines without an NVIDIA GPU).
+The server starts without opening a browser tab (the WebUI's own interface
+stays reachable at the printed address) and accepts connections from other
+devices on the same network — the script prints the LAN URL; set
+`WB_WEBUI_LISTEN=0` to bind to `127.0.0.1` only.
 
 All the booru-tag checkpoint families the module recognizes (Pony,
 Illustrious, NoobAI, Animagine) work on the default Forge install, which the
