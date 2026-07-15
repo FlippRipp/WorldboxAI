@@ -568,6 +568,20 @@ function LocalConnectionCard({ config, draft, set }) {
               : `Install helper: ${status.helper.error || 'not reachable'}`}
           </p>
         )}
+        {status && status.helper_detected && (
+          <p className="text-xs mt-1 text-yellow-400">
+            Found an install helper at{' '}
+            <span className="font-mono">{status.helper_detected.url}</span>
+            {status.helper_detected.auth_required ? ' (it requires a token)' : ''} —{' '}
+            <button
+              onClick={() => set('local_helper_url', status.helper_detected.url)}
+              className="text-purple-400 hover:underline"
+            >
+              use it
+            </button>{' '}
+            and press Save Changes to enable one-click installs.
+          </p>
+        )}
         {unsaved && (
           <p className="text-xs text-yellow-600 mt-1">Unsaved connection changes — press Save Changes before testing.</p>
         )}
@@ -688,9 +702,18 @@ function LocalConnectionCard({ config, draft, set }) {
       </div>
       <p className="text-xs text-gray-600 -mt-2">
         The bundled <span className="font-mono">image_server</span> script starts this companion server
-        next to the WebUI (port 7861) and prints its address. With it set, the model and LoRA browsers
-        install files onto that machine with live progress bars, and installed models are badged from
-        its exact file hashes. Not needed when the WebUI runs on this machine.
+        next to the WebUI (port 7861) and prints its address; Test connection also finds it
+        automatically. With it set, the model and LoRA browsers install files onto that machine with
+        live progress bars, and installed models are badged from its exact file hashes. For a WebUI
+        machine without this repo,{' '}
+        <a href={`${API_BASE}/helper-script`} download className="text-purple-400 hover:underline">
+          download helper_server.py
+        </a>{' '}
+        (needs only Python 3), copy it over, and run:{' '}
+        <span className="font-mono text-gray-500 break-all">
+          python helper_server.py --checkpoint-dir &lt;models/Stable-diffusion&gt; --lora-dir &lt;models/Lora&gt;
+        </span>
+        . Not needed when the WebUI runs on this machine.
       </p>
     </div>
   );

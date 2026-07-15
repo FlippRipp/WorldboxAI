@@ -6028,3 +6028,122 @@ def test_helper_http_endpoints_and_auth(tmp_path):
         assert body["kinds"]["lora"] == {}
     finally:
         srv.shutdown()
+
+
+def test_local_status_detects_helper_and_script_download(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable_local(backend, local_base_url="http://192.168.1.20:7860")
+
+    async def fake_get(cfg, path, timeout=None):
+        if path == "/sdapi/v1/options":
+            return {"sd_model_checkpoint": "x"}
+        return []
+
+    backend._local_get = fake_get
+
+    async def fake_helper(cfg, method, path, json_body=None, timeout=30.0):
+        assert cfg["local_helper_url"] == "http://192.168.1.20:7861"
+        return {"ok": True, "service": "wb_image_gen_helper", "auth": False}
+
+    backend._helper_request = fake_helper
+    client = _client(backend)
+    body = client.get("/local/status").json()
+    assert body["helper_detected"] == {"url": "http://192.168.1.20:7861",
+                                       "auth_required": False}
+    assert "helper" not in body
+
+    # Once configured, the probe is replaced by the real health report.
+    cfg = backend._load_config()
+    cfg["local_helper_url"] = "http://192.168.1.20:7861"
+    backend._save_config(cfg)
+    body = client.get("/local/status").json()
+    assert body["helper"]["ok"] is True
+    assert "helper_detected" not in body
+
+    # The helper script ships as a download for repo-less WebUI machines.
+    resp = client.get("/helper-script")
+    assert resp.status_code == 200
+    assert "helper_server.py" in resp.headers.get("content-disposition", "")
+    assert b"wb-helper" in resp.content
+
+
+def test_remote_install_end_to_end_through_real_helper(tmp_path):
+    """The full user flow with a real helper process model: the app has no
+    local folders, only a helper URL; Install streams the file into the
+    'remote' machine's folder while GET /local/downloads shows byte progress,
+    and completion fires the WebUI refresh."""
+    import hashlib
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    backend = _load_backend(tmp_path)
+    helper = _load_helper(tmp_path)          # 'remote' folders under tmp_path
+    helper_srv = ThreadingHTTPServer(("127.0.0.1", 0), helper.Handler)
+    threading.Thread(target=helper_srv.serve_forever, daemon=True).start()
+    helper_url = f"http://127.0.0.1:{helper_srv.server_address[1]}"
+
+    payload = b"checkpoint-bytes" * 1024
+    sha = hashlib.sha256(payload).hexdigest()
+    file_srv, file_url = _serve_payload(payload, "juggernautXL_v9.safetensors")
+
+    _enable_local(backend, local_helper_url=helper_url)
+    posted = []
+
+    async def fake_post(cfg, path, timeout=None):
+        posted.append(path)
+
+    backend._local_post = fake_post
+
+    try:
+        with _client(backend) as client:
+            assert client.get("/config").json()["local_install"] == {
+                "checkpoint": True, "lora": True}
+            body = client.post("/local/downloads", json={
+                "kind": "checkpoint", "url": file_url, "sha256": sha,
+                "label": "Juggernaut XL", "item_id": "901",
+                "base_model": "SDXL 1.0"}).json()
+            assert body["download"]["remote"] is True
+            dl_id = body["download"]["id"]
+
+            for _ in range(300):
+                downloads = client.get("/local/downloads").json()["downloads"]
+                download = next(d for d in downloads if d["id"] == dl_id)
+                assert download["remote"] is True
+                assert "received_bytes" in download and "total_bytes" in download
+                if download["status"] != "downloading":
+                    break
+                time.sleep(0.02)
+            assert download["status"] == "done", download.get("error")
+            assert download["total_bytes"] == len(payload)
+            assert download["received_bytes"] == len(payload)
+            assert download["item_id"] == "901"
+
+            # The file landed on the 'remote' machine, hash-verified.
+            remote_file = tmp_path / "ckpt" / "juggernautXL_v9.safetensors"
+            assert remote_file.read_bytes() == payload
+            # Completion fired the WebUI checkpoint rescan exactly once.
+            client.get("/local/downloads")
+            for _ in range(100):
+                if posted:
+                    break
+                time.sleep(0.02)
+            assert posted == ["/sdapi/v1/refresh-checkpoints"]
+
+            # The freshly installed file now badges as installed via the
+            # helper's hash index.
+            async def fake_search(cfg, **kwargs):
+                return {"items": [{"id": "901", "base_model": "SDXL 1.0",
+                                   "sha256": sha, "all_hashes": [sha]}],
+                        "next_cursor": ""}
+
+            backend._civitai_search_models = fake_search
+            for _ in range(100):   # helper's background scan may still run
+                items = client.get("/civitai/checkpoints").json()["items"]
+                if items[0]["local_available"] is True:
+                    break
+                time.sleep(0.05)
+            assert items[0]["local_available"] is True
+            assert items[0]["local_name"] == "juggernautXL_v9"
+    finally:
+        file_srv.shutdown()
+        helper_srv.shutdown()

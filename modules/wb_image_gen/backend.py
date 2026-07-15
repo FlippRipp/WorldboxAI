@@ -2258,6 +2258,9 @@ def _match_api_checkpoint(index: dict, entry: dict) -> str | None:
 # gives one-click installs and exact hash badges across machines.
 # --------------------------------------------------------------------------
 
+HELPER_DEFAULT_PORT = 7861   # where image_server.sh/.bat start helper_server.py
+
+
 def _helper_url(cfg: dict) -> str:
     return str(cfg.get("local_helper_url") or "").strip().rstrip("/")
 
@@ -2312,6 +2315,30 @@ async def _helper_hash_indexes(cfg: dict) -> dict:
         out[kind] = ({str(k).lower(): str(v) for k, v in index.items()}
                      if isinstance(index, dict) else {})
     return out
+
+
+async def _detect_helper(cfg: dict) -> dict | None:
+    """Probe the WebUI host's default helper port when no helper is
+    configured — the launcher script starts one on HELPER_DEFAULT_PORT, so
+    the connection test can offer it with one click instead of making the
+    user find the URL. Returns {"url", "auth_required"} or None."""
+    from urllib.parse import urlsplit
+    base = urlsplit(_local_base(cfg))
+    host = base.hostname or "127.0.0.1"
+    candidate = f"{base.scheme or 'http'}://{host}:{HELPER_DEFAULT_PORT}"
+    probe_cfg = {"local_helper_url": candidate,
+                 "local_helper_token": cfg.get("local_helper_token", "")}
+    try:
+        health = await _helper_request(probe_cfg, "GET", "/wb-helper/health",
+                                       timeout=5.0)
+    except RuntimeError as e:
+        # A live helper whose token we don't have is still worth reporting.
+        if "rejected the token" in str(e):
+            return {"url": candidate, "auth_required": True}
+        return None
+    if health.get("service") == "wb_image_gen_helper":
+        return {"url": candidate, "auth_required": bool(health.get("auth"))}
+    return None
 
 
 def _local_install_dir(cfg: dict, kind: str) -> Path | None:
@@ -4487,7 +4514,24 @@ def get_router():
                                  "kinds": health.get("kinds") or {}}
             except RuntimeError as e:
                 out["helper"] = {"ok": False, "error": str(e)}
+        else:
+            detected = await _detect_helper(cfg)
+            if detected:
+                out["helper_detected"] = detected
         return out
+
+    @router.get("/helper-script")
+    async def helper_script():
+        """helper_server.py as a download, for WebUI machines that don't have
+        this repo — copy the one file over and run it with any Python 3."""
+        from fastapi.responses import FileResponse
+        path = Path(__file__).resolve().parent / "helper_server.py"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="helper_server.py not found")
+        return FileResponse(
+            path, media_type="text/x-python",
+            headers={"Content-Disposition": 'attachment; filename="helper_server.py"',
+                     "Cache-Control": "no-cache"})
 
     @router.get("/local/loras")
     async def local_loras():
