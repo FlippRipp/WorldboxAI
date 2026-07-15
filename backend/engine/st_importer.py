@@ -67,14 +67,16 @@ class SillyTavernImporter:
                 skipped.append({"id": identifier, "name": name, "reason": "empty after cleaning"})
                 continue
 
+            is_injection = item.get("injection_position", 0) != 0
             block = {
                 "id": self._make_block_id(identifier, name),
                 "type": "static_text",
                 "source": "user",
                 "enabled": enabled_map.get(identifier, item.get("enabled", True)),
                 "role_type": item.get("role", "system"),
-                "placement": "system_relative" if item.get("injection_position", 0) == 0 else "chat_injection",
-                "depth": item.get("injection_depth", 0) if item.get("injection_position", 0) != 0 else None,
+                "placement": "chat_injection" if is_injection else "system_relative",
+                "depth": item.get("injection_depth", 0) if is_injection else None,
+                "order": self._parse_order(item.get("injection_order")) if is_injection else None,
                 "display_name": name,
                 "category": self._infer_category(identifier, name, item),
                 "generation_types": None,
@@ -91,6 +93,12 @@ class SillyTavernImporter:
                 "skipped_ids": skipped,
             },
         }
+
+    def _parse_order(self, raw: Any) -> int:
+        """ST injection_order: same-depth tiebreak, default 100."""
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return 100
+        return int(raw)
 
     def _clean_text(self, text: str) -> str:
         text = COMMENT_PATTERN.sub("", text)

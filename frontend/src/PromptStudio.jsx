@@ -135,7 +135,7 @@ function BlockCard({ block, index, draft, dragIndex, onMove, onRemove, onEdit, o
       <div className={`grid grid-cols-3 gap-2 text-[10px] ${isOff ? 'text-gray-700' : 'text-gray-600'}`}>
         <span>{blockLabel(block.type)}</span>
         <span>{block.role_type}</span>
-        <span>{block.placement === 'chat_injection' ? `injected @ depth ${block.depth ?? 0}` : 'system top'}</span>
+        <span>{block.placement === 'chat_injection' ? `injected @ depth ${block.depth ?? 0} · order ${block.order ?? 100}` : 'system top'}</span>
       </div>
     </div>
   );
@@ -278,10 +278,10 @@ function EditBlockModal({ editingBlock, macros, showMacros, setShowMacros, onSav
             </label>
           </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <label className="text-xs text-gray-400 space-y-1">
               <span>Type</span>
-              <select value={editingBlock.type || 'static_text'} onChange={(e) => onSetEditingBlock({ ...editingBlock, type: e.target.value, ...(e.target.value === 'chat_history' ? { placement: 'system_relative', depth: null } : {}) })} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-sm text-gray-100">
+              <select value={editingBlock.type || 'static_text'} onChange={(e) => onSetEditingBlock({ ...editingBlock, type: e.target.value, ...(e.target.value === 'chat_history' ? { placement: 'system_relative', depth: null, order: null } : {}) })} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-sm text-gray-100">
                 {BLOCK_TYPES.map((t) => <option key={t} value={t}>{blockLabel(t)}</option>)}
               </select>
             </label>
@@ -293,7 +293,7 @@ function EditBlockModal({ editingBlock, macros, showMacros, setShowMacros, onSav
             </label>
             <label className="text-xs text-gray-400 space-y-1">
               <span>Placement</span>
-              <select value={editingBlock.placement || 'system_relative'} disabled={editingBlock.type === 'chat_history'} onChange={(e) => onSetEditingBlock({ ...editingBlock, placement: e.target.value, depth: e.target.value === 'chat_injection' ? (editingBlock.depth ?? 0) : null })} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-sm text-gray-100 disabled:opacity-40">
+              <select value={editingBlock.placement || 'system_relative'} disabled={editingBlock.type === 'chat_history'} onChange={(e) => onSetEditingBlock({ ...editingBlock, placement: e.target.value, depth: e.target.value === 'chat_injection' ? (editingBlock.depth ?? 0) : null, order: e.target.value === 'chat_injection' ? (editingBlock.order ?? 100) : null })} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-sm text-gray-100 disabled:opacity-40">
                 {PLACEMENTS.map((p) => <option key={p} value={p}>{blockLabel(p)}</option>)}
               </select>
             </label>
@@ -301,7 +301,19 @@ function EditBlockModal({ editingBlock, macros, showMacros, setShowMacros, onSav
               <span>Depth</span>
               <input type="number" min="0" value={editingBlock.placement === 'chat_injection' ? (editingBlock.depth ?? 0) : ''} disabled={editingBlock.placement !== 'chat_injection'} onChange={(e) => onSetEditingBlock({ ...editingBlock, depth: Math.max(0, parseInt(e.target.value || '0', 10)) })} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-sm text-gray-100 disabled:opacity-40" />
             </label>
+            <label className="text-xs text-gray-400 space-y-1">
+              <span>Order</span>
+              <input type="number" value={editingBlock.placement === 'chat_injection' ? (editingBlock.order ?? 100) : ''} disabled={editingBlock.placement !== 'chat_injection'} onChange={(e) => { const parsed = parseInt(e.target.value, 10); onSetEditingBlock({ ...editingBlock, order: Number.isNaN(parsed) ? 100 : parsed }); }} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-sm text-gray-100 disabled:opacity-40" />
+            </label>
           </div>
+
+          {editingBlock.placement === 'chat_injection' && (
+            <p className="text-[11px] text-gray-500">
+              Depth counts messages up from the latest player message (0 = the very bottom).
+              Order breaks ties between blocks injected at the same depth — lower order
+              appears earlier. Default is 100.
+            </p>
+          )}
 
           <div className="grid grid-cols-2 gap-3">
             <label className="text-xs text-gray-400 space-y-1">
@@ -537,6 +549,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
         role_type: block.role_type || 'system',
         placement: block.placement || 'system_relative',
         depth: block.placement === 'chat_injection' ? (block.depth ?? 0) : null,
+        order: block.placement === 'chat_injection' ? (block.order ?? 100) : null,
         display_name: `${block.moduleName}: ${block.id}`,
         category: 'other',
         generation_types: null,
@@ -624,7 +637,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
     const name = prompt('Template name:', block.display_name || block.id);
     if (!name) return;
     try {
-      await api.createPromptTemplate(name, { type: block.type, role_type: block.role_type, placement: block.placement, depth: block.depth, config: block.config }, block.category || 'other');
+      await api.createPromptTemplate(name, { type: block.type, role_type: block.role_type, placement: block.placement, depth: block.depth, order: block.order, config: block.config }, block.category || 'other');
       await loadTemplates();
     } catch (err) {
       setError(err.message || 'Failed to save template.');
@@ -888,7 +901,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <h3 className="text-sm font-semibold uppercase tracking-wide text-purple-300">Pipeline Blocks</h3>
-                      <p className="text-xs text-gray-500 mt-0.5">Drag to reorder. Chat injections use depth relative to latest player message.</p>
+                      <p className="text-xs text-gray-500 mt-0.5">Drag to reorder. Chat injections use depth relative to latest player message; order breaks ties at the same depth (lower first).</p>
                     </div>
                     <div className="relative" ref={addMenuRef}>
                       <button
@@ -1120,7 +1133,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                         <span>{blockLabel(block.type)}</span>
                         <span>{blockLabel(block.placement)}</span>
                         <span>{block.role_type}</span>
-                        <span>depth {block.depth ?? 'n/a'}</span>
+                        <span>{block.placement === 'chat_injection' ? `depth ${block.depth ?? 0} · order ${block.order ?? 100}` : 'depth n/a'}</span>
                       </div>
                       <button
                         onClick={() => insertModuleBlock(block)}

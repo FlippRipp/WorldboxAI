@@ -41,6 +41,7 @@ Optional fields:
 - `source`: `engine`, `user`, or future values like `module:wb_core_combat`.
 - `enabled`: Defaults to `true`.
 - `depth`: Required for `chat_injection`; `0` means absolute bottom after the latest user message.
+- `order`: `chat_injection` only; breaks ties between blocks injected at the same depth. Lower order appears earlier (further from the latest message), ties keep pipeline order. Defaults to `100` (the same scale as lorebook entry order).
 
 ## Supported Block Types
 
@@ -98,7 +99,7 @@ POST /api/session/prompt-pipeline/preview
 }
 ```
 
-The backend validates block ids, types, roles, placements, depth values, and required static text before saving.
+The backend validates block ids, types, roles, placements, depth/order values, and required static text before saving.
 
 `POST /preview` uses the same body shape as `PUT`, but it does not save. It compiles the submitted draft against the active session state and module-declared prompt blocks, then returns:
 
@@ -119,7 +120,7 @@ Current capabilities:
 
 - Edit save-owned prompt blocks.
 - Toggle blocks enabled/disabled.
-- Edit block id, type, role, placement, chat injection depth, and text/empty-context config.
+- Edit block id, type, role, placement, chat injection depth and insertion order, and text/empty-context config.
 - Reorder save-owned blocks with Up/Down controls.
 - Add and remove static text blocks.
 - Save changes through `PUT /api/session/prompt-pipeline`.

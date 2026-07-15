@@ -244,6 +244,138 @@ def test_chat_injection_depth_and_veto_order():
     print("Chat injection depth and veto order test passed.")
 
 
+def _injection_block(block_id, text, depth, order=None):
+    block = {
+        "id": block_id,
+        "type": "static_text",
+        "source": "user",
+        "enabled": True,
+        "role_type": "system",
+        "placement": "chat_injection",
+        "depth": depth,
+        "config": {"text": text},
+    }
+    if order is not None:
+        block["order"] = order
+    return block
+
+
+def test_same_depth_injections_follow_insertion_order():
+    # Two blocks at the same depth: the configured order decides which comes
+    # first (lower = earlier), overriding their pipeline positions.
+    compiler = PromptCompiler()
+    pipeline = [
+        _injection_block("late", "Comes second.", depth=1, order=200),
+        _injection_block("early", "Comes first.", depth=1, order=50),
+    ]
+    state = {
+        "input_text": "I order a drink.",
+        "chat_messages": [
+            {"role": "user", "content": "I walk into the tavern."},
+            {"role": "ai", "content": "The barkeep glares at you."},
+        ],
+    }
+
+    compiled = compiler.compile(state, pipeline)
+    contents = [message["content"] for message in compiled["messages"]]
+    assert contents == [
+        "I walk into the tavern.",
+        "The barkeep glares at you.",
+        "Comes first.",
+        "Comes second.",
+        "I order a drink.",
+    ]
+
+    # The trace records each injection's order and final position.
+    by_id = {entry["id"]: entry for entry in compiled["trace"]}
+    assert by_id["early"]["order"] == 50
+    assert by_id["late"]["order"] == 200
+    assert by_id["early"]["message_index"] == 2
+    assert by_id["late"]["message_index"] == 3
+
+    # Without explicit orders both default to 100 and pipeline order wins.
+    compiled = compiler.compile(state, [
+        _injection_block("first", "Pipeline first.", depth=1),
+        _injection_block("second", "Pipeline second.", depth=1),
+    ])
+    contents = [message["content"] for message in compiled["messages"]]
+    assert contents.index("Pipeline first.") + 1 == contents.index("Pipeline second.")
+    print("Same-depth insertion order test passed.")
+
+
+def test_injection_depth_counts_chat_messages_not_other_injections():
+    # Depth is measured against the actual chat (history + current input);
+    # injections never shift each other's target slots.
+    compiler = PromptCompiler()
+    pipeline = [
+        _injection_block("bottom", "At the very bottom.", depth=0),
+        _injection_block("above_input", "Above the player's input.", depth=1),
+    ]
+    state = {
+        "input_text": "I order a drink.",
+        "chat_messages": [
+            {"role": "user", "content": "I walk into the tavern."},
+            {"role": "ai", "content": "The barkeep glares at you."},
+        ],
+    }
+
+    compiled = compiler.compile(state, pipeline)
+    contents = [message["content"] for message in compiled["messages"]]
+    assert contents == [
+        "I walk into the tavern.",
+        "The barkeep glares at you.",
+        "Above the player's input.",
+        "I order a drink.",
+        "At the very bottom.",
+    ]
+    print("Injection depth vs other injections test passed.")
+
+
+def test_invalid_injection_order_rejected():
+    compiler = PromptCompiler()
+    try:
+        compiler.normalize_pipeline([
+            _injection_block("bad", "Text.", depth=1, order="high"),
+        ])
+    except PromptPipelineValidationError:
+        pass
+    else:
+        raise AssertionError("Non-integer injection order was not rejected.")
+
+    # system_relative blocks carry no order; chat injections default to 100.
+    normalized = compiler.normalize_pipeline([
+        {
+            "id": "rules", "type": "static_text", "source": "user", "enabled": True,
+            "role_type": "system", "placement": "system_relative", "depth": None,
+            "config": {"text": "Narrate tersely."},
+        },
+        _injection_block("inj", "Text.", depth=1),
+    ])
+    assert normalized[0]["order"] is None
+    assert normalized[1]["order"] == 100
+    print("Injection order validation test passed.")
+
+
+def test_st_import_carries_injection_order():
+    from backend.engine.st_importer import SillyTavernImporter
+
+    result = SillyTavernImporter().import_preset({
+        "prompts": [
+            {"identifier": "inj", "name": "Injected", "content": "Stay terse.",
+             "injection_position": 1, "injection_depth": 2, "injection_order": 42},
+            {"identifier": "sys", "name": "System", "content": "Main prompt."},
+        ],
+        "prompt_order": [],
+    })
+    blocks = {b["id"]: b for b in result["blocks"]}
+    assert blocks["inj"]["placement"] == "chat_injection"
+    assert blocks["inj"]["depth"] == 2
+    assert blocks["inj"]["order"] == 42
+    assert blocks["sys"]["placement"] == "system_relative"
+    assert blocks["sys"]["order"] is None
+    print("ST import injection order test passed.")
+
+
 def test_command_messages_stay_out_of_the_prompt():
     # Slash-command exchanges live in the transcript for the player but must
     # never reach the storyteller LLM.
@@ -512,6 +644,10 @@ def test_auto_player_action_generation_mock():
 async def run_all_tests():
     test_default_pipeline_compiles_messages()
     test_chat_injection_depth_and_veto_order()
+    test_same_depth_injections_follow_insertion_order()
+    test_injection_depth_counts_chat_messages_not_other_injections()
+    test_invalid_injection_order_rejected()
+    test_st_import_carries_injection_order()
     test_chat_history_block_limits_turns()
     test_disabled_chat_history_block_omits_transcript()
     test_pipeline_without_chat_history_block_keeps_legacy_order()

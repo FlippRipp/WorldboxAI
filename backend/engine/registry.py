@@ -250,6 +250,9 @@ class ModuleRegistry:
                 depth = block.get("depth", 0)
                 if not isinstance(depth, int) or depth < 0:
                     raise ManifestValidationError(f"prompt_blocks.{block_id}.depth must be a non-negative integer.")
+                order = block.get("order")
+                if order is not None and (isinstance(order, bool) or not isinstance(order, int)):
+                    raise ManifestValidationError(f"prompt_blocks.{block_id}.order must be an integer.")
 
             config = block.get("config", {})
             if not isinstance(config, dict):

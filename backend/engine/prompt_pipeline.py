@@ -9,6 +9,10 @@ ALLOWED_ROLES = {"system", "user", "assistant"}
 ALLOWED_CATEGORIES = {"system_prompt", "post_history", "narrator", "world_context", "character", "utility", "other"}
 ALLOWED_GENERATION_TYPES = {"storytelling", "world_building", "character_creation", "narration", "combat", "memory", "validation"}
 
+# Default insertion order for chat_injection blocks; matches the lorebook
+# entry default so pipeline blocks and lore injections share one scale.
+DEFAULT_INJECTION_ORDER = 100
+
 # Injected as the final user turn when the player sends an empty message ("continue"):
 # the normal context is compiled, minus any player input, plus this instruction.
 DEFAULT_CONTINUE_PROMPT = (
@@ -306,8 +310,18 @@ class PromptCompiler:
                 if not isinstance(depth, int) or depth < 0:
                     raise PromptPipelineValidationError(f"Prompt block {block_id} depth must be a non-negative integer.")
                 block["depth"] = depth
+                # Insertion order breaks ties between blocks injected at the
+                # same depth: lower order lands earlier (further from the
+                # latest message). Defaults to 100, matching lorebook entries.
+                order = block.get("order")
+                if order is None:
+                    order = DEFAULT_INJECTION_ORDER
+                if isinstance(order, bool) or not isinstance(order, int):
+                    raise PromptPipelineValidationError(f"Prompt block {block_id} order must be an integer.")
+                block["order"] = order
             else:
                 block["depth"] = None
+                block["order"] = None
 
             if block_type == "static_text" and not isinstance(block.get("config", {}).get("text"), str):
                 raise PromptPipelineValidationError(f"Static text block {block_id} must define config.text.")
@@ -490,10 +504,37 @@ class PromptCompiler:
 
         messages.append(self._current_input_message(state))
 
-        for block, message in chat_injections:
-            insert_index = max(chat_start, len(messages) - block["depth"])
-            messages.insert(insert_index, message)
-            trace.append(self._trace(block, message_index=insert_index))
+        # Chat injections land `depth` messages from the bottom of the chat
+        # (0 = after the current input). Slots are computed against the
+        # pre-injection message list so injections never count each other;
+        # blocks sharing a slot are sorted by their insertion order (lower
+        # first), with pipeline position breaking ties. Depth-clamped blocks
+        # (deeper than the chat) keep deeper-first at the clamp slot.
+        if chat_injections:
+            base_length = len(messages)
+            slot_groups: dict[int, list[tuple[int, int, int, dict[str, Any], dict[str, str]]]] = {}
+            for position, (block, message) in enumerate(chat_injections):
+                slot = max(chat_start, base_length - block["depth"])
+                slot_groups.setdefault(slot, []).append(
+                    (-block["depth"], block["order"], position, block, message))
+
+            rebuilt = []
+            final_index_by_base = {}
+            injection_trace = []
+            for slot in range(base_length + 1):
+                for _, _, _, block, message in sorted(slot_groups.get(slot, []), key=lambda item: item[:3]):
+                    injection_trace.append(self._trace(block, message_index=len(rebuilt)))
+                    rebuilt.append(message)
+                if slot < base_length:
+                    final_index_by_base[slot] = len(rebuilt)
+                    rebuilt.append(messages[slot])
+            messages = rebuilt
+            # Earlier trace entries indexed the pre-injection list; remap them
+            # to the final positions before adding the injections' own entries.
+            for entry in trace:
+                if entry.get("message_index") is not None:
+                    entry["message_index"] = final_index_by_base[entry["message_index"]]
+            trace.extend(injection_trace)
 
         return {
             "messages": messages,
@@ -646,7 +687,7 @@ class PromptCompiler:
         return {"role": "user", "content": self.resolve_macros(continue_prompt, state)}
 
     def _engine_directive_block(self, block_id: str, display_name: str, text: str,
-                                depth: int = 0) -> dict[str, Any]:
+                                depth: int = 0, order: int = DEFAULT_INJECTION_ORDER) -> dict[str, Any]:
         """An engine-appended system directive injected into the chat at the
         given depth (0 = the very end, after the player's input)."""
         return {
@@ -657,6 +698,7 @@ class PromptCompiler:
             "role_type": "system",
             "placement": "chat_injection",
             "depth": depth,
+            "order": order,
             "display_name": display_name,
             "category": "utility",
             "generation_types": None,
@@ -690,6 +732,7 @@ class PromptCompiler:
             "role_type": block.get("role_type"),
             "placement": block.get("placement"),
             "depth": block.get("depth"),
+            "order": block.get("order"),
             "skipped": skipped,
         }
         if message_index is not None:

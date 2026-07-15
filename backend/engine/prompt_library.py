@@ -76,6 +76,7 @@ class PromptLibrary:
             "placement": placement,
             "config": config.get("config", {"text": ""}),
             "depth": config.get("depth") if placement == "chat_injection" else None,
+            "order": config.get("order") if placement == "chat_injection" else None,
         }
 
         templates.append(template)
@@ -120,6 +121,7 @@ class PromptLibrary:
             "role_type": template["role_type"],
             "placement": template["placement"],
             "depth": template.get("depth"),
+            "order": template.get("order"),
             "config": template.get("config", {"text": ""}),
             "display_name": template.get("name", ""),
             "category": template.get("category", "other"),
