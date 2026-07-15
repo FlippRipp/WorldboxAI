@@ -355,8 +355,35 @@ class PromptCompiler:
         generation_type: str | None = None,
     ) -> dict[str, Any]:
         blocks = self.normalize_pipeline(pipeline if pipeline is not None else state.get("prompt_pipeline"))
-        if module_blocks:
-            blocks.extend(self.normalize_pipeline(module_blocks))
+
+        # A pipeline may anchor a module's block into the stack: an entry whose
+        # id matches a module block's namespaced id (e.g.
+        # "wb_plot_director:plot_thread") takes that block's freshly rendered
+        # content at ITS position, with the pipeline entry's own enabled /
+        # placement / role / depth in control. Anchors whose module block is
+        # absent this turn (module inactive or removed) are skipped with a
+        # trace reason instead of erroring. Module blocks nobody anchored keep
+        # the historical behavior: appended after the pipeline.
+        module_norm = self.normalize_pipeline(module_blocks) if module_blocks else []
+        module_by_id = {b["id"]: b for b in module_norm}
+        anchored = set()
+        for block in blocks:
+            rendered = module_by_id.get(block["id"])
+            if rendered is not None:
+                block["type"] = rendered["type"]
+                block["config"] = rendered["config"]
+                anchored.add(block["id"])
+            elif (
+                str(block.get("source", "")).startswith("module:")
+                and block.get("type") == "module_prompt"
+                and not str(block.get("config", {}).get("text") or "").strip()
+            ):
+                # An anchor placeholder whose module didn't contribute this
+                # turn; a module-sourced block carrying its own text still
+                # renders as-is.
+                block["_module_unavailable"] = True
+        if module_norm:
+            blocks.extend(b for b in module_norm if b["id"] not in anchored)
             self._validate_unique_block_ids(blocks)
         if validation_veto:
             blocks.append(self._validation_veto_block(validation_veto))
@@ -402,6 +429,10 @@ class PromptCompiler:
 
             if not block.get("enabled", True):
                 trace.append(self._trace(block, skipped=True, reason="disabled"))
+                continue
+
+            if block.get("_module_unavailable"):
+                trace.append(self._trace(block, skipped=True, reason="module inactive or block not provided"))
                 continue
 
             if is_history:

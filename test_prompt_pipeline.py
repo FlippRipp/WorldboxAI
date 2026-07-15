@@ -530,3 +530,65 @@ def test_graph_prompt_preview_includes_messages_and_module_blocks():
 
 if __name__ == "__main__":
     asyncio.run(run_all_tests())
+
+
+def test_module_block_anchoring_in_pipeline():
+    compiler = PromptCompiler()
+
+    def _anchor():
+        return {
+            "id": "wb_x:threads", "type": "module_prompt", "source": "module:wb_x",
+            "enabled": True, "role_type": "system", "placement": "system_relative",
+            "depth": None, "config": {},
+        }
+
+    rules = {
+        "id": "rules", "type": "static_text", "source": "user", "enabled": True,
+        "role_type": "system", "placement": "system_relative", "depth": None,
+        "config": {"text": "Narrate tersely."},
+    }
+    module_blocks = [{
+        "id": "wb_x:threads", "type": "module_prompt", "source": "module:wb_x",
+        "enabled": True, "role_type": "system", "placement": "system_relative",
+        "depth": None, "config": {"text": "Thread guidance."},
+    }]
+    state = {"input_text": "hi", "chat_messages": []}
+
+    # Anchored: the module's rendered content lands at the anchor's position
+    # (ahead of "rules"), exactly once -- not appended after the pipeline.
+    compiled = compiler.compile(state, [_anchor(), rules], module_blocks=module_blocks)
+    contents = [m["content"] for m in compiled["messages"]]
+    assert contents[0] == "Thread guidance."
+    assert contents[1] == "Narrate tersely."
+    assert contents.count("Thread guidance.") == 1
+
+    # Module inactive (no module blocks this compile): the anchor is skipped
+    # with a clear trace reason instead of erroring or rendering stale text.
+    compiled = compiler.compile(state, [_anchor(), rules])
+    assert all("Thread guidance." not in m["content"] for m in compiled["messages"])
+    entry = next(e for e in compiled["trace"] if e["id"] == "wb_x:threads")
+    assert entry["skipped"] is True
+    assert "module" in entry["reason"]
+
+    # A disabled anchor suppresses the module block entirely (it was consumed
+    # by the anchor, so it must not fall back to the appended position).
+    disabled = _anchor()
+    disabled["enabled"] = False
+    compiled = compiler.compile(state, [disabled, rules], module_blocks=module_blocks)
+    assert all("Thread guidance." not in m["content"] for m in compiled["messages"])
+
+    # Unanchored module blocks keep the historical append behavior.
+    compiled = compiler.compile(state, [rules], module_blocks=module_blocks)
+    contents = [m["content"] for m in compiled["messages"]]
+    assert "Thread guidance." in contents
+
+    # A module-sourced block carrying its own static text still renders as-is
+    # (it is not mistaken for an empty anchor).
+    legacy = {
+        "id": "combat_note", "type": "module_prompt", "source": "module:wb_y",
+        "enabled": True, "role_type": "system", "placement": "system_relative",
+        "depth": None, "config": {"text": "Baked-in module text."},
+    }
+    compiled = compiler.compile(state, [legacy, rules])
+    assert any("Baked-in module text." in m["content"] for m in compiled["messages"])
+    print("Module block anchoring test passed.")

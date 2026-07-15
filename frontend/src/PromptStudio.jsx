@@ -511,6 +511,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
     (mod.prompt_blocks || []).map((block) => ({
       ...block,
       namespacedId: `${mod.id}:${block.id}`,
+      moduleId: mod.id,
       moduleName: mod.name || mod.id,
     }))
   );
@@ -519,6 +520,29 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
 
   const updateBlock = (index, patch) => {
     setDraft((prev) => prev.map((block, idx) => (idx === index ? { ...block, ...patch } : block)));
+    setHasUnsavedChanges(true);
+  };
+
+  // Anchor a module's block into the editable stack: the pipeline entry
+  // controls position/enabled/placement, the module supplies the content at
+  // compile time, and the engine skips it when the module is inactive.
+  const insertModuleBlock = (block) => {
+    setDraft((prev) => {
+      if (prev.some((b) => b.id === block.namespacedId)) return prev;
+      return [...prev, {
+        id: block.namespacedId,
+        type: 'module_prompt',
+        source: `module:${block.moduleId}`,
+        enabled: true,
+        role_type: block.role_type || 'system',
+        placement: block.placement || 'system_relative',
+        depth: block.placement === 'chat_injection' ? (block.depth ?? 0) : null,
+        display_name: `${block.moduleName}: ${block.id}`,
+        category: 'other',
+        generation_types: null,
+        config: {},
+      }];
+    });
     setHasUnsavedChanges(true);
   };
 
@@ -1080,22 +1104,34 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
             <section className="bg-gray-900/70 border border-gray-700 rounded-lg p-4">
               <h3 className="text-sm font-semibold uppercase tracking-wide text-purple-300 mb-3">Module Blocks</h3>
               <p className="text-xs text-gray-500 mb-3">
-                Prompt blocks contributed by active modules (e.g. the Plot Director's thread block).
-                Rendered fresh each turn from module state — listed here, not editable in the pipeline.
+                Prompt blocks contributed by active modules (e.g. the Plot Director's thread block),
+                rendered fresh each turn from module state. Insert one into the pipeline to control
+                its position and toggle it like any other block — it is skipped automatically when
+                the module isn't active. Uninserted blocks are appended after the pipeline.
               </p>
               <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
-                {modulePromptBlocks.map((block) => (
-                  <div key={block.namespacedId} className="bg-gray-800/70 border border-gray-700 rounded p-3 text-xs">
-                    <div className="font-mono text-gray-100 break-all">{block.namespacedId}</div>
-                    <div className="text-gray-500 mt-1">{block.moduleName}</div>
-                    <div className="grid grid-cols-2 gap-2 mt-2 text-gray-400">
-                      <span>{blockLabel(block.type)}</span>
-                      <span>{blockLabel(block.placement)}</span>
-                      <span>{block.role_type}</span>
-                      <span>depth {block.depth ?? 'n/a'}</span>
+                {modulePromptBlocks.map((block) => {
+                  const inDraft = draft.some((b) => b.id === block.namespacedId);
+                  return (
+                    <div key={block.namespacedId} className="bg-gray-800/70 border border-gray-700 rounded p-3 text-xs">
+                      <div className="font-mono text-gray-100 break-all">{block.namespacedId}</div>
+                      <div className="text-gray-500 mt-1">{block.moduleName}</div>
+                      <div className="grid grid-cols-2 gap-2 mt-2 text-gray-400">
+                        <span>{blockLabel(block.type)}</span>
+                        <span>{blockLabel(block.placement)}</span>
+                        <span>{block.role_type}</span>
+                        <span>depth {block.depth ?? 'n/a'}</span>
+                      </div>
+                      <button
+                        onClick={() => insertModuleBlock(block)}
+                        disabled={inDraft}
+                        className="mt-2 w-full text-[11px] px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed text-gray-200 transition-colors"
+                      >
+                        {inDraft ? '✓ In pipeline' : '+ Insert into pipeline'}
+                      </button>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
                 {modulePromptBlocks.length === 0 && <div className="text-sm text-gray-500 italic">No module prompt blocks loaded.</div>}
               </div>
             </section>
