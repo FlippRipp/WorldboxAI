@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 const MOMENTUM_STYLES = {
   observing: 'text-gray-500',
@@ -30,6 +30,28 @@ function normalizeEntry(entry) {
     };
   }
   return { text: String(entry ?? ''), weight: 'medium', evidence: '' };
+}
+
+// Whether the global cheats.enabled engine setting is on. The reset button is
+// hidden without it; the command itself stays reachable via
+// '/plot reset confirm' for players who type it deliberately.
+function useCheatMode() {
+  const [cheatMode, setCheatMode] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/settings?scope=global')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data?.settings) return;
+        for (const group of Object.values(data.settings)) {
+          const hit = (group || []).find((d) => d.key === 'cheats.enabled');
+          if (hit) { setCheatMode(!!hit.value); return; }
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  return cheatMode;
 }
 
 // Blurred until clicked, so spoiler material (the thread's opposition, the
@@ -182,6 +204,8 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [toneDraft, setToneDraft] = useState(null);
+  const [resetArmed, setResetArmed] = useState(false);
+  const cheatMode = useCheatMode();
 
   const data = state?.module_data?.wb_plot_director;
   if (!data) return null;
@@ -482,6 +506,31 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
                       ? 'Picks the thread back up where it left off.'
                       : 'Freezes the thread and all plot background calls until you resume.'}
                   </div>
+                </div>
+              </div>
+            )}
+
+            {!legacy && cheatMode && (
+              <div className="border-t border-gray-700 pt-3">
+                <button
+                  onClick={() => {
+                    if (!resetArmed) { setResetArmed(true); return; }
+                    setResetArmed(false);
+                    onCommand?.('/plot reset confirm');
+                  }}
+                  onBlur={() => setResetArmed(false)}
+                  disabled={!onCommand}
+                  className={`w-full py-2 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold transition-colors ${
+                    resetArmed
+                      ? 'bg-red-600/90 hover:bg-red-500 text-gray-100'
+                      : 'bg-gray-800 border border-red-900/60 hover:border-red-700 text-red-400'
+                  }`}
+                >
+                  {resetArmed ? '⚠ Really wipe everything? Click again' : '☠ Reset plot data (cheat)'}
+                </button>
+                <div className="text-[10px] text-gray-600 mt-1.5 text-center">
+                  Clears the profile (dislikes included), story direction, and thread history,
+                  then rebuilds them all from the story so far.
                 </div>
               </div>
             )}

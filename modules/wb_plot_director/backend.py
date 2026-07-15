@@ -1144,6 +1144,54 @@ async def _command_regen(state: dict, sdk, data: dict) -> dict:
     }
 
 
+async def _command_reset(state: dict, sdk) -> dict:
+    """Cheat: wipe ALL plot data -- profile (player-set dislikes included),
+    narrative direction, thread history, log, and the active thread -- then
+    rebuild from the story so far: a fresh player analysis, a newly seeded
+    direction, and a first thread. Any step that fails is retried by the
+    normal librarian machinery on the following turns."""
+    turn = state.get("turn", 0)
+    fresh = _default_data()
+    notes = []
+
+    if turn >= 2 and state.get("history"):
+        bootstrapped = await _bootstrap_profile(state, sdk)
+        if bootstrapped is not None:
+            fresh["profile"] = bootstrapped
+            notes.append("player profile rebuilt from the story so far")
+        else:
+            notes.append("player analysis failed -- profile starts blank")
+    else:
+        notes.append("story too young to analyze -- profile starts blank")
+
+    seeded, _, deep_fields = await _update_direction(state, sdk, fresh)
+    if seeded is not None and seeded.get("premise"):
+        seeded["updated_turn"] = turn
+        fresh["direction"] = seeded
+        if deep_fields:
+            fresh["profile"] = _clean_profile(deep_fields, fresh["profile"])
+        notes.append("new story direction seeded")
+    else:
+        notes.append("direction seeding failed -- it retries next turn")
+
+    fresh.update(await _generate_checked_thread(state, sdk, fresh))
+    thread = fresh.get("thread") or {}
+    if thread.get("status") == "active":
+        notes.append(f"new thread woven: {thread.get('title', '')}")
+    else:
+        notes.append("thread generation failed -- it retries next turn")
+
+    print(f"[Plot Director] Turn {turn}: plot data reset by the player.")
+    return {
+        "message": "[Plot] Reset complete -- " + "; ".join(notes) + ".",
+        "signal": "end_turn",
+        "module_data": {MODULE_ID: fresh},
+        # Deep-merge can't delete: every top-level key is replaced wholesale so
+        # the old profile, history, and log are actually gone.
+        "module_data_replace": list(fresh.keys()),
+    }
+
+
 def _command_suspend(state: dict, data: dict) -> dict:
     """Freeze plot direction: the librarian pass and the context line go quiet
     until resume. The armed nudge is cleared -- it was written for a scene that
@@ -1330,6 +1378,18 @@ async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
         if data.get("suspended"):
             return {"message": "[Plot] Plot direction is suspended -- /plot resume first.", "signal": "end_turn"}
         return await _command_regen(state, sdk, data)
+
+    if args and args[0].lower() == "reset":
+        # Deliberately works from any state (suspended, dormant, legacy) --
+        # a full reset is the escape hatch.
+        if len(args) < 2 or args[1].lower() != "confirm":
+            return {"message": (
+                "[Plot] This completely clears the plot data -- story profile "
+                "(including your dislikes), narrative direction, thread history, "
+                "and the active thread -- then rebuilds everything from the story "
+                "so far. Run '/plot reset confirm' to proceed."
+            ), "signal": "end_turn"}
+        return await _command_reset(state, sdk)
 
     if args and args[0].lower() == "profile":
         return _command_profile_edit(data, args[1:])

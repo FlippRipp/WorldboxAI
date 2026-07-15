@@ -1255,3 +1255,73 @@ def test_plot_command_shows_breathing_state():
 
     ready = asyncio.run(backend.on_command_plot([], _state(turn=9, data=data), _make_sdk([], {})))
     assert "being woven" in ready["message"]
+
+
+def test_plot_reset_requires_confirm():
+    backend = _load_backend()
+    captured = {}
+    result = asyncio.run(backend.on_command_plot(
+        ["reset"], _state(data=_active_data(backend)), _make_sdk([], captured)))
+    assert "reset confirm" in result["message"]
+    assert "module_data" not in result
+    assert captured == {}  # no LLM calls until confirmed
+
+
+def test_plot_reset_rebuilds_profile_direction_and_thread():
+    backend = _load_backend()
+    data = _active_data(backend, suspended=True, suspended_turn=3)
+    data["profile"] = backend._default_profile()
+    data["profile"]["dislikes"] = [{"text": "body horror", "weight": "high"}]
+    data["thread_history"] = [{"title": "Old Thread", "outcome": "resolved",
+                               "created_turn": 1, "closed_turn": 2, "note": "", "consequence": "x"}]
+    captured = {}
+    sdk = _make_sdk([json.dumps(_profile_reply()), DIRECTION_REPLY,
+                     THREAD_REPLY, CRITIC_ACCEPT], captured)
+
+    result = asyncio.run(backend.on_command_plot(
+        ["reset", "confirm"], _state(turn=6, data=data), sdk))
+
+    # Bootstrap analysis, direction seed, generation, fit check -- in order.
+    assert captured["preferences"] == ["smartest", "balanced", "smartest", "balanced"]
+    assert "already in progress" in captured["prompts"][0]
+    update = result["module_data"]["wb_plot_director"]
+    # Every top-level key is replaced wholesale, so old data is truly gone.
+    assert set(result["module_data_replace"]) == set(update)
+    assert update["thread_history"] == []
+    assert update["log"] == []
+    assert update["profile"]["dislikes"] == []  # complete wipe, dislikes included
+    assert any(e["text"] == "back-alley deals" for e in update["profile"]["likes"])
+    assert update["profile"]["attachments"][0]["name"] == "The Salt Baron"
+    assert update["direction"]["premise"].startswith("A quiet war")
+    assert update["thread"]["title"] == "The Salt Baron's Ledger"
+    assert update["thread"]["created_turn"] == 6
+    assert update["suspended"] is False  # a reset unfreezes
+    assert "Reset complete" in result["message"]
+    assert "The Salt Baron's Ledger" in result["message"]
+
+
+def test_plot_reset_fresh_story_skips_bootstrap_and_survives_failures():
+    backend = _load_backend()
+
+    # Turn 1: nothing to analyze -- seed + generation + critic only.
+    captured = {}
+    sdk = _make_sdk([DIRECTION_REPLY, THREAD_REPLY, CRITIC_ACCEPT], captured)
+    result = asyncio.run(backend.on_command_plot(
+        ["reset", "confirm"], _state(turn=1, data=backend._default_data()), sdk))
+    assert len(captured["prompts"]) == 3
+    assert all("already in progress" not in p for p in captured["prompts"])
+    update = result["module_data"]["wb_plot_director"]
+    assert update["thread"]["title"] == "The Salt Baron's Ledger"
+    assert "story too young" in result["message"]
+
+    # Every rebuild step failing still resets cleanly; the librarian machinery
+    # retries direction seeding and generation on later turns.
+    result = asyncio.run(backend.on_command_plot(
+        ["reset", "confirm"], _state(turn=6, data=_active_data(backend)),
+        _make_sdk(["garbage", "garbage", "garbage"], {})))
+    update = result["module_data"]["wb_plot_director"]
+    assert update["thread"]["status"] == "none"
+    assert update["direction"]["premise"] == ""
+    assert update["direction_seed_attempts"] == 0  # librarian will re-seed
+    assert update["gen_attempts"] == 1
+    assert "retries next turn" in result["message"]
