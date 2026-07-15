@@ -1087,6 +1087,7 @@ async def set_save_active_modules(save_id: str, request: ActiveModulesRequest):
 class BranchRequest(BaseModel):
     new_save_id: Optional[str] = None
     target_turn: Optional[int] = None
+    display_name: Optional[str] = None
 
 
 class RenameSaveRequest(BaseModel):
@@ -1119,7 +1120,8 @@ async def export_save(save_id: str, format: str = "md"):
 async def branch_save(save_id: str, request: BranchRequest):
     """Fork a save into a new one, optionally rolled back to `target_turn`."""
     try:
-        branch = session_manager.branch_save(save_id, request.new_save_id, request.target_turn)
+        branch = session_manager.branch_save(save_id, request.new_save_id, request.target_turn,
+                                             request.display_name)
         return {"branch": branch, "saves": session_manager.list_saves()}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { api } from '../../lib/api';
 import ModuleTogglePanel from '../shared/ModuleTogglePanel';
 import ModuleInline from '../shared/ModuleInline';
+import BranchNameDialog from '../shared/BranchNameDialog';
 
 function formatLastPlayed(iso) {
   if (!iso) return null;
@@ -43,6 +44,10 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
   const [editStyle, setEditStyle] = useState({ themes: '', tags: '', pacing: '' });
   const [savingSettings, setSavingSettings] = useState(false);
   const [branching, setBranching] = useState(false);
+  // Branch naming dialog: { defaultName } | null. Branching always goes
+  // through it; the input is prefilled with the auto-generated name.
+  const [branchPrompt, setBranchPrompt] = useState(null);
+  const [branchError, setBranchError] = useState(null);
   // Inline error messages, one per section, instead of blocking alert()s.
   const [loadError, setLoadError] = useState(false);
   const [listError, setListError] = useState(null);
@@ -126,6 +131,8 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
     setEditingSave(saveId);
     setSavingSettings(false);
     setBranching(false);
+    setBranchPrompt(null);
+    setBranchError(null);
     setSettingsError(null);
     const save = saves.find((s) => s.id === saveId);
     setEditName(save?.display_name || saveId);
@@ -168,16 +175,26 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
     setSavingSettings(false);
   };
 
-  const handleBranch = async () => {
+  const handleBranch = () => {
+    if (!editingSave) return;
+    const save = saves.find((s) => s.id === editingSave);
+    const sourceName = save?.display_name || editingSave;
+    setBranchError(null);
+    setBranchPrompt({ defaultName: `${sourceName} (branch @ turn ${save?.turn ?? 0})` });
+  };
+
+  const handleConfirmBranch = async (name) => {
     if (!editingSave) return;
     setBranching(true);
-    setSettingsError(null);
+    setBranchError(null);
     try {
-      const r = await api.branchSave(editingSave);
+      const r = await api.branchSave(editingSave, { displayName: name });
       if (Array.isArray(r.saves)) setSaves(r.saves);
+      setBranchPrompt(null);
       setEditingSave(null);
     } catch (e) {
-      setSettingsError(`Failed to branch: ${e.message}`);
+      // Keep the dialog open so the player can retry or cancel.
+      setBranchError(`Failed to branch: ${e.message}`);
     }
     setBranching(false);
   };
@@ -619,6 +636,16 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
             </div>
           </div>
         </div>
+      )}
+
+      {branchPrompt && (
+        <BranchNameDialog
+          defaultName={branchPrompt.defaultName}
+          busy={branching}
+          error={branchError}
+          onConfirm={handleConfirmBranch}
+          onCancel={() => !branching && setBranchPrompt(null)}
+        />
       )}
     </div>
   );

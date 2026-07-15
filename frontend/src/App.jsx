@@ -15,6 +15,7 @@ import HealthPanel from './components/Header/HealthPanel';
 import MemoryBrowser from './components/MemoryBrowser';
 import CharacterView from './components/CharacterView/CharacterView';
 import ModuleGameOverlay from './components/shared/ModuleGameOverlay';
+import BranchNameDialog from './components/shared/BranchNameDialog';
 import MainMenu from './components/Menu/MainMenu';
 import OnboardingWizard from './components/Onboarding/OnboardingWizard';
 import SaveSelectScreen from './components/Menu/SaveSelectScreen';
@@ -228,13 +229,34 @@ function AppContent() {
     }
   }, [ws.messages]);
 
-  // Fork the story at a given turn and jump into the branch: the server copies
-  // the save (rolled back to that turn), we load it and replay its transcript.
-  const handleBranchMessage = useCallback(async (turn) => {
+  // Branching always asks for a name first. The dialog is prefilled with the
+  // auto-generated "<save> (branch @ turn N)", so confirming without typing
+  // keeps the old default. Shape: { turn, defaultName } | null.
+  const [branchPrompt, setBranchPrompt] = useState(null);
+  const [branching, setBranching] = useState(false);
+  const [branchError, setBranchError] = useState(null);
+
+  const handleBranchMessage = useCallback((turn) => {
     const saveId = session.sessionState?.active_save_id;
     if (!saveId) return;
+    const sourceName = session.saves?.find((s) => s.id === saveId)?.display_name || saveId;
+    setBranchError(null);
+    setBranchPrompt({ turn, defaultName: `${sourceName} (branch @ turn ${turn})` });
+  }, [session]);
+
+  // Fork the story at the chosen turn under the confirmed name and jump into
+  // the branch: the server copies the save (rolled back to that turn), we
+  // load it and replay its transcript.
+  const handleConfirmBranch = useCallback(async (name) => {
+    const saveId = session.sessionState?.active_save_id;
+    if (!saveId || branchPrompt == null) {
+      setBranchPrompt(null);
+      return;
+    }
+    setBranching(true);
+    setBranchError(null);
     try {
-      const r = await api.branchSave(saveId, { targetTurn: turn });
+      const r = await api.branchSave(saveId, { targetTurn: branchPrompt.turn, displayName: name });
       const data = await session.loadSave(r.branch.id);
       // Paint the branched transcript immediately; the quiet intro reconciles.
       if (Array.isArray(data?.state?.chat_messages) && data.state.chat_messages.length > 0) {
@@ -243,11 +265,14 @@ function AppContent() {
       } else {
         ws.sendIntro();
       }
+      setBranchPrompt(null);
       showToast(`Branched into "${r.branch.display_name || r.branch.id}"`, 'info');
     } catch (e) {
-      showToast(`Failed to branch: ${e.message}`);
+      // Keep the dialog open so the player can retry or cancel.
+      setBranchError(e.message || 'Failed to branch.');
     }
-  }, [session, ws, showToast]);
+    setBranching(false);
+  }, [session, ws, showToast, branchPrompt]);
 
   const handleSwipe = useCallback(async (index) => {
     try {
@@ -695,6 +720,16 @@ function AppContent() {
             />
           ))}
       </div>
+
+      {branchPrompt && (
+        <BranchNameDialog
+          defaultName={branchPrompt.defaultName}
+          busy={branching}
+          error={branchError}
+          onConfirm={handleConfirmBranch}
+          onCancel={() => !branching && setBranchPrompt(null)}
+        />
+      )}
 
       {showExitWarning && (
         <ExitWarning

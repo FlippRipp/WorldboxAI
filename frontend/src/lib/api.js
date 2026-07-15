@@ -44,6 +44,7 @@ export const api = {
   branchSave:             (saveId, opts = {}) => request(`/api/saves/${saveId}/branch`, { method: 'POST', body: JSON.stringify({
                             new_save_id: opts.newSaveId ?? null,
                             target_turn: opts.targetTurn ?? null,
+                            display_name: opts.displayName ?? null,
                           }) }),
   // Direct download URL (used as an anchor href, not fetched as JSON).
   exportSaveUrl:          (saveId, format = 'md') => `${API}/api/saves/${saveId}/export?format=${encodeURIComponent(format)}`,

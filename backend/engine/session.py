@@ -556,11 +556,13 @@ class GameSessionManager:
         raise ValueError("Could not find a free branch id.")
 
     def branch_save(self, source_save_id: str, new_save_id: Optional[str] = None,
-                    target_turn: Optional[int] = None) -> dict[str, Any]:
+                    target_turn: Optional[int] = None,
+                    display_name: Optional[str] = None) -> dict[str, Any]:
         """Fork a save into a new one, optionally rolled back to the end of
         `target_turn`. The source (including its vector memory) is copied
         wholesale; the copy's memories are rolled back alongside the snapshot.
-        The active session is never touched."""
+        The active session is never touched. A blank `display_name` falls back
+        to "<source> (branch @ turn N)"."""
         self._validate_save_id(source_save_id)
         source_path = self.save_manager._ensure_workspace(source_save_id)
 
@@ -602,8 +604,12 @@ class GameSessionManager:
                     finally:
                         mm.close()
 
-            source_name = source_meta.get("display_name") or source_save_id
-            display_name = f"{source_name} (branch @ turn {target_turn})"
+            clean_name = (display_name or "").strip()
+            if clean_name:
+                display_name = clean_name[:120]
+            else:
+                source_name = source_meta.get("display_name") or source_save_id
+                display_name = f"{source_name} (branch @ turn {target_turn})"
             self.save_manager.update_metadata(new_save_id, {"display_name": display_name})
         except Exception:
             # Leave no half-built branch behind.

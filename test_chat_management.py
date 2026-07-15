@@ -65,6 +65,19 @@ def test_branch_at_current_turn(session):
     assert session.branch_save("autosave")["id"] == "autosave-b2"
 
 
+def test_branch_with_custom_display_name(session):
+    _play_turn(session, "I look around.", "You see a room.", 1)
+
+    branch = session.branch_save("autosave", display_name="  The Other Door  ")
+    assert branch["display_name"] == "The Other Door"
+    saves = session.list_saves()
+    assert next(s for s in saves if s["id"] == branch["id"])["display_name"] == "The Other Door"
+
+    # A blank name falls back to the auto-generated default.
+    fallback = session.branch_save("autosave", display_name="   ")
+    assert "branch @ turn 1" in fallback["display_name"]
+
+
 def test_branch_at_earlier_turn_rolls_back(session):
     _play_turn(session, "I look around.", "You see a room.", 1)
     _play_turn(session, "I open the door.", "The door creaks open.", 2)
