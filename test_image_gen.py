@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import json
+import threading
 import time
 
 import pytest
@@ -5703,3 +5704,327 @@ def test_civitai_checkpoints_remote_fallback_via_webui_api(tmp_path):
     items = client.get("/civitai/checkpoints").json()["items"]
     assert items[0]["local_available"] is None
     assert items[1]["local_available"] is None
+
+
+# ---------------------------------------------------------------------------
+# Install helper (helper_server.py next to a remote WebUI)
+# ---------------------------------------------------------------------------
+
+def _fake_helper(backend, responses):
+    """Monkeypatch _helper_request; `responses` maps (method, path-prefix) ->
+    dict or Exception. Records calls in the returned list."""
+    calls = []
+
+    async def fake_request(cfg, method, path, json_body=None, timeout=30.0):
+        calls.append({"method": method, "path": path, "body": json_body})
+        for (m, prefix), resp in responses.items():
+            if m == method and path.startswith(prefix):
+                if isinstance(resp, Exception):
+                    raise resp
+                return resp
+        raise RuntimeError(f"unexpected helper call {method} {path}")
+
+    backend._helper_request = fake_request
+    return calls
+
+
+def test_install_endpoint_routes_to_helper_when_remote(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _enable_local(backend, civitai_api_key="civ-token",
+                        local_helper_url="http://gpu-box:7861")
+    cfg["lora_library"] = [_local_lora_entry(id="901", local=None)]
+    cfg["lora_library"][0].pop("local")
+    backend._save_config(cfg)
+    calls = _fake_helper(backend, {
+        ("POST", "/wb-helper/downloads"): {"download": {
+            "id": "r1", "kind": "checkpoint", "status": "downloading",
+            "received_bytes": 0, "total_bytes": 0}},
+    })
+    client = _client(backend)
+
+    # Checkpoint: no local folder + helper configured -> the helper gets the
+    # command, with the Civitai token already on the URL.
+    body = client.post("/local/downloads", json={
+        "kind": "checkpoint", "item_id": "55", "base_model": "SDXL 1.0",
+        "label": "Juggernaut", "sha256": "a" * 64,
+        "url": "https://civitai.com/api/download/models/55"}).json()
+    assert body["download"]["remote"] is True
+    sent = calls[-1]["body"]
+    assert sent["kind"] == "checkpoint"
+    assert sent["url"].endswith("?token=civ-token")
+    assert sent["expected_hashes"] == ["a" * 64]
+    assert sent["item_id"] == "55" and sent["base_model"] == "SDXL 1.0"
+
+    # LoRA by library id routes the same way.
+    body = client.post("/local/downloads", json={"lora_id": "901"}).json()
+    assert body["download"]["remote"] is True
+    sent = calls[-1]["body"]
+    assert sent["kind"] == "lora" and sent["lora_id"] == "901"
+    assert sent["url"].startswith("https://civitai.com/api/download/models/101")
+
+    # Helper down -> a clear 502, not a silent local-folder error.
+    _fake_helper(backend, {
+        ("POST", "/wb-helper/downloads"):
+            RuntimeError("Could not reach the install helper"),
+    })
+    resp = client.post("/local/downloads", json={"lora_id": "901"})
+    assert resp.status_code == 502
+    assert "install helper" in resp.json()["detail"].lower()
+
+
+def test_list_installs_merges_helper_and_runs_followups(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _enable_local(backend, local_helper_url="http://gpu-box:7861")
+    cfg["lora_library"] = [_local_lora_entry(id="901", local=None)]
+    cfg["lora_library"][0].pop("local")
+    backend._save_config(cfg)
+
+    posted = []
+
+    async def fake_post(cfg, path, timeout=None):
+        posted.append(path)
+
+    backend._local_post = fake_post
+    _fake_helper(backend, {
+        ("GET", "/wb-helper/downloads"): {"downloads": [
+            {"id": "r1", "kind": "lora", "status": "done", "lora_id": "901",
+             "filename": "ink_style_v2.safetensors",
+             "received_bytes": 10, "total_bytes": 10},
+            {"id": "r2", "kind": "checkpoint", "status": "downloading",
+             "received_bytes": 5, "total_bytes": 10},
+        ]},
+    })
+
+    with _client(backend) as client:
+        listing = client.get("/local/downloads").json()["downloads"]
+        assert [d["id"] for d in listing] == ["r1", "r2"]
+        assert all(d["remote"] is True for d in listing)
+        # The done LoRA triggers its follow-ups (async task): WebUI refresh +
+        # library link, exactly once even across repeated polls.
+        for _ in range(200):
+            entry = backend._load_config()["lora_library"][0]
+            if entry.get("local"):
+                break
+            time.sleep(0.02)
+        assert entry["local"] == {"name": "ink_style_v2", "source": "install"}
+        client.get("/local/downloads")
+        client.get("/local/downloads")
+    assert posted.count("/sdapi/v1/refresh-loras") == 1
+
+
+def test_browse_annotation_uses_helper_hash_index(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable_local(backend, local_helper_url="http://gpu-box:7861")
+
+    async def fake_search(cfg, **kwargs):
+        return {"items": [
+            {"id": "1", "base_model": "SDXL 1.0", "sha256": "a" * 64,
+             "all_hashes": ["a" * 64]},
+            {"id": "2", "base_model": "SDXL 1.0", "sha256": "f" * 64,
+             "all_hashes": ["f" * 64]},
+        ], "next_cursor": ""}
+
+    backend._civitai_search_models = fake_search
+    _fake_helper(backend, {("GET", "/wb-helper/hashes"): {
+        "scanning": False,
+        "kinds": {"checkpoint": {"A" * 64: "juggernaut_v9"}, "lora": {}}}})
+    client = _client(backend)
+    items = client.get("/civitai/checkpoints").json()["items"]
+    assert items[0]["local_available"] is True
+    assert items[0]["local_name"] == "juggernaut_v9"   # hash keys case-folded
+    assert items[1]["local_available"] is False
+
+    # While the helper's first scan is still hashing, absence stays unknown.
+    _fake_helper(backend, {("GET", "/wb-helper/hashes"): {
+        "scanning": True,
+        "kinds": {"checkpoint": {"a" * 64: "juggernaut_v9"}, "lora": {}}}})
+
+    async def no_api(cfg, path, timeout=None):
+        raise RuntimeError("down")
+
+    backend._local_get = no_api    # keep the WebUI-API fallback out of it
+    items = client.get("/civitai/checkpoints").json()["items"]
+    assert items[0]["local_available"] is True
+    assert items[1]["local_available"] is None
+
+
+def test_match_loras_via_helper(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _enable_local(backend, local_helper_url="http://gpu-box:7861")
+    cfg["lora_library"] = [
+        _local_lora_entry(id="901", local=None),
+        _local_lora_entry(id="902", sha256="b" * 64, all_hashes=["b" * 64],
+                          local=None),
+    ]
+    for e in cfg["lora_library"]:
+        e.pop("local")
+    backend._save_config(cfg)
+    _fake_helper(backend, {("GET", "/wb-helper/hashes"): {
+        "scanning": False,
+        "kinds": {"checkpoint": {}, "lora": {"a" * 64: "ink_style_xl"}}}})
+    client = _client(backend)
+
+    body = client.post("/local/match-loras").json()
+    assert body["matched"] == 1 and body["checked"] == 2 and body["files"] == 1
+    entries = {e["id"]: e for e in body["lora_library"]}
+    assert entries["901"]["local"] == {"name": "ink_style_xl", "source": "hash"}
+    assert "local" not in entries["902"]
+
+    # Still hashing -> a retryable 503, not wrong unlink decisions.
+    _fake_helper(backend, {("GET", "/wb-helper/hashes"): {
+        "scanning": True, "kinds": {"checkpoint": {}, "lora": {}}}})
+    assert client.post("/local/match-loras").status_code == 503
+
+
+def test_public_config_reports_install_capability_and_masks_token(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    resp = client.put("/config", json={
+        "provider": "local", "local_helper_url": "http://gpu-box:7861/",
+        "local_helper_token": "secret-tok"}).json()
+    assert resp["local_helper_url"] == "http://gpu-box:7861"   # trailing / stripped
+    assert resp["local_helper_token"].startswith("****")
+    assert "secret-tok" not in json.dumps(resp)
+    assert resp["has_helper"] is True
+    # Helper configured -> both kinds installable even with no local folders.
+    assert resp["local_install"] == {"checkpoint": True, "lora": True}
+
+    # Masked round-trip keeps the stored token; clearing the URL drops the
+    # capability unless a folder on this machine exists.
+    resp = client.put("/config", json={
+        "local_helper_token": resp["local_helper_token"],
+        "local_helper_url": ""}).json()
+    assert backend._load_config()["local_helper_token"] == "secret-tok"
+    assert resp["local_install"] == {"checkpoint": False, "lora": False}
+
+    lora_dir = tmp_path / "Lora"
+    lora_dir.mkdir()
+    resp = client.put("/config", json={"local_lora_dir": str(lora_dir)}).json()
+    assert resp["local_install"] == {"checkpoint": False, "lora": True}
+
+
+# ---------------------------------------------------------------------------
+# helper_server.py itself (stdlib companion server on the WebUI machine)
+# ---------------------------------------------------------------------------
+
+def _load_helper(tmp_path):
+    path = Path(__file__).parent / "modules" / MID / "helper_server.py"
+    spec = importlib.util.spec_from_file_location("wb_helper_server", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    ckpt = tmp_path / "ckpt"
+    lora = tmp_path / "lora"
+    ckpt.mkdir(exist_ok=True)
+    lora.mkdir(exist_ok=True)
+    mod.KIND_DIRS.update({"checkpoint": ckpt, "lora": lora})
+    mod.CACHE_PATH = tmp_path / "wb-helper-cache.json"
+    return mod
+
+
+def _serve_payload(payload, filename="ink_style_v2.safetensors"):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{filename}"')
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}/file"
+
+
+def _wait_download(helper, dl_id, timeout=10.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        status = helper._downloads[dl_id]
+        if status["status"] != "downloading":
+            return status
+        time.sleep(0.02)
+    raise AssertionError("helper download did not finish in time")
+
+
+def test_helper_downloads_verifies_and_indexes(tmp_path):
+    import hashlib
+    helper = _load_helper(tmp_path)
+    payload = b"lora-bytes"
+    sha = hashlib.sha256(payload).hexdigest()
+    srv, url = _serve_payload(payload)
+    try:
+        download = helper._start_download({
+            "kind": "lora", "url": url, "label": "Ink Style",
+            "expected_hashes": [sha], "lora_id": "901", "item_id": "55"})
+        assert download["status"] == "downloading"
+        assert "url" not in download                     # token never echoed
+        status = _wait_download(helper, download["id"])
+        assert status["status"] == "done", status["error"]
+        assert status["filename"] == "ink_style_v2.safetensors"
+        assert status["received_bytes"] == status["total_bytes"] == len(payload)
+        assert (tmp_path / "lora" / "ink_style_v2.safetensors").read_bytes() == payload
+        # The file lands in the hash index for exact badges without a rescan.
+        assert helper._hash_indexes()["lora"] == {sha: "ink_style_v2"}
+
+        # A wrong-hash download is rejected and leaves no file behind.
+        bad = helper._start_download({
+            "kind": "lora", "url": url, "expected_hashes": ["f" * 64]})
+        status = _wait_download(helper, bad["id"])
+        assert status["status"] == "error" and "SHA256" in status["error"]
+        assert sorted(p.name for p in (tmp_path / "lora").iterdir()) == [
+            "ink_style_v2.safetensors"]
+    finally:
+        srv.shutdown()
+
+    assert helper._safe_filename("../../evil.exe", "Ink Style") == "Ink Style.safetensors"
+    with pytest.raises(ValueError):
+        helper._start_download({"kind": "lora", "url": "notaurl"})
+
+
+def test_helper_http_endpoints_and_auth(tmp_path):
+    import urllib.request
+    import urllib.error
+    from http.server import ThreadingHTTPServer
+    helper = _load_helper(tmp_path)
+    (tmp_path / "ckpt" / "juggernaut.safetensors").write_bytes(b"ck")
+    helper.AUTH_TOKEN = "tok"
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), helper.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def get(path, token=None):
+        req = urllib.request.Request(base + path)
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read())
+
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            get("/wb-helper/health")
+        assert exc.value.code == 401                     # token required
+
+        health = get("/wb-helper/health", token="tok")
+        assert health["ok"] is True and health["auth"] is True
+        assert health["kinds"]["checkpoint"]["exists"] is True
+
+        # /hashes kicks the background scan and reports it until done.
+        import hashlib
+        sha = hashlib.sha256(b"ck").hexdigest()
+        deadline = time.time() + 10
+        while True:
+            body = get("/wb-helper/hashes", token="tok")
+            if not body["scanning"]:
+                break
+            assert time.time() < deadline, "helper scan never finished"
+            time.sleep(0.02)
+        assert body["kinds"]["checkpoint"] == {sha: "juggernaut"}
+        assert body["kinds"]["lora"] == {}
+    finally:
+        srv.shutdown()

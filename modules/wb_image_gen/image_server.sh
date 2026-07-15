@@ -25,6 +25,16 @@
 #                     on the network (--listen); 0 binds to 127.0.0.1 only
 #   WEBUI_EXTRA_ARGS  extra launch flags, e.g. "--api-auth user:pass" or,
 #                     without an NVIDIA GPU, "--skip-torch-cuda-test --use-cpu all"
+#   WB_HELPER         1 (default) also starts the WorldBox install helper
+#                     (helper_server.py) next to the WebUI, so the app can
+#                     one-click install checkpoints/LoRAs and read exact
+#                     installed-model badges even from another machine;
+#                     0 disables it
+#   WB_HELPER_PORT    helper port (default 7861)
+#   WB_HELPER_LISTEN  like WB_WEBUI_LISTEN, for the helper (defaults to
+#                     WB_WEBUI_LISTEN)
+#   WB_HELPER_TOKEN   optional shared secret; paste the same value into the
+#                     Image Studio's helper token field
 set -u
 # The script lives in modules/wb_image_gen/; the default install dir sits at
 # the repo root.
@@ -154,6 +164,23 @@ if [ -x "$VENV_PY" ] && "$VENV_PY" -c "import numpy" >/dev/null 2>&1 \
     echo
 fi
 
+# ── WorldBox install helper (one-click installs + badges from the app) ──
+# A tiny stdlib-only companion server; the app sends it download commands and
+# reads its hash index, which is what makes the Studio's model/LoRA browsers
+# fully work when the app runs on a different machine than this WebUI.
+WB_HELPER_PORT="${WB_HELPER_PORT:-7861}"
+HELPER_PID=""
+if [ "${WB_HELPER:-1}" != "0" ]; then
+    mkdir -p "$WEBUI_DIR/models/Stable-diffusion" "$WEBUI_DIR/models/Lora"
+    WB_HELPER_CKPT_DIR="$WEBUI_DIR/models/Stable-diffusion" \
+    WB_HELPER_LORA_DIR="$WEBUI_DIR/models/Lora" \
+    WB_HELPER_PORT="$WB_HELPER_PORT" \
+    WB_HELPER_LISTEN="${WB_HELPER_LISTEN:-${WB_WEBUI_LISTEN:-1}}" \
+        "$PY_CMD" "$REPO_ROOT/modules/wb_image_gen/helper_server.py" &
+    HELPER_PID=$!
+    trap '[ -n "$HELPER_PID" ] && kill "$HELPER_PID" 2>/dev/null' EXIT INT TERM
+fi
+
 # ── First-run hints + the values the Image Studio needs ──
 if [ ! -d "$WEBUI_DIR/venv" ]; then
     echo "First launch: the WebUI now installs its own dependencies (several GB,"
@@ -173,16 +200,26 @@ if [ "${WB_WEBUI_LISTEN:-1}" != "0" ]; then
 fi
 echo "====   Checkpoint folder: $WEBUI_DIR/models/Stable-diffusion"
 echo "====   LoRA folder:       $WEBUI_DIR/models/Lora"
-echo "==== No checkpoints ship with the WebUI -- set the folders above in ===="
+if [ "${WB_HELPER:-1}" != "0" ]; then
+    echo "====   Install helper:    http://127.0.0.1:$WB_HELPER_PORT"
+    if [ -n "${LAN_IP:-}" ]; then
+        echo "====     (from other devices: http://$LAN_IP:$WB_HELPER_PORT)"
+    fi
+    echo "====   When WorldBox runs on ANOTHER machine, leave the folder      ===="
+    echo "====   fields empty and paste the helper address instead -- it      ===="
+    echo "====   downloads models here and reports installed ones back.       ===="
+fi
+echo "==== No checkpoints ship with the WebUI -- set the values above in  ===="
 echo "==== the Studio and install models from its Civitai/HF browser, or  ===="
-echo "==== drop .safetensors files into them manually.                    ===="
+echo "==== drop .safetensors files into the folders manually.             ===="
 echo "==== Press Ctrl+C to stop the server.                               ===="
 echo
 
 cd "$WEBUI_DIR"
-# webui.sh refuses to run as root unless -f is passed.
+# webui.sh refuses to run as root unless -f is passed. Not exec'd so the
+# EXIT trap can stop the install helper when the WebUI exits.
 if [ "$(id -u)" = "0" ]; then
-    exec ./webui.sh -f
+    ./webui.sh -f
 else
-    exec ./webui.sh
+    ./webui.sh
 fi

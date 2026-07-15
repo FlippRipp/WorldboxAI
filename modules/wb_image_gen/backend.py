@@ -155,6 +155,7 @@ GLOBAL_FIELDS = (
     "player_in_images", "chat_image_conceal", "civitai_nsfw",
     "provider", "local_base_url", "local_auth_user", "local_auth_pass",
     "local_checkpoint_dir", "local_lora_dir",
+    "local_helper_url", "local_helper_token",
 )
 LORA_STATE_FIELDS = ("active", "strength", "llm_mode", "condition")
 PROFILES_MAX = 20
@@ -519,6 +520,8 @@ def _default_config() -> dict:
         "local_auth_pass": "",          # masked like the API keys
         "local_checkpoint_dir": "",     # enables checkpoint installs from the browser
         "local_lora_dir": "",           # enables LoRA installs from the browser
+        "local_helper_url": "",         # helper_server.py next to a remote WebUI
+        "local_helper_token": "",       # its WB_HELPER_TOKEN; masked like keys
         "lora_library": [],             # saved LoRAs; see _normalize_lora_entry
     }
 
@@ -2250,23 +2253,112 @@ def _match_api_checkpoint(index: dict, entry: dict) -> str | None:
     return None
 
 
-async def _annotate_checkpoint_availability(cfg: dict, items: list[dict]) -> None:
-    """Checkpoint browse badges: folder-scan matching first (exact SHA256 of
-    files this machine can read), then the WebUI's own model list for items
-    the folder couldn't answer — which is all of them when the WebUI lives on
-    another machine and no folder is scannable here."""
-    _annotate_local_availability(cfg, items, kind="checkpoint")
-    pending = [i for i in items if i.get("local_available") is None]
-    if not pending:
-        return
-    index = await _local_api_checkpoint_index(cfg)
-    if index is None:
-        return   # WebUI unreachable: leave "unknown"
-    for item in pending:
-        stem = _match_api_checkpoint(index, item)
-        item["local_available"] = bool(stem)
-        if stem:
-            item["local_name"] = stem
+# --------------------------------------------------------------------------
+# Install helper client — helper_server.py running next to a remote WebUI
+# gives one-click installs and exact hash badges across machines.
+# --------------------------------------------------------------------------
+
+def _helper_url(cfg: dict) -> str:
+    return str(cfg.get("local_helper_url") or "").strip().rstrip("/")
+
+
+def _helper_headers(cfg: dict) -> dict:
+    token = str(cfg.get("local_helper_token") or "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+async def _helper_request(cfg: dict, method: str, path: str,
+                          json_body: dict | None = None,
+                          timeout: float = 30.0) -> dict:
+    """One call against the install helper; RuntimeError with an actionable
+    message on any failure."""
+    import httpx
+    base = _helper_url(cfg)
+    if not base:
+        raise RuntimeError("No install helper configured")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
+            resp = await client.request(method, f"{base}{path}",
+                                        json=json_body, headers=_helper_headers(cfg))
+    except httpx.TransportError as e:
+        raise RuntimeError(f"Could not reach the install helper at {base}: {e}")
+    if resp.status_code == 401:
+        raise RuntimeError("The install helper rejected the token — paste its "
+                           "WB_HELPER_TOKEN into Setup")
+    if resp.status_code >= 400:
+        try:
+            detail = str((resp.json() or {}).get("detail") or "")
+        except Exception:
+            detail = resp.text[:200]
+        raise RuntimeError(f"Install helper error {resp.status_code}: {detail}")
+    try:
+        body = resp.json()
+    except Exception:
+        raise RuntimeError(f"The install helper at {base} answered with "
+                           "invalid JSON — is something else on that port?")
+    return body if isinstance(body, dict) else {}
+
+
+async def _helper_hash_indexes(cfg: dict) -> dict:
+    """The helper's SHA256 indexes of its folders: {"checkpoint": {sha ->
+    file stem}, "lora": {...}, "scanning": bool}. While the helper's first
+    scan is still hashing, absence from the index means "unknown", not "not
+    installed". Raises RuntimeError when the helper is unreachable."""
+    body = await _helper_request(cfg, "GET", "/wb-helper/hashes")
+    kinds = body.get("kinds") if isinstance(body.get("kinds"), dict) else {}
+    out: dict = {"scanning": bool(body.get("scanning"))}
+    for kind in LOCAL_INSTALL_KINDS:
+        index = kinds.get(kind)
+        out[kind] = ({str(k).lower(): str(v) for k, v in index.items()}
+                     if isinstance(index, dict) else {})
+    return out
+
+
+def _local_install_dir(cfg: dict, kind: str) -> Path | None:
+    """The kind's install folder when this machine can write to it directly,
+    else None (unset, or a path that only exists on the WebUI's machine)."""
+    dest = str(cfg.get(LOCAL_INSTALL_KINDS[kind]["dir_key"]) or "").strip()
+    if dest and Path(dest).is_dir():
+        return Path(dest)
+    return None
+
+
+async def _annotate_browse_availability(cfg: dict, items: list[dict],
+                                        kind: str = "lora") -> None:
+    """Browse badges for the local provider, best source first: a hash scan
+    of the folder when this machine can read it, the install helper's hash
+    index when one is configured (WebUI on another machine), and — for
+    checkpoints only — the WebUI's own model list as a fuzzy last resort."""
+    _annotate_local_availability(cfg, items, kind=kind)
+    if _helper_url(cfg) and any(i.get("local_available") is None for i in items):
+        try:
+            indexes = await _helper_hash_indexes(cfg)
+        except RuntimeError as e:
+            print(f"[Image Gen] Helper hash index failed: {e}")
+            indexes = None
+        if indexes is not None:
+            for item in items:
+                if item.get("local_available") is not None or not _entry_hashes(item):
+                    continue
+                stem = _match_local_hashes(indexes[kind], item)
+                if stem:
+                    item["local_available"] = True
+                    item["local_name"] = stem
+                elif not indexes["scanning"]:
+                    # A finished helper scan is authoritative: absent = absent.
+                    item["local_available"] = False
+    if kind == "checkpoint":
+        pending = [i for i in items if i.get("local_available") is None]
+        if not pending:
+            return
+        index = await _local_api_checkpoint_index(cfg)
+        if index is None:
+            return   # WebUI unreachable: leave "unknown"
+        for item in pending:
+            stem = _match_api_checkpoint(index, item)
+            item["local_available"] = bool(stem)
+            if stem:
+                item["local_name"] = stem
 
 
 # --------------------------------------------------------------------------
@@ -2275,6 +2367,9 @@ async def _annotate_checkpoint_availability(cfg: dict, items: list[dict]) -> Non
 
 _downloads: dict[str, dict] = {}                 # id -> pollable status dict
 _download_tasks: dict[str, "asyncio.Task"] = {}
+# Helper downloads whose completion follow-ups (WebUI refresh, LoRA library
+# link) already ran, so each poll of the merged list fires them only once.
+_remote_done_seen: set = set()
 DOWNLOAD_CHUNK = 1 << 20
 DOWNLOADS_KEEP_FINISHED = 20
 LOCAL_INSTALL_EXTS = (".safetensors", ".ckpt")
@@ -2300,6 +2395,29 @@ def _prune_downloads() -> None:
     for stale in finished[:-DOWNLOADS_KEEP_FINISHED] if len(finished) > DOWNLOADS_KEEP_FINISHED else []:
         _downloads.pop(stale["id"], None)
         _download_tasks.pop(stale["id"], None)
+
+
+def _spawn_remote_install_followup(cfg: dict, download: dict) -> None:
+    """After the helper finishes an install on the WebUI's machine: make the
+    WebUI rescan its folders and, for LoRAs, link the library entry to the
+    new file — the same follow-ups the local pipeline runs, driven from the
+    polling side since the bytes never touched this machine."""
+    kind = download.get("kind") if download.get("kind") in LOCAL_INSTALL_KINDS else "lora"
+    lora_id = str(download.get("lora_id") or "").strip()
+    stem = Path(str(download.get("filename") or "").replace("\\", "/")).stem
+
+    async def _run():
+        try:
+            await _local_post(cfg, LOCAL_INSTALL_KINDS[kind]["refresh_path"],
+                              timeout=60.0)
+        except RuntimeError as e:
+            print(f"[Image Gen] Post-install refresh failed: {e}")
+        if kind == "lora" and lora_id and stem:
+            await _link_installed_lora(lora_id, stem)
+
+    task = asyncio.get_running_loop().create_task(_run())
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
 
 
 async def _link_installed_lora(lora_id: str, stem: str) -> None:
@@ -3863,6 +3981,8 @@ def get_router():
         local_auth_pass: str | None = None
         local_checkpoint_dir: str | None = None
         local_lora_dir: str | None = None
+        local_helper_url: str | None = None
+        local_helper_token: str | None = None
 
     class GenerateRequest(BaseModel):
         prompt_override: str | None = None
@@ -3958,6 +4078,14 @@ def get_router():
         out["has_hf_key"] = bool(cfg.get("hf_api_key"))
         out["local_auth_pass"] = _mask_key(cfg.get("local_auth_pass", ""))
         out["has_local_auth"] = bool(cfg.get("local_auth_user"))
+        out["local_helper_token"] = _mask_key(cfg.get("local_helper_token", ""))
+        out["has_helper"] = bool(str(cfg.get("local_helper_url") or "").strip())
+        # Whether one-click installs can work per kind: a folder this machine
+        # can write to, or an install helper next to a remote WebUI.
+        out["local_install"] = {
+            kind: _local_install_dir(cfg, kind) is not None or out["has_helper"]
+            for kind in LOCAL_INSTALL_KINDS
+        }
         out["providers"] = PROVIDERS
         out["samplers"] = SAMPLERS
         out["default_prompt_template"] = DEFAULT_PROMPT_TEMPLATE
@@ -4007,6 +4135,9 @@ def get_router():
         local_pass = incoming.pop("local_auth_pass", None)
         if local_pass is not None and not local_pass.startswith(KEY_MASK_PREFIX):
             cfg["local_auth_pass"] = local_pass
+        helper_token = incoming.pop("local_helper_token", None)
+        if helper_token is not None and not helper_token.startswith(KEY_MASK_PREFIX):
+            cfg["local_helper_token"] = helper_token.strip()
 
         if "provider" in incoming and incoming["provider"] not in PROVIDERS:
             raise HTTPException(status_code=400,
@@ -4017,6 +4148,12 @@ def get_router():
                 raise HTTPException(status_code=400,
                                     detail="local_base_url must start with http:// or https://")
             incoming["local_base_url"] = base or LOCAL_DEFAULT_BASE
+        if "local_helper_url" in incoming:
+            helper = str(incoming["local_helper_url"]).strip().rstrip("/")
+            if helper and not helper.startswith(("http://", "https://")):
+                raise HTTPException(status_code=400,
+                                    detail="local_helper_url must start with http:// or https://")
+            incoming["local_helper_url"] = helper
         for field in ("local_checkpoint_dir", "local_lora_dir"):
             if field in incoming:
                 # Existence is checked when an install starts, not here — the
@@ -4326,19 +4463,31 @@ def get_router():
     @router.get("/local/status")
     async def local_status():
         """Connection test for the Image Studio setup card. Always 200 — the
-        UI renders {ok: false, error} inline instead of a request failure."""
+        UI renders {ok: false, error} inline instead of a request failure.
+        Probes the install helper too when one is configured."""
         cfg = _load_config()
+        out: dict
         try:
             options, models = await asyncio.gather(
                 _local_get(cfg, "/sdapi/v1/options"),
                 _local_get(cfg, "/sdapi/v1/sd-models"))
         except RuntimeError as e:
-            return {"ok": False, "base_url": _local_base(cfg), "error": str(e)}
-        current = str((options if isinstance(options, dict) else {})
-                      .get("sd_model_checkpoint") or "")
-        return {"ok": True, "base_url": _local_base(cfg),
-                "checkpoint_count": len(models if isinstance(models, list) else []),
-                "current_checkpoint": current}
+            out = {"ok": False, "base_url": _local_base(cfg), "error": str(e)}
+        else:
+            current = str((options if isinstance(options, dict) else {})
+                          .get("sd_model_checkpoint") or "")
+            out = {"ok": True, "base_url": _local_base(cfg),
+                   "checkpoint_count": len(models if isinstance(models, list) else []),
+                   "current_checkpoint": current}
+        if _helper_url(cfg):
+            try:
+                health = await _helper_request(cfg, "GET", "/wb-helper/health",
+                                               timeout=10.0)
+                out["helper"] = {"ok": bool(health.get("ok")),
+                                 "kinds": health.get("kinds") or {}}
+            except RuntimeError as e:
+                out["helper"] = {"ok": False, "error": str(e)}
+        return out
 
     @router.get("/local/loras")
     async def local_loras():
@@ -4365,15 +4514,32 @@ def get_router():
         unlink, so the badge never claims a deleted LoRA still applies."""
         cfg = _load_config()
         lora_dir = str(cfg.get("local_lora_dir") or "").strip()
-        if not lora_dir:
+        if lora_dir and Path(lora_dir).is_dir():
+            async with _get_local_scan_lock():
+                cache = await _scan_local_hashes(lora_dir)
+            index = _local_hash_index(cache) or {}
+            file_count = len(cache.get("files", {}))
+        elif _helper_url(cfg):
+            # WebUI on another machine: the helper's hash index stands in for
+            # the folder scan.
+            try:
+                indexes = await _helper_hash_indexes(cfg)
+            except RuntimeError as e:
+                raise HTTPException(status_code=502, detail=str(e))
+            if indexes["scanning"]:
+                raise HTTPException(status_code=503,
+                                    detail="The install helper is still hashing "
+                                           "its folders — try again in a moment")
+            index = indexes["lora"]
+            file_count = len(index)
+        elif not lora_dir:
             raise HTTPException(status_code=400,
-                                detail="Set your WebUI's LoRA folder in Setup first")
-        if not Path(lora_dir).is_dir():
+                                detail="Set your WebUI's LoRA folder in Setup "
+                                       "first (or the install helper URL for a "
+                                       "remote WebUI)")
+        else:
             raise HTTPException(status_code=400,
                                 detail=f"LoRA folder not found: {lora_dir}")
-        async with _get_local_scan_lock():
-            cache = await _scan_local_hashes(lora_dir)
-        index = _local_hash_index(cache) or {}
 
         cfg = _load_config()  # the scan awaited; re-load before mutating
         now = _now()
@@ -4395,7 +4561,7 @@ def get_router():
             entry["local_checked_at"] = now
         _save_config(cfg)
         return {"lora_library": cfg["lora_library"], "matched": matched,
-                "checked": checked, "files": len(cache.get("files", {}))}
+                "checked": checked, "files": file_count}
 
     def _public_download(status: dict) -> dict:
         # The raw URL may carry the user's Civitai token — never expose it.
@@ -4410,13 +4576,17 @@ def get_router():
         kind = req.kind if req.kind in LOCAL_INSTALL_KINDS else "lora"
         spec = LOCAL_INSTALL_KINDS[kind]
         refresh_path = spec["refresh_path"]
-        dest = str(cfg.get(spec["dir_key"]) or "").strip()
-        if not dest:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Set your WebUI's {spec['label']} folder in Setup first")
-        dest_dir = Path(dest)
-        if not dest_dir.is_dir():
+        # No folder this machine can write to + a configured helper = the
+        # WebUI runs on another machine; the helper downloads the file there.
+        dest_dir = _local_install_dir(cfg, kind)
+        remote = dest_dir is None and bool(_helper_url(cfg))
+        if dest_dir is None and not remote:
+            dest = str(cfg.get(spec["dir_key"]) or "").strip()
+            if not dest:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Set your WebUI's {spec['label']} folder in Setup "
+                           "first (or the install helper URL for a remote WebUI)")
             raise HTTPException(status_code=400,
                                 detail=f"{spec['label']} folder not found: {dest}")
 
@@ -4461,6 +4631,25 @@ def get_router():
             expected_hashes = [sha] if sha else []
             lora_id = None
 
+        if remote:
+            # The helper streams the file on the WebUI's machine and tracks
+            # byte progress in the same status shape; the merged
+            # GET /local/downloads list feeds the UI's progress bars either
+            # way. It dedupes in-flight commands itself.
+            try:
+                body = await _helper_request(
+                    cfg, "POST", "/wb-helper/downloads", json_body={
+                        "kind": kind, "url": url, "filename": fallback_name,
+                        "label": label, "expected_hashes": expected_hashes,
+                        "lora_id": lora_id, "item_id": item_id,
+                        "base_model": (req.base_model or "").strip(),
+                    })
+            except RuntimeError as e:
+                raise HTTPException(status_code=502, detail=str(e))
+            download = body.get("download") if isinstance(body.get("download"), dict) else {}
+            download["remote"] = True
+            return {"download": download}
+
         # A second click while the same file is in flight returns the
         # existing download instead of racing it.
         for d in _downloads.values():
@@ -4490,14 +4679,45 @@ def get_router():
 
     @router.get("/local/downloads")
     async def list_installs():
+        """Local downloads plus the install helper's, merged into one
+        pollable list — remote entries carry the same byte-progress fields,
+        so the UI's download bars work for both. A helper download flipping
+        to done triggers the WebUI refresh / library link exactly once."""
+        cfg = _load_config()
         items = sorted(_downloads.values(),
                        key=lambda d: str(d.get("started_at") or ""), reverse=True)
-        return {"downloads": [_public_download(d) for d in items]}
+        merged = [_public_download(d) for d in items]
+        if _helper_url(cfg):
+            try:
+                body = await _helper_request(cfg, "GET", "/wb-helper/downloads",
+                                             timeout=10.0)
+                remote = [d for d in (body.get("downloads") or [])
+                          if isinstance(d, dict) and d.get("id")]
+            except RuntimeError as e:
+                print(f"[Image Gen] Helper download poll failed: {e}")
+                remote = []
+            for d in remote:
+                d["remote"] = True
+                if d.get("status") == "done" and d["id"] not in _remote_done_seen:
+                    _remote_done_seen.add(d["id"])
+                    _spawn_remote_install_followup(cfg, d)
+            merged = remote + merged
+        return {"downloads": merged}
 
     @router.delete("/local/downloads/{dl_id}")
     async def cancel_install(dl_id: str):
         status = _downloads.get(dl_id)
         if status is None:
+            cfg = _load_config()
+            if _helper_url(cfg):
+                try:
+                    body = await _helper_request(
+                        cfg, "DELETE", f"/wb-helper/downloads/{dl_id}")
+                except RuntimeError as e:
+                    raise HTTPException(status_code=502, detail=str(e))
+                download = body.get("download") if isinstance(body.get("download"), dict) else {}
+                download["remote"] = True
+                return {"download": download}
             raise HTTPException(status_code=404, detail="No such download")
         task = _download_tasks.get(dl_id)
         if status["status"] == "downloading" and task is not None and not task.done():
@@ -4557,7 +4777,7 @@ def get_router():
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))
         if _provider(cfg) == "local":
-            _annotate_local_availability(cfg, result["items"])
+            await _annotate_browse_availability(cfg, result["items"], "lora")
         else:
             _annotate_novita_availability(cfg, result["items"])
         return result
@@ -4587,7 +4807,7 @@ def get_router():
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))
         if _provider(cfg) == "local":
-            await _annotate_checkpoint_availability(cfg, result["items"])
+            await _annotate_browse_availability(cfg, result["items"], "checkpoint")
         return result
 
     @router.get("/civitai/model-versions/{model_id}")
@@ -4601,16 +4821,14 @@ def get_router():
             raise HTTPException(status_code=502, detail=str(e))
         if _provider(cfg) == "local":
             # Checkpoints and LoRAs install into different folders, so each
-            # version badges against its own type's matching (checkpoints
-            # also fall back to the WebUI's model list for remote servers).
+            # version badges against its own type's matching sources.
             by_kind: dict[str, list[dict]] = {"lora": [], "checkpoint": []}
             for v in versions:
                 is_ckpt = str(v.get("type") or "").lower() == "checkpoint"
                 by_kind["checkpoint" if is_ckpt else "lora"].append(v)
-            if by_kind["lora"]:
-                _annotate_local_availability(cfg, by_kind["lora"])
-            if by_kind["checkpoint"]:
-                await _annotate_checkpoint_availability(cfg, by_kind["checkpoint"])
+            for kind, group in by_kind.items():
+                if group:
+                    await _annotate_browse_availability(cfg, group, kind)
         return {"versions": versions}
 
     @router.get("/hf/loras")
@@ -4631,7 +4849,7 @@ def get_router():
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))
         if _provider(cfg) == "local":
-            _annotate_local_availability(cfg, result["items"])
+            await _annotate_browse_availability(cfg, result["items"], "lora")
         else:
             _annotate_novita_availability(cfg, result["items"])
         return result

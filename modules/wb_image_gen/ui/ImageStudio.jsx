@@ -561,6 +561,13 @@ function LocalConnectionCard({ config, draft, set }) {
               : status.error}
           </p>
         )}
+        {status && status.helper && (
+          <p className={`text-xs mt-1 ${status.helper.ok ? 'text-green-400' : 'text-red-400'}`}>
+            {status.helper.ok
+              ? 'Install helper ✓ — remote installs and installed-model badges enabled'
+              : `Install helper: ${status.helper.error || 'not reachable'}`}
+          </p>
+        )}
         {unsaved && (
           <p className="text-xs text-yellow-600 mt-1">Unsaved connection changes — press Save Changes before testing.</p>
         )}
@@ -651,11 +658,40 @@ function LocalConnectionCard({ config, draft, set }) {
         />
         <p className="text-xs text-gray-600 mt-1">
           The WebUI's <span className="font-mono">models/Stable-diffusion</span> folder, for one-click
-          checkpoint installs. Leave it empty when the WebUI runs on another machine (unless the folder
-          is mounted here) — the model browser then detects installed checkpoints through the WebUI API
-          and offers download links to fetch on that machine instead.
+          checkpoint installs. Leave both folders empty when the WebUI runs on another machine (unless
+          they are mounted here) and use the install helper below instead.
         </p>
       </div>
+      <div className="grid sm:grid-cols-2 gap-3">
+        <div>
+          <label className={labelCls}>Install helper (for a WebUI on another machine)</label>
+          <input
+            type="text"
+            value={draft.local_helper_url ?? ''}
+            onChange={(e) => set('local_helper_url', e.target.value)}
+            placeholder="e.g. http://192.168.1.20:7861"
+            className={inputCls}
+            autoComplete="off"
+          />
+        </div>
+        <div>
+          <label className={labelCls}>Helper token (optional)</label>
+          <input
+            type="password"
+            value={draft.local_helper_token ?? ''}
+            onChange={(e) => set('local_helper_token', e.target.value)}
+            placeholder="only if WB_HELPER_TOKEN is set"
+            className={inputCls}
+            autoComplete="off"
+          />
+        </div>
+      </div>
+      <p className="text-xs text-gray-600 -mt-2">
+        The bundled <span className="font-mono">image_server</span> script starts this companion server
+        next to the WebUI (port 7861) and prints its address. With it set, the model and LoRA browsers
+        install files onto that machine with live progress bars, and installed models are badged from
+        its exact file hashes. Not needed when the WebUI runs on this machine.
+      </p>
     </div>
   );
 }
@@ -851,7 +887,7 @@ function browseAvailability(item, isLocal) {
     }
     return {
       label: 'installed: ?', cls: 'bg-gray-900/40 text-gray-600 border-gray-800',
-      title: 'Local availability unknown (set your LoRA folder in Setup and it will be scanned)',
+      title: 'Local availability unknown (set your LoRA folder or the install helper in Setup and it will be matched)',
     };
   }
   if (baseFamily(item.base_model) === 'flux') {
@@ -1259,7 +1295,7 @@ function LoraRow({ entry, checkpointFamily, provider, canInstall, download, onIn
                 disabled={!canInstall}
                 title={canInstall
                   ? `Download into your LoRA folder${entry.size_kb ? ` (${(entry.size_kb / 1024).toFixed(0)} MB)` : ''} and link it up`
-                  : 'Set your LoRA folder in Setup to enable one-click installs'}
+                  : 'Set your LoRA folder (or the install helper) in Setup to enable one-click installs'}
                 className="px-2 py-0.5 rounded bg-purple-600 hover:bg-purple-500 text-white disabled:opacity-40"
               >
                 Install to WebUI
@@ -1449,7 +1485,9 @@ function loadLoraBrowserState() {
 function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily, onConfigRefresh }) {
   const [saved] = useState(loadLoraBrowserState);
   const isLocal = (draft.provider || config.provider) === 'local';
-  const canInstall = !!(config.local_lora_dir || '').trim();
+  // A writable folder on this machine, or the install helper next to a
+  // remote WebUI — the backend routes the download either way.
+  const canInstall = !!(config.local_install && config.local_install.lora);
   const [source, setSource] = useState(saved?.source || 'civitai');
   const [novitaOnly, setNovitaOnly] = useState(!!saved?.novitaOnly);
   const [query, setQuery] = useState(saved?.query || '');
@@ -1981,7 +2019,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
                           ? (item.source !== 'hf' && item.model_id
                             ? 'Pick a version, then it downloads into your LoRA folder and links up'
                             : 'Download into your LoRA folder and link it up')
-                          : 'Set your LoRA folder in Setup to enable one-click installs'}
+                          : 'Set your LoRA folder (or the install helper) in Setup to enable one-click installs'}
                         className="w-full px-2 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         Install
@@ -2119,7 +2157,9 @@ function ckptAvailability(item) {
 // into the profile (better than the filename guess).
 function CheckpointBrowser({ config, draft, set, setDraft }) {
   const [saved] = useState(loadCkptBrowserState);
-  const canInstall = !!(config.local_checkpoint_dir || '').trim();
+  // A writable folder on this machine, or the install helper next to a
+  // remote WebUI — the backend routes the download either way.
+  const canInstall = !!(config.local_install && config.local_install.checkpoint);
   const [open, setOpen] = useState(!!saved?.open);
   const [query, setQuery] = useState(saved?.query || '');
   const [baseModel, setBaseModel] = useState(saved?.baseModel || '');
@@ -2751,6 +2791,8 @@ export default function ImageStudio({ onBack }) {
         local_auth_pass: draft.local_auth_pass ?? '',
         local_checkpoint_dir: draft.local_checkpoint_dir ?? '',
         local_lora_dir: draft.local_lora_dir ?? '',
+        local_helper_url: draft.local_helper_url ?? '',
+        local_helper_token: draft.local_helper_token ?? '',
       };
       const res = await fetch(`${API_BASE}/config`, {
         method: 'PUT',

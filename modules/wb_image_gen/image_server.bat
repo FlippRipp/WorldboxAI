@@ -26,6 +26,16 @@ setlocal enabledelayedexpansion
 ::                     on the network (--listen); 0 binds to 127.0.0.1 only
 ::   WEBUI_EXTRA_ARGS  extra launch flags, e.g. "--api-auth user:pass" or,
 ::                     without an NVIDIA GPU, "--skip-torch-cuda-test --use-cpu all"
+::   WB_HELPER         1 (default) also starts the WorldBox install helper
+::                     (helper_server.py) next to the WebUI, so the app can
+::                     one-click install checkpoints/LoRAs and read exact
+::                     installed-model badges even from another machine;
+::                     0 disables it
+::   WB_HELPER_PORT    helper port (default 7861)
+::   WB_HELPER_LISTEN  like WB_WEBUI_LISTEN, for the helper (defaults to
+::                     WB_WEBUI_LISTEN)
+::   WB_HELPER_TOKEN   optional shared secret; paste the same value into the
+::                     Image Studio's helper token field
 
 :: The script lives in modules\wb_image_gen\; the default install dir sits at
 :: the repo root.
@@ -162,6 +172,22 @@ if exist "%VENV_PY%" (
     )
 )
 
+:: ── WorldBox install helper (one-click installs + badges from the app) ──
+:: A tiny stdlib-only companion server; the app sends it download commands
+:: and reads its hash index, which is what makes the Studio's model/LoRA
+:: browsers fully work when the app runs on a different machine than this
+:: WebUI. It shares this console and stops with it.
+if not defined WB_HELPER set WB_HELPER=1
+if not defined WB_HELPER_PORT set WB_HELPER_PORT=7861
+if not defined WB_HELPER_LISTEN set WB_HELPER_LISTEN=%WB_WEBUI_LISTEN%
+if not "%WB_HELPER%"=="0" (
+    if not exist "%WEBUI_DIR%\models\Stable-diffusion" mkdir "%WEBUI_DIR%\models\Stable-diffusion"
+    if not exist "%WEBUI_DIR%\models\Lora" mkdir "%WEBUI_DIR%\models\Lora"
+    set "WB_HELPER_CKPT_DIR=%WEBUI_DIR%\models\Stable-diffusion"
+    set "WB_HELPER_LORA_DIR=%WEBUI_DIR%\models\Lora"
+    start "WorldBox Install Helper" /b python "%REPO_ROOT%\modules\wb_image_gen\helper_server.py"
+)
+
 :: ── First-run hints + the values the Image Studio needs ──
 if not exist "%WEBUI_DIR%\venv" (
     echo First launch: the WebUI now installs its own dependencies ^(several GB,
@@ -180,9 +206,15 @@ if not "%WB_WEBUI_LISTEN%"=="0" (
 )
 echo ====   Checkpoint folder: %WEBUI_DIR%\models\Stable-diffusion
 echo ====   LoRA folder:       %WEBUI_DIR%\models\Lora
-echo ==== No checkpoints ship with the WebUI -- set the folders above in ====
+if not "%WB_HELPER%"=="0" (
+    echo ====   Install helper:    http://127.0.0.1:%WB_HELPER_PORT%
+    echo ====   When WorldBox runs on ANOTHER machine, leave the folder      ====
+    echo ====   fields empty and paste the helper address instead -- it      ====
+    echo ====   downloads models here and reports installed ones back.       ====
+)
+echo ==== No checkpoints ship with the WebUI -- set the values above in  ====
 echo ==== the Studio and install models from its Civitai/HF browser, or  ====
-echo ==== drop .safetensors files into them manually.                    ====
+echo ==== drop .safetensors files into the folders manually.             ====
 echo ==== Press Ctrl+C to stop the server.                               ====
 echo.
 

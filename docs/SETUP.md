@@ -64,7 +64,14 @@ are supported, switched with the provider toggle on the Setup tab:
   Studio to enable one-click installs from the built-in browsers: the Setup
   tab's model browser finds checkpoints on Civitai (search, base-model /
   category / sort filters, per-version installs), and the LoRAs tab's browser
-  covers Civitai and Hugging Face LoRAs.
+  covers Civitai and Hugging Face LoRAs. When the WebUI runs on a **different
+  machine**, leave the folder fields empty and set the install helper URL
+  instead: the bundled `image_server` script also starts a tiny companion
+  server (`helper_server.py`, port 7861) next to the WebUI that downloads
+  models into its folders on command — with live progress bars in the Studio —
+  and reports exact installed-model hashes back for the browsers' badges. Set
+  `WB_HELPER_TOKEN` on the server and paste it into the Studio to require
+  auth on the helper.
 
 To set up a local server from scratch, run the module's bundled script from
 the repo root:
