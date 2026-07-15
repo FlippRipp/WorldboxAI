@@ -117,6 +117,17 @@ if [ -f "$WEBUI_DIR/webui-user.sh" ] \
 fi
 export python_cmd="$PY_CMD"
 
+# ── Pin setuptools for the WebUI's pip installs ──
+# The launcher builds openai/CLIP from an old source zip whose setup.py
+# imports pkg_resources, removed in setuptools 81. The build runs in pip's
+# isolated build environment (which installs the newest setuptools), so the
+# pin must travel via PIP_CONSTRAINT -- the one channel that reaches build
+# environments. A PIP_CONSTRAINT the user already set is left alone.
+if [ -z "${PIP_CONSTRAINT:-}" ]; then
+    printf 'setuptools<81\n' > "$WEBUI_DIR/worldbox-pip-constraints.txt"
+    export PIP_CONSTRAINT="$WEBUI_DIR/worldbox-pip-constraints.txt"
+fi
+
 # ── First-run hints + the values the Image Studio needs ──
 if [ ! -d "$WEBUI_DIR/venv" ]; then
     echo "First launch: the WebUI now installs its own dependencies (several GB,"

@@ -117,6 +117,17 @@ if not exist "%WEBUI_DIR%\webui.bat" (
 set "COMMANDLINE_ARGS=--api --port %WB_WEBUI_PORT%"
 if defined WEBUI_EXTRA_ARGS set "COMMANDLINE_ARGS=%COMMANDLINE_ARGS% %WEBUI_EXTRA_ARGS%"
 
+:: ── Pin setuptools for the WebUI's pip installs ──
+:: The launcher builds openai/CLIP from an old source zip whose setup.py
+:: imports pkg_resources, removed in setuptools 81. The build runs in pip's
+:: isolated build environment (which installs the newest setuptools), so the
+:: pin must travel via PIP_CONSTRAINT -- the one channel that reaches build
+:: environments. A PIP_CONSTRAINT the user already set is left alone.
+if not defined PIP_CONSTRAINT (
+    > "%WEBUI_DIR%\worldbox-pip-constraints.txt" echo setuptools^<81
+    set "PIP_CONSTRAINT=%WEBUI_DIR%\worldbox-pip-constraints.txt"
+)
+
 :: ── First-run hints + the values the Image Studio needs ──
 if not exist "%WEBUI_DIR%\venv" (
     echo First launch: the WebUI now installs its own dependencies ^(several GB,
