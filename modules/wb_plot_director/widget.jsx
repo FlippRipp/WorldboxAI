@@ -209,10 +209,14 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
   // feedback while the rebuild command (analysis + direction + thread) runs
   // server-side; the next state_update replaces the module data and clears it.
   const [resetting, setResetting] = useState(false);
+  // Same idea for the regen button: /plot regen takes a few LLM calls, so the
+  // button shows a busy state until the command's state_update lands (the
+  // server sends one after every command, success or failure).
+  const [regenning, setRegenning] = useState(false);
   const cheatMode = useCheatMode();
 
   const liveData = state?.module_data?.wb_plot_director;
-  useEffect(() => { setResetting(false); }, [liveData]);
+  useEffect(() => { setResetting(false); setRegenning(false); }, [liveData]);
   if (!liveData) return null;
   if (config?.plot_enabled === false) return null;
 
@@ -492,14 +496,19 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
                 {!suspended && (
                   <div>
                     <button
-                      onClick={() => onCommand?.('/plot regen')}
-                      disabled={!onCommand}
-                      className="w-full py-2 rounded-lg bg-indigo-600/80 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-gray-100 text-xs font-semibold transition-colors"
+                      onClick={() => { setRegenning(true); onCommand?.('/plot regen'); }}
+                      disabled={!onCommand || regenning}
+                      aria-busy={regenning}
+                      className={`w-full py-2 rounded-lg bg-indigo-600/80 hover:bg-indigo-500 disabled:cursor-not-allowed text-gray-100 text-xs font-semibold transition-colors ${
+                        regenning ? 'animate-pulse' : 'disabled:opacity-40'
+                      }`}
                     >
-                      ↻ Weave a new thread
+                      {regenning ? '⏳ Weaving a new thread…' : '↻ Weave a new thread'}
                     </button>
                     <div className="text-[10px] text-gray-600 mt-1.5 text-center">
-                      Closes the current thread and generates a fresh one from your profile.
+                      {regenning
+                        ? 'Generating and quality-checking a fresh thread — a few seconds.'
+                        : 'Closes the current thread and generates a fresh one from your profile.'}
                     </div>
                   </div>
                 )}
