@@ -808,7 +808,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
           </div>
         </div>
 
-        <div className={`flex-1 overflow-hidden p-4 grid ${standalone ? 'grid-cols-1' : 'grid-cols-1 xl:grid-cols-[minmax(0,1fr)_380px]'} gap-4`}>
+        <div className="flex-1 overflow-hidden p-4 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_380px] gap-4">
           <div className="overflow-y-auto space-y-4 min-w-0 pr-1">
             <div className="flex items-center gap-2 border-b border-gray-700 pb-2">
               {[
@@ -1050,8 +1050,8 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
             )}
           </div>
 
-          {!standalone && (
           <aside className="space-y-4 min-w-0 overflow-y-auto pr-1">
+            {!standalone && (
             <section className="bg-gray-900/70 border border-gray-700 rounded-lg p-4">
               <div className="flex items-center justify-between gap-3 mb-3">
                 <div>
@@ -1075,9 +1075,14 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                 )}
               </div>
             </section>
+            )}
 
             <section className="bg-gray-900/70 border border-gray-700 rounded-lg p-4">
               <h3 className="text-sm font-semibold uppercase tracking-wide text-purple-300 mb-3">Module Blocks</h3>
+              <p className="text-xs text-gray-500 mb-3">
+                Prompt blocks contributed by active modules (e.g. the Plot Director's thread block).
+                Rendered fresh each turn from module state — listed here, not editable in the pipeline.
+              </p>
               <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
                 {modulePromptBlocks.map((block) => (
                   <div key={block.namespacedId} className="bg-gray-800/70 border border-gray-700 rounded p-3 text-xs">
@@ -1095,6 +1100,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
               </div>
             </section>
 
+            {!standalone && (
             <section className="bg-gray-900/70 border border-gray-700 rounded-lg p-4">
               <div className="flex items-center justify-between gap-3 mb-3">
                 <h3 className="text-sm font-semibold uppercase tracking-wide text-purple-300">{preview ? 'Preview Trace' : 'Last Trace'}</h3>
@@ -1123,8 +1129,8 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                 </div>
               )}
             </section>
+            )}
           </aside>
-          )}
         </div>
 
         <div className="p-4 border-t border-gray-700 bg-gray-900 rounded-b-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3">
