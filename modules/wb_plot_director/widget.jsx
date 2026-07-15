@@ -314,6 +314,13 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
               </div>
             )}
 
+            {!legacy && !hasDirection && data.status !== 'failed' && (
+              <div className="space-y-1 border-t border-gray-700 pt-3">
+                <div className="text-[10px] text-gray-500 uppercase tracking-wider">Story direction</div>
+                <div className="text-[10px] text-gray-600 italic">Still taking shape — it forms from the story's first turns.</div>
+              </div>
+            )}
+
             {hasDirection && (
               <div className="space-y-1 border-t border-gray-700 pt-3">
                 <div className="text-[10px] text-gray-500 uppercase tracking-wider">Story direction</div>

@@ -162,6 +162,7 @@ def _default_data() -> dict:
         "last_closed_turn": 0,
         "next_thread_turn": 0,  # earliest turn a new thread may be generated
         "defer_streak": 0,      # consecutive generator defers (readiness escape)
+        "direction_seed_attempts": 0,  # failed initial-direction reads (capped)
         "suspended": False,
         "suspended_turn": 0,
         "log": [],
@@ -709,19 +710,39 @@ async def _generate_checked_thread(state: dict, sdk, data: dict, avoid_previous_
     return retry
 
 
-async def _update_direction(state: dict, sdk, data: dict, closed_thread: dict,
-                            outcome: str, note: str = "") -> tuple[dict | None, str, dict | None]:
-    """Evolve the narrative direction when a thread closes, distill the
-    thread's lasting consequence, and refresh the slow-moving deep profile
-    fields (attachments, engagement, narrative, notes) -- thread close is
-    exactly when "what hooks work on this player" becomes learnable, and this
-    call already reads the full story material.
+async def _update_direction(state: dict, sdk, data: dict, closed_thread: dict | None = None,
+                            outcome: str = "", note: str = "") -> tuple[dict | None, str, dict | None]:
+    """Evolve the narrative direction, distill a closed thread's lasting
+    consequence, and refresh the slow-moving deep profile fields (attachments,
+    engagement, narrative, notes). Runs at thread close -- exactly when "what
+    hooks work on this player" becomes learnable -- and once at the start of a
+    story (closed_thread None) so the direction exists from the first turns
+    instead of only after the first close.
 
     Returns (direction or None on garbage, consequence sentence, deep profile
     fields or None on garbage)."""
     config = _config(state)
     direction = _clean_direction({}, data.get("direction") or _default_direction())
     profile = data.get("profile") or _default_profile()
+
+    if closed_thread is not None:
+        event_block = f"""A PLOT THREAD JUST CLOSED ({outcome}):
+Title: {closed_thread.get('title', '')}
+Hook: {closed_thread.get('hook', '')}
+Challenge: {closed_thread.get('challenge', '')}
+Stakes: {closed_thread.get('stakes', '')}
+How it ended: {note or '(it faded without resolution)'}
+
+"""
+        consequence_rule = ("- consequence: ONE sentence stating the lasting fallout of this thread's "
+                            "outcome -- something a future thread could call back to (a debt, a grudge, "
+                            "a change in the world). Write it even for expired or abandoned threads: "
+                            "unfinished business is fallout too.\n")
+    else:
+        event_block = ("No plot thread has closed yet -- establish the INITIAL narrative direction "
+                       "from the story material below. Keep it faithful to what is actually on the "
+                       "page; where the story is still young, lean on the scenario and premise.\n\n")
+        consequence_rule = ""
 
     prompt = f"""You maintain the long-term narrative direction of a text RPG -- a short living summary of where the story is heading, used to keep future plot threads coherent with each other and with everything already established. You also keep the slow-moving parts of the player's profile current.
 
@@ -731,19 +752,11 @@ CURRENT NARRATIVE DIRECTION (evolve it, don't rewrite from scratch; empty means 
 CURRENT PLAYER PROFILE:
 {json.dumps(profile, ensure_ascii=False)}
 
-A PLOT THREAD JUST CLOSED ({outcome}):
-Title: {closed_thread.get('title', '')}
-Hook: {closed_thread.get('hook', '')}
-Challenge: {closed_thread.get('challenge', '')}
-Stakes: {closed_thread.get('stakes', '')}
-How it ended: {note or '(it faded without resolution)'}
-
-{_storylines_block(state)}STORY MATERIAL:
+{event_block}{_storylines_block(state)}STORY MATERIAL:
 {_story_material(state)}
 
 Update:
-- consequence: ONE sentence stating the lasting fallout of this thread's outcome -- something a future thread could call back to (a debt, a grudge, a change in the world). Write it even for expired or abandoned threads: unfinished business is fallout too.
-- premise: 1-2 sentences: the larger arc the story seems to be telling.
+{consequence_rule}- premise: 1-2 sentences: the larger arc the story seems to be telling.
 - heading: one sentence: where events look to be going next.
 - open_questions: up to {DIRECTION_LIST_CAP} short unresolved questions the story has raised.
 - recurring_elements: up to {DIRECTION_LIST_CAP} named characters, places, factions, or motifs worth returning to.
@@ -851,6 +864,7 @@ async def on_gather_context(state: dict, sdk) -> dict:
             "last_closed_turn": 0,
             "next_thread_turn": 0,
             "defer_streak": 0,
+            "direction_seed_attempts": 0,
         }}}
 
     if data.get("schema") != SCHEMA_VERSION:
@@ -913,6 +927,25 @@ async def on_librarian(state: dict, sdk) -> dict | None:
     if data.get("pending_nudge") and int(data.get("last_nudge_turn", 0) or 0) < turn:
         updates["pending_nudge"] = ""
 
+    # The narrative direction should exist from the story's first turns, not
+    # only after the first thread closes: seed it once while it is empty
+    # (covers fresh stories, mid-story adoption, and migrated v2 saves with a
+    # thread already running). Two failed reads stop the retries.
+    if (
+        not str((data.get("direction") or {}).get("premise", "")).strip()
+        and int(data.get("direction_seed_attempts", 0) or 0) < 2
+    ):
+        seeded, _, deep_fields = await _update_direction(state, sdk, data)
+        if seeded is not None and seeded.get("premise"):
+            seeded["updated_turn"] = turn
+            updates["direction"] = seeded
+            if deep_fields:
+                updates["profile"] = _clean_profile(
+                    deep_fields, data.get("profile") or _default_profile())
+            print(f"[Plot Director] Turn {turn}: initial narrative direction established.")
+        else:
+            updates["direction_seed_attempts"] = int(data.get("direction_seed_attempts", 0) or 0) + 1
+
     thread = data.get("thread") or _empty_thread()
     cooldown = max(0, int(config.get("thread_cooldown_turns", 3) or 0))
 
@@ -959,7 +992,9 @@ async def on_librarian(state: dict, sdk) -> dict | None:
             player_input = str(message["content"])[-1000:]
             break
 
-    profile = data.get("profile") or _default_profile()
+    # The seed pass above may have just written deep profile fields; build on
+    # that version so this turn's assessment doesn't clobber them.
+    profile = updates.get("profile") or data.get("profile") or _default_profile()
 
     prompt = f"""You maintain a live profile of the player and track one active plot thread in a text RPG. The thread is visible to the player; your profile drives what threads they get next.
 
@@ -1312,7 +1347,7 @@ async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
         direction = data.get("direction") or {}
         premise = str(direction.get("premise", "")).strip()
         if not premise:
-            return {"message": "[Plot] No story direction yet -- it forms as threads close.", "signal": "end_turn"}
+            return {"message": "[Plot] No story direction yet -- it takes shape within the first turns.", "signal": "end_turn"}
         lines = [f"[Plot] Story direction (spoiler): {premise}"]
         heading = str(direction.get("heading", "")).strip()
         if heading:

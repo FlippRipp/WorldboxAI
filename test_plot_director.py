@@ -93,8 +93,16 @@ def _assessment_reply(**overrides):
     return json.dumps(reply)
 
 
-def _active_data(backend, created_turn=1, **overrides):
+def _observing_data(backend):
+    """Default data with the narrative direction already seeded, so tests that
+    are not about seeding skip the one-time seed call."""
     data = backend._default_data()
+    data["direction"]["premise"] = "A test premise already in place."
+    return data
+
+
+def _active_data(backend, created_turn=1, **overrides):
+    data = _observing_data(backend)
     data["status"] = "active"
     data["thread"] = backend._full_thread(
         id=f"t{created_turn}",
@@ -200,8 +208,8 @@ def test_gather_context_soft_migrates_v2_save_preserving_profile_and_thread():
 
     # Additive migration: only the version bump, the upgraded profile, and the
     # new v3 keys -- nothing learned is wiped, no legacy blanking.
-    assert set(update) == {"schema", "profile", "direction",
-                           "last_closed_turn", "next_thread_turn", "defer_streak"}
+    assert set(update) == {"schema", "profile", "direction", "last_closed_turn",
+                           "next_thread_turn", "defer_streak", "direction_seed_attempts"}
     assert update["schema"] == backend.SCHEMA_VERSION
     assert update["direction"] == backend._default_direction()
     # The v2 profile survives in full, upgraded to the v3 shape in place.
@@ -273,7 +281,7 @@ def test_first_librarian_generates_thread_from_scenario():
     sdk = _make_sdk([THREAD_REPLY, CRITIC_ACCEPT], captured)
     state = _state(
         turn=1,
-        data=backend._default_data(),
+        data=_observing_data(backend),
         history=["You arrive at the forgotten ruins."],
         scenario_data={"scenario_description": "An expedition to the forgotten ruins."},
     )
@@ -301,7 +309,7 @@ def test_generation_prompt_includes_profile_difficulty_and_npc_threads():
     backend = _load_backend()
     captured = {}
     sdk = _make_sdk([THREAD_REPLY, CRITIC_ACCEPT], captured)
-    data = backend._default_data()
+    data = _observing_data(backend)
     data["profile"] = _profile_reply()
     state = _state(turn=1, data=data, config={"difficulty": 5})
     state["module_data"]["wb_npc_system"] = {
@@ -317,7 +325,7 @@ def test_generation_prompt_includes_profile_difficulty_and_npc_threads():
     # Soft-fail: no npc module data at all -> generation still runs, blocks omitted.
     captured2 = {}
     sdk2 = _make_sdk([THREAD_REPLY, CRITIC_ACCEPT], captured2)
-    result = asyncio.run(backend.on_librarian(_state(turn=1, data=backend._default_data()), sdk2))
+    result = asyncio.run(backend.on_librarian(_state(turn=1, data=_observing_data(backend)), sdk2))
     assert _updates(result)["status"] == "active"
     assert "OTHER ACTIVE STORYLINES" not in captured2["prompts"][0]
     assert "ESTABLISHED CHARACTERS" not in captured2["prompts"][0]
@@ -327,7 +335,7 @@ def test_generation_prompt_includes_character_roster():
     backend = _load_backend()
     captured = {}
     sdk = _make_sdk([THREAD_REPLY, CRITIC_ACCEPT], captured)
-    state = _state(turn=1, data=backend._default_data())
+    state = _state(turn=1, data=_observing_data(backend))
     state["module_data"]["wb_npc_system"] = {
         "characters": {
             "npc_1": {"name": "Mira Voss", "archetype": "smuggler queen", "role": "antagonist",
@@ -387,7 +395,7 @@ def test_adoption_midstory_bootstraps_profile_before_first_thread():
     sdk = _make_sdk([bootstrap_reply, THREAD_REPLY, CRITIC_ACCEPT], captured)
     state = _state(
         turn=12,
-        data=backend._default_data(),
+        data=_observing_data(backend),
         history=["The intro.", "You duel the harbor watch.", "You bribe the customs clerk."],
     )
     state["chat_messages"] = [
@@ -424,7 +432,7 @@ def test_adoption_bootstrap_failure_still_generates_thread():
     sdk = _make_sdk(["not json", THREAD_REPLY, CRITIC_ACCEPT], captured)
 
     result = asyncio.run(backend.on_librarian(
-        _state(turn=12, data=backend._default_data()), sdk))
+        _state(turn=12, data=_observing_data(backend)), sdk))
     update = _updates(result)
 
     assert len(captured["prompts"]) == 3
@@ -439,7 +447,7 @@ def test_fresh_story_does_not_bootstrap():
     sdk = _make_sdk([THREAD_REPLY, CRITIC_ACCEPT], captured)
 
     result = asyncio.run(backend.on_librarian(
-        _state(turn=1, data=backend._default_data()), sdk))
+        _state(turn=1, data=_observing_data(backend)), sdk))
 
     assert len(captured["prompts"]) == 2  # thread generation + fit check only
     assert "already in progress" not in captured["prompts"][0]
@@ -448,7 +456,7 @@ def test_fresh_story_does_not_bootstrap():
 
 def test_generation_failure_retries_then_dormant():
     backend = _load_backend()
-    data = backend._default_data()
+    data = _observing_data(backend)
 
     for attempt in range(1, backend.GEN_MAX_ATTEMPTS + 1):
         captured = {}
@@ -474,7 +482,7 @@ def test_fit_check_reject_retries_with_critique():
     sdk = _make_sdk([THREAD_REPLY, CRITIC_REJECT, SECOND_THREAD_REPLY, CRITIC_ACCEPT], captured)
 
     result = asyncio.run(backend.on_librarian(
-        _state(turn=1, data=backend._default_data()), sdk))
+        _state(turn=1, data=_observing_data(backend)), sdk))
     update = _updates(result)
 
     assert len(captured["prompts"]) == 4
@@ -493,7 +501,7 @@ def test_fit_check_double_reject_accepts_second_candidate():
     sdk = _make_sdk([THREAD_REPLY, CRITIC_REJECT, SECOND_THREAD_REPLY, CRITIC_REJECT], captured)
 
     result = asyncio.run(backend.on_librarian(
-        _state(turn=1, data=backend._default_data()), sdk))
+        _state(turn=1, data=_observing_data(backend)), sdk))
     update = _updates(result)
 
     # The critic never starves the module: the second candidate ships anyway,
@@ -510,7 +518,7 @@ def test_fit_check_fails_open():
     captured = {}
     sdk = _make_sdk([THREAD_REPLY], captured)
     result = asyncio.run(backend.on_librarian(
-        _state(turn=1, data=backend._default_data(), config={"fit_check_enabled": False}), sdk))
+        _state(turn=1, data=_observing_data(backend), config={"fit_check_enabled": False}), sdk))
     assert len(captured["prompts"]) == 1
     assert _updates(result)["thread"]["title"] == "The Salt Baron's Ledger"
 
@@ -518,7 +526,7 @@ def test_fit_check_fails_open():
     captured = {}
     sdk = _make_sdk([THREAD_REPLY, "not json"], captured)
     result = asyncio.run(backend.on_librarian(
-        _state(turn=1, data=backend._default_data()), sdk))
+        _state(turn=1, data=_observing_data(backend)), sdk))
     assert len(captured["prompts"]) == 2
     assert _updates(result)["thread"]["title"] == "The Salt Baron's Ledger"
 
@@ -526,16 +534,73 @@ def test_fit_check_fails_open():
     captured = {}
     sdk = _make_sdk([THREAD_REPLY, CRITIC_REJECT, "not json"], captured)
     result = asyncio.run(backend.on_librarian(
-        _state(turn=1, data=backend._default_data()), sdk))
+        _state(turn=1, data=_observing_data(backend)), sdk))
     assert len(captured["prompts"]) == 3
     update = _updates(result)
     assert update["thread"]["title"] == "The Salt Baron's Ledger"
     assert update["gen_attempts"] == 0
 
 
+def test_direction_seeds_from_story_start():
+    backend = _load_backend()
+    captured = {}
+    sdk = _make_sdk([DIRECTION_REPLY, THREAD_REPLY, CRITIC_ACCEPT], captured)
+    data = backend._default_data()
+    data["profile"] = _profile_reply()  # non-empty: skip the bootstrap path
+
+    result = asyncio.run(backend.on_librarian(_state(turn=1, data=data), sdk))
+    update = _updates(result)
+
+    # Seed (balanced) runs before the first generation, so the overarching
+    # plot exists from the story's first turns -- not only after a close.
+    assert captured["preferences"] == ["balanced", "smartest", "balanced"]
+    assert "INITIAL narrative direction" in captured["prompts"][0]
+    assert update["direction"]["premise"].startswith("A quiet war")
+    assert update["direction"]["updated_turn"] == 1
+    # The freshly seeded direction already steers the first thread.
+    assert "A quiet war for the harbor's soul" in captured["prompts"][1]
+    # Deep profile fields arrive with the seed.
+    assert update["profile"]["attachments"][0]["name"] == "The Salt Baron"
+    assert update["thread"]["title"] == "The Salt Baron's Ledger"
+
+
+def test_direction_seed_covers_migrated_active_thread_and_caps_retries():
+    backend = _load_backend()
+
+    # A save migrated mid-thread: active thread, empty direction. The seed
+    # runs alongside the normal assessment.
+    data = _active_data(backend)
+    data["direction"] = backend._default_direction()
+    captured = {}
+    sdk = _make_sdk([DIRECTION_REPLY, _assessment_reply()], captured)
+    result = asyncio.run(backend.on_librarian(_state(turn=3, data=data), sdk))
+    update = _updates(result)
+    assert len(captured["prompts"]) == 2
+    assert update["direction"]["premise"].startswith("A quiet war")
+    # The assessment builds on the seeded profile rather than clobbering it.
+    assert update["profile"]["attachments"][0]["name"] == "The Salt Baron"
+    assert update["profile"]["tone"] == "gritty"
+
+    # Failed seeds are capped at two attempts, then the module stops paying
+    # for them until a close writes the direction.
+    data = _active_data(backend)
+    data["direction"] = backend._default_direction()
+    for expected_attempts in (1, 2):
+        result = asyncio.run(backend.on_librarian(
+            _state(turn=3, data=data), _make_sdk(["garbage", _assessment_reply()], {})))
+        update = _updates(result)
+        assert update["direction_seed_attempts"] == expected_attempts
+        assert "direction" not in update
+        data.update(update)
+    captured = {}
+    asyncio.run(backend.on_librarian(
+        _state(turn=4, data=data), _make_sdk([_assessment_reply()], captured)))
+    assert len(captured["prompts"]) == 1  # assessment only, no more seed tries
+
+
 def test_generation_defer_postpones_without_failure():
     backend = _load_backend()
-    data = backend._default_data()
+    data = _observing_data(backend)
     data["profile"] = _profile_reply()  # non-empty: skip the bootstrap path
 
     # First ask: the generator defers -- no thread, no failure bookkeeping.
