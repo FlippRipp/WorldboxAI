@@ -117,15 +117,36 @@ if not exist "%WEBUI_DIR%\webui.bat" (
 set "COMMANDLINE_ARGS=--api --port %WB_WEBUI_PORT%"
 if defined WEBUI_EXTRA_ARGS set "COMMANDLINE_ARGS=%COMMANDLINE_ARGS% %WEBUI_EXTRA_ARGS%"
 
-:: ── Pin setuptools for the WebUI's pip installs ──
-:: The launcher builds openai/CLIP from an old source zip whose setup.py
-:: imports pkg_resources, removed in setuptools 81. The build runs in pip's
-:: isolated build environment (which installs the newest setuptools), so the
-:: pin must travel via PIP_CONSTRAINT -- the one channel that reaches build
-:: environments. A PIP_CONSTRAINT the user already set is left alone.
+:: ── Pin packages for the WebUI's pip installs ──
+:: setuptools<81: the launcher builds openai/CLIP from an old source zip
+::   whose setup.py imports pkg_resources, removed in setuptools 81. The
+::   build runs in pip's isolated build environment (which installs the
+::   newest setuptools), so the pin must travel via PIP_CONSTRAINT -- the one
+::   channel that reaches build environments.
+:: numpy<2: the WebUI's torch/scikit-image builds are compiled against
+::   NumPy 1.x; a stray install step upgrading to NumPy 2 crashes startup
+::   with "_ARRAY_API not found" / "numpy.dtype size changed".
+:: A PIP_CONSTRAINT the user already set is left alone.
 if not defined PIP_CONSTRAINT (
-    > "%WEBUI_DIR%\worldbox-pip-constraints.txt" echo setuptools^<81
+    > "%WEBUI_DIR%\worldbox-pip-constraints.txt" (
+        echo setuptools^<81
+        echo numpy^<2
+    )
     set "PIP_CONSTRAINT=%WEBUI_DIR%\worldbox-pip-constraints.txt"
+)
+
+:: ── Repair: a venv that already picked up NumPy 2 gets downgraded ──
+set "VENV_PY=%WEBUI_DIR%\venv\Scripts\python.exe"
+if exist "%VENV_PY%" (
+    "%VENV_PY%" -c "import numpy" >nul 2>&1
+    if not errorlevel 1 (
+        "%VENV_PY%" -c "import numpy, sys; sys.exit(int(numpy.__version__.split('.')[0]) >= 2)" >nul 2>&1
+        if errorlevel 1 (
+            echo Repairing the WebUI venv: downgrading NumPy 2 to 1.x ...
+            "%VENV_PY%" -m pip install "numpy<2"
+            echo.
+        )
+    )
 )
 
 :: ── First-run hints + the values the Image Studio needs ──

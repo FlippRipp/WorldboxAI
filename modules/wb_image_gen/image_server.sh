@@ -117,15 +117,28 @@ if [ -f "$WEBUI_DIR/webui-user.sh" ] \
 fi
 export python_cmd="$PY_CMD"
 
-# ── Pin setuptools for the WebUI's pip installs ──
-# The launcher builds openai/CLIP from an old source zip whose setup.py
-# imports pkg_resources, removed in setuptools 81. The build runs in pip's
-# isolated build environment (which installs the newest setuptools), so the
-# pin must travel via PIP_CONSTRAINT -- the one channel that reaches build
-# environments. A PIP_CONSTRAINT the user already set is left alone.
+# ── Pin packages for the WebUI's pip installs ──
+# setuptools<81: the launcher builds openai/CLIP from an old source zip
+#   whose setup.py imports pkg_resources, removed in setuptools 81. The
+#   build runs in pip's isolated build environment (which installs the
+#   newest setuptools), so the pin must travel via PIP_CONSTRAINT -- the one
+#   channel that reaches build environments.
+# numpy<2: the WebUI's torch/scikit-image builds are compiled against
+#   NumPy 1.x; a stray install step upgrading to NumPy 2 crashes startup
+#   with "_ARRAY_API not found" / "numpy.dtype size changed".
+# A PIP_CONSTRAINT the user already set is left alone.
 if [ -z "${PIP_CONSTRAINT:-}" ]; then
-    printf 'setuptools<81\n' > "$WEBUI_DIR/worldbox-pip-constraints.txt"
+    printf 'setuptools<81\nnumpy<2\n' > "$WEBUI_DIR/worldbox-pip-constraints.txt"
     export PIP_CONSTRAINT="$WEBUI_DIR/worldbox-pip-constraints.txt"
+fi
+
+# ── Repair: a venv that already picked up NumPy 2 gets downgraded ──
+VENV_PY="$WEBUI_DIR/venv/bin/python"
+if [ -x "$VENV_PY" ] && "$VENV_PY" -c "import numpy" >/dev/null 2>&1 \
+        && ! "$VENV_PY" -c "import numpy, sys; sys.exit(int(numpy.__version__.split('.')[0]) >= 2)" >/dev/null 2>&1; then
+    echo "Repairing the WebUI venv: downgrading NumPy 2 to 1.x ..."
+    "$VENV_PY" -m pip install "numpy<2"
+    echo
 fi
 
 # ── First-run hints + the values the Image Studio needs ──
