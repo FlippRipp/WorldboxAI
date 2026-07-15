@@ -46,6 +46,7 @@ DIRECTION_LIST_CAP = 6
 FIT_MAX_REJECTS = 2
 DEFER_MAX_STREAK = 2
 ABANDON_COOLDOWN_FACTOR = 2
+PIVOT_COOLDOWN_TURNS = 3  # min turns between pivot-driven thread replacements
 BOOTSTRAP_SCENES = 15
 BOOTSTRAP_SCENES_MAX_CHARS = 12000
 BOOTSTRAP_INPUTS = 15
@@ -163,6 +164,7 @@ def _default_data() -> dict:
         "next_thread_turn": 0,  # earliest turn a new thread may be generated
         "defer_streak": 0,      # consecutive generator defers (readiness escape)
         "direction_seed_attempts": 0,  # failed initial-direction reads (capped)
+        "last_pivot_turn": 0,  # last pivot-driven replacement (thrash guard)
         "suspended": False,
         "suspended_turn": 0,
         "log": [],
@@ -544,7 +546,8 @@ def _history_block(data: dict) -> str:
 
 
 async def _generate_thread(state: dict, sdk, data: dict, avoid_previous_kind: bool = False,
-                           allow_defer: bool = False, critique: str = "") -> dict:
+                           allow_defer: bool = False, critique: str = "",
+                           pivot_intent: str = "") -> dict:
     """Generate a new short-term thread from the profile, narrative direction,
     and the story's established material. Returns the module_data update dict:
     a fresh active thread, a defer (story not ready for new plot material), or
@@ -568,6 +571,13 @@ async def _generate_thread(state: dict, sdk, data: dict, avoid_previous_kind: bo
         "Design a different thread that addresses this."
         if critique else ""
     )
+    pivot_block = (
+        f"\n\nTHE PLAYER JUST CHANGED COURSE: {pivot_intent} "
+        "Meet them there: design the thread to serve what they are heading toward "
+        "-- it should travel with them and enrich their new pursuit, never pull "
+        "them back to what they left behind."
+        if pivot_intent else ""
+    )
     defer_streak = int(data.get("defer_streak", 0) or 0)
     may_defer = allow_defer and defer_streak < DEFER_MAX_STREAK
     defer_block = (
@@ -588,7 +598,7 @@ CHALLENGE DIFFICULTY:
 {_direction_block(data)}STORY MATERIAL:
 {_story_material(state)}
 
-{_storylines_block(state)}{_character_roster(state)}{_history_block(data)}Design ONE new thread that fits the established genre, tone and current situation, plays to what this player enjoys, and injects challenge at the guided difficulty. GROUND IT: anchor the hook in established characters, places, factions, or unresolved hooks from the material above -- invent at most one new minor element, and only when nothing established fits. Where a past consequence or open question offers a natural seed, grow the thread from it.{different}{critique_block}{defer_block}
+{_storylines_block(state)}{_character_roster(state)}{_history_block(data)}Design ONE new thread that fits the established genre, tone and current situation, plays to what this player enjoys, and injects challenge at the guided difficulty. GROUND IT: anchor the hook in established characters, places, factions, or unresolved hooks from the material above -- invent at most one new minor element, and only when nothing established fits. Where a past consequence or open question offers a natural seed, grow the thread from it.{different}{critique_block}{pivot_block}{defer_block}
 
 Respond with ONLY valid JSON:
 {{"title": "3-6 words", "hook": "how it surfaces in the story, one sentence", "challenge": "the complication or opposition, one sentence", "stakes": "what is at risk, one sentence", "appeal": "which player preference this serves, a few words"}}"""
@@ -684,12 +694,13 @@ Respond with ONLY valid JSON:
 
 
 async def _generate_checked_thread(state: dict, sdk, data: dict, avoid_previous_kind: bool = False,
-                                   allow_defer: bool = False) -> dict:
+                                   allow_defer: bool = False, pivot_intent: str = "") -> dict:
     """Generate a thread and run it through the fit-check critic. One rejection
     earns a critique-fed retry; a second rejection accepts anyway (the critic
     gates quality, it must never starve the module). Malformed generation
     replies keep the existing gen_attempts/dormancy bookkeeping untouched."""
-    result = await _generate_thread(state, sdk, data, avoid_previous_kind, allow_defer)
+    result = await _generate_thread(state, sdk, data, avoid_previous_kind, allow_defer,
+                                    pivot_intent=pivot_intent)
     if "thread" not in result or not _config(state).get("fit_check_enabled", True):
         return result
 
@@ -698,7 +709,8 @@ async def _generate_checked_thread(state: dict, sdk, data: dict, avoid_previous_
         return result
 
     retry = await _generate_thread(state, sdk, data, avoid_previous_kind,
-                                   allow_defer=False, critique=critique)
+                                   allow_defer=False, critique=critique,
+                                   pivot_intent=pivot_intent)
     if "thread" not in retry:
         # The retry came back malformed; the first candidate is still a valid
         # thread, so use it rather than burning gen_attempts on a quality pass.
@@ -827,7 +839,7 @@ def _finalize_thread(updates: dict, data: dict, thread: dict, outcome: str, turn
 
 async def _close_thread(state: dict, sdk, data: dict, updates: dict, thread: dict,
                         outcome: str, turn: int, note: str = "", cooldown: int = 0,
-                        avoid_previous_kind: bool = False) -> None:
+                        avoid_previous_kind: bool = False, pivot_intent: str = "") -> None:
     """Full close sequence: evolve the narrative direction (and the deep
     profile fields), record the thread's consequence, finalize into history
     with the quiet-period clock, and -- only when no cooldown applies --
@@ -844,7 +856,9 @@ async def _close_thread(state: dict, sdk, data: dict, updates: dict, thread: dic
     if turn >= int(updates["next_thread_turn"]):
         updates.update(await _generate_checked_thread(
             state, sdk, {**data, **updates},
-            avoid_previous_kind=avoid_previous_kind, allow_defer=True))
+            avoid_previous_kind=avoid_previous_kind,
+            allow_defer=not pivot_intent,  # a pivot means the player is moving NOW
+            pivot_intent=pivot_intent))
 
 
 async def on_gather_context(state: dict, sdk) -> dict:
@@ -865,6 +879,7 @@ async def on_gather_context(state: dict, sdk) -> dict:
             "next_thread_turn": 0,
             "defer_streak": 0,
             "direction_seed_attempts": 0,
+            "last_pivot_turn": 0,
         }}}
 
     if data.get("schema") != SCHEMA_VERSION:
@@ -1016,13 +1031,15 @@ LAST PLAYER INPUT:
 Judge and update:
 - thread_engaged: did the player or the scene meaningfully interact with the active thread this turn?
 - thread_resolved: is the thread's challenge definitively over (overcome, defused, or conclusively failed)?
+- player_pivot: has the player clearly COMMITTED to a different pursuit than the active thread -- a stated intention, a new goal, leaving the situation behind for good? A brief detour, a side errand, or a single scene elsewhere is NOT a pivot.
+- pivot_intent: one sentence naming what the player is now pursuing (only when player_pivot is true).
 - opportunity: does the scene end with a natural opening to bring the thread forward next turn?
 - nudge: one subtle piece of story material (a rumor, an arrival, a discovery) that could pull the scene toward the thread without contradicting what the player is doing. Never an instruction to the player.
 - momentum: building | steady | stalled
 - profile: the updated fast-moving profile fields. playstyle values are integers 0-10 for what the player actually does. tone is the story's prevailing tone in a few words. themes are short phrases. likes are what the player demonstrably enjoys; avoids are what they consistently steer away from in practice -- both carry a weight (low, medium, high) for how strongly the player seems to feel and one clause of evidence citing what the player actually did (an entry without real evidence does not belong). At most {PROFILE_LIST_CAP} entries per list -- drop the least relevant to make room. Some entries may have been set directly by the player; preserve those (including their weight) unless the story clearly contradicts them. The profile's dislikes are set by the player themselves and are NOT yours to change -- do not include dislikes in your reply, and never add a like that contradicts one. A character acting averse to something in-story does not mean the player dislikes it. The profile's attachments, engagement, narrative, and notes fields are maintained elsewhere -- do not include them.
 
 Respond with ONLY valid JSON:
-{{"thread_engaged": false, "thread_resolved": false, "resolution_note": "one sentence, only if resolved", "opportunity": false, "nudge": "...", "momentum": "steady", "profile": {{"playstyle": {{{", ".join(f'"{k}": 0' for k in PLAYSTYLE_KEYS)}}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high", "evidence": "..."}}], "avoids": [{{"text": "...", "weight": "low|medium|high", "evidence": "..."}}]}}}}"""
+{{"thread_engaged": false, "thread_resolved": false, "resolution_note": "one sentence, only if resolved", "player_pivot": false, "pivot_intent": "", "opportunity": false, "nudge": "...", "momentum": "steady", "profile": {{"playstyle": {{{", ".join(f'"{k}": 0' for k in PLAYSTYLE_KEYS)}}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high", "evidence": "..."}}], "avoids": [{{"text": "...", "weight": "low|medium|high", "evidence": "..."}}]}}}}"""
 
     model_pref = config.get("assessment_ai_model", "balanced")
     try:
@@ -1037,6 +1054,8 @@ Respond with ONLY valid JSON:
 
     engaged = bool(parsed.get("thread_engaged"))
     resolved = bool(parsed.get("thread_resolved"))
+    pivot = bool(parsed.get("player_pivot"))
+    pivot_intent = str(parsed.get("pivot_intent") or "").strip()
     opportunity = bool(parsed.get("opportunity"))
     nudge_text = str(parsed.get("nudge") or "").strip()
     resolution_note = str(parsed.get("resolution_note") or "").strip()
@@ -1057,6 +1076,23 @@ Respond with ONLY valid JSON:
         print(f"[Plot Director] Turn {turn}: thread resolved -- {thread.get('title', '')}")
         await _close_thread(state, sdk, data, updates, thread, "resolved", turn,
                             note=resolution_note, cooldown=cooldown)
+        return {"module_data": {MODULE_ID: updates}}
+
+    # The player has clearly committed to a different pursuit: don't wait for
+    # the ignore-streak to grind through -- supersede the thread now and weave
+    # one that meets them where they are going. No quiet period (the player is
+    # actively moving), and a thrash guard so back-to-back pivots settle down.
+    if (
+        pivot
+        and not engaged
+        and pivot_intent
+        and config.get("pivot_adapt", True)
+        and turn - int(data.get("last_pivot_turn", 0) or 0) >= PIVOT_COOLDOWN_TURNS
+    ):
+        print(f"[Plot Director] Turn {turn}: player pivoted -- superseding {thread.get('title', '')}")
+        updates["last_pivot_turn"] = turn
+        await _close_thread(state, sdk, data, updates, thread, "superseded", turn,
+                            note=pivot_intent, cooldown=0, pivot_intent=pivot_intent)
         return {"module_data": {MODULE_ID: updates}}
 
     abandon_after = max(

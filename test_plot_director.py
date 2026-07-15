@@ -209,7 +209,8 @@ def test_gather_context_soft_migrates_v2_save_preserving_profile_and_thread():
     # Additive migration: only the version bump, the upgraded profile, and the
     # new v3 keys -- nothing learned is wiped, no legacy blanking.
     assert set(update) == {"schema", "profile", "direction", "last_closed_turn",
-                           "next_thread_turn", "defer_streak", "direction_seed_attempts"}
+                           "next_thread_turn", "defer_streak", "direction_seed_attempts",
+                           "last_pivot_turn"}
     assert update["schema"] == backend.SCHEMA_VERSION
     assert update["direction"] == backend._default_direction()
     # The v2 profile survives in full, upgraded to the v3 shape in place.
@@ -1325,3 +1326,70 @@ def test_plot_reset_fresh_story_skips_bootstrap_and_survives_failures():
     assert update["direction_seed_attempts"] == 0  # librarian will re-seed
     assert update["gen_attempts"] == 1
     assert "retries next turn" in result["message"]
+
+
+def test_player_pivot_supersedes_thread_and_meets_player():
+    backend = _load_backend()
+    captured = {}
+    sdk = _make_sdk([
+        _assessment_reply(thread_engaged=False, player_pivot=True,
+                          pivot_intent="The player has set sail north to hunt the ice reavers."),
+        DIRECTION_REPLY,
+        SECOND_THREAD_REPLY,
+        CRITIC_ACCEPT,
+    ], captured)
+    data = _active_data(backend, created_turn=1)
+
+    result = asyncio.run(backend.on_librarian(_state(turn=5, data=data), sdk))
+    update = _updates(result)
+
+    # The assessment is asked to spot committed pivots...
+    assert "player_pivot" in captured["prompts"][0]
+    # ...and a detected one supersedes the thread and replaces it in the SAME
+    # pass, despite the default quiet period -- the plot meets the player.
+    assert update["thread_history"][-1]["outcome"] == "superseded"
+    assert update["thread_history"][-1]["note"] == "The player has set sail north to hunt the ice reavers."
+    assert update["thread"]["title"] == "Tremors Below"
+    assert update["thread"]["status"] == "active"
+    assert update["last_pivot_turn"] == 5
+    assert update["next_thread_turn"] == 5
+    generation_prompt = captured["prompts"][2]
+    assert "CHANGED COURSE" in generation_prompt
+    assert "set sail north" in generation_prompt
+    assert '"defer"' not in generation_prompt  # the player is moving NOW
+
+
+def test_pivot_needs_commitment_toggle_and_thrash_guard():
+    backend = _load_backend()
+
+    def run(reply_kwargs, config=None, last_pivot_turn=0):
+        data = _active_data(backend, created_turn=1, last_pivot_turn=last_pivot_turn)
+        captured = {}
+        sdk = _make_sdk([_assessment_reply(**reply_kwargs)], captured)
+        result = asyncio.run(backend.on_librarian(
+            _state(turn=5, data=data, config=config), sdk))
+        return _updates(result), captured
+
+    pivot_kwargs = {"thread_engaged": False, "player_pivot": True,
+                    "pivot_intent": "Sailing north."}
+
+    # Still engaging with the thread: a claimed pivot changes nothing.
+    update, captured = run({**pivot_kwargs, "thread_engaged": True})
+    assert "thread_history" not in update
+    assert len(captured["prompts"]) == 1
+
+    # Toggle off: the pivot falls through to the normal ignore-streak path.
+    update, captured = run(pivot_kwargs, config={"pivot_adapt": False})
+    assert "thread_history" not in update
+    assert update["ignored_streak"] == 1
+    assert len(captured["prompts"]) == 1
+
+    # Thrash guard: a pivot within PIVOT_COOLDOWN_TURNS of the last one waits.
+    update, captured = run(pivot_kwargs, last_pivot_turn=3)
+    assert "thread_history" not in update
+    assert len(captured["prompts"]) == 1
+
+    # No stated intent, no pivot -- there is nothing to meet the player with.
+    update, captured = run({**pivot_kwargs, "pivot_intent": ""})
+    assert "thread_history" not in update
+    assert len(captured["prompts"]) == 1

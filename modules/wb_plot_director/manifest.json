@@ -93,6 +93,13 @@
       "category": "Plot Director",
       "description": "Also nudge when a scene presents a natural opening for the thread, even before the stall threshold is reached."
     },
+    "pivot_adapt": {
+      "type": "toggle",
+      "default": true,
+      "label": "Adapt to Player Pivots",
+      "category": "Plot Director",
+      "description": "When you clearly commit to a different pursuit, the current thread is superseded immediately and a new one is woven to meet you where you are going -- no waiting for the ignore counter."
+    },
     "assessment_ai_model": {
       "type": "select",
       "options": [

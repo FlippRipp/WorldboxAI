@@ -8,7 +8,7 @@ const MOMENTUM_STYLES = {
   resolving: 'text-purple-400',
 };
 
-const OUTCOME_ICONS = { resolved: '✓', abandoned: '✕', expired: '⌛', rerolled: '↻' };
+const OUTCOME_ICONS = { resolved: '✓', abandoned: '✕', expired: '⌛', rerolled: '↻', superseded: '↷' };
 
 const PREF_WEIGHTS = ['low', 'medium', 'high'];
 const WEIGHT_CHIP_STYLES = {
