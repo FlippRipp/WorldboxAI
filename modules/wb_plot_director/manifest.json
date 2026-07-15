@@ -119,7 +119,7 @@
     "/plot": "on_command_plot"
   },
   "command_help": {
-    "/plot": "Show the active plot thread, momentum, story direction, and your profile. '/plot regen' weaves a new thread; '/plot suspend' freezes plot direction and '/plot resume' picks it back up; '/plot profile ...' edits your tone/themes/likes/dislikes/avoids/pacing/agency/register/notes."
+    "/plot": "Show the active plot thread, momentum, and your profile. The challenge and the story direction stay spoiler-hidden: '/plot challenge' and '/plot direction' reveal them. '/plot regen' weaves a new thread; '/plot suspend' freezes plot direction and '/plot resume' picks it back up; '/plot profile ...' edits your tone/themes/likes/dislikes/avoids/pacing/agency/register/notes."
   },
   "prompt_blocks": []
 }

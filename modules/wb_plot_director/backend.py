@@ -14,10 +14,10 @@ thread_history; new threads are generated to build on both, grounded in the
 NPC system's established characters, and vetted by a fit-check critic before
 they go live. Between threads the story gets a configurable quiet period.
 
-The active thread is fully visible: a soft context line keeps the storyteller
-aware of it every turn, /plot and the sidebar widget show it to the player, and
-one-turn nudges ride inside that context line only when the thread stalls or a
-natural opening appears.
+The active thread is visible: a soft context line keeps the storyteller aware
+of it every turn, /plot and the sidebar widget show it to the player (with the
+challenge spoiler-hidden until they opt in), and one-turn nudges ride inside
+that context line only when the thread stalls or a natural opening appears.
 
 The player can suspend plot direction at any time (/plot suspend or the widget
 button): the context line, assessments, nudges, expiry, and generation all
@@ -1299,6 +1299,32 @@ async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
     if args and args[0].lower() == "profile":
         return _command_profile_edit(data, args[1:])
 
+    if args and args[0].lower() == "challenge":
+        thread = data.get("thread") or {}
+        if thread.get("status") != "active" or not thread.get("challenge"):
+            return {"message": "[Plot] No active thread challenge to reveal.", "signal": "end_turn"}
+        return {
+            "message": f"[Plot] Challenge (spoiler): {thread['challenge']}",
+            "signal": "end_turn",
+        }
+
+    if args and args[0].lower() == "direction":
+        direction = data.get("direction") or {}
+        premise = str(direction.get("premise", "")).strip()
+        if not premise:
+            return {"message": "[Plot] No story direction yet -- it forms as threads close.", "signal": "end_turn"}
+        lines = [f"[Plot] Story direction (spoiler): {premise}"]
+        heading = str(direction.get("heading", "")).strip()
+        if heading:
+            lines.append(f"Heading: {heading}")
+        questions = [str(q).strip() for q in direction.get("open_questions", []) if str(q).strip()]
+        if questions:
+            lines.append("Open questions: " + "; ".join(questions))
+        recurring = [str(r).strip() for r in direction.get("recurring_elements", []) if str(r).strip()]
+        if recurring:
+            lines.append("Recurring elements: " + ", ".join(recurring))
+        return {"message": "\n".join(lines), "signal": "end_turn"}
+
     if data.get("status") == "failed":
         return {"message": "[Plot] Plot direction is inactive.", "signal": "end_turn"}
     if data.get("suspended"):
@@ -1323,7 +1349,8 @@ async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
     if thread.get("hook"):
         lines.append(f"Hook: {thread['hook']}")
     if thread.get("challenge"):
-        lines.append(f"Challenge: {thread['challenge']}")
+        # The opposition stays a surprise unless the player opts in.
+        lines.append("Challenge: (spoiler -- '/plot challenge' reveals it)")
     if thread.get("stakes"):
         lines.append(f"Stakes: {thread['stakes']}")
 
@@ -1335,9 +1362,9 @@ async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
     if profile_line:
         lines.append(f"Profile: {profile_line}")
 
-    premise = str((data.get("direction") or {}).get("premise", "")).strip()
-    if premise:
-        lines.append(f"Story direction: {premise}")
+    if str((data.get("direction") or {}).get("premise", "")).strip():
+        # The arc is spoiler territory, same as the challenge.
+        lines.append("Story direction: (spoiler -- '/plot direction' reveals it)")
 
     recent = [
         f'"{entry.get("title", "")}" {entry.get("outcome", "")} (t{entry.get("closed_turn", 0)})'

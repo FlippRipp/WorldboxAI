@@ -32,6 +32,48 @@ function normalizeEntry(entry) {
   return { text: String(entry ?? ''), weight: 'medium', evidence: '' };
 }
 
+// Blurred until clicked, so spoiler material (the thread's opposition, the
+// story's larger arc) stays a surprise unless the player opts in. Mount with
+// a key tied to the content's identity (thread id, direction update turn) so
+// fresh material re-hides itself.
+function Spoiler({ label = 'spoiler', children }) {
+  const [revealed, setRevealed] = useState(false);
+  if (revealed) return children;
+  return (
+    <button
+      onClick={() => setRevealed(true)}
+      className="w-full text-left group"
+      aria-label={`Reveal ${label} (spoiler)`}
+      title="Spoiler — click to reveal"
+    >
+      <span className="blur-[5px] select-none group-hover:blur-[4px] transition-all">{children}</span>
+      <span className="block text-[9px] text-gray-600 group-hover:text-gray-400">spoiler — click to reveal</span>
+    </button>
+  );
+}
+
+// A read-only chip row for AI-maintained lists (engagement patterns,
+// recurring story elements).
+function ChipRow({ label, items, className = 'text-gray-400' }) {
+  const texts = (items ?? []).map((t) => String(t ?? '').trim()).filter(Boolean);
+  if (texts.length === 0) return null;
+  return (
+    <div className="space-y-1">
+      <div className="text-[10px] text-gray-500 uppercase tracking-wider">{label}</div>
+      <div className="flex flex-wrap gap-1">
+        {texts.map((t, i) => (
+          <span
+            key={`${t}-${i}`}
+            className={`bg-gray-900 border border-gray-700 rounded-full text-[10px] px-2 py-0.5 ${className}`}
+          >
+            {t}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // One editable profile list: chips with remove buttons in edit mode, plus an
 // add input. Weighted lists also get a low/medium/high picker on add and a
 // per-chip badge that cycles the weight. Persistence is a command round-trip;
@@ -244,7 +286,9 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
                 {thread.challenge && (
                   <div className="text-xs leading-snug">
                     <span className="text-amber-400 uppercase tracking-wider text-[10px] mr-1">Challenge</span>
-                    <span className="text-gray-300">{thread.challenge}</span>
+                    <Spoiler key={thread.id} label="the challenge">
+                      <span className="text-gray-300">{thread.challenge}</span>
+                    </Spoiler>
                   </div>
                 )}
                 {thread.stakes && (
@@ -273,22 +317,30 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
             {hasDirection && (
               <div className="space-y-1 border-t border-gray-700 pt-3">
                 <div className="text-[10px] text-gray-500 uppercase tracking-wider">Story direction</div>
-                <div className="text-xs text-gray-300 leading-snug">{direction.premise}</div>
-                {direction.heading && (
-                  <div className="text-[10px] text-gray-500 leading-snug">{direction.heading}</div>
-                )}
-                {(direction.open_questions ?? []).length > 0 && (
-                  <div className="flex flex-wrap gap-1 pt-0.5">
-                    {direction.open_questions.map((q, i) => (
-                      <span
-                        key={`${q}-${i}`}
-                        className="bg-gray-900 border border-gray-700 rounded-full text-[10px] text-gray-400 px-2 py-0.5"
-                      >
-                        {q}
-                      </span>
-                    ))}
-                  </div>
-                )}
+                {/* The arc is spoiler territory too: it re-hides whenever it evolves. */}
+                <Spoiler key={direction.updated_turn ?? 0} label="the story direction">
+                  <div className="text-xs text-gray-300 leading-snug">{direction.premise}</div>
+                  {direction.heading && (
+                    <div className="text-[10px] text-gray-500 leading-snug">{direction.heading}</div>
+                  )}
+                  {(direction.open_questions ?? []).length > 0 && (
+                    <div className="flex flex-wrap gap-1 pt-0.5">
+                      {direction.open_questions.map((q, i) => (
+                        <span
+                          key={`${q}-${i}`}
+                          className="bg-gray-900 border border-gray-700 rounded-full text-[10px] text-gray-400 px-2 py-0.5"
+                        >
+                          {q}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {(direction.recurring_elements ?? []).length > 0 && (
+                    <div className="text-[10px] text-gray-600">
+                      Recurring: {direction.recurring_elements.join(', ')}
+                    </div>
+                  )}
+                </Spoiler>
               </div>
             )}
 
@@ -361,6 +413,9 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
                     </div>
                   </div>
                 )}
+
+                <ChipRow label="Hooks you bite on" items={profile.engagement?.bites_on} />
+                <ChipRow label="Hooks you pass by" items={profile.engagement?.ignores} className="text-gray-500" />
 
                 {narrativeLine && (
                   <div className="text-[10px] text-gray-500">{narrativeLine}</div>

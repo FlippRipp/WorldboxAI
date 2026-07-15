@@ -1138,12 +1138,35 @@ def test_plot_command_shows_thread_openly():
     message = result["message"]
     assert "The Salt Baron's Ledger" in message
     assert "stolen ledger" in message
-    assert "enforcers" in message
     assert "steady" in message
     assert "intrigue" in message
     assert "The Pilgrim Road" in message
-    assert "A quiet war for the harbor's soul." in message
     assert result["signal"] == "end_turn"
+
+    # The challenge and the story direction are spoiler-hidden by default and
+    # revealed only on request.
+    assert "enforcers" not in message
+    assert "/plot challenge" in message
+    assert "A quiet war for the harbor's soul." not in message
+    assert "/plot direction" in message
+
+    revealed = asyncio.run(backend.on_command_plot(["challenge"], _state(data=data), _make_sdk([], {})))
+    assert "enforcers" in revealed["message"]
+    assert "spoiler" in revealed["message"].lower()
+
+    data["direction"]["heading"] = "The Baron plans a reprisal."
+    data["direction"]["open_questions"] = ["Who tipped off the enforcers?"]
+    arc = asyncio.run(backend.on_command_plot(["direction"], _state(data=data), _make_sdk([], {})))
+    assert "A quiet war for the harbor's soul." in arc["message"]
+    assert "The Baron plans a reprisal." in arc["message"]
+    assert "Who tipped off the enforcers?" in arc["message"]
+
+    no_thread = asyncio.run(backend.on_command_plot(
+        ["challenge"], _state(data=backend._default_data()), _make_sdk([], {})))
+    assert "No active thread challenge" in no_thread["message"]
+    no_arc = asyncio.run(backend.on_command_plot(
+        ["direction"], _state(data=backend._default_data()), _make_sdk([], {})))
+    assert "No story direction yet" in no_arc["message"]
 
     observing = asyncio.run(backend.on_command_plot(
         [], _state(data=backend._default_data()), _make_sdk([], {})))
