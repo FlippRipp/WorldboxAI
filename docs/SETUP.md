@@ -60,8 +60,11 @@ are supported, switched with the provider toggle on the Setup tab:
   (AUTOMATIC1111, SD WebUI Forge, reForge, SD.Next) started with the `--api`
   flag (default address `http://127.0.0.1:7860`). Generation is free and
   private; the model dropdown lists your installed checkpoints. Optionally set
-  the WebUI's `models/Lora` folder in the Studio to enable one-click LoRA
-  installs from the built-in Civitai/Hugging Face browser.
+  the WebUI's `models/Stable-diffusion` and `models/Lora` folders in the
+  Studio to enable one-click installs from the built-in browsers: the Setup
+  tab's model browser finds checkpoints on Civitai (search, base-model /
+  category / sort filters, per-version installs), and the LoRAs tab's browser
+  covers Civitai and Hugging Face LoRAs.
 
 To set up a local server from scratch, run the module's bundled script from
 the repo root:

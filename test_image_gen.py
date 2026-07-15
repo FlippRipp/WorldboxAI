@@ -5376,3 +5376,235 @@ def test_download_pipeline_cancel_cleans_up(tmp_path):
     status = backend._downloads["dl_slow"]
     assert status["status"] == "error" and status["error"] == "cancelled"
     assert not list(dest.iterdir())          # .part removed
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint browser (Civitai model browsing + installs for the local WebUI)
+# ---------------------------------------------------------------------------
+
+def test_civitai_checkpoints_endpoint_gates_nsfw_and_forwards(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    for mode in ("include", "only"):
+        resp = client.get(f"/civitai/checkpoints?nsfw={mode}")
+        assert resp.status_code == 400
+        assert "Civitai API key" in resp.json()["detail"]
+
+    captured = {}
+
+    async def fake_search(cfg, **kwargs):
+        captured.update(kwargs)
+        return {"items": [], "next_cursor": ""}
+
+    backend._civitai_search_models = fake_search
+    resp = client.get("/civitai/checkpoints?query=juggernaut&base_model=SDXL 1.0"
+                      "&sort=Newest&category=style")
+    assert resp.status_code == 200
+    assert captured == {"query": "juggernaut", "base_model": "SDXL 1.0",
+                        "types": "Checkpoint", "sort": "Newest",
+                        "nsfw_mode": "off", "category": "style",
+                        "cursor": "", "limit": 24}
+
+    # Unknown mode values degrade to off instead of erroring.
+    assert client.get("/civitai/checkpoints?nsfw=true").status_code == 200
+    assert captured["nsfw_mode"] == "off"
+
+    # Overload keeps the retry contract of the LoRA endpoints.
+    async def overloaded(cfg, **kwargs):
+        raise backend.SearchOverloadedError("Civitai search failed (503): busy")
+
+    backend._civitai_search_models = overloaded
+    assert client.get("/civitai/checkpoints").status_code == 503
+
+
+def test_civitai_search_loras_still_routes_lora_types(tmp_path):
+    # The LoRA wrapper keeps validating its type against the LoRA list while
+    # the shared search passes any type it is handed (e.g. "Checkpoint").
+    backend = _load_backend(tmp_path)
+    seen = {}
+
+    class FakeResponse:
+        status_code = 200
+        def json(self):
+            return {"items": [], "metadata": {}}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def get(self, url, headers=None, params=None):
+            seen["params"] = dict(params)
+            return FakeResponse()
+
+    import httpx
+    original = httpx.AsyncClient
+    httpx.AsyncClient = FakeClient
+    try:
+        asyncio.run(backend._civitai_search_loras(
+            backend._default_config(), query="", base_model="",
+            lora_type="Checkpoint", sort="Most Downloaded", nsfw_mode="off",
+            cursor="", limit=24))
+        assert seen["params"]["types"] == "LORA"   # not a LoRA type: coerced
+
+        asyncio.run(backend._civitai_search_models(
+            backend._default_config(), query="", base_model="",
+            types="Checkpoint", sort="Most Downloaded", nsfw_mode="off",
+            cursor="", limit=24))
+        assert seen["params"]["types"] == "Checkpoint"
+    finally:
+        httpx.AsyncClient = original
+
+
+def test_civitai_checkpoints_annotates_against_ckpt_folder(tmp_path):
+    import hashlib
+    backend = _load_backend(tmp_path)
+    ckpt_dir = tmp_path / "Stable-diffusion"
+    ckpt_dir.mkdir()
+    (ckpt_dir / "juggernautXL_v9.safetensors").write_bytes(b"model-bytes")
+    sha = hashlib.sha256(b"model-bytes").hexdigest()
+    _enable_local(backend, local_checkpoint_dir=str(ckpt_dir))
+    asyncio.run(backend._scan_local_hashes(
+        str(ckpt_dir), backend.LOCAL_CKPT_HASH_CACHE_FILE))
+
+    async def fake_search(cfg, **kwargs):
+        return {"items": [
+            {"id": "1", "base_model": "SDXL 1.0", "sha256": sha,
+             "all_hashes": [sha]},
+            {"id": "2", "base_model": "SDXL 1.0", "sha256": "f" * 64,
+             "all_hashes": ["f" * 64]},
+        ], "next_cursor": ""}
+
+    backend._civitai_search_models = fake_search
+    client = _client(backend)
+    items = client.get("/civitai/checkpoints").json()["items"]
+    assert items[0]["local_available"] is True
+    assert items[0]["local_name"] == "juggernautXL_v9"
+    assert items[1]["local_available"] is False
+    # The two folders index separately: the LoRA cache never learned the file.
+    assert backend._read_local_hash_cache() is None
+
+
+def test_annotate_checkpoint_availability_unknown_without_scan(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _enable_local(backend)      # no checkpoint dir configured, no cache
+    items = [{"id": "x", "base_model": "SDXL 1.0", "sha256": "a" * 64}]
+    backend._annotate_local_availability(cfg, items, kind="checkpoint")
+    assert items[0]["local_available"] is None
+
+
+def test_checkpoint_install_registers_hash_and_refreshes(tmp_path):
+    import hashlib
+    import httpx
+    backend = _load_backend(tmp_path)
+    dest = tmp_path / "Stable-diffusion"
+    dest.mkdir()
+    _enable_local(backend, local_checkpoint_dir=str(dest))
+
+    payload = b"checkpoint-bytes"
+    sha = hashlib.sha256(payload).hexdigest()
+    resp = _StreamResp([payload], headers={
+        "content-disposition": 'attachment; filename="juggernautXL_v9.safetensors"'})
+
+    posted = []
+
+    async def fake_post(cfg, path, timeout=None):
+        posted.append(path)
+
+    backend._local_post = fake_post
+    backend._downloads["dl_ck"] = {
+        "id": "dl_ck", "kind": "checkpoint", "label": "Juggernaut XL",
+        "filename": "", "dest_dir": str(dest), "url": "https://x/f",
+        "total_bytes": 0, "received_bytes": 0, "status": "downloading",
+        "error": None, "lora_id": None, "item_id": "901",
+        "started_at": "now", "completed_at": None,
+    }
+    original = httpx.AsyncClient
+    httpx.AsyncClient = lambda **kw: _StreamClient(resp)
+    try:
+        asyncio.run(backend._download_file_pipeline(
+            "dl_ck", "https://x/f", dest, "Juggernaut XL", [sha],
+            "/sdapi/v1/refresh-checkpoints", None, backend._load_config(),
+            kind="checkpoint"))
+    finally:
+        httpx.AsyncClient = original
+
+    status = backend._downloads["dl_ck"]
+    assert status["status"] == "done", status["error"]
+    assert posted == ["/sdapi/v1/refresh-checkpoints"]
+    # The checkpoint cache learned the file (so browse badges flip without a
+    # rescan); the LoRA cache stayed untouched.
+    ckpt_cache = backend._read_local_hash_cache(backend.LOCAL_CKPT_HASH_CACHE_FILE)
+    assert backend._local_hash_index(ckpt_cache) == {sha: "juggernautXL_v9"}
+    assert backend._read_local_hash_cache() is None
+
+
+def test_install_endpoint_checkpoint_kind_validates_and_dedupes(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable_local(backend, civitai_api_key="civ-token")   # no ckpt folder yet
+    client = _client(backend)
+
+    body = {"kind": "checkpoint", "item_id": "901", "base_model": "SDXL 1.0",
+            "label": "Juggernaut XL",
+            "url": "https://civitai.com/api/download/models/901"}
+    resp = client.post("/local/downloads", json=body)
+    assert resp.status_code == 400
+    assert "checkpoint folder" in resp.json()["detail"].lower()
+
+    dest = tmp_path / "Stable-diffusion"
+    dest.mkdir()
+    cfg = backend._load_config()
+    cfg["local_checkpoint_dir"] = str(dest)
+    backend._save_config(cfg)
+
+    assert client.post("/local/downloads",
+                       json={**body, "url": "notaurl"}).status_code == 400
+
+    seen = []
+
+    async def stuck_pipeline(*a, **k):
+        seen.append((a, k))
+
+    backend._download_file_pipeline = stuck_pipeline
+    first = client.post("/local/downloads", json=body).json()["download"]
+    second = client.post("/local/downloads", json=body).json()["download"]
+    assert first["id"] == second["id"]           # deduped by item_id
+    assert first["kind"] == "checkpoint"
+    assert first["item_id"] == "901"
+    assert first["base_model"] == "SDXL 1.0"
+    assert "url" not in first                    # the token must not leak
+    # Server-side the URL carries the Civitai token, the refresh path targets
+    # checkpoints, and the pipeline runs in checkpoint mode.
+    args, kwargs = seen[0]
+    assert args[1].endswith("?token=civ-token")
+    assert args[5] == "/sdapi/v1/refresh-checkpoints"
+    assert kwargs.get("kind") == "checkpoint"
+
+
+def test_model_versions_annotate_checkpoints_against_ckpt_cache(tmp_path):
+    import httpx
+    backend = _load_backend(tmp_path)
+    _enable_local(backend)
+    # A checkpoint cache holding version 901's hash ("a"*64 in the fixture).
+    backend._atomic_write_json(
+        backend._data_dir() / backend.LOCAL_CKPT_HASH_CACHE_FILE,
+        {"files": {"/x/ink_v2.safetensors":
+                   {"size": 1, "mtime": 1, "sha256": "a" * 64}},
+         "scanned_at": backend._now()})
+
+    fixture = dict(CIVITAI_MODEL_FIXTURE, type="Checkpoint")
+    original = httpx.AsyncClient
+    httpx.AsyncClient = lambda **kw: _LocalClient(_LocalResp(fixture))
+    try:
+        with _client(backend) as client:
+            versions = client.get("/civitai/model-versions/555").json()["versions"]
+    finally:
+        httpx.AsyncClient = original
+
+    assert [v["id"] for v in versions] == ["901", "900"]
+    assert versions[0]["local_available"] is True
+    assert versions[0]["local_name"] == "ink_v2"
+    assert versions[1]["local_available"] is False

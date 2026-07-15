@@ -2042,6 +2042,475 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   );
 }
 
+const CKPT_BROWSER_KEY = 'wb_image_gen_ckpt_browser';
+
+function loadCkptBrowserState() {
+  try { return JSON.parse(localStorage.getItem(CKPT_BROWSER_KEY)) || null; } catch (e) { return null; }
+}
+
+function fmtSizeKB(kb) {
+  kb = Number(kb) || 0;
+  if (!kb) return '';
+  if (kb >= 1024 * 1024) return `${(kb / (1024 * 1024)).toFixed(1)} GB`;
+  return `${(kb / 1024).toFixed(0)} MB`;
+}
+
+function stripModelExt(name) {
+  return String(name || '').replace(/\.(safetensors|ckpt|pt)$/i, '');
+}
+
+// Availability badge for a checkpoint browse result: hash-matched against a
+// scan of the configured checkpoint folder (the checkpoint twin of
+// browseAvailability's local branch).
+function ckptAvailability(item) {
+  if (item.local_available === true) {
+    return {
+      label: 'installed', cls: 'bg-green-900/50 text-green-300 border-green-800',
+      title: item.local_name ? `In your checkpoint folder as ${item.local_name}` : 'In your checkpoint folder',
+    };
+  }
+  if (item.local_available === false) {
+    return {
+      label: 'not installed', cls: 'bg-gray-800/80 text-gray-400 border-gray-700',
+      title: 'Not in your checkpoint folder yet — press Install',
+    };
+  }
+  return {
+    label: 'installed: ?', cls: 'bg-gray-900/40 text-gray-600 border-gray-800',
+    title: 'Local availability unknown (set your checkpoint folder in Setup and it will be scanned)',
+  };
+}
+
+// Civitai checkpoint browser for the local provider (Setup tab). Mirrors the
+// LoRA browser: search/filter/sort proxied through the module backend (which
+// injects the Civitai key), infinite scroll with persisted state, one-click
+// installs into the WebUI's checkpoint folder, and a "Use as model" shortcut
+// that selects the installed file and carries Civitai's base-model metadata
+// into the profile (better than the filename guess).
+function CheckpointBrowser({ config, draft, set, setDraft }) {
+  const [saved] = useState(loadCkptBrowserState);
+  const canInstall = !!(config.local_checkpoint_dir || '').trim();
+  const [open, setOpen] = useState(!!saved?.open);
+  const [query, setQuery] = useState(saved?.query || '');
+  const [baseModel, setBaseModel] = useState(saved?.baseModel || '');
+  const [category, setCategory] = useState(saved?.category || '');
+  const [sort, setSort] = useState(saved?.sort || 'Most Downloaded');
+  const [installedOnly, setInstalledOnly] = useState(!!saved?.installedOnly);
+  const [items, setItems] = useState(saved?.items || []);
+  const [nextCursor, setNextCursor] = useState(saved?.nextCursor || '');
+  const [loading, setLoading] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [error, setError] = useState('');
+  const [versionPickerFor, setVersionPickerFor] = useState(null);   // browse item id
+  const [downloads, setDownloads] = useState([]);
+  const debounceRef = useRef(null);
+  const seqRef = useRef(0);
+  const skipSearchRef = useRef(!!(saved?.open && saved?.items?.length));
+  const gridRef = useRef(null);
+  const pendingScrollRef = useRef(saved?.scrollTop || 0);
+  const scrollTopRef = useRef(saved?.scrollTop || 0);
+  const scrollSaveRef = useRef(null);
+  const autoLoadCursorRef = useRef('');
+  const downloadsPollRef = useRef(null);
+
+  const nsfwMode = config.has_civitai_key ? (draft.civitai_nsfw || 'off') : 'off';
+
+  const refreshDownloads = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/local/downloads`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setDownloads((data.downloads || []).filter((d) => d.kind === 'checkpoint'));
+    } catch (e) { /* retried by the poller */ }
+  }, []);
+
+  useEffect(() => {
+    if (open) refreshDownloads();
+  }, [open, refreshDownloads]);
+
+  useEffect(() => {
+    const active = downloads.some((d) => d.status === 'downloading');
+    if (active && !downloadsPollRef.current) {
+      downloadsPollRef.current = setInterval(refreshDownloads, 1000);
+    } else if (!active && downloadsPollRef.current) {
+      clearInterval(downloadsPollRef.current);
+      downloadsPollRef.current = null;
+    }
+    return () => {
+      if (downloadsPollRef.current) {
+        clearInterval(downloadsPollRef.current);
+        downloadsPollRef.current = null;
+      }
+    };
+  }, [downloads, refreshDownloads]);
+
+  const startInstall = useCallback(async (version) => {
+    setError('');
+    try {
+      const res = await fetch(`${API_BASE}/local/downloads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind: 'checkpoint',
+          url: version.download_url,
+          sha256: version.sha256 || '',
+          label: [version.name, version.version_name].filter(Boolean).join(' — '),
+          filename: version.name || '',
+          item_id: version.id,
+          base_model: version.base_model || '',
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      await refreshDownloads();
+      return data.download;
+    } catch (e) {
+      setError(String(e.message || e));
+      return null;
+    }
+  }, [refreshDownloads]);
+
+  const cancelInstall = useCallback(async (dlId) => {
+    await fetch(`${API_BASE}/local/downloads/${dlId}`, { method: 'DELETE' }).catch(() => {});
+    refreshDownloads();
+  }, [refreshDownloads]);
+
+  // Select an installed checkpoint as the profile's model: find the WebUI's
+  // title for the file stem in the installed list (it may carry a subfolder
+  // prefix and a short hash), preferring Civitai's base-model metadata over
+  // the WebUI list's filename-inferred guess.
+  const chooseModel = useCallback(async (stem, civitaiBase) => {
+    setError('');
+    try {
+      const res = await fetch(`${API_BASE}/models`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      const low = String(stem || '').toLowerCase();
+      const hit = (data.models || []).find((m) => low && m.sd_name.toLowerCase().includes(low));
+      if (!hit) {
+        throw new Error('The WebUI has not picked the file up yet — press "Rescan" in the Model dropdown, then try again');
+      }
+      setDraft((d) => ({ ...d, model_name: hit.sd_name, model_base: civitaiBase || hit.base_model || '' }));
+    } catch (e) {
+      setError(String(e.message || e));
+    }
+  }, [setDraft]);
+
+  const search = useCallback(async (cursor = '') => {
+    const seq = ++seqRef.current;
+    setLoading(true);
+    setError('');
+    try {
+      const params = new URLSearchParams({ query, sort, nsfw: nsfwMode });
+      if (baseModel) params.set('base_model', baseModel);
+      if (category) params.set('category', category);
+      if (cursor) params.set('cursor', cursor);
+      const url = `${API_BASE}/civitai/checkpoints?${params}`;
+      let res = await fetch(url);
+      // 503 = Civitai temporarily overloaded: keep the spinner up and retry
+      // (a newer search supersedes via seq; the error surfaces after a minute).
+      for (let attempt = 0; res.status === 503 && attempt < 60; attempt++) {
+        if (seq !== seqRef.current) return;
+        setRetrying(true);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        if (seq !== seqRef.current) return;
+        res = await fetch(url);
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      if (seq !== seqRef.current) return;
+      setItems((prev) => (cursor ? mergeBrowseResults(prev, data.items, sort) : data.items));
+      setNextCursor(data.next_cursor || '');
+    } catch (e) {
+      if (seq === seqRef.current) setError(String(e.message || e));
+    } finally {
+      if (seq === seqRef.current) { setLoading(false); setRetrying(false); }
+    }
+  }, [query, baseModel, category, sort, nsfwMode]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    if (skipSearchRef.current) {
+      skipSearchRef.current = false;
+      return undefined;
+    }
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => search(), 400);
+    return () => clearTimeout(debounceRef.current);
+  }, [open, search]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(CKPT_BROWSER_KEY, JSON.stringify({
+        open, query, baseModel, category, sort, installedOnly,
+        items, nextCursor, scrollTop: scrollTopRef.current,
+      }));
+    } catch (e) { /* storage unavailable or full */ }
+  }, [open, query, baseModel, category, sort, installedOnly, items, nextCursor]);
+
+  useEffect(() => {
+    if (!open || !pendingScrollRef.current || !gridRef.current) return;
+    gridRef.current.scrollTop = pendingScrollRef.current;
+    pendingScrollRef.current = 0;
+  }, [open, items.length]);
+
+  const saveScrollTop = () => {
+    try {
+      const state = JSON.parse(localStorage.getItem(CKPT_BROWSER_KEY)) || {};
+      state.scrollTop = scrollTopRef.current;
+      localStorage.setItem(CKPT_BROWSER_KEY, JSON.stringify(state));
+    } catch (e) { /* storage unavailable or full */ }
+  };
+
+  const onGridScroll = () => {
+    const el = gridRef.current;
+    scrollTopRef.current = el ? el.scrollTop : 0;
+    if (scrollSaveRef.current) clearTimeout(scrollSaveRef.current);
+    scrollSaveRef.current = setTimeout(saveScrollTop, 250);
+    if (
+      el && !loading && nextCursor && autoLoadCursorRef.current !== nextCursor &&
+      el.scrollTop + el.clientHeight >= el.scrollHeight - 200
+    ) {
+      autoLoadCursorRef.current = nextCursor;
+      search(nextCursor);
+    }
+  };
+
+  useEffect(() => () => {
+    if (scrollSaveRef.current) {
+      clearTimeout(scrollSaveRef.current);
+      saveScrollTop();
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const visibleItems = installedOnly ? items.filter((i) => i.local_available === true) : items;
+  const stemInUse = (stem) =>
+    !!stem && (draft.model_name || '').toLowerCase().includes(String(stem).toLowerCase());
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs uppercase tracking-wider text-gray-500">Model browser</span>
+        <button
+          onClick={() => setOpen((o) => !o)}
+          className="text-xs text-purple-400 hover:text-purple-300"
+        >
+          {open ? 'Close browser' : 'Browse Civitai models…'}
+        </button>
+      </div>
+      <p className="text-xs text-gray-600">
+        Find checkpoints on Civitai and press Install — the file downloads into your WebUI's
+        checkpoint folder{canInstall ? '' : ' (set it above to enable one-click installs)'}. Once
+        it finishes, press "Use as model" to select it here.
+      </p>
+
+      {open && (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search checkpoints…"
+              className={inputCls}
+            />
+            <select value={baseModel} onChange={(e) => setBaseModel(e.target.value)} className={inputCls}>
+              <option value="">All base models</option>
+              {(config.civitai_base_models || []).map((b) => <option key={b} value={b}>{b}</option>)}
+            </select>
+            <select value={category} onChange={(e) => setCategory(e.target.value)} className={inputCls}>
+              <option value="">All categories</option>
+              {(config.civitai_categories || []).map((c) => (
+                <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>
+              ))}
+            </select>
+            <select value={sort} onChange={(e) => setSort(e.target.value)} className={inputCls}>
+              {(config.civitai_sorts || []).map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div className="flex items-center gap-4">
+            <select
+              value={nsfwMode}
+              onChange={(e) => set('civitai_nsfw', e.target.value)}
+              disabled={!config.has_civitai_key}
+              className={`${inputCls} max-w-[160px] disabled:opacity-50`}
+            >
+              <option value="off">No NSFW</option>
+              <option value="include">NSFW</option>
+              <option value="only">NSFW only</option>
+            </select>
+            <label
+              className="flex items-center gap-1.5 text-[11px] text-gray-400 shrink-0 cursor-pointer"
+              title="Only show checkpoints already installed in your checkpoint folder. Hides ones with unknown availability."
+            >
+              <input
+                type="checkbox"
+                checked={installedOnly}
+                onChange={(e) => setInstalledOnly(e.target.checked)}
+                className="accent-purple-500"
+              />
+              Installed only
+            </label>
+            {!config.has_civitai_key && (
+              <span className="text-[11px] text-yellow-600">Save a Civitai API key above to browse NSFW models.</span>
+            )}
+          </div>
+
+          {error && <p className="text-xs text-red-400">{error}</p>}
+
+          <div
+            ref={gridRef}
+            onScroll={onGridScroll}
+            className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-96 overflow-y-auto pr-1"
+          >
+            {visibleItems.map((item) => {
+              const pageUrl = loraLink(item);
+              const badge = ckptAvailability(item);
+              const itemDownload = downloads.find(
+                (d) => d.item_id === item.id && d.status === 'downloading');
+              const doneDownload = downloads.find(
+                (d) => d.item_id === item.id && d.status === 'done');
+              // A finished install marks the cached browse result installed
+              // without waiting for a fresh search to re-annotate it.
+              const itemInstalled = item.local_available === true || !!doneDownload;
+              const stem = item.local_name || stripModelExt(doneDownload?.filename);
+              const inUse = stemInUse(stem);
+              return (
+                <div key={item.id} className="bg-gray-950/60 border border-gray-800 rounded-lg overflow-hidden">
+                  {item.thumb_url ? (
+                    <a href={pageUrl} target="_blank" rel="noreferrer" title="Open on Civitai">
+                      <img src={item.thumb_url} alt="" loading="lazy" className="w-full h-28 object-cover bg-gray-800" />
+                    </a>
+                  ) : (
+                    <div className="w-full h-28 bg-gray-800" />
+                  )}
+                  <div className="p-2 space-y-1">
+                    <a
+                      href={pageUrl} target="_blank" rel="noreferrer"
+                      className="text-xs text-gray-200 hover:text-purple-300 line-clamp-2 leading-snug"
+                      title={item.name}
+                    >
+                      {item.name}
+                    </a>
+                    <div className="flex items-center justify-between text-[10px] text-gray-500">
+                      <span className="truncate">
+                        {item.base_model}
+                        {item.size_kb ? ` · ${fmtSizeKB(item.size_kb)}` : ''}
+                      </span>
+                      <span className="shrink-0">⬇ {fmtCount(item.stats?.downloads)} · 👍 {fmtCount(item.stats?.likes)}</span>
+                    </div>
+                    <span
+                      className={`inline-block px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider border ${badge.cls}`}
+                      title={badge.title}
+                    >
+                      {badge.label}
+                    </span>
+                    {itemDownload ? (
+                      <InstallProgress download={itemDownload} onCancel={cancelInstall} />
+                    ) : itemInstalled ? (
+                      <div className="flex gap-1">
+                        <p className="flex-1 px-2 py-1 rounded bg-green-900/40 border border-green-800 text-green-300 text-[11px] font-medium text-center">
+                          Installed ✓
+                        </p>
+                        {inUse ? (
+                          <p className="px-2 py-1 rounded bg-purple-900/40 border border-purple-800 text-purple-300 text-[11px] font-medium shrink-0" title="Selected as the profile's model">
+                            In use
+                          </p>
+                        ) : (
+                          <button
+                            onClick={() => chooseModel(stem, item.base_model)}
+                            className="px-2 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-medium shrink-0"
+                            title="Select this checkpoint as the profile's model"
+                          >
+                            Use
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => {
+                          if (!canInstall) return;
+                          setVersionPickerFor(versionPickerFor === item.id ? null : item.id);
+                        }}
+                        disabled={!canInstall}
+                        title={canInstall
+                          ? 'Pick a version, then it downloads into your checkpoint folder'
+                          : 'Set your checkpoint folder in Setup to enable one-click installs'}
+                        className="w-full px-2 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        Install
+                      </button>
+                    )}
+                    {versionPickerFor === item.id && (
+                      <VersionPicker
+                        item={item}
+                        onClose={() => setVersionPickerFor(null)}
+                        onInstall={async (version) => {
+                          const started = await startInstall(version);
+                          if (started) setVersionPickerFor(null);
+                        }}
+                      />
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {loading && (
+            <p className="text-xs text-gray-500 animate-pulse">
+              {retrying ? 'Civitai search is overloaded — retrying…' : 'Searching Civitai…'}
+            </p>
+          )}
+          {!loading && installedOnly && items.length > visibleItems.length && (
+            <p className="text-xs text-gray-600">
+              {items.length - visibleItems.length} of {items.length} results hidden (not installed)
+              {visibleItems.length === 0 && nextCursor ? ' — try Load more' : ''}.
+            </p>
+          )}
+          {!loading && items.length === 0 && !error && (
+            <p className="text-xs text-gray-600 italic">No checkpoints found.</p>
+          )}
+          {!loading && nextCursor && (
+            <button onClick={() => search(nextCursor)} className="text-xs text-purple-400 hover:text-purple-300">
+              Load more…
+            </button>
+          )}
+        </div>
+      )}
+
+      {!open && error && <p className="text-xs text-red-400">{error}</p>}
+
+      {downloads.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-[10px] uppercase tracking-wider text-gray-500">Checkpoint installs</p>
+          {downloads.slice(0, 5).map((d) => (
+            <div key={d.id} className="flex items-center gap-2">
+              <div className="flex-1 min-w-0">
+                <InstallProgress download={d} onCancel={cancelInstall} />
+              </div>
+              {d.status === 'done' && (
+                stemInUse(stripModelExt(d.filename)) ? (
+                  <span className="text-[11px] text-purple-300 shrink-0">In use</span>
+                ) : (
+                  <button
+                    onClick={() => chooseModel(stripModelExt(d.filename), d.base_model)}
+                    className="text-[11px] text-purple-400 hover:text-purple-300 shrink-0"
+                  >
+                    Use as model
+                  </button>
+                )
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ImageStudio({ onBack }) {
   const [config, setConfig] = useState(null);
   const [draft, setDraft] = useState({});
@@ -2550,6 +3019,9 @@ export default function ImageStudio({ onBack }) {
                 LoRAs are considered compatible.
               </p>
             </div>
+          )}
+          {isLocal && (
+            <CheckpointBrowser config={config} draft={draft} set={set} setDraft={setDraft} />
           )}
         </section>
         )}

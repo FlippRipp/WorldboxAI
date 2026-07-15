@@ -13,10 +13,12 @@ branch; two providers and one call site don't earn a registry):
   MAX_PROMPT_CHARS (a Novita API limit).
 - "local": an A1111/Forge-compatible WebUI (--api) at a configured base URL.
   txt2img there is one synchronous call; /models lists the installed
-  checkpoints; LoRAs apply as <lora:name:weight> prompt tags added at payload
-  time only, linked to library entries by hashing the configured LoRA folder
-  (one-click installs download Civitai/HF files straight into it). No prompt
-  cap and no content filter, so the refusal-softening path never triggers.
+  checkpoints and /civitai/checkpoints browses Civitai for new ones; LoRAs
+  apply as <lora:name:weight> prompt tags added at payload time only, linked
+  to library entries by hashing the configured LoRA folder (one-click
+  installs download Civitai/HF checkpoints and LoRAs straight into the
+  WebUI's folders). No prompt cap and no content filter, so the
+  refusal-softening path never triggers.
 
 The whole pipeline runs as a fire-and-forget background task so the player
 keeps playing while the image renders; the chat-feed footer widget polls the
@@ -2012,26 +2014,55 @@ async def _local_list_checkpoints(cfg: dict) -> list[dict]:
     return models
 
 
-# The WebUI's /sdapi/v1/loras exposes only kohya's sshs_model_hash (a weights
-# hash) — never the file SHA256 that Civitai/HF publish — so matching library
-# entries to installed files means hashing the LoRA folder ourselves. Results
-# are cached by (size, mtime) so rescans only hash new or changed files.
+# The WebUI's APIs expose no usable file hashes (/sdapi/v1/loras only has
+# kohya's sshs_model_hash, a weights hash — never the file SHA256 that
+# Civitai/HF publish) — so matching browse results and library entries to
+# installed files means hashing the model folders ourselves. Results are
+# cached by (size, mtime) so rescans only hash new or changed files. LoRAs
+# and checkpoints index into separate cache files, one per folder.
 LOCAL_HASH_CACHE_FILE = "local_hash_cache.json"
-LOCAL_LORA_EXTS = (".safetensors", ".ckpt", ".pt")
+LOCAL_CKPT_HASH_CACHE_FILE = "local_ckpt_hash_cache.json"
+LOCAL_SCAN_EXTS = (".safetensors", ".ckpt", ".pt")
+# Browse annotation re-scans a folder in the background when its cache is
+# older than this, so files the user dropped in by hand get badged too.
+LOCAL_HASH_RESCAN_S = 900
+
+# The two one-click install targets: which config key holds the folder, which
+# cache file its hashes live in, and which WebUI endpoint rescans it.
+LOCAL_INSTALL_KINDS = {
+    "lora": {"dir_key": "local_lora_dir",
+             "cache_file": LOCAL_HASH_CACHE_FILE,
+             "refresh_path": "/sdapi/v1/refresh-loras",
+             "label": "LoRA"},
+    "checkpoint": {"dir_key": "local_checkpoint_dir",
+                   "cache_file": LOCAL_CKPT_HASH_CACHE_FILE,
+                   "refresh_path": "/sdapi/v1/refresh-checkpoints",
+                   "label": "checkpoint"},
+}
 
 
-def _read_local_hash_cache() -> dict | None:
-    path = _data_dir() / LOCAL_HASH_CACHE_FILE
+def _read_local_hash_cache(cache_file: str = LOCAL_HASH_CACHE_FILE) -> dict | None:
+    path = _data_dir() / cache_file
     if not path.exists():
         return None
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
-        print(f"[Image Gen] Failed to read {LOCAL_HASH_CACHE_FILE}: {e}")
+        print(f"[Image Gen] Failed to read {cache_file}: {e}")
         return None
     return data if isinstance(data, dict) and isinstance(data.get("files"), dict) \
         else None
+
+
+def _hash_cache_stale(cache: dict | None) -> bool:
+    if cache is None:
+        return True
+    try:
+        scanned = datetime.fromisoformat(str(cache.get("scanned_at") or ""))
+    except ValueError:
+        return True
+    return (datetime.now(timezone.utc) - scanned).total_seconds() > LOCAL_HASH_RESCAN_S
 
 
 def _local_hash_index(cache: dict | None) -> dict[str, str] | None:
@@ -2055,15 +2086,16 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-async def _scan_local_lora_hashes(lora_dir: str) -> dict:
-    """Hash every LoRA file under the folder (recursively — the WebUI supports
-    subfolders), reusing cached digests for files whose size+mtime are
-    unchanged. Persists and returns the refreshed cache."""
-    root = Path(lora_dir)
-    old_files = (_read_local_hash_cache() or {}).get("files", {})
+async def _scan_local_hashes(folder: str,
+                             cache_file: str = LOCAL_HASH_CACHE_FILE) -> dict:
+    """Hash every model file under the folder (recursively — the WebUI
+    supports subfolders), reusing cached digests for files whose size+mtime
+    are unchanged. Persists and returns the refreshed cache."""
+    root = Path(folder)
+    old_files = (_read_local_hash_cache(cache_file) or {}).get("files", {})
     files: dict[str, dict] = {}
     for path in sorted(p for p in root.rglob("*")
-                       if p.is_file() and p.suffix.lower() in LOCAL_LORA_EXTS):
+                       if p.is_file() and p.suffix.lower() in LOCAL_SCAN_EXTS):
         try:
             stat = path.stat()
             prev = old_files.get(str(path))
@@ -2078,11 +2110,12 @@ async def _scan_local_lora_hashes(lora_dir: str) -> dict:
         files[str(path)] = {"size": stat.st_size, "mtime": stat.st_mtime,
                             "sha256": digest}
     cache = {"files": files, "scanned_at": _now()}
-    _atomic_write_json(_data_dir() / LOCAL_HASH_CACHE_FILE, cache)
+    _atomic_write_json(_data_dir() / cache_file, cache)
     return cache
 
 
-def _register_local_lora_file(path: Path) -> None:
+def _register_local_file(path: Path,
+                         cache_file: str = LOCAL_HASH_CACHE_FILE) -> None:
     """Add one just-installed file to the hash cache without a full rescan."""
     try:
         stat = path.stat()
@@ -2090,11 +2123,11 @@ def _register_local_lora_file(path: Path) -> None:
     except OSError as e:
         print(f"[Image Gen] Could not hash {path}: {e}")
         return
-    cache = _read_local_hash_cache() or {"files": {}}
+    cache = _read_local_hash_cache(cache_file) or {"files": {}}
     cache["files"][str(path)] = {"size": stat.st_size, "mtime": stat.st_mtime,
                                  "sha256": digest}
     cache["scanned_at"] = _now()
-    _atomic_write_json(_data_dir() / LOCAL_HASH_CACHE_FILE, cache)
+    _atomic_write_json(_data_dir() / cache_file, cache)
 
 
 def _match_local_hashes(index: dict[str, str], entry: dict) -> str | None:
@@ -2106,11 +2139,12 @@ def _match_local_hashes(index: dict[str, str], entry: dict) -> str | None:
     return None
 
 
-def _spawn_local_hash_scan(cfg: dict) -> None:
-    """Fire-and-forget LoRA-folder scan so browse annotation never blocks on
+def _spawn_local_hash_scan(cfg: dict, kind: str = "lora") -> None:
+    """Fire-and-forget model-folder scan so browse annotation never blocks on
     hashing; the scan lock dedupes concurrent runs."""
-    lora_dir = str(cfg.get("local_lora_dir") or "").strip()
-    if not lora_dir or not Path(lora_dir).is_dir():
+    spec = LOCAL_INSTALL_KINDS[kind]
+    folder = str(cfg.get(spec["dir_key"]) or "").strip()
+    if not folder or not Path(folder).is_dir():
         return
     if _get_local_scan_lock().locked():
         return
@@ -2118,21 +2152,29 @@ def _spawn_local_hash_scan(cfg: dict) -> None:
     async def _run():
         async with _get_local_scan_lock():
             try:
-                await _scan_local_lora_hashes(lora_dir)
+                await _scan_local_hashes(folder, spec["cache_file"])
             except OSError as e:
-                print(f"[Image Gen] LoRA folder scan failed: {e}")
-    task = asyncio.get_running_loop().create_task(_run())
+                print(f"[Image Gen] {spec['label']} folder scan failed: {e}")
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return   # sync context (tests) — annotation degrades to "unknown"
+    task = loop.create_task(_run())
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
 
 
-def _annotate_local_availability(cfg: dict, items: list[dict]) -> None:
+def _annotate_local_availability(cfg: dict, items: list[dict],
+                                 kind: str = "lora") -> None:
     """Badge browse results with whether the file is already installed in the
-    local LoRA folder (matched by SHA256 against the scan cache). No scan yet
-    degrades to None ("unknown") while one runs in the background."""
-    index = _local_hash_index(_read_local_hash_cache())
-    if index is None:
-        _spawn_local_hash_scan(cfg)
+    local LoRA/checkpoint folder (matched by SHA256 against that folder's scan
+    cache). No scan yet degrades to None ("unknown") while one runs in the
+    background; a stale cache still annotates but refreshes behind the
+    request so hand-copied files eventually get badged."""
+    cache = _read_local_hash_cache(LOCAL_INSTALL_KINDS[kind]["cache_file"])
+    index = _local_hash_index(cache)
+    if index is None or _hash_cache_stale(cache):
+        _spawn_local_hash_scan(cfg, kind)
     for item in items:
         if index is None or not _entry_hashes(item):
             item["local_available"] = None
@@ -2192,7 +2234,7 @@ async def _link_installed_lora(lora_id: str, stem: str) -> None:
 async def _download_file_pipeline(dl_id: str, url: str, dest_dir: Path,
                                   fallback_name: str, expected_hashes: list[str],
                                   refresh_path: str, lora_id: str | None,
-                                  cfg: dict) -> None:
+                                  cfg: dict, kind: str = "lora") -> None:
     """Stream one file into the WebUI's model folder with byte progress and a
     running SHA256, then refresh the WebUI and link the library entry. Only
     ever marks its own status dict — never raises to the caller."""
@@ -2234,8 +2276,12 @@ async def _download_file_pipeline(dl_id: str, url: str, dest_dir: Path,
         os.replace(part_path, final_path)
         part_path = None
         if lora_id:
-            _register_local_lora_file(final_path)
+            _register_local_file(final_path)
             await _link_installed_lora(lora_id, final_path.stem)
+        elif kind == "checkpoint":
+            # Learn the file so checkpoint browse badges flip to "installed"
+            # without waiting for the next folder rescan.
+            _register_local_file(final_path, LOCAL_CKPT_HASH_CACHE_FILE)
         try:
             await _local_post(cfg, refresh_path, timeout=60.0)
         except RuntimeError as e:
@@ -2545,6 +2591,20 @@ async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
                                 lora_type: str, sort: str, nsfw_mode: str,
                                 cursor: str, limit: int,
                                 category: str = "") -> dict:
+    return await _civitai_search_models(
+        cfg, query=query, base_model=base_model,
+        types=lora_type if lora_type in CIVITAI_LORA_TYPES else "LORA",
+        sort=sort, nsfw_mode=nsfw_mode, cursor=cursor, limit=limit,
+        category=category)
+
+
+async def _civitai_search_models(cfg: dict, *, query: str, base_model: str,
+                                 types: str, sort: str, nsfw_mode: str,
+                                 cursor: str, limit: int,
+                                 category: str = "") -> dict:
+    """One Civitai /models search reduced to the library-entry shape. `types`
+    is Civitai's model-type filter — LoRA variants for the LoRA browser,
+    "Checkpoint" for the local provider's model browser."""
     import httpx
     if nsfw_mode not in CIVITAI_NSFW_MODES:
         nsfw_mode = "off"
@@ -2554,7 +2614,7 @@ async def _civitai_search_loras(cfg: dict, *, query: str, base_model: str,
     pages = CIVITAI_SEARCH_PAGES if query else 1
     fetch_limit = 100 if query else max(1, min(100, limit))
     params = [
-        ("types", lora_type if lora_type in CIVITAI_LORA_TYPES else "LORA"),
+        ("types", types),
         ("sort", sort),
         ("limit", str(fetch_limit)),
         ("nsfw", "false" if nsfw_mode == "off" else "true"),
@@ -3761,7 +3821,8 @@ def get_router():
     class InstallRequest(BaseModel):
         # LoRA installs: an already-saved entry (lora_id) or a browse/version-
         # picker item (saved to the library first). Checkpoint installs: a
-        # direct URL.
+        # direct URL plus browse metadata (item_id ties the pollable status
+        # back to the browse card; base_model feeds "Use as model").
         lora_id: str | None = None
         item: LoraSave | None = None
         kind: str = "lora"                 # "lora" | "checkpoint"
@@ -3769,6 +3830,8 @@ def get_router():
         filename: str = ""
         sha256: str = ""
         label: str = ""
+        item_id: str = ""
+        base_model: str = ""
 
     class KeySubmit(BaseModel):
         api_key: str
@@ -4224,7 +4287,7 @@ def get_router():
             raise HTTPException(status_code=400,
                                 detail=f"LoRA folder not found: {lora_dir}")
         async with _get_local_scan_lock():
-            cache = await _scan_local_lora_hashes(lora_dir)
+            cache = await _scan_local_hashes(lora_dir)
         index = _local_hash_index(cache) or {}
 
         cfg = _load_config()  # the scan awaited; re-load before mutating
@@ -4259,22 +4322,21 @@ def get_router():
         folder, then refresh the WebUI and link the library entry. Returns a
         pollable status; GET /local/downloads tracks progress."""
         cfg = _load_config()
-        kind = req.kind if req.kind in ("lora", "checkpoint") else "lora"
-        folder_label = "LoRA" if kind == "lora" else "checkpoint"
-        dest_key = "local_lora_dir" if kind == "lora" else "local_checkpoint_dir"
-        refresh_path = ("/sdapi/v1/refresh-loras" if kind == "lora"
-                        else "/sdapi/v1/refresh-checkpoints")
-        dest = str(cfg.get(dest_key) or "").strip()
+        kind = req.kind if req.kind in LOCAL_INSTALL_KINDS else "lora"
+        spec = LOCAL_INSTALL_KINDS[kind]
+        refresh_path = spec["refresh_path"]
+        dest = str(cfg.get(spec["dir_key"]) or "").strip()
         if not dest:
             raise HTTPException(
                 status_code=400,
-                detail=f"Set your WebUI's {folder_label} folder in Setup first")
+                detail=f"Set your WebUI's {spec['label']} folder in Setup first")
         dest_dir = Path(dest)
         if not dest_dir.is_dir():
             raise HTTPException(status_code=400,
-                                detail=f"{folder_label} folder not found: {dest}")
+                                detail=f"{spec['label']} folder not found: {dest}")
 
         lora_id = (req.lora_id or "").strip() or None
+        item_id = (req.item_id or "").strip() or None
         label = (req.label or "").strip()
         if kind == "lora":
             if req.item is not None:
@@ -4319,6 +4381,7 @@ def get_router():
         for d in _downloads.values():
             if d["status"] == "downloading" and (
                     (lora_id and d.get("lora_id") == lora_id)
+                    or (item_id and d.get("item_id") == item_id)
                     or d.get("url") == url):
                 return {"download": _public_download(d)}
 
@@ -4328,11 +4391,13 @@ def get_router():
             "dest_dir": str(dest_dir), "url": url,
             "total_bytes": 0, "received_bytes": 0,
             "status": "downloading", "error": None, "lora_id": lora_id,
+            "item_id": item_id, "base_model": (req.base_model or "").strip(),
             "started_at": _now(), "completed_at": None,
         }
         task = asyncio.get_running_loop().create_task(
             _download_file_pipeline(dl_id, url, dest_dir, fallback_name,
-                                    expected_hashes, refresh_path, lora_id, cfg))
+                                    expected_hashes, refresh_path, lora_id, cfg,
+                                    kind=kind))
         _download_tasks[dl_id] = task
         _tasks.add(task)
         task.add_done_callback(_tasks.discard)
@@ -4412,6 +4477,34 @@ def get_router():
             _annotate_novita_availability(cfg, result["items"])
         return result
 
+    @router.get("/civitai/checkpoints")
+    async def civitai_checkpoints(query: str = "", base_model: str = "",
+                                  sort: str = "Most Downloaded", nsfw: str = "off",
+                                  category: str = "", cursor: str = "",
+                                  limit: int = 24):
+        """Civitai checkpoint browsing for the local provider's model browser:
+        the same proxy shape as /civitai/loras, with results badged against a
+        hash scan of the WebUI's checkpoint folder."""
+        cfg = _load_config()
+        if nsfw not in CIVITAI_NSFW_MODES:
+            nsfw = "off"
+        if nsfw != "off" and not cfg.get("civitai_api_key"):
+            raise HTTPException(status_code=400,
+                                detail="NSFW browsing needs a Civitai API key")
+        try:
+            result = await _civitai_search_models(
+                cfg, query=query.strip(), base_model=base_model.strip(),
+                types="Checkpoint", sort=sort, nsfw_mode=nsfw,
+                category=category.strip().lower(),
+                cursor=cursor.strip(), limit=limit)
+        except SearchOverloadedError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        except RuntimeError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        if _provider(cfg) == "local":
+            _annotate_local_availability(cfg, result["items"], kind="checkpoint")
+        return result
+
     @router.get("/civitai/model-versions/{model_id}")
     async def civitai_model_versions(model_id: int):
         """Every downloadable version of a Civitai model, for the Install
@@ -4422,7 +4515,15 @@ def get_router():
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))
         if _provider(cfg) == "local":
-            _annotate_local_availability(cfg, versions)
+            # Checkpoints and LoRAs install into different folders, so each
+            # version badges against its own type's hash cache.
+            by_kind: dict[str, list[dict]] = {"lora": [], "checkpoint": []}
+            for v in versions:
+                is_ckpt = str(v.get("type") or "").lower() == "checkpoint"
+                by_kind["checkpoint" if is_ckpt else "lora"].append(v)
+            for kind, group in by_kind.items():
+                if group:
+                    _annotate_local_availability(cfg, group, kind=kind)
         return {"versions": versions}
 
     @router.get("/hf/loras")
