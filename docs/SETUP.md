@@ -141,6 +141,16 @@ roughly doubles render time and VRAM per image; if batched multi-image
 generations start hitting out-of-memory, lower the "GPU batch size" setting
 (the pipeline also falls back to one-image requests automatically on OOM).
 
+The hires-fix section also carries a curated **one-click upscaler catalog**
+(4x-AnimeSharp, 4x-UltraSharp, Remacri, and friends — the community models
+people otherwise hunt down by hand). Installs download into the WebUI's
+`models/ESRGAN` folder, derived automatically from the checkpoint folder
+(or set the optional upscaler folder in Setup); every file is verified
+against its published SHA256. One caveat: the WebUI only scans for new
+upscalers at startup, so restart it after an install before the new name
+appears in the upscaler dropdown. The install helper does not support
+upscaler installs yet — they need a folder this machine can write to.
+
 Start the backend:
 
 ```powershell

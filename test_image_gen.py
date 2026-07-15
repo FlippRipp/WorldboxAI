@@ -6315,6 +6315,97 @@ def test_checkpoint_install_registers_hash_and_refreshes(tmp_path):
     assert backend._read_local_hash_cache() is None
 
 
+def test_upscaler_install_kind_and_catalog(tmp_path):
+    import hashlib
+    import httpx
+    backend = _load_backend(tmp_path)
+
+    # Filename safety is kind-aware: .pth survives for upscalers, and a
+    # catalog fallback that already carries a whitelisted extension is kept.
+    assert backend._safe_install_filename(
+        "4x-UltraSharp.pth", "x", kind="upscaler") == "4x-UltraSharp.pth"
+    assert backend._safe_install_filename(
+        "evil.exe", "4x-UltraSharp.pth", kind="upscaler") == "4x-UltraSharp.pth"
+    assert backend._safe_install_filename(
+        "evil.exe", "model", kind="upscaler") == "model.pth"
+    # Other kinds keep the safetensors/ckpt whitelist.
+    assert backend._safe_install_filename("thing.pth", "model") == "model.safetensors"
+
+    # An unset upscaler folder derives models/ESRGAN from a checkpoint dir
+    # named Stable-diffusion — even before the ESRGAN folder exists.
+    models = tmp_path / "models"
+    ckpt_dir = models / "Stable-diffusion"
+    ckpt_dir.mkdir(parents=True)
+    _enable_local(backend, local_checkpoint_dir=str(ckpt_dir))
+    cfg = backend._load_config()
+    assert backend._local_install_dir(cfg, "upscaler") == models / "ESRGAN"
+    # An explicit folder wins; a flat/custom checkpoint dir derives nothing.
+    assert backend._local_install_dir(
+        {**cfg, "local_checkpoint_dir": str(tmp_path)}, "upscaler") is None
+
+    # Full install through the endpoint: creates the derived folder, keeps
+    # the .pth name, verifies the hash, and never POSTs a refresh route
+    # (upscalers have none — the WebUI scans them at startup only).
+    payload = b"esrgan-weights"
+    sha = hashlib.sha256(payload).hexdigest()
+    posted = []
+
+    async def fake_post(cfg, path, timeout=None):
+        posted.append(path)
+
+    backend._local_post = fake_post
+    resp = _StreamResp([payload], headers={})
+    client = _client(backend)
+    original = httpx.AsyncClient
+    httpx.AsyncClient = lambda **kw: _StreamClient(resp)
+    try:
+        body = client.post("/local/downloads", json={
+            "kind": "upscaler", "url": "https://huggingface.co/x/y.pth",
+            "sha256": sha, "filename": "4x-UltraSharp.pth",
+            "label": "4x-UltraSharp"}).json()["download"]
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            download = next(d for d in client.get("/local/downloads")
+                            .json()["downloads"] if d["id"] == body["id"])
+            if download["status"] != "downloading":
+                break
+            time.sleep(0.02)
+    finally:
+        httpx.AsyncClient = original
+    assert download["status"] == "done", download["error"]
+    assert download["filename"] == "4x-UltraSharp.pth"
+    assert (models / "ESRGAN" / "4x-UltraSharp.pth").read_bytes() == payload
+    assert posted == []
+
+    # The catalog reports it installed; the other entries stay available.
+    body = client.get("/local/upscaler-catalog").json()
+    assert body["can_install"] is True
+    by_name = {e["name"]: e for e in body["entries"]}
+    assert by_name["4x-UltraSharp"]["installed"] is True
+    assert by_name["4x-AnimeSharp"]["installed"] is False
+    assert all(e["url"].startswith("https://huggingface.co/")
+               and len(e["sha256"]) == 64 for e in body["entries"])
+
+    # config exposes the upscaler install capability from the derived dir
+    # (helper-only setups don't count: the helper can't service this kind).
+    assert client.get("/config").json()["local_install"]["upscaler"] is True
+    cfg = backend._load_config()
+    cfg["local_checkpoint_dir"] = ""
+    cfg["local_helper_url"] = "http://192.168.1.20:7861"
+    backend._save_config(cfg)
+    conf = client.get("/config").json()
+    assert conf["local_install"]["upscaler"] is False
+    assert conf["local_install"]["checkpoint"] is True   # helper still serves these
+    body = client.get("/local/upscaler-catalog").json()
+    assert body["can_install"] is False
+    # And the endpoint refuses to route an upscaler install to the helper.
+    resp = client.post("/local/downloads", json={
+        "kind": "upscaler", "url": "https://huggingface.co/x/y.pth",
+        "filename": "4x-UltraSharp.pth", "label": "4x-UltraSharp"})
+    assert resp.status_code == 400
+    assert "helper" in resp.json()["detail"].lower()
+
+
 def test_install_endpoint_checkpoint_kind_validates_and_dedupes(tmp_path):
     backend = _load_backend(tmp_path)
     _enable_local(backend, civitai_api_key="civ-token")   # no ckpt folder yet
@@ -6659,8 +6750,10 @@ def test_public_config_reports_install_capability_and_masks_token(tmp_path):
     assert resp["local_helper_token"].startswith("****")
     assert "secret-tok" not in json.dumps(resp)
     assert resp["has_helper"] is True
-    # Helper configured -> both kinds installable even with no local folders.
-    assert resp["local_install"] == {"checkpoint": True, "lora": True}
+    # Helper configured -> checkpoint/LoRA installable even with no local
+    # folders; upscalers stay off (the helper can't service that kind).
+    assert resp["local_install"] == {"checkpoint": True, "lora": True,
+                                     "upscaler": False}
 
     # Masked round-trip keeps the stored token; clearing the URL drops the
     # capability unless a folder on this machine exists.
@@ -6668,12 +6761,14 @@ def test_public_config_reports_install_capability_and_masks_token(tmp_path):
         "local_helper_token": resp["local_helper_token"],
         "local_helper_url": ""}).json()
     assert backend._load_config()["local_helper_token"] == "secret-tok"
-    assert resp["local_install"] == {"checkpoint": False, "lora": False}
+    assert resp["local_install"] == {"checkpoint": False, "lora": False,
+                                     "upscaler": False}
 
     lora_dir = tmp_path / "Lora"
     lora_dir.mkdir()
     resp = client.put("/config", json={"local_lora_dir": str(lora_dir)}).json()
-    assert resp["local_install"] == {"checkpoint": False, "lora": True}
+    assert resp["local_install"] == {"checkpoint": False, "lora": True,
+                                     "upscaler": False}
 
 
 # ---------------------------------------------------------------------------
@@ -6869,7 +6964,7 @@ def test_remote_install_end_to_end_through_real_helper(tmp_path):
     try:
         with _client(backend) as client:
             assert client.get("/config").json()["local_install"] == {
-                "checkpoint": True, "lora": True}
+                "checkpoint": True, "lora": True, "upscaler": False}
             body = client.post("/local/downloads", json={
                 "kind": "checkpoint", "url": file_url, "sha256": sha,
                 "label": "Juggernaut XL", "item_id": "901",

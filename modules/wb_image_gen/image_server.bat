@@ -188,6 +188,7 @@ if exist "%VENV_PY%" (
 if not defined WB_HELPER set WB_HELPER=1
 if not defined WB_HELPER_PORT set WB_HELPER_PORT=7861
 if not defined WB_HELPER_LISTEN set WB_HELPER_LISTEN=%WB_WEBUI_LISTEN%
+if not exist "%WEBUI_DIR%\models\ESRGAN" mkdir "%WEBUI_DIR%\models\ESRGAN"
 if not "%WB_HELPER%"=="0" (
     if not exist "%WEBUI_DIR%\models\Stable-diffusion" mkdir "%WEBUI_DIR%\models\Stable-diffusion"
     if not exist "%WEBUI_DIR%\models\Lora" mkdir "%WEBUI_DIR%\models\Lora"
@@ -214,6 +215,8 @@ if not "%WB_WEBUI_LISTEN%"=="0" (
 )
 echo ====   Checkpoint folder: %WEBUI_DIR%\models\Stable-diffusion
 echo ====   LoRA folder:       %WEBUI_DIR%\models\Lora
+echo ====   Upscaler folder:   %WEBUI_DIR%\models\ESRGAN
+echo ====     (optional -- derived from the checkpoint folder if empty)
 if not "%WB_HELPER%"=="0" (
     echo ====   Install helper:    http://127.0.0.1:%WB_HELPER_PORT%
     echo ====   When WorldBox runs on ANOTHER machine, leave the folder      ====

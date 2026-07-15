@@ -189,7 +189,7 @@ GLOBAL_FIELDS = (
     "character_reference_enabled",
     "player_in_images", "chat_image_conceal", "civitai_nsfw",
     "provider", "local_base_url", "local_auth_user", "local_auth_pass",
-    "local_checkpoint_dir", "local_lora_dir",
+    "local_checkpoint_dir", "local_lora_dir", "local_upscaler_dir",
     "local_helper_url", "local_helper_token", "local_batch_size",
 )
 LORA_STATE_FIELDS = ("active", "strength", "llm_mode", "condition")
@@ -657,6 +657,7 @@ def _default_config() -> dict:
         "local_auth_pass": "",          # masked like the API keys
         "local_checkpoint_dir": "",     # enables checkpoint installs from the browser
         "local_lora_dir": "",           # enables LoRA installs from the browser
+        "local_upscaler_dir": "",       # empty derives models/ESRGAN from the checkpoint dir
         "local_helper_url": "",         # helper_server.py next to a remote WebUI
         "local_helper_token": "",       # its WB_HELPER_TOKEN; masked like keys
         "local_batch_size": LOCAL_BATCH_SIZE_DEFAULT,  # images per GPU batch (wb_prompt_batch.py)
@@ -2280,18 +2281,74 @@ LOCAL_SCAN_EXTS = (".safetensors", ".ckpt", ".pt")
 # older than this, so files the user dropped in by hand get badged too.
 LOCAL_HASH_RESCAN_S = 900
 
-# The two one-click install targets: which config key holds the folder, which
-# cache file its hashes live in, and which WebUI endpoint rescans it.
+# The one-click install targets: which config key holds the folder, which
+# cache file its hashes live in, which WebUI endpoint rescans it ("" = the
+# WebUI has no rescan route for this kind and needs a restart), and which
+# file extensions an install may write.
+LOCAL_UPSCALER_HASH_CACHE_FILE = "local_upscaler_hash_cache.json"
 LOCAL_INSTALL_KINDS = {
     "lora": {"dir_key": "local_lora_dir",
              "cache_file": LOCAL_HASH_CACHE_FILE,
              "refresh_path": "/sdapi/v1/refresh-loras",
-             "label": "LoRA"},
+             "label": "LoRA",
+             "exts": (".safetensors", ".ckpt"),
+             "default_ext": ".safetensors"},
     "checkpoint": {"dir_key": "local_checkpoint_dir",
                    "cache_file": LOCAL_CKPT_HASH_CACHE_FILE,
                    "refresh_path": "/sdapi/v1/refresh-checkpoints",
-                   "label": "checkpoint"},
+                   "label": "checkpoint",
+                   "exts": (".safetensors", ".ckpt"),
+                   "default_ext": ".safetensors"},
+    # ESRGAN-family hires-fix upscalers (models/ESRGAN). No refresh route
+    # exists for them — A1111/Forge scan the folder at startup only, so a
+    # fresh install needs a WebUI restart before it can render.
+    "upscaler": {"dir_key": "local_upscaler_dir",
+                 "cache_file": LOCAL_UPSCALER_HASH_CACHE_FILE,
+                 "refresh_path": "",
+                 "label": "upscaler",
+                 "exts": (".pth", ".pt", ".safetensors"),
+                 "default_ext": ".pth"},
 }
+
+# Curated hires-fix upscalers for one-click install, so nobody has to hunt
+# these down by hand. URLs and SHA256s verified against the Hugging Face
+# API; all are 4x ESRGAN-architecture models (~64 MB) that A1111/Forge load
+# from models/ESRGAN. The WebUI shows each by its filename stem.
+UPSCALER_CATALOG = [
+    {"name": "4x-AnimeSharp",
+     "filename": "4x-AnimeSharp.pth",
+     "url": "https://huggingface.co/Kim2091/AnimeSharp/resolve/main/4x-AnimeSharp.pth",
+     "sha256": "e7a7de2dafd7331c1992862bbbcd9e9712a9f9f8e6303f0aaa59b4341d359bab",
+     "size": 67010245,
+     "description": "Anime line art and cel shading — the go-to for "
+                    "Illustrious/NoobAI hires fix"},
+    {"name": "4x-UltraSharp",
+     "filename": "4x-UltraSharp.pth",
+     "url": "https://huggingface.co/Kim2091/UltraSharp/resolve/main/4x-UltraSharp.pth",
+     "sha256": "a5812231fc936b42af08a5edba784195495d303d5b3248c24489ef0c4021fe01",
+     "size": 66961958,
+     "description": "Crisp general-purpose detail — the de-facto community "
+                    "default hires upscaler"},
+    {"name": "4x_foolhardy_Remacri",
+     "filename": "4x_foolhardy_Remacri.pth",
+     "url": "https://huggingface.co/FacehugmanIII/4x_foolhardy_Remacri/resolve/main/4x_foolhardy_Remacri.pth",
+     "sha256": "e1a73bd89c2da1ae494774746398689048b5a892bd9653e146713f9df8bca86a",
+     "size": 67025055,
+     "description": "Sharp, less smoothed detail on photo and anime alike"},
+    {"name": "4x_NMKD-Siax_200k",
+     "filename": "4x_NMKD-Siax_200k.pth",
+     "url": "https://huggingface.co/gemasai/4x_NMKD-Siax_200k/resolve/main/4x_NMKD-Siax_200k.pth",
+     "sha256": "560424d9f68625713fc47e9e7289a98aabe1d744e1cd6a9ae5a35e9957fd127e",
+     "size": 66957746,
+     "description": "Clean general detail reconstruction, a good all-rounder"},
+    {"name": "4x_NMKD-Superscale-SP_178000_G",
+     "filename": "4x_NMKD-Superscale-SP_178000_G.pth",
+     "url": "https://huggingface.co/uwg/upscaler/resolve/main/ESRGAN/4x_NMKD-Superscale-SP_178000_G.pth",
+     "sha256": "1d1b0078fe71446e0469d8d4df59e96baa80d83cda600d68237d655830821bcc",
+     "size": 66958607,
+     "description": "Neutral 'super-scale' detail, a popular alternative to "
+                    "UltraSharp"},
+]
 
 
 def _read_local_hash_cache(cache_file: str = LOCAL_HASH_CACHE_FILE) -> dict | None:
@@ -2659,10 +2716,18 @@ async def _detect_helper(cfg: dict) -> dict | None:
 
 def _local_install_dir(cfg: dict, kind: str) -> Path | None:
     """The kind's install folder when this machine can write to it directly,
-    else None (unset, or a path that only exists on the WebUI's machine)."""
+    else None (unset, or a path that only exists on the WebUI's machine).
+    An unset upscaler folder derives the WebUI-standard sibling of the
+    checkpoint folder (models/Stable-diffusion -> models/ESRGAN), so the
+    bundled-launcher layout works with zero extra setup; the folder may not
+    exist yet on a fresh WebUI — the install creates it."""
     dest = str(cfg.get(LOCAL_INSTALL_KINDS[kind]["dir_key"]) or "").strip()
     if dest and Path(dest).is_dir():
         return Path(dest)
+    if kind == "upscaler" and not dest:
+        ckpt = Path(str(cfg.get("local_checkpoint_dir") or "").strip() or ".")
+        if ckpt.name.lower() == "stable-diffusion" and ckpt.is_dir():
+            return ckpt.parent / "ESRGAN"
     return None
 
 
@@ -2719,15 +2784,24 @@ LOCAL_INSTALL_EXTS = (".safetensors", ".ckpt")
 _CONTENT_DISPOSITION_RE = re.compile(r'filename\*?="?([^";]+)"?')
 
 
-def _safe_install_filename(raw: str, fallback: str) -> str:
+def _safe_install_filename(raw: str, fallback: str, kind: str = "lora") -> str:
     """A bare, whitelisted-extension filename that cannot escape the install
     folder. `raw` usually comes from Content-Disposition; the fallback is the
-    slugged entry name."""
+    slugged entry name. The extension whitelist is per kind — upscalers are
+    .pth/.pt files, everything else safetensors/ckpt."""
+    spec = LOCAL_INSTALL_KINDS.get(kind) or {}
+    exts = tuple(spec.get("exts") or LOCAL_INSTALL_EXTS)
     name = Path(str(raw or "").strip().replace("\\", "/")).name
     name = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip(" .")
-    if not name or not name.lower().endswith(LOCAL_INSTALL_EXTS):
+    if not name or not name.lower().endswith(exts):
         base = re.sub(r"[^A-Za-z0-9._ -]+", "_", str(fallback or "model")).strip(" .")
-        name = (base or "model") + ".safetensors"
+        # A fallback that already carries a whitelisted extension keeps it
+        # (catalog entries pass exact filenames); otherwise the kind's
+        # default extension is appended.
+        if base.lower().endswith(exts):
+            name = base
+        else:
+            name = (base or "model") + str(spec.get("default_ext") or ".safetensors")
     return name
 
 
@@ -2750,11 +2824,12 @@ def _spawn_remote_install_followup(cfg: dict, download: dict) -> None:
     stem = Path(str(download.get("filename") or "").replace("\\", "/")).stem
 
     async def _run():
-        try:
-            await _local_post(cfg, LOCAL_INSTALL_KINDS[kind]["refresh_path"],
-                              timeout=60.0)
-        except RuntimeError as e:
-            print(f"[Image Gen] Post-install refresh failed: {e}")
+        refresh_path = LOCAL_INSTALL_KINDS[kind]["refresh_path"]
+        if refresh_path:
+            try:
+                await _local_post(cfg, refresh_path, timeout=60.0)
+            except RuntimeError as e:
+                print(f"[Image Gen] Post-install refresh failed: {e}")
         if kind == "lora" and lora_id and stem:
             await _link_installed_lora(lora_id, stem)
 
@@ -2798,7 +2873,7 @@ async def _download_file_pipeline(dl_id: str, url: str, dest_dir: Path,
                 disposition = resp.headers.get("content-disposition", "")
                 match = _CONTENT_DISPOSITION_RE.search(disposition)
                 filename = _safe_install_filename(
-                    match.group(1) if match else "", fallback_name)
+                    match.group(1) if match else "", fallback_name, kind=kind)
                 final_path = (dest_dir / filename).resolve()
                 if dest_dir.resolve() not in final_path.parents:
                     raise RuntimeError("Refusing a filename outside the install folder")
@@ -2823,15 +2898,16 @@ async def _download_file_pipeline(dl_id: str, url: str, dest_dir: Path,
         if lora_id:
             _register_local_file(final_path)
             await _link_installed_lora(lora_id, final_path.stem)
-        elif kind == "checkpoint":
-            # Learn the file so checkpoint browse badges flip to "installed"
+        elif kind in LOCAL_INSTALL_KINDS:
+            # Learn the file so browse/catalog badges flip to "installed"
             # without waiting for the next folder rescan.
-            _register_local_file(final_path, LOCAL_CKPT_HASH_CACHE_FILE)
-        try:
-            await _local_post(cfg, refresh_path, timeout=60.0)
-        except RuntimeError as e:
-            # The file is in place; the WebUI just hasn't rescanned yet.
-            print(f"[Image Gen] Post-install refresh failed: {e}")
+            _register_local_file(final_path, LOCAL_INSTALL_KINDS[kind]["cache_file"])
+        if refresh_path:   # "" = no rescan route for this kind (upscalers)
+            try:
+                await _local_post(cfg, refresh_path, timeout=60.0)
+            except RuntimeError as e:
+                # The file is in place; the WebUI just hasn't rescanned yet.
+                print(f"[Image Gen] Post-install refresh failed: {e}")
         status["status"] = "done"
     except asyncio.CancelledError:
         status["status"] = "error"
@@ -4487,6 +4563,7 @@ def get_router():
         local_auth_pass: str | None = None
         local_checkpoint_dir: str | None = None
         local_lora_dir: str | None = None
+        local_upscaler_dir: str | None = None
         local_helper_url: str | None = None
         local_helper_token: str | None = None
         local_batch_size: int | None = None
@@ -4537,7 +4614,7 @@ def get_router():
         # back to the browse card; base_model feeds "Use as model").
         lora_id: str | None = None
         item: LoraSave | None = None
-        kind: str = "lora"                 # "lora" | "checkpoint"
+        kind: str = "lora"                 # a LOCAL_INSTALL_KINDS key
         url: str = ""
         filename: str = ""
         sha256: str = ""
@@ -4588,9 +4665,12 @@ def get_router():
         out["local_helper_token"] = _mask_key(cfg.get("local_helper_token", ""))
         out["has_helper"] = bool(str(cfg.get("local_helper_url") or "").strip())
         # Whether one-click installs can work per kind: a folder this machine
-        # can write to, or an install helper next to a remote WebUI.
+        # can write to, or an install helper next to a remote WebUI. The
+        # helper predates the upscaler kind and can't service it, so that
+        # kind counts the local folder only.
         out["local_install"] = {
-            kind: _local_install_dir(cfg, kind) is not None or out["has_helper"]
+            kind: _local_install_dir(cfg, kind) is not None
+                  or (out["has_helper"] and kind != "upscaler")
             for kind in LOCAL_INSTALL_KINDS
         }
         out["providers"] = PROVIDERS
@@ -4665,7 +4745,7 @@ def get_router():
                 raise HTTPException(status_code=400,
                                     detail="local_helper_url must start with http:// or https://")
             incoming["local_helper_url"] = helper
-        for field in ("local_checkpoint_dir", "local_lora_dir"):
+        for field in ("local_checkpoint_dir", "local_lora_dir", "local_upscaler_dir"):
             if field in incoming:
                 # Existence is checked when an install starts, not here — the
                 # WebUI may live on another machine or not be mounted yet.
@@ -5203,18 +5283,27 @@ def get_router():
         else:
             url = (req.url or "").strip()
             if not url.startswith(("http://", "https://")):
-                raise HTTPException(status_code=400,
-                                    detail="Checkpoint installs need an http(s) URL")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{spec['label'].capitalize()} installs need an http(s) URL")
             if "civitai.com" in url:
                 key = str(cfg.get("civitai_api_key") or "").strip()
                 if key:
                     url += ("&" if "?" in url else "?") + "token=" + key
-            fallback_name = (req.filename or "").strip() or label or "checkpoint"
+            fallback_name = (req.filename or "").strip() or label or spec["label"]
             label = label or fallback_name
             sha = (req.sha256 or "").strip().lower()
             expected_hashes = [sha] if sha else []
             lora_id = None
 
+        if remote and kind == "upscaler":
+            # The install helper predates the upscaler kind; its folder map
+            # has no entry to receive the file.
+            raise HTTPException(
+                status_code=400,
+                detail="Upscaler installs need a checkpoint or upscaler folder "
+                       "this machine can write to — the install helper does "
+                       "not support them yet")
         if remote:
             # The helper streams the file on the WebUI's machine and tracks
             # byte progress in the same status shape; the merged
@@ -5233,6 +5322,14 @@ def get_router():
             download = body.get("download") if isinstance(body.get("download"), dict) else {}
             download["remote"] = True
             return {"download": download}
+
+        # The derived upscaler folder (models/ESRGAN) may not exist on a
+        # fresh WebUI; creating it is exactly what a manual install would do.
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise HTTPException(status_code=400,
+                                detail=f"Cannot create {dest_dir}: {e}")
 
         # A second click while the same file is in flight returns the
         # existing download instead of racing it.
@@ -5324,6 +5421,24 @@ def get_router():
         except RuntimeError:
             names = []
         return {"samplers": names or list(SAMPLERS)}
+
+    @router.get("/local/upscaler-catalog")
+    async def local_upscaler_catalog():
+        """The curated one-click upscaler list with per-entry install state.
+        "installed" is file presence in the upscaler folder — immediate and
+        restart-independent; whether the WebUI has LOADED the file is the
+        /local/upscalers dropdown's business (new files appear there only
+        after a WebUI restart, since no upscaler rescan route exists)."""
+        cfg = _load_config()
+        root = _local_install_dir(cfg, "upscaler")
+        present: set[str] = set()
+        if root is not None and root.is_dir():
+            present = {p.name.lower() for p in root.rglob("*") if p.is_file()}
+        entries = [{**entry, "installed": entry["filename"].lower() in present}
+                   for entry in UPSCALER_CATALOG]
+        return {"entries": entries,
+                "can_install": root is not None,
+                "dir": str(root) if root is not None else None}
 
     @router.get("/local/upscalers")
     async def local_upscalers():

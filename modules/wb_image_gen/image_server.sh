@@ -178,6 +178,7 @@ fi
 # fully work when the app runs on a different machine than this WebUI.
 WB_HELPER_PORT="${WB_HELPER_PORT:-7861}"
 HELPER_PID=""
+mkdir -p "$WEBUI_DIR/models/ESRGAN"
 if [ "${WB_HELPER:-1}" != "0" ]; then
     mkdir -p "$WEBUI_DIR/models/Stable-diffusion" "$WEBUI_DIR/models/Lora"
     WB_HELPER_CKPT_DIR="$WEBUI_DIR/models/Stable-diffusion" \
@@ -208,6 +209,8 @@ if [ "${WB_WEBUI_LISTEN:-1}" != "0" ]; then
 fi
 echo "====   Checkpoint folder: $WEBUI_DIR/models/Stable-diffusion"
 echo "====   LoRA folder:       $WEBUI_DIR/models/Lora"
+echo "====   Upscaler folder:   $WEBUI_DIR/models/ESRGAN"
+echo "====     (optional -- derived from the checkpoint folder if empty)"
 if [ "${WB_HELPER:-1}" != "0" ]; then
     echo "====   Install helper:    http://127.0.0.1:$WB_HELPER_PORT"
     if [ -n "${LAN_IP:-}" ]; then

@@ -709,6 +709,22 @@ function LocalConnectionCard({ config, draft, set }) {
           they are mounted here) and use the install helper below instead.
         </p>
       </div>
+      <div>
+        <label className={labelCls}>Upscaler folder (optional)</label>
+        <input
+          type="text"
+          value={draft.local_upscaler_dir ?? ''}
+          onChange={(e) => set('local_upscaler_dir', e.target.value)}
+          placeholder="e.g. C:\\stable-diffusion-webui\\models\\ESRGAN"
+          className={inputCls}
+          autoComplete="off"
+        />
+        <p className="text-xs text-gray-600 mt-1">
+          The WebUI's <span className="font-mono">models/ESRGAN</span> folder, for one-click
+          hires-fix upscaler installs. Left empty it is derived from the checkpoint folder
+          automatically, so most setups never need it.
+        </p>
+      </div>
       <div className="grid sm:grid-cols-2 gap-3">
         <div>
           <label className={labelCls}>Install helper (for a WebUI on another machine)</label>
@@ -2849,6 +2865,56 @@ export default function ImageStudio({ onBack }) {
   const upscalerOptions = localUpscalers
     || ['Latent', 'Lanczos', 'ESRGAN_4x', 'R-ESRGAN 4x+', 'R-ESRGAN 4x+ Anime6B', 'SwinIR 4x'];
 
+  // Curated one-click upscaler catalog + its download progress. Badge state
+  // ("installed") is file presence; whether the WebUI has LOADED a file is
+  // upscalerOptions membership — new files need a WebUI restart.
+  const [upscalerCatalog, setUpscalerCatalog] = useState(null);
+  const [upscalerDownloads, setUpscalerDownloads] = useState([]);
+  const [upscalerInstallError, setUpscalerInstallError] = useState('');
+  const refreshUpscalerCatalog = useCallback(() => {
+    fetch(`${API_BASE}/local/upscaler-catalog`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => { if (data) setUpscalerCatalog(data); })
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (isLocal) refreshUpscalerCatalog();
+  }, [isLocal, refreshUpscalerCatalog]);
+  const refreshUpscalerDownloads = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/local/downloads`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setUpscalerDownloads((data.downloads || []).filter((d) => d.kind === 'upscaler'));
+    } catch { /* transient poll failure */ }
+  }, []);
+  useEffect(() => {
+    if (!upscalerDownloads.some((d) => d.status === 'downloading')) return undefined;
+    const timer = setInterval(refreshUpscalerDownloads, 1000);
+    return () => clearInterval(timer);
+  }, [upscalerDownloads, refreshUpscalerDownloads]);
+  const upscalerDoneCount = upscalerDownloads.filter((d) => d.status === 'done').length;
+  useEffect(() => {
+    if (upscalerDoneCount > 0) refreshUpscalerCatalog();
+  }, [upscalerDoneCount, refreshUpscalerCatalog]);
+  const installUpscaler = async (entry) => {
+    setUpscalerInstallError('');
+    try {
+      const res = await fetch(`${API_BASE}/local/downloads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'upscaler', url: entry.url,
+                               sha256: entry.sha256 || '',
+                               filename: entry.filename, label: entry.name }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      await refreshUpscalerDownloads();
+    } catch (e) {
+      setUpscalerInstallError(String(e.message || e));
+    }
+  };
+
   const save = async () => {
     setSaving(true);
     setSaveError('');
@@ -2895,6 +2961,7 @@ export default function ImageStudio({ onBack }) {
         local_auth_pass: draft.local_auth_pass ?? '',
         local_checkpoint_dir: draft.local_checkpoint_dir ?? '',
         local_lora_dir: draft.local_lora_dir ?? '',
+        local_upscaler_dir: draft.local_upscaler_dir ?? '',
         local_helper_url: draft.local_helper_url ?? '',
         local_helper_token: draft.local_helper_token ?? '',
         local_batch_size: Math.max(1, Number(draft.local_batch_size) || 4),
@@ -3461,6 +3528,79 @@ export default function ImageStudio({ onBack }) {
                       />
                     </div>
                   </div>
+                  {upscalerCatalog && (
+                    <div className="bg-gray-950/60 border border-gray-800 rounded-lg px-3 py-2 space-y-1.5">
+                      <div className="text-xs uppercase tracking-wider text-gray-500">
+                        Popular upscalers — one-click install
+                      </div>
+                      {!upscalerCatalog.can_install && (
+                        <p className="text-xs text-gray-600">
+                          Set your WebUI's checkpoint folder (or a dedicated upscaler
+                          folder) in the Setup tab to enable installs — files land in
+                          the WebUI's models/ESRGAN.
+                        </p>
+                      )}
+                      {(upscalerCatalog.entries || []).map((entry) => {
+                        const dl = upscalerDownloads.find(
+                          (d) => d.label === entry.name
+                            || (d.filename && d.filename === entry.filename));
+                        const installing = dl?.status === 'downloading';
+                        const installed = entry.installed || dl?.status === 'done';
+                        const loaded = upscalerOptions.includes(entry.name);
+                        return (
+                          <div key={entry.name} className="flex items-center justify-between gap-3 text-xs">
+                            <div className="min-w-0">
+                              <span className="text-gray-300 font-mono">{entry.name}</span>
+                              <span className="text-gray-600">
+                                {' '}— {entry.description} ({Math.round(entry.size / 1048576)} MB)
+                              </span>
+                            </div>
+                            {installed ? (
+                              loaded ? (
+                                <button
+                                  onClick={() => set('hires_upscaler', entry.name)}
+                                  className="text-purple-400 hover:text-purple-300 whitespace-nowrap"
+                                >
+                                  {(draft.hires_upscaler || 'R-ESRGAN 4x+ Anime6B') === entry.name ? 'Selected ✓' : 'Use'}
+                                </button>
+                              ) : (
+                                <span className="text-yellow-400 whitespace-nowrap">Installed — restart WebUI</span>
+                              )
+                            ) : installing ? (
+                              <span className="text-gray-400 whitespace-nowrap">
+                                {dl.total_bytes
+                                  ? `${Math.min(100, Math.round((dl.received_bytes / dl.total_bytes) * 100))}%`
+                                  : 'downloading…'}
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => installUpscaler(entry)}
+                                disabled={!upscalerCatalog.can_install}
+                                className="text-purple-400 hover:text-purple-300 disabled:opacity-40 whitespace-nowrap"
+                              >
+                                Install
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                      {upscalerInstallError && (
+                        <p className="text-xs text-red-400">{upscalerInstallError}</p>
+                      )}
+                      {(upscalerCatalog.entries || []).some((entry) => {
+                        const dl = upscalerDownloads.find(
+                          (d) => d.label === entry.name
+                            || (d.filename && d.filename === entry.filename));
+                        return (entry.installed || dl?.status === 'done')
+                          && !upscalerOptions.includes(entry.name);
+                      }) && (
+                        <p className="text-xs text-gray-600">
+                          The WebUI only scans for new upscalers at startup — restart it
+                          and they appear in the dropdown above.
+                        </p>
+                      )}
+                    </div>
+                  )}
                   <p className="text-xs text-gray-600">
                     Renders at the base size, then upscales and re-diffuses — the standard
                     fine-detail pass for SDXL checkpoints (R-ESRGAN 4x+ Anime6B at 1.5×,
