@@ -65,7 +65,13 @@ def _make_client(mod, rpg, llm_replies=None, config=None):
         save_manager=SimpleNamespace(save_turn=lambda *a: None),
     )
     engine = SimpleNamespace(sdk=SimpleNamespace(llm=llm))
-    mod.set_services({"session_manager": session_manager, "engine": engine})
+    # Cheats on: some tests use the (cheat-gated) manual skill edit endpoints
+    # as setup; evolution itself is ungated.
+    mod.set_services({
+        "session_manager": session_manager,
+        "engine": engine,
+        "settings": {"cheats.enabled": True},
+    })
 
     app = FastAPI()
     app.include_router(mod.get_router(), prefix=BASE)

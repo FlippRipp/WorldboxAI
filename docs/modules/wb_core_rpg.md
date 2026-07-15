@@ -257,7 +257,10 @@ The widget's "View Full Character Sheet" modal additionally supports **skill
 editing**: each skill card has a pencil button opening an inline form (name,
 type, rating, description, trigger words), plus delete and an "+ Add Skill"
 button. Edits are saved immediately through the module API below and persist
-into the active save.
+into the active save. Manual sheet editing is a cheat: the pencil/add buttons
+only appear while the global cheat toggle (`cheats.enabled`) is on, and the
+skill CRUD endpoints below return 403 without it. Earned changes (level-up
+point spending, evolutions) are normal gameplay and stay ungated.
 
 ## Skill Editing API
 

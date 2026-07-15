@@ -605,8 +605,9 @@ def test_wizard_uses_new_skill_ai_model_config():
 
 def test_add_skill_clears_wizard_cache():
     mod = _load_backend()
+    # Cheats on: the manual add-skill endpoint used below is cheat-gated.
     client, _, calls = _make_client(
-        mod, _rpg(), llm_replies=[CATEGORIES_REPLY, CATEGORIES_REPLY]
+        mod, _rpg(), llm_replies=[CATEGORIES_REPLY, CATEGORIES_REPLY], cheats=True
     )
     assert client.post(f"{BASE}/skills/wizard/categories").status_code == 200
     res = client.post(f"{BASE}/skills", json={"name": "herbalism", "description": "d"})

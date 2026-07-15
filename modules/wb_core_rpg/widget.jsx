@@ -1828,13 +1828,15 @@ export default function CoreRpgWidget({ state, config, generating }) {
                               </button>
                             )}
                             <span className="text-purple-400 font-mono font-bold text-sm">{data.rating}/10</span>
-                            <button
-                              onClick={() => startEdit(name, data)}
-                              title="Edit skill"
-                              className="text-gray-600 hover:text-indigo-300 transition-colors text-sm leading-none p-0.5"
-                            >
-                              {'✎'}
-                            </button>
+                            {cheatMode && (
+                              <button
+                                onClick={() => startEdit(name, data)}
+                                title="Cheat — edit skill"
+                                className="text-gray-600 hover:text-indigo-300 transition-colors text-sm leading-none p-0.5"
+                              >
+                                {'✎'}
+                              </button>
+                            )}
                           </span>
                         </div>
                         <div className="w-full h-2 bg-gray-700 rounded-full overflow-hidden mb-1.5">
@@ -1872,14 +1874,15 @@ export default function CoreRpgWidget({ state, config, generating }) {
                       onSave={saveSkill}
                       onCancel={cancelEdit}
                     />
-                  ) : (
+                  ) : cheatMode ? (
                     <button
                       onClick={startAdd}
+                      title="Cheat — add a skill directly"
                       className="w-full py-1.5 px-3 text-xs text-gray-400 hover:text-indigo-300 bg-gray-800/40 hover:bg-gray-800/70 border border-dashed border-gray-700 rounded-lg transition-colors"
                     >
                       + Add Skill
                     </button>
-                  )}
+                  ) : null}
                 </div>
               </section>
             </div>

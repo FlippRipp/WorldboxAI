@@ -1690,6 +1690,14 @@ def get_router():
         settings = _services.get("settings")
         return bool(settings.get("cheats.enabled")) if settings is not None else False
 
+    def _require_cheats():
+        # Hand-editing the character sheet (skills, status effects) bypasses
+        # the story, so like forced skill rarity the gate lives server-side
+        # on the global cheat toggle. Earned changes (level-up spending,
+        # evolutions) stay ungated.
+        if not _cheats_enabled():
+            raise HTTPException(status_code=403, detail="Editing the character sheet requires cheat mode.")
+
     def _sync_evolutions(rpg: dict):
         rpg["pending_evolutions"] = _sync_pending_evolutions(
             rpg.get("skills", {}), rpg.get("pending_evolutions", [])
@@ -1762,6 +1770,7 @@ def get_router():
 
     @router.post("/skills")
     def add_skill(payload: SkillPayload):
+        _require_cheats()
         sm = _session_manager()
         rpg = _rpg_data(sm)
         skills = rpg.setdefault("skills", {})
@@ -1784,6 +1793,7 @@ def get_router():
 
     @router.put("/skills/{skill_name}")
     def update_skill(skill_name: str, payload: SkillPayload):
+        _require_cheats()
         sm = _session_manager()
         rpg = _rpg_data(sm)
         skills = rpg.setdefault("skills", {})
@@ -1831,6 +1841,7 @@ def get_router():
 
     @router.delete("/skills/{skill_name}")
     def delete_skill(skill_name: str):
+        _require_cheats()
         sm = _session_manager()
         rpg = _rpg_data(sm)
         skills = rpg.setdefault("skills", {})
@@ -1847,10 +1858,7 @@ def get_router():
 
     @router.delete("/status-effects/{effect_name}")
     def delete_status_effect(effect_name: str):
-        # Hand-removing a condition bypasses the story, so like forced skill
-        # rarity the gate lives server-side on the global cheat toggle.
-        if not _cheats_enabled():
-            raise HTTPException(status_code=403, detail="Removing status effects requires cheat mode.")
+        _require_cheats()
         sm = _session_manager()
         rpg = _rpg_data(sm)
         effects = rpg.get("status_effects") or []

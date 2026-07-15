@@ -16,7 +16,7 @@ def _load_backend():
     return mod
 
 
-def _make_client(mod, state=None, active_save_id="save1"):
+def _make_client(mod, state=None, active_save_id="save1", cheats_enabled=True):
     saved = []
 
     def save_turn(save_id, st, turn):
@@ -27,7 +27,11 @@ def _make_client(mod, state=None, active_save_id="save1"):
         state=state if state is not None else _default_state(),
         save_manager=SimpleNamespace(save_turn=save_turn),
     )
-    mod.set_services({"session_manager": session_manager})
+    # Manual character-sheet edits are cheat-gated server-side.
+    mod.set_services({
+        "session_manager": session_manager,
+        "settings": {"cheats.enabled": cheats_enabled},
+    })
 
     app = FastAPI()
     app.include_router(mod.get_router(), prefix="/api/modules/wb_core_rpg")
@@ -202,6 +206,20 @@ def test_delete_skill_clears_practice_counter():
     assert missing.status_code == 404
 
 
+def test_skill_editing_requires_cheat_mode():
+    mod = _load_backend()
+    client, sm, saved = _make_client(mod, cheats_enabled=False)
+
+    assert client.put(f"{BASE}/swordplay", json={"rating": 9}).status_code == 403
+    assert client.post(BASE, json={"name": "haggling"}).status_code == 403
+    assert client.delete(f"{BASE}/swordplay").status_code == 403
+    # State untouched, nothing persisted.
+    skills = sm.state["module_data"]["wb_core_rpg"]["skills"]
+    assert skills["swordplay"]["rating"] == 5
+    assert "haggling" not in skills
+    assert saved == []
+
+
 def test_no_active_save_409():
     mod = _load_backend()
     client, _, _ = _make_client(mod, active_save_id=None)
@@ -231,7 +249,10 @@ def test_router_mounted_on_server():
         save_manager=SimpleNamespace(save_turn=lambda sid, st, t: saved.append((sid, t))),
     )
     old_services = dict(getattr(mod, "_services", {}) or {})
-    mod.set_services({"session_manager": session_manager})
+    mod.set_services({
+        "session_manager": session_manager,
+        "settings": {"cheats.enabled": True},
+    })
     try:
         client = TestClient(server.app)
         res = client.put("/api/modules/wb_core_rpg/skills/swordplay", json={"rating": 9})
