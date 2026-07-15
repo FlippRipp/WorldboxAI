@@ -41,6 +41,28 @@ const TYPE_LABELS = {
 const API_BASE = '/api/modules/wb_core_rpg';
 const NEW_SKILL = '__new__';
 
+// Whether the global cheats.enabled engine setting is on. Cheat-only UI
+// (rarity picker, status effect removal) is hidden without it; the server
+// enforces the same gate, so this is purely cosmetic.
+function useCheatMode() {
+  const [cheatMode, setCheatMode] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/settings?scope=global')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data?.settings) return;
+        for (const group of Object.values(data.settings)) {
+          const hit = (group || []).find((d) => d.key === 'cheats.enabled');
+          if (hit) { setCheatMode(!!hit.value); return; }
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  return cheatMode;
+}
+
 // Rarity tiers for wizard-generated skills, keyed by the pick-time strength
 // roll (uniform 5-10). Strength becomes the starting rating; the tint sells
 // the lucky pull. Shown as colors + names only - never numbers.
@@ -106,7 +128,7 @@ function effectDurationLabel(effect, nowMinutes) {
   return 'ongoing';
 }
 
-function StatusEffectList({ effects, nowMinutes, detailed = false }) {
+function StatusEffectList({ effects, nowMinutes, detailed = false, onRemove = null }) {
   if (!effects || effects.length === 0) return null;
   return (
     <div className="space-y-1">
@@ -118,9 +140,18 @@ function StatusEffectList({ effects, nowMinutes, detailed = false }) {
         >
           <div className="flex items-center justify-between">
             <span className={`capitalize truncate ${e.kind === 'good' ? 'text-emerald-300' : 'text-red-300'}`}>{e.name}</span>
-            <span className="text-gray-500 font-mono ml-2 shrink-0">
+            <span className="text-gray-500 font-mono ml-2 shrink-0 flex items-center">
               {e.severity != null && <span className="mr-1.5 text-gray-600">S{e.severity}</span>}
               {effectDurationLabel(e, nowMinutes)}
+              {onRemove && (
+                <button
+                  onClick={() => onRemove(e.name)}
+                  title={`Cheat — remove '${e.name}'`}
+                  className="ml-1.5 px-1 text-gray-500 hover:text-red-300 hover:bg-red-500/20 rounded transition-colors"
+                >
+                  {'✕'}
+                </button>
+              )}
             </span>
           </div>
           {detailed && e.description && (
@@ -762,29 +793,12 @@ function AddSkillModal({ generating, costLabel, saveId, resume, onCancel, onConf
   const [confirming, setConfirming] = useState(false);
   const [query, setQuery] = useState('');
   const [rollIdx, setRollIdx] = useState(0); // cycles the rarity ladder while refining
-  const [cheatMode, setCheatMode] = useState(false); // global cheats.enabled engine setting
+  const cheatMode = useCheatMode(); // gates the rarity picker
   const [forcedTier, setForcedTier] = useState(null); // strength 5-10, null = let fate roll
 
   // StrictMode double-mounts the modal in dev, firing loadCategories twice;
   // the sequence counter makes every response but the latest a no-op.
   const loadSeq = React.useRef(0);
-
-  // The rarity picker only appears when the global cheat toggle is on. The
-  // server enforces the same gate, so this is purely cosmetic.
-  useEffect(() => {
-    let cancelled = false;
-    fetch('/api/settings?scope=global')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (cancelled || !data?.settings) return;
-        for (const group of Object.values(data.settings)) {
-          const hit = (group || []).find((d) => d.key === 'cheats.enabled');
-          if (hit) { setCheatMode(!!hit.value); return; }
-        }
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, []);
 
   // Refined results already revealed this session, by lowercased skill name.
   // Mirrors the server-side roll lock so re-picks skip the roll animation.
@@ -1327,6 +1341,10 @@ export default function CoreRpgWidget({ state, config, generating }) {
   // Level-up popup + skill evolution flow. API responses are mirrored into
   // rpgOverride until the next server state refresh carries them back.
   const [rpgOverride, setRpgOverride] = useState(null);
+
+  // Cheat-only status effect removal (server enforces the same gate).
+  const cheatMode = useCheatMode();
+  const [effectError, setEffectError] = useState('');
   const [showLevelUp, setShowLevelUp] = useState(false);
   const [evolvingSkill, setEvolvingSkill] = useState(null); // skill key
   const [restoredEvo, setRestoredEvo] = useState(null); // recent_evolutions entry for a reveal that finished while the app was closed
@@ -1458,6 +1476,18 @@ export default function CoreRpgWidget({ state, config, generating }) {
     }
   }
 
+  async function removeEffect(name) {
+    setEffectError('');
+    try {
+      const res = await fetch(`${API_BASE}/status-effects/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `Remove failed (HTTP ${res.status})`);
+      setRpgOverride({ ...rpg, status_effects: data.status_effects || [] });
+    } catch (e) {
+      setEffectError(e.message);
+    }
+  }
+
   async function deleteSkill() {
     if (!confirmingDelete) { setConfirmingDelete(true); return; }
     setSaving(true);
@@ -1552,7 +1582,8 @@ export default function CoreRpgWidget({ state, config, generating }) {
         {statusEffects.length > 0 && (
           <div>
             <div className="text-xs text-gray-400 uppercase tracking-wider mb-1">Effects</div>
-            <StatusEffectList effects={statusEffects} nowMinutes={nowMinutes} />
+            <StatusEffectList effects={statusEffects} nowMinutes={nowMinutes} onRemove={cheatMode ? removeEffect : null} />
+            {effectError && <div className="text-[10px] text-red-400 mt-1">{effectError}</div>}
           </div>
         )}
 
@@ -1725,7 +1756,8 @@ export default function CoreRpgWidget({ state, config, generating }) {
                   <h3 className="text-xs uppercase tracking-wider text-gray-500 mb-3">
                     Status Effects ({statusEffects.length})
                   </h3>
-                  <StatusEffectList effects={statusEffects} nowMinutes={nowMinutes} detailed />
+                  <StatusEffectList effects={statusEffects} nowMinutes={nowMinutes} detailed onRemove={cheatMode ? removeEffect : null} />
+                  {effectError && <div className="text-[10px] text-red-400 mt-1">{effectError}</div>}
                 </section>
               )}
 

@@ -99,6 +99,11 @@ actions it aids), appear in the storyteller's character sheet as "Current
 afflictions"/"Current boons", in `/stats`, and in the sidebar widget and
 character view panel with their remaining duration.
 
+While the global cheat toggle (`cheats.enabled`) is on, each effect in the
+sidebar widget and full character sheet gets a ✕ button that removes it
+outright via `DELETE /api/modules/wb_core_rpg/status-effects/{name}`. The
+gate is enforced server-side — with cheats off the endpoint returns 403.
+
 ## Settings
 
 | Setting | Type | Default | Description |

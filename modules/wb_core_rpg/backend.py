@@ -1845,6 +1845,23 @@ def get_router():
         _persist(sm)
         return {"skills": skills}
 
+    @router.delete("/status-effects/{effect_name}")
+    def delete_status_effect(effect_name: str):
+        # Hand-removing a condition bypasses the story, so like forced skill
+        # rarity the gate lives server-side on the global cheat toggle.
+        if not _cheats_enabled():
+            raise HTTPException(status_code=403, detail="Removing status effects requires cheat mode.")
+        sm = _session_manager()
+        rpg = _rpg_data(sm)
+        effects = rpg.get("status_effects") or []
+        lowered = effect_name.strip().lower()
+        kept = [e for e in effects if not (isinstance(e, dict) and str(e.get("name", "")).lower() == lowered)]
+        if len(kept) == len(effects):
+            raise HTTPException(status_code=404, detail=f"Status effect '{effect_name}' not found.")
+        rpg["status_effects"] = kept
+        _persist(sm)
+        return {"status_effects": kept}
+
     @router.post("/levelup/spend")
     def spend_levelup_points(payload: SpendPayload):
         sm = _session_manager()

@@ -435,3 +435,67 @@ def test_legacy_saves_over_the_cap_are_trimmed_to_the_strongest():
     # The trim persists through the per-turn round trip.
     result = asyncio.run(backend.on_gather_context(_state(effects), _make_sdk()))
     assert [e["name"] for e in _effects_of(result)] == ["b", "d", "e"]
+
+
+# ---------------------------------------------------------------------------
+# Cheat-gated manual removal endpoint (DELETE /status-effects/{name})
+# ---------------------------------------------------------------------------
+
+def _make_client(mod, effects, cheats_enabled=True):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    saved = []
+
+    def save_turn(save_id, st, turn):
+        saved.append({"save_id": save_id, "turn": turn})
+
+    session_manager = SimpleNamespace(
+        active_save_id="save1",
+        state=_state(effects=effects),
+        save_manager=SimpleNamespace(save_turn=save_turn),
+    )
+    mod.set_services({
+        "session_manager": session_manager,
+        "settings": {"cheats.enabled": cheats_enabled},
+    })
+    app = FastAPI()
+    app.include_router(mod.get_router(), prefix="/api/modules/wb_core_rpg")
+    return TestClient(app), session_manager, saved
+
+
+EFFECTS_BASE = "/api/modules/wb_core_rpg/status-effects"
+
+
+def test_cheat_delete_removes_effect_and_persists():
+    backend = _load_backend()
+    effects = [_broken_leg(), _broken_leg(name="blessed", kind="good")]
+    client, sm, saved = _make_client(backend, effects)
+
+    # Case-insensitive match, like the widget's skill endpoints.
+    res = client.delete(f"{EFFECTS_BASE}/Broken%20Leg")
+    assert res.status_code == 200
+    remaining = res.json()["status_effects"]
+    assert [e["name"] for e in remaining] == ["blessed"]
+    assert sm.state["module_data"]["wb_core_rpg"]["status_effects"] == remaining
+    assert saved == [{"save_id": "save1", "turn": 3}]
+
+
+def test_delete_requires_cheat_mode():
+    backend = _load_backend()
+    client, sm, saved = _make_client(backend, [_broken_leg()], cheats_enabled=False)
+
+    res = client.delete(f"{EFFECTS_BASE}/broken%20leg")
+    assert res.status_code == 403
+    # State untouched, nothing persisted.
+    assert [e["name"] for e in sm.state["module_data"]["wb_core_rpg"]["status_effects"]] == ["broken leg"]
+    assert saved == []
+
+
+def test_delete_unknown_effect_is_404():
+    backend = _load_backend()
+    client, _, saved = _make_client(backend, [_broken_leg()])
+
+    res = client.delete(f"{EFFECTS_BASE}/frostbite")
+    assert res.status_code == 404
+    assert saved == []
