@@ -3,7 +3,9 @@
 ## Git workflow
 
 - Always push completed, tested work to `main`. Do not leave finished changes
-  sitting only on a feature branch and do not wait to be asked.
+  sitting only on a feature branch and do not wait to be asked. This holds
+  even when a session assigns a designated feature branch: push there for the
+  session's bookkeeping, but always land the finished work on `main` too.
 - If work was developed on a feature branch, rebase it onto `origin/main` and
   fast-forward `main` (`git push origin <branch>:main`). Run the test suite
   after the rebase, before pushing.
