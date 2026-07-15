@@ -82,6 +82,14 @@ environment variables select a different A1111-compatible fork, port, or
 extra launch flags (e.g. `--api-auth user:pass`, or
 `--skip-torch-cuda-test --use-cpu all` on machines without an NVIDIA GPU).
 
+All the booru-tag checkpoint families the module recognizes (Pony,
+Illustrious, NoobAI, Animagine) work on the default Forge install, which the
+Studio pairs with tag-style prompts and the family's own quality tags
+automatically. Note that NoobAI v-pred checkpoints need a WebUI with SDXL
+v-prediction support — Forge handles them out of the box, classic
+AUTOMATIC1111 does not, so keep the default `WB_WEBUI_REPO` if you plan to
+use them.
+
 Start the backend:
 
 ```powershell

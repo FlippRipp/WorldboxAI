@@ -1175,8 +1175,10 @@ def test_prompt_style_detection(tmp_path):
     # sd_name fallback for configs saved before model_base existed
     assert backend._prompt_style(cfg("", "ponyDiffusionV6XL.safetensors")) == "tags"
     assert backend._prompt_style(cfg("", "noobaiXLNAIXL_epsilon.safetensors")) == "tags"
-    assert backend._is_pony(cfg("Pony"))
-    assert not backend._is_pony(cfg("Illustrious XL"))
+    assert backend._tag_model_marker(cfg("Pony")) == "pony"
+    assert backend._tag_model_marker(cfg("Illustrious XL")) == "illustrious"
+    assert backend._tag_model_marker(cfg("NoobAI XL")) == "noob"
+    assert backend._tag_model_marker(cfg("SDXL 1.0")) is None
 
     # An explicit prompt_style_mode overrides the detection in both directions;
     # "auto" and junk values fall back to it.
@@ -1208,7 +1210,7 @@ def test_prompt_style_mode_config_roundtrip(tmp_path):
     assert backend._load_config()["prompt_style_mode"] == "auto"
 
 
-def test_prompt_writer_picks_template_and_pony_tags(tmp_path):
+def test_prompt_writer_picks_template_and_quality_tags(tmp_path):
     backend = _load_backend(tmp_path)
 
     # Pony base: tag template used, quality tags prepended before the suffix.
@@ -1220,11 +1222,38 @@ def test_prompt_writer_picks_template_and_pony_tags(tmp_path):
     assert "BOORU-STYLE TAGS" in captured["prompts"][0]
     assert prompt == "score_9, score_8_up, score_7_up, 1girl, market square, smiling, anime style"
 
-    # Illustrious: tag template, but no pony score tags.
+    # Each tag family gets its own quality vocabulary when the stored value is
+    # stock. _write_image_prompt reads cfg as _effective_config produced it,
+    # so resolve through a saved profile the way production does.
+    for base, marker in (("Illustrious XL", "illustrious"),
+                         ("NoobAI XL", "noob")):
+        cfg = backend._load_config()
+        cfg.update({"model_base": base, "model_name": "m.safetensors"})
+        backend._save_config(cfg)
+        cfg = backend._load_config()
+        assert cfg["quality_tags"] == backend.QUALITY_TAG_DEFAULTS[marker]
+        sdk = _make_sdk(reply="1girl, market square", captured={})
+        prompt = asyncio.run(backend._write_image_prompt(cfg, "scene", "", sdk))
+        assert prompt == f"{backend.QUALITY_TAG_DEFAULTS[marker]}, 1girl, market square"
+
+    # A customized value is used verbatim on any tag family.
     sdk = _make_sdk(reply="1girl, market square", captured={})
-    cfg = {**backend._default_config(), "model_base": "Illustrious XL", "model_name": "m.safetensors"}
+    cfg = {**backend._default_config(), "model_base": "NoobAI XL",
+           "model_name": "m.safetensors", "quality_tags": "my quality tags"}
+    prompt = asyncio.run(backend._write_image_prompt(cfg, "scene", "", sdk))
+    assert prompt == "my quality tags, 1girl, market square"
+
+    # An unrecognized family forced into tags mode gets no stock prefix (its
+    # quality vocabulary is unknown), but a customized one still applies.
+    sdk = _make_sdk(reply="1girl, market square", captured={})
+    cfg = {**backend._default_config(), "model_base": "SDXL 1.0",
+           "model_name": "m.safetensors", "prompt_style_mode": "tags"}
     prompt = asyncio.run(backend._write_image_prompt(cfg, "scene", "", sdk))
     assert prompt == "1girl, market square"
+    sdk = _make_sdk(reply="1girl, market square", captured={})
+    cfg["quality_tags"] = "masterpiece"
+    prompt = asyncio.run(backend._write_image_prompt(cfg, "scene", "", sdk))
+    assert prompt == "masterpiece, 1girl, market square"
 
     # Flux: natural-language template, no tags anywhere.
     captured = {}
@@ -4081,7 +4110,7 @@ def test_prompt_writer_applies_tag_usage_filter(tmp_path):
 
     cfg = {**backend._default_config(), "model_base": "Pony",
            "tag_usage_filter": "hard", "tag_usage_min_count": 100,
-           "pony_quality_tags": "score_9, score_8_up",
+           "quality_tags": "score_9, score_8_up",
            "style_suffix": "sparklestyle glow"}   # dictionary-unknown, must survive
     prompt = asyncio.run(backend._write_image_prompt(
         cfg, "narration", "earlier", _make_sdk(reply=reply)))
@@ -4110,6 +4139,61 @@ def test_legacy_tags_template_upgrades_on_load(tmp_path):
     backend._save_config(cfg)
     assert backend._load_config()["prompt_template_tags"] \
         == "my custom template {narration} {history}"
+
+
+def test_quality_tags_migrate_and_follow_family(tmp_path):
+    backend = _load_backend(tmp_path)
+
+    # A v2 profile stored under the old pony_quality_tags key (customized
+    # value) migrates to quality_tags and is used verbatim.
+    store = backend._default_store()
+    profile = store["profiles"]["default"]
+    del profile["quality_tags"]
+    profile["pony_quality_tags"] = "score_9"
+    profile["model_base"] = "Pony"
+    profile["model_name"] = "m.safetensors"
+    with open(backend._data_dir() / "config.json", "w", encoding="utf-8") as f:
+        json.dump(store, f)
+    assert backend._load_config()["quality_tags"] == "score_9"
+
+    # A stock value keeps tracking the checkpoint family across model
+    # switches; a customized one survives them.
+    cfg = backend._load_config()
+    cfg["quality_tags"] = backend.DEFAULT_QUALITY_TAGS
+    backend._save_config(cfg)
+    for base, marker in (("NoobAI XL", "noob"), ("Pony", "pony"),
+                         ("Illustrious XL", "illustrious")):
+        cfg = backend._load_config()
+        cfg["model_base"] = base
+        backend._save_config(cfg)
+        assert backend._load_config()["quality_tags"] \
+            == backend.QUALITY_TAG_DEFAULTS[marker]
+    cfg = backend._load_config()
+    cfg["quality_tags"] = "my tags"
+    cfg["model_base"] = "Pony"
+    backend._save_config(cfg)
+    cfg = backend._load_config()
+    cfg["model_base"] = "NoobAI XL"
+    backend._save_config(cfg)
+    assert backend._load_config()["quality_tags"] == "my tags"
+
+    # A flat pre-profile config migrates the old key too.
+    flat = {**backend._default_config(), "model_base": "Pony"}
+    flat["pony_quality_tags"] = flat.pop("quality_tags") + ", score_6_up"
+    with open(backend._data_dir() / "config.json", "w", encoding="utf-8") as f:
+        json.dump(flat, f)
+    assert backend._load_config()["quality_tags"] \
+        == backend.DEFAULT_QUALITY_TAGS + ", score_6_up"
+
+    # The PUT endpoint accepts the deprecated field name from stale UIs and
+    # exposes the per-family defaults for the Studio.
+    client = _client(backend)
+    resp = client.put("/config", json={"pony_quality_tags": "alias tags"})
+    assert resp.status_code == 200
+    assert resp.json()["quality_tags"] == "alias tags"
+    assert backend._load_config()["quality_tags"] == "alias tags"
+    assert client.get("/config").json()["quality_tag_defaults"] \
+        == backend.QUALITY_TAG_DEFAULTS
 
 
 def test_clean_character_tags_usage_filter(tmp_path):

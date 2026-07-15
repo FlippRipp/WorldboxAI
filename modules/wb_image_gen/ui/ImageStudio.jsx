@@ -2162,7 +2162,12 @@ export default function ImageStudio({ onBack }) {
     ? 'tags' : 'natural';
   const promptStyleMode = draft.prompt_style_mode || 'auto';
   const promptStyle = promptStyleMode === 'auto' ? autoPromptStyle : promptStyleMode;
-  const isPony = modelIdent.includes('pony');
+  // Mirror of the backend's _tag_model_marker: the tag-trained family the
+  // checkpoint matches, keying quality_tag_defaults. Null for natural models.
+  const qualityMarker =
+    ['pony', 'illustrious', 'noob', 'animagine'].find((m) => modelIdent.includes(m)) || null;
+  const qualityDefault =
+    (config?.quality_tag_defaults || {})[qualityMarker || 'pony'] || 'score_9, score_8_up, score_7_up';
   const isLocal = (draft.provider || config?.provider) === 'local';
   const checkpointFamily =
     draft.model_name === config?.flux2_model_name ? 'flux' : baseFamily(modelIdent);
@@ -2206,7 +2211,7 @@ export default function ImageStudio({ onBack }) {
         beat_planner: draft.beat_planner || 'fast',
         prompt_template: draft.prompt_template,
         prompt_template_tags: draft.prompt_template_tags,
-        pony_quality_tags: draft.pony_quality_tags,
+        quality_tags: draft.quality_tags,
         booru_subject_mode: draft.booru_subject_mode || 'auto',
         booru_break_separator: draft.booru_break_separator === true,
         prompt_style_mode: draft.prompt_style_mode || 'auto',
@@ -2732,7 +2737,7 @@ export default function ImageStudio({ onBack }) {
               <span className="text-purple-300 font-medium">
                 {promptStyle === 'tags' ? 'booru tag' : 'natural language'}
               </span>{' '}
-              template{isPony ? ', with Pony quality tags prepended' : ''}.
+              template{qualityMarker ? ', with its family’s quality tags prepended' : ''}.
               {promptStyleMode === 'auto'
                 ? ` Detected from base model${draft.model_base ? ` "${draft.model_base}"` : ' / model name'}.`
                 : ' Set by the prompt style choice above.'}
@@ -2892,22 +2897,28 @@ export default function ImageStudio({ onBack }) {
           </div>
           <div>
             <div className="flex items-center justify-between mb-1.5">
-              <label className={`text-xs uppercase tracking-wider ${isPony ? 'text-purple-400' : 'text-gray-500'}`}>
-                Pony quality tags (prepended for Pony models){isPony ? ' — active' : ''}
+              <label className={`text-xs uppercase tracking-wider ${qualityMarker ? 'text-purple-400' : 'text-gray-500'}`}>
+                Quality tags (prepended for booru-tag models){qualityMarker ? ' — active' : ''}
               </label>
               <button
-                onClick={() => set('pony_quality_tags', config.default_pony_quality_tags)}
+                onClick={() => set('quality_tags', qualityDefault)}
                 className="text-xs text-gray-500 hover:text-gray-300"
               >
                 Reset to default
               </button>
             </div>
             <AutoGrowTextarea
-              value={draft.pony_quality_tags || ''}
-              onChange={(e) => set('pony_quality_tags', e.target.value)}
-              placeholder="score_9, score_8_up, score_7_up"
+              value={draft.quality_tags || ''}
+              onChange={(e) => set('quality_tags', e.target.value)}
+              placeholder={qualityDefault}
               className={inputCls}
             />
+            <p className="text-xs text-gray-600 mt-1">
+              Each tag-trained family expects its own quality vocabulary — Pony wants
+              score_* tags, NoobAI/Illustrious/Animagine masterpiece-style tags. Left
+              at a stock value the field follows the checkpoint family automatically;
+              edit it to pin your own tags for this profile.
+            </p>
           </div>
           <div>
             <label className={labelCls}>Style suffix (appended to every image prompt)</label>

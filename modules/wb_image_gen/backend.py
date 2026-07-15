@@ -87,6 +87,7 @@ HF_BASE_MODELS = {
     "SDXL 1.0": "base_model:stabilityai/stable-diffusion-xl-base-1.0",
     "Pony": "base_model:AstraliteHeart/pony-diffusion-v6",
     "Illustrious": "base_model:OnomaAIResearch/Illustrious-xl-early-release-v0",
+    "NoobAI": "base_model:Laxhar/noobai-XL-1.1",
     "Flux.1 D": "base_model:black-forest-labs/FLUX.1-dev",
     "Flux.2 D": "base_model:black-forest-labs/FLUX.2-dev",
 }
@@ -141,7 +142,7 @@ LORA_LLM_MODES = ("off", "gate", "weight", "both")
 PROFILE_FIELDS = (
     "model_name", "model_base", "width", "height", "image_num", "steps",
     "guidance_scale", "sampler_name", "negative_prompt", "style_suffix",
-    "pony_quality_tags", "booru_subject_mode", "booru_break_separator",
+    "quality_tags", "booru_subject_mode", "booru_break_separator",
     "tag_usage_filter", "tag_usage_min_count", "prompt_template",
     "prompt_template_tags", "prompt_style_mode",
 )
@@ -371,7 +372,21 @@ EARLIER CONTEXT (for continuity only):
 LATEST SCENE (illustrate this):
 {narration}""",)
 
-DEFAULT_PONY_QUALITY_TAGS = "score_9, score_8_up, score_7_up"
+# Booru-tag checkpoint families each expect their own quality tags up front:
+# score_* is Pony vocabulary; Illustrious/NoobAI/Animagine were trained on
+# masterpiece/best-quality style tags (NoobAI also knows the "newest" recency
+# tag). Keyed by BOORU_TAG_MODEL_MARKERS entries. A stored quality_tags value
+# still equal to ANY of these stock defaults was never customized, so it
+# keeps tracking the active checkpoint's family (resolved in
+# _effective_config); an edited value is used verbatim.
+QUALITY_TAG_DEFAULTS = {
+    "pony": "score_9, score_8_up, score_7_up",
+    "illustrious": "masterpiece, best quality, very aesthetic, absurdres",
+    "noob": "masterpiece, best quality, newest, absurdres, highres",
+    "animagine": "masterpiece, best quality, very aesthetic, absurdres",
+}
+DEFAULT_QUALITY_TAGS = QUALITY_TAG_DEFAULTS["pony"]
+STOCK_QUALITY_TAGS = frozenset(QUALITY_TAG_DEFAULTS.values())
 
 # Tag-trained checkpoints blend features badly when asked for several distinct
 # characters, so booru_subject_mode "single" narrows the prompt to one.
@@ -483,7 +498,7 @@ def _default_config() -> dict:
         "beat_planner": "fast",         # one of BEAT_PLANNER_MODES
         "prompt_template": DEFAULT_PROMPT_TEMPLATE,
         "prompt_template_tags": DEFAULT_PROMPT_TEMPLATE_TAGS,
-        "pony_quality_tags": DEFAULT_PONY_QUALITY_TAGS,
+        "quality_tags": DEFAULT_QUALITY_TAGS,
         "booru_subject_mode": "auto",   # tag models: one of BOORU_SUBJECT_MODES
         "prompt_style_mode": "auto",    # one of PROMPT_STYLE_MODES
         "booru_break_separator": False, # multi mode: emit BREAK between character groups
@@ -548,6 +563,10 @@ def _migrate_flat_store(stored: dict) -> dict:
             and isinstance(stored.get("booru_single_subject"), bool):
         profile["booru_subject_mode"] = \
             "single" if stored["booru_single_subject"] else "multi"
+    # quality_tags was pony_quality_tags before it went family-aware.
+    if "quality_tags" not in stored \
+            and isinstance(stored.get("pony_quality_tags"), str):
+        profile["quality_tags"] = stored["pony_quality_tags"]
     library = []
     for entry in stored.get("lora_library") or []:
         if not isinstance(entry, dict) or not entry.get("id"):
@@ -591,6 +610,10 @@ def _load_store() -> dict:
             continue
         profile = _default_profile(str(raw.get("name") or pid))
         profile.update({k: raw[k] for k in PROFILE_FIELDS if k in raw})
+        # quality_tags was pony_quality_tags before it went family-aware.
+        if "quality_tags" not in raw \
+                and isinstance(raw.get("pony_quality_tags"), str):
+            profile["quality_tags"] = raw["pony_quality_tags"]
         if isinstance(raw.get("lora_state"), dict):
             profile["lora_state"] = raw["lora_state"]
         profiles[str(pid)] = profile
@@ -647,6 +670,13 @@ def _effective_config(store: dict) -> dict:
     # customized; keep it tracking the current default.
     if cfg.get("prompt_template_tags") in LEGACY_PROMPT_TEMPLATES_TAGS:
         cfg["prompt_template_tags"] = DEFAULT_PROMPT_TEMPLATE_TAGS
+    # Same for quality tags: a stock value tracks the checkpoint family's own
+    # default (score_* means nothing to NoobAI/Illustrious and vice versa).
+    # Unrecognized families display the universal default; _quality_tags
+    # withholds it at render time since their vocabulary is unknown.
+    if cfg.get("quality_tags") in STOCK_QUALITY_TAGS:
+        cfg["quality_tags"] = QUALITY_TAG_DEFAULTS.get(
+            _tag_model_marker(cfg) or "", DEFAULT_QUALITY_TAGS)
     if cfg.get("tag_usage_filter") not in TAG_USAGE_FILTER_MODES:
         cfg["tag_usage_filter"] = "off"
     try:
@@ -884,6 +914,14 @@ def _model_ident(cfg: dict) -> str:
 BOORU_TAG_MODEL_MARKERS = ("pony", "illustrious", "noob", "animagine")
 
 
+def _tag_model_marker(cfg: dict) -> str | None:
+    """The BOORU_TAG_MODEL_MARKERS entry the checkpoint matches, or None for
+    natural-language models and unrecognized bases. Doubles as the key into
+    QUALITY_TAG_DEFAULTS."""
+    ident = _model_ident(cfg)
+    return next((m for m in BOORU_TAG_MODEL_MARKERS if m in ident), None)
+
+
 def _prompt_style(cfg: dict) -> str:
     """Resolved prompt style, "tags" (danbooru lists) or "natural" (descriptive
     text). An explicit prompt_style_mode wins; "auto" picks "tags" for
@@ -892,14 +930,27 @@ def _prompt_style(cfg: dict) -> str:
     mode = str(cfg.get("prompt_style_mode") or "auto")
     if mode in ("tags", "natural"):
         return mode
-    ident = _model_ident(cfg)
-    if any(marker in ident for marker in BOORU_TAG_MODEL_MARKERS):
-        return "tags"
-    return "natural"
+    return "tags" if _tag_model_marker(cfg) else "natural"
 
 
-def _is_pony(cfg: dict) -> bool:
-    return "pony" in _model_ident(cfg)
+def _quality_tags(cfg: dict) -> str:
+    """Quality-tag prefix for the prompt being written. A stock value tracks
+    the checkpoint family's own default (normally pre-resolved by
+    _effective_config; re-resolving here is idempotent and covers cfgs built
+    from _default_config) and is withheld for unrecognized families, whose
+    quality vocabulary is unknown. A customized value is the user's explicit
+    choice: it applies verbatim to any recognized tag family (even under a
+    forced natural prompt style -- Pony without score_* degrades whatever the
+    prompt looks like) and to anything else running tag-style prompts."""
+    value = str(cfg.get("quality_tags") or "").strip()
+    marker = _tag_model_marker(cfg)
+    if value in STOCK_QUALITY_TAGS:
+        return QUALITY_TAG_DEFAULTS.get(marker or "", "")
+    if not value:
+        return ""
+    if marker:
+        return value
+    return value if _prompt_style(cfg) == "tags" else ""
 
 
 def _subject_mode(cfg: dict, characters: dict | None = None) -> str:
@@ -1562,8 +1613,8 @@ async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
     if style == "tags":
         image_prompt = _filter_tags_by_usage(image_prompt, cfg, whitelist=triggers)
 
-    # Pony checkpoints are trained to expect score_* quality tags up front.
-    prefix = str(cfg.get("pony_quality_tags") or "").strip() if _is_pony(cfg) else ""
+    # Tag-trained checkpoints expect their family's quality tags up front.
+    prefix = _quality_tags(cfg)
     suffix = str(cfg.get("style_suffix") or "").strip()
 
     cap = _prompt_cap(cfg)
@@ -3646,7 +3697,8 @@ def get_router():
         beat_planner: str | None = None
         prompt_template: str | None = None
         prompt_template_tags: str | None = None
-        pony_quality_tags: str | None = None
+        quality_tags: str | None = None
+        pony_quality_tags: str | None = None       # deprecated alias for quality_tags
         booru_subject_mode: str | None = None
         booru_break_separator: bool | None = None
         prompt_style_mode: str | None = None
@@ -3762,7 +3814,7 @@ def get_router():
         out["samplers"] = SAMPLERS
         out["default_prompt_template"] = DEFAULT_PROMPT_TEMPLATE
         out["default_prompt_template_tags"] = DEFAULT_PROMPT_TEMPLATE_TAGS
-        out["default_pony_quality_tags"] = DEFAULT_PONY_QUALITY_TAGS
+        out["quality_tag_defaults"] = QUALITY_TAG_DEFAULTS
         out["prompt_style"] = _prompt_style(cfg)   # resolved; the stored mode rides in as prompt_style_mode
         out["prompt_style_modes"] = PROMPT_STYLE_MODES
         out["civitai_sorts"] = CIVITAI_SORTS
@@ -3870,6 +3922,10 @@ def get_router():
         legacy_single = incoming.pop("booru_single_subject", None)
         if legacy_single is not None and "booru_subject_mode" not in incoming:
             incoming["booru_subject_mode"] = "single" if legacy_single else "multi"
+        # Same for the pre-family-aware quality tags field name.
+        legacy_quality = incoming.pop("pony_quality_tags", None)
+        if legacy_quality is not None and "quality_tags" not in incoming:
+            incoming["quality_tags"] = legacy_quality
         if ("booru_subject_mode" in incoming
                 and incoming["booru_subject_mode"] not in BOORU_SUBJECT_MODES):
             raise HTTPException(status_code=400,
