@@ -650,7 +650,10 @@ function LocalConnectionCard({ config, draft, set }) {
           autoComplete="off"
         />
         <p className="text-xs text-gray-600 mt-1">
-          The WebUI's <span className="font-mono">models/Stable-diffusion</span> folder, for checkpoint downloads.
+          The WebUI's <span className="font-mono">models/Stable-diffusion</span> folder, for one-click
+          checkpoint installs. Leave it empty when the WebUI runs on another machine (unless the folder
+          is mounted here) — the model browser then detects installed checkpoints through the WebUI API
+          and offers download links to fetch on that machine instead.
         </p>
       </div>
     </div>
@@ -916,10 +919,36 @@ function InstallProgress({ download, onCancel }) {
   );
 }
 
+// Copy text to the clipboard. navigator.clipboard needs a secure context,
+// which a LAN-served http:// app doesn't have — fall back to the legacy
+// textarea trick, and report failure so the caller can show the text instead.
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch (e2) {
+      return false;
+    }
+  }
+}
+
 // The Install button's version picker: Civitai models ship many versions but
 // browse hits carry only the latest, so picking fetches the full list. HF
 // items have no versions and install directly (the button skips this panel).
-function VersionPicker({ item, onInstall, onClose }) {
+// actionLabel renames the per-version button when the parent's onInstall
+// does something other than a one-click install (e.g. copy the link).
+function VersionPicker({ item, onInstall, onClose, actionLabel = 'Install' }) {
   const [versions, setVersions] = useState(null);
   const [error, setError] = useState('');
   const [busyId, setBusyId] = useState(null);
@@ -966,7 +995,7 @@ function VersionPicker({ item, onInstall, onClose }) {
               disabled={busyId !== null}
               className="px-2 py-0.5 rounded bg-purple-600 hover:bg-purple-500 text-white disabled:opacity-40 shrink-0"
             >
-              {busyId === v.id ? '…' : 'Install'}
+              {busyId === v.id ? '…' : actionLabel}
             </button>
           )}
         </div>
@@ -2077,7 +2106,8 @@ function ckptAvailability(item) {
   }
   return {
     label: 'installed: ?', cls: 'bg-gray-900/40 text-gray-600 border-gray-800',
-    title: 'Local availability unknown (set your checkpoint folder in Setup and it will be scanned)',
+    title: 'Local availability unknown — the WebUI did not answer. Check the connection in Setup '
+      + '(installed models are matched through the WebUI API, or a scan of the checkpoint folder if set).',
   };
 }
 
@@ -2101,6 +2131,7 @@ function CheckpointBrowser({ config, draft, set, setDraft }) {
   const [loading, setLoading] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');   // copy-link feedback
   const [versionPickerFor, setVersionPickerFor] = useState(null);   // browse item id
   const [downloads, setDownloads] = useState([]);
   const debounceRef = useRef(null);
@@ -2196,10 +2227,22 @@ function CheckpointBrowser({ config, draft, set, setDraft }) {
     }
   }, [setDraft]);
 
+  // Copy a version's download link, for WebUIs on another machine where this
+  // app cannot write into the checkpoint folder. Civitai often requires auth
+  // on the actual download, so the user may need `?token=<their key>` or a
+  // logged-in browser on that machine.
+  const copyLink = useCallback(async (version) => {
+    const ok = await copyText(version.download_url);
+    setNotice(ok
+      ? `Link copied for "${[version.name, version.version_name].filter(Boolean).join(' — ')}" — download it into the WebUI machine's checkpoint folder (Civitai may need your API key: append ?token=…), then rescan.`
+      : `Could not copy automatically — download link: ${version.download_url}`);
+  }, []);
+
   const search = useCallback(async (cursor = '') => {
     const seq = ++seqRef.current;
     setLoading(true);
     setError('');
+    setNotice('');
     try {
       const params = new URLSearchParams({ query, sort, nsfw: nsfwMode });
       if (baseModel) params.set('base_model', baseModel);
@@ -2302,9 +2345,15 @@ function CheckpointBrowser({ config, draft, set, setDraft }) {
         </button>
       </div>
       <p className="text-xs text-gray-600">
-        Find checkpoints on Civitai and press Install — the file downloads into your WebUI's
-        checkpoint folder{canInstall ? '' : ' (set it above to enable one-click installs)'}. Once
-        it finishes, press "Use as model" to select it here.
+        {canInstall ? (
+          <>Find checkpoints on Civitai and press Install — the file downloads into your WebUI's
+          checkpoint folder. Once it finishes, press "Use as model" to select it here.</>
+        ) : (
+          <>Find checkpoints on Civitai. Installed ones are detected through the WebUI itself, so
+          this works when the WebUI runs on another machine — press "Copy link" and download the
+          file into that machine's checkpoint folder. (If the folder is on this machine or
+          mounted here, set it above to enable one-click installs.)</>
+        )}
       </p>
 
       {open && (
@@ -2360,6 +2409,7 @@ function CheckpointBrowser({ config, draft, set, setDraft }) {
           </div>
 
           {error && <p className="text-xs text-red-400">{error}</p>}
+          {notice && <p className="text-xs text-green-400 break-all">{notice}</p>}
 
           <div
             ref={gridRef}
@@ -2431,26 +2481,28 @@ function CheckpointBrowser({ config, draft, set, setDraft }) {
                       </div>
                     ) : (
                       <button
-                        onClick={() => {
-                          if (!canInstall) return;
-                          setVersionPickerFor(versionPickerFor === item.id ? null : item.id);
-                        }}
-                        disabled={!canInstall}
+                        onClick={() => setVersionPickerFor(versionPickerFor === item.id ? null : item.id)}
                         title={canInstall
                           ? 'Pick a version, then it downloads into your checkpoint folder'
-                          : 'Set your checkpoint folder in Setup to enable one-click installs'}
-                        className="w-full px-2 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                          : 'Pick a version and copy its download link — fetch the file on the machine running the WebUI'}
+                        className="w-full px-2 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-medium"
                       >
-                        Install
+                        {canInstall ? 'Install' : 'Copy link'}
                       </button>
                     )}
                     {versionPickerFor === item.id && (
                       <VersionPicker
                         item={item}
+                        actionLabel={canInstall ? 'Install' : 'Copy link'}
                         onClose={() => setVersionPickerFor(null)}
                         onInstall={async (version) => {
-                          const started = await startInstall(version);
-                          if (started) setVersionPickerFor(null);
+                          if (canInstall) {
+                            const started = await startInstall(version);
+                            if (started) setVersionPickerFor(null);
+                          } else {
+                            await copyLink(version);
+                            setVersionPickerFor(null);
+                          }
                         }}
                       />
                     )}

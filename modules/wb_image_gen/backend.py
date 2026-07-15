@@ -2185,6 +2185,90 @@ def _annotate_local_availability(cfg: dict, items: list[dict],
             item["local_name"] = stem
 
 
+# A1111's checkpoint shorthash and Civitai's AutoV2 hash are both the first
+# 10 hex chars of the file SHA256, so they join directly (the same trick as
+# NOVITA_HASH_PREFIX_LEN).
+CKPT_HASH_PREFIX_LEN = 10
+_CKPT_TITLE_HASH_RE = re.compile(r"\s*\[[0-9a-fA-F]{8,12}\]$")
+
+
+def _ckpt_title_stem(title: str) -> str:
+    """The bare file stem of a WebUI checkpoint title or path — subfolders,
+    the extension, and a trailing " [shorthash]" stripped."""
+    base = _CKPT_TITLE_HASH_RE.sub("", str(title or "").strip())
+    base = base.replace("\\", "/").rsplit("/", 1)[-1]
+    for ext in LOCAL_SCAN_EXTS:
+        if base.lower().endswith(ext):
+            base = base[: -len(ext)]
+            break
+    return base
+
+
+async def _local_api_checkpoint_index(cfg: dict) -> dict | None:
+    """Hash-prefix and filename-stem indexes over the WebUI's installed
+    checkpoints, built from /sdapi/v1/sd-models — how browse badges match
+    when the checkpoint folder is not a path this machine can scan (the
+    WebUI runs on another machine). The WebUI computes SHA256s lazily, so
+    hash coverage grows as checkpoints get loaded; filename stems fill the
+    gap for files that kept their Civitai names. None when unreachable."""
+    try:
+        body = await _local_get(cfg, "/sdapi/v1/sd-models")
+    except RuntimeError:
+        return None
+    prefixes: dict[str, str] = {}
+    stems: dict[str, str] = {}
+    for m in body if isinstance(body, list) else []:
+        if not isinstance(m, dict):
+            continue
+        title = str(m.get("title") or m.get("model_name") or "").strip()
+        stem = _ckpt_title_stem(str(m.get("filename") or "") or title)
+        if not stem:
+            continue
+        bracket = _CKPT_TITLE_HASH_RE.search(str(m.get("title") or ""))
+        for h in (m.get("sha256"), m.get("hash"),
+                  bracket.group(0).strip(" []") if bracket else ""):
+            h = str(h or "").strip().lower()
+            if len(h) >= CKPT_HASH_PREFIX_LEN:
+                prefixes.setdefault(h[:CKPT_HASH_PREFIX_LEN], stem)
+        stems.setdefault(stem.casefold(), stem)
+        model_name_stem = _ckpt_title_stem(str(m.get("model_name") or ""))
+        if model_name_stem:
+            stems.setdefault(model_name_stem.casefold(), stem)
+    return {"prefixes": prefixes, "stems": stems}
+
+
+def _match_api_checkpoint(index: dict, entry: dict) -> str | None:
+    """First hash-prefix hit in the WebUI's model list, falling back to the
+    Civitai file name (renamed files only match once their hash is known)."""
+    for h in _entry_hashes(entry):
+        stem = index["prefixes"].get(h[:CKPT_HASH_PREFIX_LEN])
+        if stem:
+            return stem
+    file_stem = _ckpt_title_stem(str(entry.get("file_name") or ""))
+    if file_stem:
+        return index["stems"].get(file_stem.casefold())
+    return None
+
+
+async def _annotate_checkpoint_availability(cfg: dict, items: list[dict]) -> None:
+    """Checkpoint browse badges: folder-scan matching first (exact SHA256 of
+    files this machine can read), then the WebUI's own model list for items
+    the folder couldn't answer — which is all of them when the WebUI lives on
+    another machine and no folder is scannable here."""
+    _annotate_local_availability(cfg, items, kind="checkpoint")
+    pending = [i for i in items if i.get("local_available") is None]
+    if not pending:
+        return
+    index = await _local_api_checkpoint_index(cfg)
+    if index is None:
+        return   # WebUI unreachable: leave "unknown"
+    for item in pending:
+        stem = _match_api_checkpoint(index, item)
+        item["local_available"] = bool(stem)
+        if stem:
+            item["local_name"] = stem
+
+
 # --------------------------------------------------------------------------
 # Local installs: download Civitai/HF files into the WebUI's model folders
 # --------------------------------------------------------------------------
@@ -2525,6 +2609,7 @@ def _civitai_version_to_entry(model: dict, version: dict,
         "sha256": sha256,
         "all_hashes": all_hashes if all_hashes is not None
         else ([sha256] if sha256 else []),
+        "file_name": str(file.get("name") or ""),
         "download_url": str(file.get("downloadUrl") or version.get("downloadUrl") or ""),
         "size_kb": file.get("sizeKB"),
         "trained_words": [str(w) for w in (version.get("trainedWords") or [])],
@@ -4502,7 +4587,7 @@ def get_router():
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))
         if _provider(cfg) == "local":
-            _annotate_local_availability(cfg, result["items"], kind="checkpoint")
+            await _annotate_checkpoint_availability(cfg, result["items"])
         return result
 
     @router.get("/civitai/model-versions/{model_id}")
@@ -4516,14 +4601,16 @@ def get_router():
             raise HTTPException(status_code=502, detail=str(e))
         if _provider(cfg) == "local":
             # Checkpoints and LoRAs install into different folders, so each
-            # version badges against its own type's hash cache.
+            # version badges against its own type's matching (checkpoints
+            # also fall back to the WebUI's model list for remote servers).
             by_kind: dict[str, list[dict]] = {"lora": [], "checkpoint": []}
             for v in versions:
                 is_ckpt = str(v.get("type") or "").lower() == "checkpoint"
                 by_kind["checkpoint" if is_ckpt else "lora"].append(v)
-            for kind, group in by_kind.items():
-                if group:
-                    _annotate_local_availability(cfg, group, kind=kind)
+            if by_kind["lora"]:
+                _annotate_local_availability(cfg, by_kind["lora"])
+            if by_kind["checkpoint"]:
+                await _annotate_checkpoint_availability(cfg, by_kind["checkpoint"])
         return {"versions": versions}
 
     @router.get("/hf/loras")

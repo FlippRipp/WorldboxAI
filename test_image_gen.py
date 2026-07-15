@@ -5608,3 +5608,98 @@ def test_model_versions_annotate_checkpoints_against_ckpt_cache(tmp_path):
     assert versions[0]["local_available"] is True
     assert versions[0]["local_name"] == "ink_v2"
     assert versions[1]["local_available"] is False
+
+
+def test_ckpt_title_stem_strips_paths_hashes_and_extensions(tmp_path):
+    backend = _load_backend(tmp_path)
+    assert backend._ckpt_title_stem("dreamshaper_8.safetensors [879db523c3]") == "dreamshaper_8"
+    assert backend._ckpt_title_stem("subdir/juggernautXL_v9.safetensors") == "juggernautXL_v9"
+    assert backend._ckpt_title_stem(r"D:\models\Stable-diffusion\ink_v2.ckpt") == "ink_v2"
+    assert backend._ckpt_title_stem("plain_name") == "plain_name"
+    assert backend._ckpt_title_stem("") == ""
+
+
+def test_local_api_checkpoint_index_matches_hash_and_filename(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable_local(backend)
+
+    sd_models = [
+        # Full sha256 known (model was loaded once).
+        {"title": "hashed.safetensors [aaaaaaaaaa]", "model_name": "hashed",
+         "sha256": "a" * 64, "hash": "a" * 10,
+         "filename": "/srv/webui/models/Stable-diffusion/hashed.safetensors"},
+        # No hash computed yet — only the filename can match (Windows path).
+        {"title": "subdir/juggernautXL_v9.safetensors",
+         "model_name": "subdir/juggernautXL_v9", "sha256": None, "hash": None,
+         "filename": "D:\\webui\\models\\Stable-diffusion\\subdir\\juggernautXL_v9.safetensors"},
+        # Shorthash only, carried in the title bracket.
+        {"title": "old.ckpt [bbbbbbbbbb]", "model_name": "old",
+         "sha256": None, "hash": None, "filename": ""},
+    ]
+
+    async def fake_get(cfg, path, timeout=None):
+        assert path == "/sdapi/v1/sd-models"
+        return sd_models
+
+    backend._local_get = fake_get
+    index = asyncio.run(backend._local_api_checkpoint_index(backend._load_config()))
+    assert index["prefixes"]["a" * 10] == "hashed"
+    assert index["prefixes"]["b" * 10] == "old"
+    assert index["stems"]["juggernautxl_v9"] == "juggernautXL_v9"
+
+    # Hash-prefix match (Civitai's AutoV2 == sha256[:10]) beats filename.
+    hit = backend._match_api_checkpoint(index, {
+        "sha256": "a" * 64, "all_hashes": ["a" * 64], "file_name": "renamed.safetensors"})
+    assert hit == "hashed"
+    # Filename fallback for models the WebUI has not hashed yet.
+    hit = backend._match_api_checkpoint(index, {
+        "sha256": "c" * 64, "all_hashes": ["c" * 64],
+        "file_name": "JuggernautXL_v9.safetensors"})
+    assert hit == "juggernautXL_v9"
+    assert backend._match_api_checkpoint(index, {
+        "sha256": "c" * 64, "all_hashes": ["c" * 64],
+        "file_name": "unknown.safetensors"}) is None
+
+    # Unreachable WebUI -> None (badges stay "unknown").
+    async def down(cfg, path, timeout=None):
+        raise RuntimeError("connection refused")
+
+    backend._local_get = down
+    assert asyncio.run(backend._local_api_checkpoint_index(backend._load_config())) is None
+
+
+def test_civitai_checkpoints_remote_fallback_via_webui_api(tmp_path):
+    # No checkpoint folder configured (the WebUI runs on another machine):
+    # badges come from the WebUI's own model list instead of a folder scan.
+    backend = _load_backend(tmp_path)
+    _enable_local(backend)
+
+    async def fake_get(cfg, path, timeout=None):
+        return [{"title": "hashed.safetensors [aaaaaaaaaa]", "model_name": "hashed",
+                 "sha256": "a" * 64, "hash": "a" * 10,
+                 "filename": "/srv/models/hashed.safetensors"}]
+
+    async def fake_search(cfg, **kwargs):
+        return {"items": [
+            {"id": "1", "sha256": "a" * 64, "all_hashes": ["a" * 64],
+             "file_name": "renamed.safetensors"},
+            {"id": "2", "sha256": "f" * 64, "all_hashes": ["f" * 64],
+             "file_name": "missing.safetensors"},
+        ], "next_cursor": ""}
+
+    backend._local_get = fake_get
+    backend._civitai_search_models = fake_search
+    client = _client(backend)
+    items = client.get("/civitai/checkpoints").json()["items"]
+    assert items[0]["local_available"] is True
+    assert items[0]["local_name"] == "hashed"
+    assert items[1]["local_available"] is False
+
+    # WebUI unreachable: availability stays unknown rather than lying.
+    async def down(cfg, path, timeout=None):
+        raise RuntimeError("connection refused")
+
+    backend._local_get = down
+    items = client.get("/civitai/checkpoints").json()["items"]
+    assert items[0]["local_available"] is None
+    assert items[1]["local_available"] is None
