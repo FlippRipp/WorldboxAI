@@ -13,7 +13,7 @@
   },
   "produces": {
     "module_data": true,
-    "context_string": true,
+    "context_string": false,
     "messages": false
   },
   "ui_slots": ["slot_sidebar"],
@@ -128,5 +128,15 @@
   "command_help": {
     "/plot": "Show the active plot thread, momentum, and your profile. The challenge and the story direction stay spoiler-hidden: '/plot challenge' and '/plot direction' reveal them. '/plot regen' weaves a new thread; '/plot reset confirm' (cheat) wipes the plot data (keeping likes/dislikes you added yourself) and rebuilds the profile, direction, and first thread from the story so far; '/plot suspend' freezes plot direction and '/plot resume' picks it back up; '/plot profile ...' edits your tone/themes/likes/dislikes/avoids/pacing/agency/register/notes."
   },
-  "prompt_blocks": []
+  "prompt_blocks": [
+    {
+      "id": "plot_thread",
+      "type": "module_prompt",
+      "enabled": true,
+      "role_type": "system",
+      "placement": "system_relative",
+      "depth": 0,
+      "config": {}
+    }
+  ]
 }

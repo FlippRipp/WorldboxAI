@@ -231,49 +231,59 @@ def test_gather_context_soft_migrates_v2_save_preserving_profile_and_thread():
     assert again == {}
 
 
-def test_gather_context_emits_context_line_for_active_thread():
+def test_plot_thread_block_renders_for_active_thread():
     backend = _load_backend()
     sdk = _make_sdk([], {})
+    block = {"id": "plot_thread"}
     data = _active_data(backend)
 
-    result = asyncio.run(backend.on_gather_context(_state(data=data), sdk))
-    context = result["context_string"]
-    assert "The Salt Baron's Ledger" in context
-    assert "stolen ledger" in context
-    assert "optional" in context.lower()
-    assert "never at the expense of what the player is doing" in context
+    content = asyncio.run(backend.on_render_prompt_block(block, _state(data=data), sdk))["content"]
+    assert "The Salt Baron's Ledger" in content
+    assert "stolen ledger" in content
+    assert "Advance it whenever the scene gives it room" in content
+    assert "never override their current action" in content
+    assert "never mention that a thread exists" in content
 
-    observing = asyncio.run(backend.on_gather_context(_state(data=backend._default_data()), sdk))
-    assert "context_string" not in observing
+    # The thread no longer travels through the engine-context grab bag.
+    gathered = asyncio.run(backend.on_gather_context(_state(data=data), sdk))
+    assert "context_string" not in gathered
 
-    disabled = asyncio.run(backend.on_gather_context(
-        _state(data=data, config={"plot_enabled": False}), sdk))
-    assert "context_string" not in disabled
+    # Quiet states render nothing: observing, disabled, suspended, other ids.
+    observing = asyncio.run(backend.on_render_prompt_block(
+        block, _state(data=backend._default_data()), sdk))
+    assert observing["content"] == ""
+    disabled = asyncio.run(backend.on_render_prompt_block(
+        block, _state(data=data, config={"plot_enabled": False}), sdk))
+    assert disabled["content"] == ""
+    suspended = asyncio.run(backend.on_render_prompt_block(
+        block, _state(data=_active_data(backend, suspended=True)), sdk))
+    assert suspended["content"] == ""
+    other = asyncio.run(backend.on_render_prompt_block({"id": "other"}, _state(data=data), sdk))
+    assert other["content"] == ""
 
 
-def test_context_line_softens_when_ignored_and_carries_nudge():
+def test_plot_thread_block_softens_when_ignored_and_carries_nudge():
     backend = _load_backend()
     sdk = _make_sdk([], {})
+    block = {"id": "plot_thread"}
 
     # Below the stall threshold: no softening, no nudge.
-    plain = asyncio.run(backend.on_gather_context(
-        _state(data=_active_data(backend, ignored_streak=1)), sdk))["context_string"]
-    assert "faint background color" not in plain
-    assert "one light way in" not in plain
+    plain = asyncio.run(backend.on_render_prompt_block(
+        block, _state(data=_active_data(backend, ignored_streak=1)), sdk))["content"]
+    assert "background pressure" not in plain
+    assert "move it forward this turn" not in plain
 
-    # At/past the stall threshold the line backs off.
-    ignored = asyncio.run(backend.on_gather_context(
-        _state(data=_active_data(backend, ignored_streak=3)), sdk))["context_string"]
-    assert "faint background color" in ignored
+    # At/past the stall threshold the block backs off.
+    ignored = asyncio.run(backend.on_render_prompt_block(
+        block, _state(data=_active_data(backend, ignored_streak=3)), sdk))["content"]
+    assert "background pressure" in ignored
 
-    # An armed nudge rides inside the context line -- there is no separate
-    # prompt-block injection anymore.
-    assert not hasattr(backend, "on_render_prompt_block")
-    nudged = asyncio.run(backend.on_gather_context(
-        _state(data=_active_data(backend, pending_nudge="A rumor spreads.", last_nudge_turn=3)),
-        sdk))["context_string"]
+    # An armed nudge rides inside the block for its one turn.
+    nudged = asyncio.run(backend.on_render_prompt_block(
+        block, _state(data=_active_data(backend, pending_nudge="A rumor spreads.", last_nudge_turn=3)),
+        sdk))["content"]
     assert "A rumor spreads." in nudged
-    assert "one light way in" in nudged
+    assert "move it forward this turn" in nudged
 
 
 def test_first_librarian_generates_thread_from_scenario():

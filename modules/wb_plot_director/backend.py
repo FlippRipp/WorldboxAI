@@ -14,10 +14,11 @@ thread_history; new threads are generated to build on both, grounded in the
 NPC system's established characters, and vetted by a fit-check critic before
 they go live. Between threads the story gets a configurable quiet period.
 
-The active thread is visible: a soft context line keeps the storyteller aware
-of it every turn, /plot and the sidebar widget show it to the player (with the
-challenge spoiler-hidden until they opt in), and one-turn nudges ride inside
-that context line only when the thread stalls or a natural opening appears.
+The active thread is visible: a dedicated system prompt block (plot_thread)
+keeps the storyteller aware of it every turn, /plot and the sidebar widget
+show it to the player (with the challenge spoiler-hidden until they opt in),
+and one-turn nudges ride inside that block only when the thread stalls or a
+natural opening appears.
 
 The player can suspend plot direction at any time (/plot suspend or the widget
 button): the context line, assessments, nudges, expiry, and generation all
@@ -1027,32 +1028,54 @@ async def on_gather_context(state: dict, sdk) -> dict:
         print("[Plot Director] Migrated legacy plot data (profile starts fresh).")
         return {"module_data": {MODULE_ID: fresh}}
 
-    config = _config(state)
-    thread = data.get("thread") or {}
-    if (
-        config.get("plot_enabled", True)
-        and not data.get("suspended")
-        and data.get("status") == "active"
-        and thread.get("status") == "active"
-    ):
-        line = (
-            "Background plot thread (entirely optional -- the player has not "
-            "been told about it in-story; let it surface only where the scene "
-            "naturally opens toward it, and never at the expense of what the "
-            f"player is doing): \"{thread.get('title', '')}\". {thread.get('hook', '')} "
-            f"Complication: {thread.get('challenge', '')}"
-        )
-        stall_threshold = max(1, int(config.get("stall_threshold", 3) or 3))
-        if int(data.get("ignored_streak", 0) or 0) >= stall_threshold:
-            line += (
-                " The player has been pursuing other things -- keep this thread "
-                "as faint background color unless they turn toward it."
-            )
-        nudge = str(data.get("pending_nudge") or "").strip()
-        if nudge:
-            line += f" If a natural opening appears this turn, one light way in: {nudge}"
-        return {"context_string": line}
+    # The active thread reaches the storyteller through the plot_thread
+    # prompt block (a dedicated, visible system block) -- not through the
+    # engine-context grab bag, where it proved easy to overlook.
     return {}
+
+
+async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
+    """The active thread's standing guidance to the storyteller: its own
+    labeled system block, so it is discoverable in the prompt and carries
+    real weight -- advance the thread when the scene gives it room, follow
+    the player's lead, never railroad. An armed nudge rides along for
+    exactly one turn (consumed by the librarian)."""
+    if block.get("id") != "plot_thread":
+        return {"content": ""}
+    config = _config(state)
+    data = _own_data(state)
+    thread = (data.get("thread") or {}) if data else {}
+    if (
+        not data
+        or not config.get("plot_enabled", True)
+        or data.get("suspended")
+        or data.get("status") != "active"
+        or thread.get("status") != "active"
+    ):
+        return {"content": ""}
+
+    lines = [
+        "An ongoing plot thread runs through this story -- living story "
+        "material, not a script. Advance it whenever the scene gives it room "
+        "(an encounter, a rumor, a consequence, a shift in the air), and give "
+        "it visible momentum when the player isn't steering somewhere else. "
+        "Follow the player's lead first: never override their current action, "
+        "never force the thread into a scene it doesn't fit, and never mention "
+        "that a thread exists.",
+        f"Thread: \"{thread.get('title', '')}\". {thread.get('hook', '')} "
+        f"Complication: {thread.get('challenge', '')}",
+    ]
+    stall_threshold = max(1, int(config.get("stall_threshold", 3) or 3))
+    if int(data.get("ignored_streak", 0) or 0) >= stall_threshold:
+        lines.append(
+            "The player has been pursuing other things -- keep the thread "
+            "present as quiet background pressure, resurfacing it lightly "
+            "rather than pushing."
+        )
+    nudge = str(data.get("pending_nudge") or "").strip()
+    if nudge:
+        lines.append(f"A natural way to move it forward this turn, if the scene allows: {nudge}")
+    return {"content": "\n".join(lines)}
 
 
 async def on_librarian(state: dict, sdk) -> dict | None:
