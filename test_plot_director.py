@@ -42,6 +42,29 @@ SECOND_THREAD_REPLY = json.dumps({
     "appeal": "mystery",
 })
 
+CRITIC_ACCEPT = json.dumps({"verdict": "accept", "critique": ""})
+CRITIC_REJECT = json.dumps({
+    "verdict": "reject",
+    "critique": "Not grounded in the established harbor cast.",
+})
+DEFER_REPLY = json.dumps({"defer": True})
+
+DIRECTION_REPLY = json.dumps({
+    "consequence": "The magistrate now owes you a favor, and the Baron wants revenge.",
+    "premise": "A quiet war for the harbor's soul between the guilds and the Salt Baron.",
+    "heading": "The Baron is preparing a reprisal against the docks.",
+    "open_questions": ["Who tipped off the enforcers?"],
+    "recurring_elements": ["The Salt Baron", "the harbor docks"],
+    "attachments": [{"name": "The Salt Baron", "kind": "character", "note": "the player keeps circling him"}],
+    "engagement": {"bites_on": ["intrigue with a personal stake"], "ignores": ["open brawls"]},
+    "narrative": {"pacing": "slow-burn", "agency": "drives the story", "register": "tense and wry"},
+    "notes": "Prefers to talk first and fight only when cornered.",
+})
+
+# Zero-cooldown config: restores the classic close-and-replace-in-one-pass
+# behavior for tests whose subject is the replacement itself.
+NO_COOLDOWN = {"thread_cooldown_turns": 0}
+
 
 def _profile_reply(**overrides):
     profile = {
@@ -104,7 +127,7 @@ def _updates(result):
     return result["module_data"]["wb_plot_director"]
 
 
-def test_gather_context_seeds_v2_skeleton_once():
+def test_gather_context_seeds_skeleton_once():
     backend = _load_backend()
     sdk = _make_sdk([], {})
 
@@ -115,6 +138,13 @@ def test_gather_context_seeds_v2_skeleton_once():
     assert seeded["thread"]["status"] == "none"
     assert seeded["profile"]["playstyle"] == {k: 0 for k in backend.PLAYSTYLE_KEYS}
     assert seeded["profile"]["likes"] == []
+    assert seeded["profile"]["avoids"] == []
+    assert seeded["profile"]["attachments"] == []
+    assert seeded["profile"]["engagement"] == {"bites_on": [], "ignores": []}
+    assert seeded["profile"]["narrative"] == {"pacing": "", "agency": "", "register": ""}
+    assert seeded["direction"] == backend._default_direction()
+    assert seeded["next_thread_turn"] == 0
+    assert seeded["defer_streak"] == 0
 
     again = asyncio.run(backend.on_gather_context(_state(data=seeded), sdk))
     assert again == {}
@@ -145,6 +175,53 @@ def test_gather_context_migrates_legacy_save():
     assert update["pending_nudge"] == ""
 
 
+def test_gather_context_soft_migrates_v2_save_preserving_profile_and_thread():
+    backend = _load_backend()
+    sdk = _make_sdk([], {})
+    v2 = {
+        "schema": 2,
+        "status": "observing",
+        "gen_attempts": 0,
+        "profile": _profile_reply(),
+        "thread": {"status": "none"},
+        "thread_history": [{"title": "The Pilgrim Road", "outcome": "resolved",
+                            "created_turn": 2, "closed_turn": 9, "note": "done"}],
+        "momentum": "observing",
+        "ignored_streak": 0,
+        "pending_nudge": "",
+        "last_nudge_turn": 0,
+        "suspended": False,
+        "suspended_turn": 0,
+        "log": [],
+    }
+
+    result = asyncio.run(backend.on_gather_context(_state(data=v2), sdk))
+    update = _updates(result)
+
+    # Additive migration: only the version bump, the upgraded profile, and the
+    # new v3 keys -- nothing learned is wiped, no legacy blanking.
+    assert set(update) == {"schema", "profile", "direction",
+                           "last_closed_turn", "next_thread_turn", "defer_streak"}
+    assert update["schema"] == backend.SCHEMA_VERSION
+    assert update["direction"] == backend._default_direction()
+    # The v2 profile survives in full, upgraded to the v3 shape in place.
+    profile = update["profile"]
+    assert profile["tone"] == "gritty"
+    assert profile["likes"] == [
+        {"text": "back-alley deals", "weight": "medium", "evidence": ""},
+        {"text": "haggling", "weight": "medium", "evidence": ""},
+    ]
+    assert profile["playstyle"]["intrigue"] == 6
+    assert profile["playstyle"]["stealth"] == 0  # new axes default to 0
+    assert profile["avoids"] == []
+    assert profile["notes"] == ""
+
+    # Second pass (post-merge): native v3, no further migration.
+    merged = {**v2, **update}
+    again = asyncio.run(backend.on_gather_context(_state(data=merged), sdk))
+    assert again == {}
+
+
 def test_gather_context_emits_context_line_for_active_thread():
     backend = _load_backend()
     sdk = _make_sdk([], {})
@@ -155,6 +232,7 @@ def test_gather_context_emits_context_line_for_active_thread():
     assert "The Salt Baron's Ledger" in context
     assert "stolen ledger" in context
     assert "optional" in context.lower()
+    assert "never at the expense of what the player is doing" in context
 
     observing = asyncio.run(backend.on_gather_context(_state(data=backend._default_data()), sdk))
     assert "context_string" not in observing
@@ -164,10 +242,35 @@ def test_gather_context_emits_context_line_for_active_thread():
     assert "context_string" not in disabled
 
 
+def test_context_line_softens_when_ignored_and_carries_nudge():
+    backend = _load_backend()
+    sdk = _make_sdk([], {})
+
+    # Below the stall threshold: no softening, no nudge.
+    plain = asyncio.run(backend.on_gather_context(
+        _state(data=_active_data(backend, ignored_streak=1)), sdk))["context_string"]
+    assert "faint background color" not in plain
+    assert "one light way in" not in plain
+
+    # At/past the stall threshold the line backs off.
+    ignored = asyncio.run(backend.on_gather_context(
+        _state(data=_active_data(backend, ignored_streak=3)), sdk))["context_string"]
+    assert "faint background color" in ignored
+
+    # An armed nudge rides inside the context line -- there is no separate
+    # prompt-block injection anymore.
+    assert not hasattr(backend, "on_render_prompt_block")
+    nudged = asyncio.run(backend.on_gather_context(
+        _state(data=_active_data(backend, pending_nudge="A rumor spreads.", last_nudge_turn=3)),
+        sdk))["context_string"]
+    assert "A rumor spreads." in nudged
+    assert "one light way in" in nudged
+
+
 def test_first_librarian_generates_thread_from_scenario():
     backend = _load_backend()
     captured = {}
-    sdk = _make_sdk([THREAD_REPLY], captured)
+    sdk = _make_sdk([THREAD_REPLY, CRITIC_ACCEPT], captured)
     state = _state(
         turn=1,
         data=backend._default_data(),
@@ -178,12 +281,15 @@ def test_first_librarian_generates_thread_from_scenario():
     result = asyncio.run(backend.on_librarian(state, sdk))
     update = _updates(result)
 
-    assert len(captured["prompts"]) == 1
+    # Generation on the smartest model, then the fit-check critic on balanced.
+    assert len(captured["prompts"]) == 2
     assert "forgotten ruins" in captured["prompts"][0]
-    assert captured["preferences"] == ["smartest"]
+    assert "GROUND IT" in captured["prompts"][0]
+    assert captured["preferences"] == ["smartest", "balanced"]
     assert update["status"] == "active"
     assert update["momentum"] == "building"
     assert update["gen_attempts"] == 0
+    assert update["defer_streak"] == 0
     thread = update["thread"]
     assert set(thread) == set(backend._empty_thread())
     assert thread["status"] == "active"
@@ -194,7 +300,7 @@ def test_first_librarian_generates_thread_from_scenario():
 def test_generation_prompt_includes_profile_difficulty_and_npc_threads():
     backend = _load_backend()
     captured = {}
-    sdk = _make_sdk([THREAD_REPLY], captured)
+    sdk = _make_sdk([THREAD_REPLY, CRITIC_ACCEPT], captured)
     data = backend._default_data()
     data["profile"] = _profile_reply()
     state = _state(turn=1, data=data, config={"difficulty": 5})
@@ -208,19 +314,77 @@ def test_generation_prompt_includes_profile_difficulty_and_npc_threads():
     assert "back-alley deals" in prompt
     assert "dockmaster plots against the guild" in prompt
 
-    # Soft-fail: no npc module data at all -> generation still runs, block omitted.
+    # Soft-fail: no npc module data at all -> generation still runs, blocks omitted.
     captured2 = {}
-    sdk2 = _make_sdk([THREAD_REPLY], captured2)
+    sdk2 = _make_sdk([THREAD_REPLY, CRITIC_ACCEPT], captured2)
     result = asyncio.run(backend.on_librarian(_state(turn=1, data=backend._default_data()), sdk2))
     assert _updates(result)["status"] == "active"
     assert "OTHER ACTIVE STORYLINES" not in captured2["prompts"][0]
+    assert "ESTABLISHED CHARACTERS" not in captured2["prompts"][0]
+
+
+def test_generation_prompt_includes_character_roster():
+    backend = _load_backend()
+    captured = {}
+    sdk = _make_sdk([THREAD_REPLY, CRITIC_ACCEPT], captured)
+    state = _state(turn=1, data=backend._default_data())
+    state["module_data"]["wb_npc_system"] = {
+        "characters": {
+            "npc_1": {"name": "Mira Voss", "archetype": "smuggler queen", "role": "antagonist",
+                      "introduced": True, "status": "active",
+                      "pitch": "Controls the night docks and everyone in debt to them."},
+            "npc_2": {"name": "Brother Callum", "archetype": "wandering scholar", "role": "ally",
+                      "introduced": False, "status": "unintroduced",
+                      "pitch": "Knows what sleeps under the market."},
+            "npc_3": {"name": "Old Tam", "archetype": "fisherman", "role": "neutral",
+                      "introduced": True, "status": "deceased", "pitch": "Gone."},
+        },
+    }
+
+    asyncio.run(backend.on_librarian(state, sdk))
+    prompt = captured["prompts"][0]
+    assert "ESTABLISHED CHARACTERS" in prompt
+    assert "Mira Voss" in prompt and "smuggler queen" in prompt and "met" in prompt
+    assert "Controls the night docks" in prompt
+    assert "Brother Callum" in prompt and "not yet met" in prompt
+    assert "Old Tam" not in prompt  # the dead stay out of new threads
+    # The critic sees the same grounding material.
+    assert "Mira Voss" in captured["prompts"][1]
+
+
+def test_direction_and_consequences_feed_generation():
+    backend = _load_backend()
+    captured = {}
+    sdk = _make_sdk([THREAD_REPLY, CRITIC_ACCEPT], captured)
+    data = backend._default_data()
+    data["profile"] = _profile_reply()  # non-empty: skip the bootstrap path
+    data["direction"] = {
+        "premise": "A quiet war for the harbor's soul.",
+        "heading": "The Baron plans a reprisal.",
+        "open_questions": ["Who tipped off the enforcers?"],
+        "recurring_elements": ["The Salt Baron"],
+        "updated_turn": 5,
+    }
+    data["thread_history"] = [{
+        "title": "The Pilgrim Road", "outcome": "resolved", "created_turn": 2,
+        "closed_turn": 9, "note": "", "consequence": "The pilgrims now owe the player passage.",
+    }]
+
+    asyncio.run(backend.on_librarian(_state(turn=10, data=data), sdk))
+    prompt = captured["prompts"][0]
+    assert "NARRATIVE DIRECTION" in prompt
+    assert "A quiet war for the harbor's soul." in prompt
+    assert "Who tipped off the enforcers?" in prompt
+    assert "BUILD on" in prompt
+    assert "The pilgrims now owe the player passage." in prompt
+    assert "do not repeat" not in prompt  # the avoid-list framing is gone
 
 
 def test_adoption_midstory_bootstraps_profile_before_first_thread():
     backend = _load_backend()
     captured = {}
     bootstrap_reply = json.dumps(_profile_reply())
-    sdk = _make_sdk([bootstrap_reply, THREAD_REPLY], captured)
+    sdk = _make_sdk([bootstrap_reply, THREAD_REPLY, CRITIC_ACCEPT], captured)
     state = _state(
         turn=12,
         data=backend._default_data(),
@@ -235,17 +399,20 @@ def test_adoption_midstory_bootstraps_profile_before_first_thread():
     result = asyncio.run(backend.on_librarian(state, sdk))
     update = _updates(result)
 
-    assert len(captured["prompts"]) == 2
-    assert captured["preferences"] == ["smartest", "smartest"]
+    assert len(captured["prompts"]) == 3
+    assert captured["preferences"] == ["smartest", "smartest", "balanced"]
     bootstrap_prompt = captured["prompts"][0]
     assert "already in progress" in bootstrap_prompt
     assert "bribe the customs clerk" in bootstrap_prompt
     assert "I slip the clerk a purse." in bootstrap_prompt
+    # The bootstrap builds the full deep profile from the start.
+    assert "attachments" in bootstrap_prompt
+    assert "avoids" in bootstrap_prompt
     # The thread generation that follows sees the bootstrapped profile.
     assert "back-alley deals" in captured["prompts"][1]
     assert update["profile"]["likes"] == [
-        {"text": "back-alley deals", "weight": "medium"},
-        {"text": "haggling", "weight": "medium"},
+        {"text": "back-alley deals", "weight": "medium", "evidence": ""},
+        {"text": "haggling", "weight": "medium", "evidence": ""},
     ]
     assert update["status"] == "active"
     assert update["thread"]["title"] == "The Salt Baron's Ledger"
@@ -254,13 +421,13 @@ def test_adoption_midstory_bootstraps_profile_before_first_thread():
 def test_adoption_bootstrap_failure_still_generates_thread():
     backend = _load_backend()
     captured = {}
-    sdk = _make_sdk(["not json", THREAD_REPLY], captured)
+    sdk = _make_sdk(["not json", THREAD_REPLY, CRITIC_ACCEPT], captured)
 
     result = asyncio.run(backend.on_librarian(
         _state(turn=12, data=backend._default_data()), sdk))
     update = _updates(result)
 
-    assert len(captured["prompts"]) == 2
+    assert len(captured["prompts"]) == 3
     assert "profile" not in update  # starting blind, no profile written
     assert update["status"] == "active"
     assert update["thread"]["title"] == "The Salt Baron's Ledger"
@@ -269,12 +436,12 @@ def test_adoption_bootstrap_failure_still_generates_thread():
 def test_fresh_story_does_not_bootstrap():
     backend = _load_backend()
     captured = {}
-    sdk = _make_sdk([THREAD_REPLY], captured)
+    sdk = _make_sdk([THREAD_REPLY, CRITIC_ACCEPT], captured)
 
     result = asyncio.run(backend.on_librarian(
         _state(turn=1, data=backend._default_data()), sdk))
 
-    assert len(captured["prompts"]) == 1  # thread generation only
+    assert len(captured["prompts"]) == 2  # thread generation + fit check only
     assert "already in progress" not in captured["prompts"][0]
     assert _updates(result)["status"] == "active"
 
@@ -284,10 +451,13 @@ def test_generation_failure_retries_then_dormant():
     data = backend._default_data()
 
     for attempt in range(1, backend.GEN_MAX_ATTEMPTS + 1):
-        sdk = _make_sdk(["not json"], {})
+        captured = {}
+        sdk = _make_sdk(["not json"], captured)
         result = asyncio.run(backend.on_librarian(_state(turn=1, data=data), sdk))
         data.update(_updates(result))
         assert data["gen_attempts"] == attempt
+        # A malformed generation never reaches the critic.
+        assert len(captured["prompts"]) == 1
 
     assert data["status"] == "failed"
     assert asyncio.run(backend.on_librarian(_state(turn=2, data=data), _make_sdk([], {}))) is None
@@ -298,13 +468,118 @@ def test_generation_failure_retries_then_dormant():
     assert "context_string" not in gathered
 
 
+def test_fit_check_reject_retries_with_critique():
+    backend = _load_backend()
+    captured = {}
+    sdk = _make_sdk([THREAD_REPLY, CRITIC_REJECT, SECOND_THREAD_REPLY, CRITIC_ACCEPT], captured)
+
+    result = asyncio.run(backend.on_librarian(
+        _state(turn=1, data=backend._default_data()), sdk))
+    update = _updates(result)
+
+    assert len(captured["prompts"]) == 4
+    assert captured["preferences"] == ["smartest", "balanced", "smartest", "balanced"]
+    # The retry generation carries the critic's critique.
+    assert "Not grounded in the established harbor cast." in captured["prompts"][2]
+    assert "rejected by a quality check" in captured["prompts"][2]
+    assert update["thread"]["title"] == "Tremors Below"
+    assert update["status"] == "active"
+    assert update["gen_attempts"] == 0
+
+
+def test_fit_check_double_reject_accepts_second_candidate():
+    backend = _load_backend()
+    captured = {}
+    sdk = _make_sdk([THREAD_REPLY, CRITIC_REJECT, SECOND_THREAD_REPLY, CRITIC_REJECT], captured)
+
+    result = asyncio.run(backend.on_librarian(
+        _state(turn=1, data=backend._default_data()), sdk))
+    update = _updates(result)
+
+    # The critic never starves the module: the second candidate ships anyway,
+    # and gen_attempts stays clear of the dormancy counter.
+    assert update["thread"]["title"] == "Tremors Below"
+    assert update["status"] == "active"
+    assert update["gen_attempts"] == 0
+
+
+def test_fit_check_fails_open():
+    backend = _load_backend()
+
+    # Disabled: generation only, no critic call.
+    captured = {}
+    sdk = _make_sdk([THREAD_REPLY], captured)
+    result = asyncio.run(backend.on_librarian(
+        _state(turn=1, data=backend._default_data(), config={"fit_check_enabled": False}), sdk))
+    assert len(captured["prompts"]) == 1
+    assert _updates(result)["thread"]["title"] == "The Salt Baron's Ledger"
+
+    # Malformed critic reply accepts the candidate.
+    captured = {}
+    sdk = _make_sdk([THREAD_REPLY, "not json"], captured)
+    result = asyncio.run(backend.on_librarian(
+        _state(turn=1, data=backend._default_data()), sdk))
+    assert len(captured["prompts"]) == 2
+    assert _updates(result)["thread"]["title"] == "The Salt Baron's Ledger"
+
+    # A malformed retry generation falls back to the first (valid) candidate.
+    captured = {}
+    sdk = _make_sdk([THREAD_REPLY, CRITIC_REJECT, "not json"], captured)
+    result = asyncio.run(backend.on_librarian(
+        _state(turn=1, data=backend._default_data()), sdk))
+    assert len(captured["prompts"]) == 3
+    update = _updates(result)
+    assert update["thread"]["title"] == "The Salt Baron's Ledger"
+    assert update["gen_attempts"] == 0
+
+
+def test_generation_defer_postpones_without_failure():
+    backend = _load_backend()
+    data = backend._default_data()
+    data["profile"] = _profile_reply()  # non-empty: skip the bootstrap path
+
+    # First ask: the generator defers -- no thread, no failure bookkeeping.
+    captured = {}
+    result = asyncio.run(backend.on_librarian(
+        _state(turn=5, data=data), _make_sdk([DEFER_REPLY], captured)))
+    update = _updates(result)
+    assert '"defer"' in captured["prompts"][0]
+    assert "thread" not in update
+    assert update["defer_streak"] == 1
+    assert update["gen_attempts"] == 0
+    assert update["next_thread_turn"] == 7
+    data.update(update)
+
+    # The deferred window is quiet: zero LLM calls.
+    captured = {}
+    assert asyncio.run(backend.on_librarian(
+        _state(turn=6, data=data), _make_sdk([], captured))) is None
+    assert captured == {}
+
+    # Second defer allowed...
+    result = asyncio.run(backend.on_librarian(
+        _state(turn=7, data=data), _make_sdk([DEFER_REPLY], {})))
+    update = _updates(result)
+    assert update["defer_streak"] == 2
+    data.update(update)
+
+    # ...but after DEFER_MAX_STREAK the option disappears and generation runs.
+    captured = {}
+    result = asyncio.run(backend.on_librarian(
+        _state(turn=9, data=data), _make_sdk([THREAD_REPLY, CRITIC_ACCEPT], captured)))
+    update = _updates(result)
+    assert '"defer"' not in captured["prompts"][0]
+    assert update["thread"]["title"] == "The Salt Baron's Ledger"
+    assert update["defer_streak"] == 0
+
+
 def test_assessment_updates_profile_and_resets_streak():
     backend = _load_backend()
     captured = {}
     wild_profile = _profile_reply(
         playstyle={"combat": 99, "diplomacy": 4, "exploration": 2,
                    "mystery": 3, "social": 5, "intrigue": 6},
-        likes=[f"like {i}" for i in range(12)],
+        likes=[f"like {i}" for i in range(backend.PROFILE_LIST_CAP + 4)],
     )
     sdk = _make_sdk([_assessment_reply(profile=wild_profile)], captured)
     data = _active_data(backend, ignored_streak=2)
@@ -316,6 +591,7 @@ def test_assessment_updates_profile_and_resets_streak():
     assert "The Salt Baron's Ledger" in prompt
     assert "I browse the stalls." in prompt
     assert json.dumps(data["profile"], ensure_ascii=False) in prompt
+    assert "evidence" in prompt  # observed entries must cite behavior
     assert captured["preferences"] == ["balanced"]
 
     assert update["ignored_streak"] == 0
@@ -325,23 +601,57 @@ def test_assessment_updates_profile_and_resets_streak():
     assert update["log"][-1]["turn"] == 3
 
 
-def test_resolution_regenerates_immediately_with_full_replacement():
+def test_ai_writes_avoids_with_evidence_but_never_against_player_taste():
+    backend = _load_backend()
+    data = _active_data(backend)
+    data["profile"] = backend._default_profile()
+    data["profile"]["dislikes"] = [{"text": "body horror", "weight": "high"}]
+    data["profile"]["likes"] = [{"text": "courtly politics", "weight": "high", "evidence": ""}]
+
+    reply_profile = _profile_reply(
+        likes=[{"text": "courtly politics", "weight": "high"}],
+        avoids=[
+            {"text": "open brawls", "weight": "medium", "evidence": "talked their way out three times"},
+            {"text": "body horror", "weight": "high", "evidence": "in-story flinch"},   # matches a dislike
+            {"text": "Courtly Politics", "weight": "low", "evidence": "guessed"},        # matches a like
+        ],
+    )
+    result = asyncio.run(backend.on_librarian(
+        _state(turn=3, data=data), _make_sdk([_assessment_reply(profile=reply_profile)], {})))
+    profile = _updates(result)["profile"]
+
+    # The genuine observation lands, evidence intact.
+    assert profile["avoids"] == [
+        {"text": "open brawls", "weight": "medium", "evidence": "talked their way out three times"},
+    ]
+    # Player-set taste wins on both sides.
+    assert profile["dislikes"] == [{"text": "body horror", "weight": "high"}]
+    assert any(e["text"] == "courtly politics" for e in profile["likes"])
+
+
+def test_resolution_with_zero_cooldown_regenerates_with_full_replacement():
     backend = _load_backend()
     captured = {}
     sdk = _make_sdk([
         _assessment_reply(thread_resolved=True, resolution_note="The ledger reached the magistrate."),
+        DIRECTION_REPLY,
         SECOND_THREAD_REPLY,
+        CRITIC_ACCEPT,
     ], captured)
     data = _active_data(backend, ignored_streak=1)
 
-    result = asyncio.run(backend.on_librarian(_state(turn=5, data=data), sdk))
+    result = asyncio.run(backend.on_librarian(
+        _state(turn=5, data=data, config=NO_COOLDOWN), sdk))
     update = _updates(result)
 
-    assert len(captured["prompts"]) == 2
+    # Assessment, direction update, generation, fit check -- all in one pass.
+    assert len(captured["prompts"]) == 4
+    assert captured["preferences"] == ["balanced", "balanced", "smartest", "balanced"]
     closed = update["thread_history"][-1]
     assert closed["outcome"] == "resolved"
     assert closed["title"] == "The Salt Baron's Ledger"
     assert closed["closed_turn"] == 5
+    assert closed["consequence"] == "The magistrate now owes you a favor, and the Baron wants revenge."
 
     # Full-key overwrite contract: the new thread replaces every field.
     thread = update["thread"]
@@ -352,18 +662,122 @@ def test_resolution_regenerates_immediately_with_full_replacement():
     assert thread["created_turn"] == 5
     assert update["momentum"] == "building"
     assert update["pending_nudge"] == ""
+    # The evolved direction is stored, full shape.
+    assert update["direction"]["premise"].startswith("A quiet war")
+    assert update["direction"]["updated_turn"] == 5
+
+
+def test_close_sets_cooldown_and_generation_waits():
+    backend = _load_backend()
+    captured = {}
+    sdk = _make_sdk([
+        _assessment_reply(thread_resolved=True, resolution_note="The ledger reached the magistrate."),
+        DIRECTION_REPLY,
+    ], captured)
+    data = _active_data(backend)
+
+    result = asyncio.run(backend.on_librarian(_state(turn=5, data=data), sdk))
+    update = _updates(result)
+
+    # Default cooldown 3: no regeneration in this pass -- just the close.
+    assert len(captured["prompts"]) == 2
+    assert update["thread"]["status"] == "resolved"
+    assert update["next_thread_turn"] == 8
+    assert update["last_closed_turn"] == 5
+    assert update["momentum"] == "resolving"
+    assert update["ignored_streak"] == 0
+    data.update(update)
+
+    # The quiet period costs zero LLM calls.
+    for turn in (6, 7):
+        captured_gap = {}
+        assert asyncio.run(backend.on_librarian(
+            _state(turn=turn, data=data), _make_sdk([], captured_gap))) is None
+        assert captured_gap == {}
+
+    # At the gap's end the next thread is woven, building on the consequence.
+    captured_end = {}
+    result = asyncio.run(backend.on_librarian(
+        _state(turn=8, data=data), _make_sdk([SECOND_THREAD_REPLY, CRITIC_ACCEPT], captured_end)))
+    update = _updates(result)
+    assert update["thread"]["title"] == "Tremors Below"
+    assert "The magistrate now owes you a favor" in captured_end["prompts"][0]
+    assert "NARRATIVE DIRECTION" in captured_end["prompts"][0]
+
+
+def test_abandoned_cooldown_is_doubled():
+    backend = _load_backend()
+    captured = {}
+    sdk = _make_sdk([_assessment_reply(thread_engaged=False), DIRECTION_REPLY], captured)
+    data = _active_data(backend, ignored_streak=3)
+
+    result = asyncio.run(backend.on_librarian(_state(turn=6, data=data), sdk))
+    update = _updates(result)
+
+    assert update["thread_history"][-1]["outcome"] == "abandoned"
+    assert len(captured["prompts"]) == 2  # assessment + direction, no regen yet
+    assert update["next_thread_turn"] == 6 + 3 * backend.ABANDON_COOLDOWN_FACTOR
+    # Abandonment must not write a dislike -- those are player-set only.
+    assert update["profile"]["dislikes"] == []
+
+
+def test_direction_update_failure_is_safe():
+    backend = _load_backend()
+    captured = {}
+    sdk = _make_sdk([
+        _assessment_reply(thread_resolved=True, resolution_note="Settled quietly."),
+        "not json",
+    ], captured)
+    data = _active_data(backend)
+
+    result = asyncio.run(backend.on_librarian(_state(turn=5, data=data), sdk))
+    update = _updates(result)
+
+    # The close still completes; the consequence falls back to the resolution
+    # note and the stored direction is left untouched.
+    assert update["thread"]["status"] == "resolved"
+    assert update["thread_history"][-1]["consequence"] == "Settled quietly."
+    assert "direction" not in update
+    assert update["next_thread_turn"] == 8
+
+
+def test_close_time_deep_fields_merge_into_profile():
+    backend = _load_backend()
+    sdk = _make_sdk([
+        _assessment_reply(thread_resolved=True, resolution_note="Done."),
+        DIRECTION_REPLY,
+    ], {})
+    data = _active_data(backend)
+
+    result = asyncio.run(backend.on_librarian(_state(turn=5, data=data), sdk))
+    profile = _updates(result)["profile"]
+
+    # Fast fields from the assessment survive...
+    assert profile["tone"] == "gritty"
+    assert any(e["text"] == "back-alley deals" for e in profile["likes"])
+    # ...and the close-time call fills the slow-moving deep fields.
+    assert profile["attachments"] == [
+        {"name": "The Salt Baron", "kind": "character", "note": "the player keeps circling him"},
+    ]
+    assert profile["engagement"] == {
+        "bites_on": ["intrigue with a personal stake"], "ignores": ["open brawls"],
+    }
+    assert profile["narrative"] == {
+        "pacing": "slow-burn", "agency": "drives the story", "register": "tense and wry",
+    }
+    assert profile["notes"] == "Prefers to talk first and fight only when cornered."
 
 
 def test_ignored_streak_nudges_then_abandons_without_touching_dislikes():
     backend = _load_backend()
     data = _active_data(backend, created_turn=1)
-    config = {}  # defaults: stall_threshold 2, abandon_after 4
+    config = {"stall_threshold": 2, "thread_cooldown_turns": 0}  # abandon_after default 4
     armed_turn = None
 
     for turn in range(2, 6):
         replies = [_assessment_reply(thread_engaged=False)]
         if turn == 5:
-            replies.append(SECOND_THREAD_REPLY)
+            replies.extend([DIRECTION_REPLY, SECOND_THREAD_REPLY, CRITIC_ACCEPT])
         captured = {}
         sdk = _make_sdk(replies, captured)
         result = asyncio.run(backend.on_librarian(_state(turn=turn, data=data, config=config), sdk))
@@ -375,13 +789,14 @@ def test_ignored_streak_nudges_then_abandons_without_touching_dislikes():
         if turn == 4:  # streak 3: past the threshold, no re-arm; streak keeps climbing
             assert update.get("pending_nudge", "") == ""  # consume-once clear only
             assert update["ignored_streak"] == 3
-        if turn == 5:  # streak 4 = abandon_after -> abandoned + regeneration
-            assert len(captured["prompts"]) == 2
+        if turn == 5:  # streak 4 = abandon_after -> abandoned + direction + regeneration
+            assert len(captured["prompts"]) == 4
             assert update["thread_history"][-1]["outcome"] == "abandoned"
             # Abandonment must not write a dislike -- those are player-set only.
             assert update["profile"]["dislikes"] == []
-            assert "DIFFERENT kind" in captured["prompts"][1]
-            assert '"The Salt Baron\'s Ledger" -- abandoned' in captured["prompts"][1]
+            generation_prompt = captured["prompts"][2]
+            assert "DIFFERENT kind" in generation_prompt
+            assert '"The Salt Baron\'s Ledger" -- abandoned' in generation_prompt
             assert update["thread"]["title"] == "Tremors Below"
 
         data.update(update)
@@ -391,26 +806,33 @@ def test_ignored_streak_nudges_then_abandons_without_touching_dislikes():
 
 def test_expiry_by_turn_cap_skips_assessment():
     backend = _load_backend()
-    captured = {}
-    sdk = _make_sdk([SECOND_THREAD_REPLY], captured)
-    data = _active_data(backend, created_turn=1)
 
+    # Default cooldown: the expiry pass spends only the direction call.
+    captured = {}
+    sdk = _make_sdk([DIRECTION_REPLY], captured)
+    data = _active_data(backend, created_turn=1)
     result = asyncio.run(backend.on_librarian(_state(turn=13, data=data), sdk))
     update = _updates(result)
+    assert len(captured["prompts"]) == 1
+    assert update["thread_history"][-1]["outcome"] == "expired"
+    assert update["thread"]["status"] == "expired"
+    assert update["next_thread_turn"] == 16
 
-    assert len(captured["prompts"]) == 1  # generation only, no assessment spent
+    # Zero cooldown: close and replace in the same pass, still no assessment.
+    captured = {}
+    sdk = _make_sdk([DIRECTION_REPLY, SECOND_THREAD_REPLY, CRITIC_ACCEPT], captured)
+    data = _active_data(backend, created_turn=1)
+    result = asyncio.run(backend.on_librarian(
+        _state(turn=13, data=data, config=NO_COOLDOWN), sdk))
+    update = _updates(result)
+    assert len(captured["prompts"]) == 3
     assert update["thread_history"][-1]["outcome"] == "expired"
     assert update["thread"]["title"] == "Tremors Below"
 
 
-def test_nudge_consume_and_render_block_contract():
+def test_nudge_consume_once():
     backend = _load_backend()
     data = _active_data(backend, created_turn=1, pending_nudge="A rumor spreads.", last_nudge_turn=3)
-
-    block = {"id": "plot_nudge"}
-    rendered = asyncio.run(backend.on_render_prompt_block(block, _state(data=data), _make_sdk([], {})))
-    assert "A rumor spreads." in rendered["content"]
-    assert "Optional" in rendered["content"]
 
     # Frequency-gated turn still consumes the already-rendered nudge; _deep_merge
     # cannot delete keys, so it must return an explicit "".
@@ -418,23 +840,20 @@ def test_nudge_consume_and_render_block_contract():
         _state(turn=4, data=data, config={"assessment_frequency": 5}), _make_sdk([], {})))
     assert _updates(result)["pending_nudge"] == ""
 
-    quiet = asyncio.run(backend.on_render_prompt_block(
-        block, _state(data=_active_data(backend)), _make_sdk([], {})))
-    assert quiet["content"] == ""
-
 
 def test_opportunity_nudge_respects_toggle_and_cooldown():
     backend = _load_backend()
 
-    def run(config, last_nudge_turn=0):
+    def run(config, last_nudge_turn=0, turn=5):
         data = _active_data(backend, created_turn=1, last_nudge_turn=last_nudge_turn)
         sdk = _make_sdk([_assessment_reply(opportunity=True)], {})
-        result = asyncio.run(backend.on_librarian(_state(turn=4, data=data, config=config), sdk))
+        result = asyncio.run(backend.on_librarian(_state(turn=turn, data=data, config=config), sdk))
         return _updates(result).get("pending_nudge", "")
 
     assert run({}) != ""
     assert run({"opportunity_nudges": False}) == ""
-    assert run({}, last_nudge_turn=3) == ""  # within the 2-turn cooldown
+    assert run({}, last_nudge_turn=3) == ""   # within the 3-turn cooldown
+    assert run({}, last_nudge_turn=2) != ""   # cooldown elapsed
 
 
 def test_malformed_assessment_reply_is_noop():
@@ -449,7 +868,7 @@ def test_malformed_assessment_reply_is_noop():
 def test_plot_regen_replaces_thread_and_writes_back():
     backend = _load_backend()
     captured = {}
-    sdk = _make_sdk([SECOND_THREAD_REPLY], captured)
+    sdk = _make_sdk([SECOND_THREAD_REPLY, CRITIC_ACCEPT], captured)
     data = _active_data(backend, created_turn=1)
 
     result = asyncio.run(backend.on_command_plot(["regen"], _state(turn=6, data=data), sdk))
@@ -458,12 +877,17 @@ def test_plot_regen_replaces_thread_and_writes_back():
     update = result["module_data"]["wb_plot_director"]
     assert update["thread_history"][-1]["outcome"] == "rerolled"
     assert update["thread_history"][-1]["title"] == "The Salt Baron's Ledger"
+    assert update["thread_history"][-1]["consequence"] == "Set aside by the player."
     assert update["thread"]["title"] == "Tremors Below"
     assert update["thread"]["status"] == "active"
-    # The old thread appears in the generation prompt's do-not-repeat list.
+    # A reroll never waits out a quiet period.
+    assert update["next_thread_turn"] == 0
+    # The old thread appears in the generation prompt's consequences list.
     assert '"The Salt Baron\'s Ledger" -- rerolled' in captured["prompts"][0]
-    # A player reroll records no dislike.
+    # A player reroll records no dislike and skips the direction call.
     assert "profile" not in update
+    assert "direction" not in update
+    assert captured["preferences"] == ["smartest", "balanced"]
 
 
 def test_plot_regen_failure_keeps_current_thread():
@@ -481,7 +905,7 @@ def test_plot_regen_failure_keeps_current_thread():
     failed["status"] = "failed"
     failed["gen_attempts"] = 3
     result = asyncio.run(backend.on_command_plot(
-        ["regen"], _state(turn=6, data=failed), _make_sdk([THREAD_REPLY], {})))
+        ["regen"], _state(turn=6, data=failed), _make_sdk([THREAD_REPLY, CRITIC_ACCEPT], {})))
     update = result["module_data"]["wb_plot_director"]
     assert update["status"] == "active"
     assert update["thread"]["status"] == "active"
@@ -538,15 +962,24 @@ def test_suspend_and_resume_commands():
     assert "module_data" not in noop
 
 
-def test_resume_between_threads_writes_no_thread():
+def test_resume_between_threads_shifts_quiet_period():
     backend = _load_backend()
+
+    # No pending quiet period: nothing but the flags change.
     data = backend._default_data()
     data["suspended"] = True
     data["suspended_turn"] = 3
+    result = asyncio.run(backend.on_command_plot(["resume"], _state(turn=8, data=data), _make_sdk([], {})))
+    assert result["module_data"]["wb_plot_director"] == {"suspended": False, "suspended_turn": 0}
 
+    # A quiet period frozen mid-run resumes where it stopped.
+    data = backend._default_data()
+    data["suspended"] = True
+    data["suspended_turn"] = 3
+    data["next_thread_turn"] = 5
     result = asyncio.run(backend.on_command_plot(["resume"], _state(turn=8, data=data), _make_sdk([], {})))
     update = result["module_data"]["wb_plot_director"]
-    assert update == {"suspended": False, "suspended_turn": 0}
+    assert update["next_thread_turn"] == 5 + (8 - 3)
 
 
 def test_ai_cannot_write_dislikes_and_contradicting_likes_are_dropped():
@@ -582,8 +1015,54 @@ def test_profile_add_moves_entry_between_likes_and_dislikes():
 
     assert "Moved" in result["message"]
     profile = result["module_data"]["wb_plot_director"]["profile"]
-    assert {"text": "sea voyages", "weight": "high"} in profile["likes"]
+    assert any(e["text"] == "sea voyages" and e["weight"] == "high" for e in profile["likes"])
     assert profile["dislikes"] == []
+
+
+def test_profile_dislike_add_promotes_matching_avoid():
+    backend = _load_backend()
+    data = _active_data(backend)
+    data["profile"] = backend._default_profile()
+    data["profile"]["avoids"] = [
+        {"text": "courtly politics", "weight": "medium", "evidence": "walked out twice"},
+    ]
+
+    result = asyncio.run(backend.on_command_plot(
+        ["profile", "dislikes", "add", "courtly", "politics"], _state(data=data), _make_sdk([], {})))
+    profile = result["module_data"]["wb_plot_director"]["profile"]
+
+    assert any(e["text"] == "courtly politics" for e in profile["dislikes"])
+    assert profile["avoids"] == []  # the observation graduated to a player veto
+
+
+def test_profile_edit_deep_fields():
+    backend = _load_backend()
+    data = _active_data(backend)
+    data["profile"] = backend._default_profile()
+    data["profile"]["avoids"] = [
+        {"text": "courtly politics", "weight": "medium", "evidence": "walked out twice"},
+    ]
+
+    def run(args, current=data):
+        return asyncio.run(backend.on_command_plot(
+            ["profile"] + args, _state(data=current), _make_sdk([], {})))
+
+    # Avoids are AI-territory: the player can only veto them.
+    result = run(["avoids", "remove", "courtly politics"])
+    assert "Removed" in result["message"]
+    assert result["module_data"]["wb_plot_director"]["profile"]["avoids"] == []
+    assert "not in avoids" in run(["avoids", "remove", "nothing here"])["message"]
+    assert "Usage" in run(["avoids", "add", "something"])["message"]
+
+    # Narrative preferences and notes are direct setters.
+    result = run(["pacing", "slow", "burn"])
+    assert result["module_data"]["wb_plot_director"]["profile"]["narrative"]["pacing"] == "slow burn"
+    result = run(["register", "dread", "and", "wonder"])
+    assert result["module_data"]["wb_plot_director"]["profile"]["narrative"]["register"] == "dread and wonder"
+    result = run(["notes", "Loves", "a", "slow", "reveal."])
+    assert result["module_data"]["wb_plot_director"]["profile"]["notes"] == "Loves a slow reveal."
+    result = run(["notes"])
+    assert result["module_data"]["wb_plot_director"]["profile"]["notes"] == ""
 
 
 def test_plot_profile_edit_lists_and_tone():
@@ -601,7 +1080,7 @@ def test_plot_profile_edit_lists_and_tone():
     result = run(["likes", "add", "sea", "voyages"])
     assert 'Added "sea voyages" to likes (medium)' in result["message"]
     profile = result["module_data"]["wb_plot_director"]["profile"]
-    assert {"text": "sea voyages", "weight": "medium"} in profile["likes"]
+    assert any(e["text"] == "sea voyages" and e["weight"] == "medium" for e in profile["likes"])
 
     result = run(["likes", "remove", "HAGGLING"])
     assert "Removed" in result["message"]
@@ -615,7 +1094,9 @@ def test_plot_profile_edit_lists_and_tone():
     weighted["profile"] = _profile_reply(likes=[{"text": "haggling", "weight": "medium"}])
     result = run(["likes", "add", "high", "haggling"], current=weighted)
     assert 'set to high' in result["message"]
-    assert result["module_data"]["wb_plot_director"]["profile"]["likes"] == [{"text": "haggling", "weight": "high"}]
+    likes = result["module_data"]["wb_plot_director"]["profile"]["likes"]
+    assert len(likes) == 1
+    assert likes[0]["text"] == "haggling" and likes[0]["weight"] == "high"
 
     result = run(["themes", "remove", "smuggling"])
     assert result["module_data"]["wb_plot_director"]["profile"]["themes"] == ["harbor politics"]
@@ -648,6 +1129,7 @@ def test_plot_command_shows_thread_openly():
     backend = _load_backend()
     data = _active_data(backend)
     data["profile"] = _profile_reply()
+    data["direction"]["premise"] = "A quiet war for the harbor's soul."
     data["thread_history"] = [
         {"title": "The Pilgrim Road", "outcome": "abandoned", "created_turn": 2, "closed_turn": 9, "note": ""},
     ]
@@ -660,6 +1142,7 @@ def test_plot_command_shows_thread_openly():
     assert "steady" in message
     assert "intrigue" in message
     assert "The Pilgrim Road" in message
+    assert "A quiet war for the harbor's soul." in message
     assert result["signal"] == "end_turn"
 
     observing = asyncio.run(backend.on_command_plot(
@@ -669,3 +1152,18 @@ def test_plot_command_shows_thread_openly():
     disabled = asyncio.run(backend.on_command_plot(
         [], _state(data=data, config={"plot_enabled": False}), _make_sdk([], {})))
     assert "inactive" in disabled["message"]
+
+
+def test_plot_command_shows_breathing_state():
+    backend = _load_backend()
+    data = backend._default_data()
+    data["status"] = "active"
+    data["thread"] = backend._full_thread(status="resolved", closed_turn=5, created_turn=1)
+    data["next_thread_turn"] = 8
+
+    breathing = asyncio.run(backend.on_command_plot([], _state(turn=6, data=data), _make_sdk([], {})))
+    assert "letting the story breathe" in breathing["message"]
+    assert "turn 8" in breathing["message"]
+
+    ready = asyncio.run(backend.on_command_plot([], _state(turn=9, data=data), _make_sdk([], {})))
+    assert "being woven" in ready["message"]

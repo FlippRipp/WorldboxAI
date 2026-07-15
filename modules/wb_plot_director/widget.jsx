@@ -18,21 +18,27 @@ const WEIGHT_CHIP_STYLES = {
 };
 const WEIGHT_BADGE = { low: 'L', medium: 'M', high: 'H' };
 
-// Weighted lists (likes/dislikes) store {text, weight} objects; themes are
-// plain strings. Tolerate both shapes -- old saves normalize server-side on
-// the next write.
+// Weighted lists (likes/dislikes/avoids) store {text, weight} objects (plus
+// an evidence clause on observed lists); themes are plain strings. Tolerate
+// both shapes -- old saves normalize server-side on the next write.
 function normalizeEntry(entry) {
   if (entry && typeof entry === 'object') {
-    return { text: entry.text ?? '', weight: PREF_WEIGHTS.includes(entry.weight) ? entry.weight : 'medium' };
+    return {
+      text: entry.text ?? '',
+      weight: PREF_WEIGHTS.includes(entry.weight) ? entry.weight : 'medium',
+      evidence: entry.evidence ?? '',
+    };
   }
-  return { text: String(entry ?? ''), weight: 'medium' };
+  return { text: String(entry ?? ''), weight: 'medium', evidence: '' };
 }
 
 // One editable profile list: chips with remove buttons in edit mode, plus an
 // add input. Weighted lists also get a low/medium/high picker on add and a
 // per-chip badge that cycles the weight. Persistence is a command round-trip;
-// the refreshed list arrives via the next state_update.
-function ProfileList({ label, field, entries, weighted, editing, onCommand, hint }) {
+// the refreshed list arrives via the next state_update. removeOnly lists
+// (avoids -- the AI writes them, the player can only veto) get no add input
+// and no weight cycling.
+function ProfileList({ label, field, entries, weighted, editing, onCommand, hint, removeOnly }) {
   const [draft, setDraft] = useState('');
   const [draftWeight, setDraftWeight] = useState('medium');
 
@@ -66,11 +72,12 @@ function ProfileList({ label, field, entries, weighted, editing, onCommand, hint
         {items.map((item, i) => (
           <span
             key={`${item.text}-${i}`}
+            title={item.evidence || undefined}
             className={`flex items-center gap-1 bg-gray-900 border rounded-full text-[10px] px-2 py-0.5 ${
               weighted ? (WEIGHT_CHIP_STYLES[item.weight] ?? WEIGHT_CHIP_STYLES.medium) : 'border-gray-700 text-gray-300'
             }`}
           >
-            {weighted && editing && (
+            {weighted && editing && !removeOnly && (
               <button
                 onClick={() => cycleWeight(item)}
                 className="font-mono text-[9px] text-indigo-400 hover:text-indigo-300"
@@ -97,7 +104,7 @@ function ProfileList({ label, field, entries, weighted, editing, onCommand, hint
           <span className="text-[10px] text-gray-600 italic">none yet</span>
         )}
       </div>
-      {editing && (
+      {editing && !removeOnly && (
         <div className="flex gap-1">
           {weighted && (
             <select
@@ -138,14 +145,17 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
   if (!data) return null;
   if (config?.plot_enabled === false) return null;
 
-  const legacy = data.schema !== 2;
+  const legacy = !(data.schema >= 2);
   const thread = data.thread ?? {};
   const profile = data.profile ?? {};
+  const direction = data.direction ?? {};
   const suspended = !legacy && data.suspended === true;
   const momentum = legacy ? 'observing' : (data.momentum ?? 'observing');
   const momentumLabel = suspended ? 'suspended' : momentum;
   const momentumStyle = suspended ? 'text-gray-500' : (MOMENTUM_STYLES[momentum] ?? 'text-gray-500');
   const hasThread = !legacy && data.status === 'active' && thread.status === 'active';
+  const breathing = !legacy && !hasThread && data.status === 'active'
+    && (state?.turn ?? 0) < (data.next_thread_turn ?? 0);
   const streak = data.ignored_streak ?? 0;
   const abandonAfter = config?.abandon_after ?? 4;
   const history = (data.thread_history ?? []).slice(-3).reverse();
@@ -154,9 +164,17 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
     .sort((a, b) => b[1] - a[1])
     .slice(0, 3);
   const tone = profile.tone ?? '';
+  const narrative = profile.narrative ?? {};
+  const narrativeLine = ['pacing', 'agency', 'register']
+    .map((k) => (narrative[k] ? `${k}: ${narrative[k]}` : null))
+    .filter(Boolean)
+    .join(' · ');
+  const attachments = (profile.attachments ?? []).filter((a) => a && a.name);
   const hasProfile = topStyles.length > 0 || tone
     || (profile.themes ?? []).length > 0 || (profile.likes ?? []).length > 0
-    || (profile.dislikes ?? []).length > 0;
+    || (profile.dislikes ?? []).length > 0 || (profile.avoids ?? []).length > 0
+    || attachments.length > 0 || narrativeLine || profile.notes;
+  const hasDirection = !legacy && (direction.premise ?? '').trim() !== '';
 
   const subtitle = suspended
     ? (hasThread ? `⏸ ${thread.title}` : 'Suspended')
@@ -166,7 +184,9 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
         ? 'Inactive'
         : legacy || data.status === 'observing'
           ? 'Observing your story…'
-          : 'Weaving a new thread…';
+          : breathing
+            ? 'Letting the story breathe…'
+            : 'Weaving a new thread…';
 
   const saveTone = () => {
     if (toneDraft === null || toneDraft.trim() === tone) { setToneDraft(null); return; }
@@ -250,6 +270,28 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
               </div>
             )}
 
+            {hasDirection && (
+              <div className="space-y-1 border-t border-gray-700 pt-3">
+                <div className="text-[10px] text-gray-500 uppercase tracking-wider">Story direction</div>
+                <div className="text-xs text-gray-300 leading-snug">{direction.premise}</div>
+                {direction.heading && (
+                  <div className="text-[10px] text-gray-500 leading-snug">{direction.heading}</div>
+                )}
+                {(direction.open_questions ?? []).length > 0 && (
+                  <div className="flex flex-wrap gap-1 pt-0.5">
+                    {direction.open_questions.map((q, i) => (
+                      <span
+                        key={`${q}-${i}`}
+                        className="bg-gray-900 border border-gray-700 rounded-full text-[10px] text-gray-400 px-2 py-0.5"
+                      >
+                        {q}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {!legacy && (hasProfile || onCommand) && (
               <div className="space-y-2.5 border-t border-gray-700 pt-3">
                 <div className="flex items-center justify-between">
@@ -300,6 +342,32 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
                 <ProfileList label="Themes" field="themes" entries={profile.themes ?? []} editing={editing} onCommand={onCommand} />
                 <ProfileList label="Likes" field="likes" entries={profile.likes ?? []} weighted editing={editing} onCommand={onCommand} />
                 <ProfileList label="Dislikes" field="dislikes" entries={profile.dislikes ?? []} weighted editing={editing} onCommand={onCommand} hint="yours alone; the AI never adds these" />
+                <ProfileList label="Avoids" field="avoids" entries={profile.avoids ?? []} weighted editing={editing} onCommand={onCommand} removeOnly hint="observed by the AI; remove any that ring false" />
+
+                {attachments.length > 0 && (
+                  <div className="space-y-1">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider">Drawn to</div>
+                    <div className="flex flex-wrap gap-1">
+                      {attachments.map((a, i) => (
+                        <span
+                          key={`${a.name}-${i}`}
+                          title={a.note || undefined}
+                          className="bg-gray-900 border border-gray-700 rounded-full text-[10px] text-gray-300 px-2 py-0.5"
+                        >
+                          {a.name}
+                          {a.kind && <span className="text-gray-600 ml-1">{a.kind}</span>}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {narrativeLine && (
+                  <div className="text-[10px] text-gray-500">{narrativeLine}</div>
+                )}
+                {profile.notes && (
+                  <div className="text-[10px] text-gray-600 italic leading-snug">{profile.notes}</div>
+                )}
               </div>
             )}
 
@@ -307,8 +375,13 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
               <div className="space-y-0.5 border-t border-gray-700 pt-3">
                 <div className="text-[10px] text-gray-500 uppercase tracking-wider">Recent threads</div>
                 {history.map((entry, i) => (
-                  <div key={`${entry.title}-${i}`} className="text-[10px] text-gray-600 truncate">
-                    {OUTCOME_ICONS[entry.outcome] ?? '·'} {entry.outcome} — {entry.title}
+                  <div key={`${entry.title}-${i}`}>
+                    <div className="text-[10px] text-gray-600 truncate">
+                      {OUTCOME_ICONS[entry.outcome] ?? '·'} {entry.outcome} — {entry.title}
+                    </div>
+                    {entry.consequence && (
+                      <div className="text-[10px] text-gray-700 truncate pl-4">{entry.consequence}</div>
+                    )}
                   </div>
                 ))}
               </div>

@@ -1,9 +1,9 @@
 {
   "id": "wb_plot_director",
   "name": "Plot Director",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "icon": "🎭",
-  "description": "Watches how you play, builds a profile of the story's themes and your preferences, and weaves short plot threads that cater to them with a tunable dose of challenge. The active thread is visible in the sidebar and via /plot.",
+  "description": "Watches how you play, builds a deep profile of the story's themes and your preferences, and weaves short plot threads that build on each other -- grounded in established characters, guided by an evolving narrative direction, and quality-checked before they go live. The active thread is visible in the sidebar and via /plot.",
   "dependencies": [],
   "consumes": {
     "state": "*",
@@ -52,14 +52,30 @@
       "category": "Plot Director",
       "description": "A thread that has not resolved after this many turns expires and is replaced by a new one."
     },
+    "thread_cooldown_turns": {
+      "type": "slider",
+      "min": 0,
+      "max": 8,
+      "default": 3,
+      "label": "Quiet Period After a Thread (turns)",
+      "category": "Plot Director",
+      "description": "After a thread resolves or expires, wait this many turns before weaving the next one (abandoned threads wait twice as long; 0 restores immediate replacement)."
+    },
+    "fit_check_enabled": {
+      "type": "toggle",
+      "default": true,
+      "label": "Thread Quality Gate",
+      "category": "Plot Director",
+      "description": "Check each generated thread against the story's tone, established facts, and narrative direction before accepting it. One extra cheap LLM call per new thread."
+    },
     "stall_threshold": {
       "type": "slider",
       "min": 1,
       "max": 10,
-      "default": 2,
+      "default": 3,
       "label": "Nudge After (ignored checks)",
       "category": "Plot Director",
-      "description": "Number of consecutive checks where the thread saw no engagement before a subtle nudge is injected into the storyteller prompt."
+      "description": "Number of consecutive checks where the thread saw no engagement before the storyteller gets a gentle piece of connective material in its context."
     },
     "abandon_after": {
       "type": "slider",
@@ -103,17 +119,7 @@
     "/plot": "on_command_plot"
   },
   "command_help": {
-    "/plot": "Show the active plot thread, momentum, and your story profile. '/plot regen' weaves a new thread; '/plot suspend' freezes plot direction and '/plot resume' picks it back up; '/plot profile ...' edits your tone/themes/likes/dislikes."
+    "/plot": "Show the active plot thread, momentum, story direction, and your profile. '/plot regen' weaves a new thread; '/plot suspend' freezes plot direction and '/plot resume' picks it back up; '/plot profile ...' edits your tone/themes/likes/dislikes/avoids/pacing/agency/register/notes."
   },
-  "prompt_blocks": [
-    {
-      "id": "plot_nudge",
-      "type": "module_prompt",
-      "enabled": true,
-      "role_type": "system",
-      "placement": "chat_injection",
-      "depth": 0,
-      "config": {}
-    }
-  ]
+  "prompt_blocks": []
 }
