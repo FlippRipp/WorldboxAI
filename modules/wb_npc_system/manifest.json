@@ -90,6 +90,13 @@
       "label": "Capture Story-Introduced Characters",
       "category": "NPC System",
       "description": "Detect significant characters the storyteller introduces on its own (unnamed ones are tracked under a descriptive epithet until the story names them), generate full profiles for them, and track them as known NPCs."
+    },
+    "track_character_changes": {
+      "type": "toggle",
+      "default": true,
+      "label": "Auto-Track Character Changes",
+      "category": "NPC System",
+      "description": "After each turn, check the scene for lasting changes to the characters in it -- new names or revealed names, appearance changes, personality shifts, a changed pitch or narrative role, death or departure -- and update their records automatically."
     }
   },
   "mutation_schema": {

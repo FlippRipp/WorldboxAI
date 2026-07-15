@@ -306,7 +306,7 @@ def test_capture_llm_resolves_revealed_name_to_epithet_record():
     npc = new_bank["npc_1"]
     assert npc["name"] == "Veyra"
     assert npc["introduced"] is True
-    assert "Formerly tracked as The Hooded Stranger." in npc["notes"]
+    assert "Formerly known as The Hooded Stranger." in npc["notes"]
     # The profiler saw the existing roster to match identities against.
     assert "npc_1" in calls["prompts"][0] and "The Hooded Stranger" in calls["prompts"][0]
 
@@ -735,3 +735,184 @@ def test_appearance_prompts_require_hair_and_eye_color():
     asyncio.run(backend._update_npc_from_story("npc_1", _state(bank), sdk))
     prompt = _prompt_with(calls, "bring one character's record up to date")
     assert "keep hair color and eye color stated" in prompt
+
+    # The per-turn change-tracking pass.
+    sdk, calls = _make_sdk(json.dumps({"updates": []}))
+    state = _state({"npc_1": _present_npc("npc_1", "Mara")},
+                   history=["Mara sharpens her blade."])
+    asyncio.run(backend._track_character_changes(state, backend._get_bank(state), sdk))
+    prompt = _prompt_with(calls, "bring their records up to date")
+    assert "keep hair color and eye color stated" in prompt
+
+
+# ── Per-turn automatic change tracking ───────────────────────────────────────
+
+def _tracking_state(bank, latest, mutation_config=None):
+    # turn 4 with the default generator_frequency of 5: on_librarian runs
+    # ONLY the change-tracking pass on this turn.
+    return _state(bank, mutation_config=mutation_config,
+                  history=["The tavern hums with low voices.", latest])
+
+
+def test_tracking_pass_updates_changed_fields():
+    backend = _load_backend()
+    reply = json.dumps({"updates": [{
+        "npc_id": "npc_1",
+        "appearance": "Mara has a fresh scar across her brow, black hair, grey eyes.",
+        "status": "unintroduced",
+        "change_note": "Mara was scarred defending the gate.",
+    }]})
+    sdk, calls = _make_sdk(reply)
+    bank = {"npc_1": _present_npc("npc_1", "Mara", profile_embedded=True)}
+    state = _tracking_state(bank, "The blade catches Mara across the brow.")
+
+    result = asyncio.run(backend.on_librarian(state, sdk))
+
+    npc = _bank_from_result(result)["npc_1"]
+    assert "fresh scar" in npc["appearance"]
+    # A story-driven pass may retire a character but never un-introduce one.
+    assert npc["status"] == "active"
+    log = npc["change_log"][-1]
+    assert log["source"] == "auto"
+    assert log["fields"] == ["appearance"]
+    # The change note is remembered for RAG, and the stale profile embedding
+    # is replaced (appearance feeds the profile text).
+    assert any(c["text"] == "Mara was scarred defending the gate." for c in calls["remember"])
+    assert calls["forget"] == [{"npc_id": "npc_1", "tags": ["profile"]}]
+
+
+def test_tracking_pass_rename_sweeps_record_and_keeps_old_name():
+    backend = _load_backend()
+    reply = json.dumps({"updates": [{
+        "npc_id": "npc_1", "name": "Veyra",
+        "change_note": "The stranger gives her name: Veyra.",
+    }]})
+    sdk, _ = _make_sdk(reply)
+    bank = {"npc_1": _present_npc("npc_1", "The Hooded Stranger")}
+    state = _tracking_state(bank, "The hooded stranger lowers her cowl. 'I am Veyra.'")
+
+    result = asyncio.run(backend.on_librarian(state, sdk))
+
+    npc = _bank_from_result(result)["npc_1"]
+    assert npc["name"] == "Veyra"
+    # The old name is swept out of the other text fields...
+    assert npc["appearance"] == "Veyra has a scarred cheek."
+    assert npc["pitch"] == "Veyra knows every alley in Harborside."
+    # ...but stays retrievable in notes.
+    assert "Formerly known as The Hooded Stranger." in npc["notes"]
+
+
+def test_tracking_pass_rename_never_takes_another_characters_name():
+    backend = _load_backend()
+    reply = json.dumps({"updates": [{
+        "npc_id": "npc_1", "name": "Tobin",
+        "personality": ["grim", "loyal", "quiet"],
+        "change_note": "Mara hardens after the ambush.",
+    }]})
+    sdk, _ = _make_sdk(reply)
+    bank = {
+        "npc_1": _present_npc("npc_1", "Mara"),
+        "npc_2": _present_npc("npc_2", "Tobin"),
+    }
+    state = _tracking_state(bank, "Mara stares into the fire, changed.")
+
+    result = asyncio.run(backend.on_librarian(state, sdk))
+
+    npc = _bank_from_result(result)["npc_1"]
+    # The colliding rename is dropped; the rest of the update still lands.
+    assert npc["name"] == "Mara"
+    assert npc["personality"] == ["grim", "loyal", "quiet"]
+
+
+def test_tracking_pass_resolves_name_echo_to_record():
+    # Tracker models sometimes echo the character's name instead of the id.
+    backend = _load_backend()
+    reply = json.dumps({"updates": [{
+        "npc_id": "Mara", "notes": "Owes the player a favor.",
+    }]})
+    sdk, _ = _make_sdk(reply)
+    bank = {"npc_1": _present_npc("npc_1", "Mara")}
+    state = _tracking_state(bank, "Mara nods: 'I won't forget this.'")
+
+    result = asyncio.run(backend.on_librarian(state, sdk))
+
+    assert _bank_from_result(result)["npc_1"]["notes"] == "Owes the player a favor."
+
+
+def test_tracking_pass_skips_when_no_character_is_in_scene():
+    backend = _load_backend()
+    sdk, calls = _make_sdk(json.dumps({"updates": []}))
+    bank = {"npc_1": _present_npc("npc_1", "Mara")}
+    state = _tracking_state(bank, "Wind howls over the empty pass.")
+
+    result = asyncio.run(backend.on_librarian(state, sdk))
+
+    assert result is None
+    assert calls["generate_count"] == 0
+
+
+def test_tracking_pass_toggle_off_makes_no_llm_call():
+    backend = _load_backend()
+    sdk, calls = _make_sdk(json.dumps({"updates": []}))
+    bank = {"npc_1": _present_npc("npc_1", "Mara")}
+    state = _tracking_state(bank, "The blade catches Mara across the brow.",
+                            mutation_config={"track_character_changes": False})
+
+    result = asyncio.run(backend.on_librarian(state, sdk))
+
+    assert result is None
+    assert calls["generate_count"] == 0
+
+
+def test_tracking_candidates_cover_roster_party_and_named():
+    backend = _load_backend()
+    bank = {
+        "npc_a": _present_npc("npc_a", "Mara"),
+        "npc_b": _present_npc("npc_b", "Tobin", traveling_with_player=True),
+        "npc_c": _present_npc("npc_c", "Serel"),
+        "npc_d": _present_npc("npc_d", "Wren"),
+    }
+    state = _tracking_state(bank, "Serel pours another round.")
+    # npc_a comes from the published scene roster (stamped last turn -- the
+    # reader increments the turn before the librarian runs).
+    state["module_data"]["wb_npc_system"]["scene_presence"] = {
+        "turn": state["turn"] - 1, "npc_ids": ["npc_a"],
+    }
+
+    ids = {n["id"] for n in backend._tracking_candidates(state, backend._get_bank(state))}
+
+    assert ids == {"npc_a", "npc_b", "npc_c"}
+
+
+def test_capture_llm_renames_real_named_record():
+    # The story starts calling a known character by a genuinely new name
+    # (not an epithet reveal). The profiler resolves the identity; the record
+    # follows the story's name instead of spawning a duplicate.
+    backend = _load_backend()
+    reply = json.dumps({"npcs": [{"existing_npc_id": "npc_1", "name": "Lady Vane"}]})
+    sdk, _ = _make_sdk(reply)
+    bank = {"npc_1": _unmet_npc("npc_1", "Kara", introduced=True, status="active")}
+    mutation = {"story_characters": [
+        {"name": "Lady Vane", "descriptor": "the merchant queen of Harborside", "evidence": ""}
+    ]}
+
+    result = asyncio.run(backend.on_mutate_state(mutation, _state(bank), sdk))
+
+    npc = _bank_from_result(result)["npc_1"]
+    assert npc["name"] == "Lady Vane"
+    assert npc["pitch"] == "Lady Vane owes the player a debt."
+    assert "Formerly known as Kara." in npc["notes"]
+
+
+def test_update_command_rename_sweeps_record():
+    backend = _load_backend()
+    reply = json.dumps({"name": "Veyra", "change_note": "Now goes by Veyra."})
+    sdk, _ = _make_sdk(reply)
+    bank = {"npc_1": _present_npc("npc_1", "Mara")}
+
+    asyncio.run(backend._update_npc_from_story("npc_1", _state(bank), sdk))
+
+    npc = bank["npc_1"]
+    assert npc["name"] == "Veyra"
+    assert npc["pitch"] == "Veyra knows every alley in Harborside."
+    assert "Formerly known as Mara." in npc["notes"]

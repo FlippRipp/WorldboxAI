@@ -816,20 +816,51 @@ def _is_epithet(name: str) -> bool:
     return str(name).strip().lower().startswith("the ")
 
 
-async def _maybe_adopt_revealed_name(npc: dict, story_name: str, state: dict, sdk) -> bool:
-    """When a character tracked under a coined epithet ('The Hooded Stranger')
-    turns out to have a real name in the story, rename the record instead of
-    letting the real name spawn a duplicate."""
+def _rename_collides(new_name: str, npc: dict, bank: dict, state: dict) -> bool:
+    """A rename must never take a name that already identifies someone else --
+    another bank character or the player. An LLM confusing two characters
+    would otherwise silently merge their records."""
+    other = _find_by_name(new_name, bank)
+    if other is not None and other.get("id") != npc.get("id"):
+        return True
+    player = _player_name(state)
+    return bool(player and _same_character_name(new_name, player))
+
+
+def _finish_rename(npc: dict, old_name: str) -> None:
+    """Bookkeeping shared by every rename path, run after the name field is
+    already updated: sweep the old name out of the record's other text fields
+    (any the LLM did not rewrite itself) and keep it retrievable in notes, so
+    story references to the old name still resolve to this character."""
+    new_name = str(npc.get("name", ""))
+    old_name = str(old_name).strip()
+    if not old_name or old_name.lower() == new_name.lower():
+        return
+    pattern = re.compile(rf"\b{re.escape(old_name)}\b", re.IGNORECASE)
+    for field in ("appearance", "pitch", "notes"):
+        text = npc.get(field)
+        if isinstance(text, str) and pattern.search(text):
+            npc[field] = pattern.sub(new_name, text)
+    notes = str(npc.get("notes", "")).strip()
+    npc["notes"] = f"{notes} Formerly known as {old_name}.".strip()
+
+
+async def _adopt_story_name(npc: dict, story_name: str, state: dict, bank: dict, sdk) -> bool:
+    """When the capture pass resolves a reported character to an existing
+    record under a different name -- the story revealed the real name of a
+    character tracked under a coined epithet, or now firmly calls them
+    something new -- rename the record instead of letting the story name
+    spawn a duplicate. Never renames TO an epithet (an epithet reported for
+    a real-named character is a description, not a new name)."""
     story_name = str(story_name).strip()
     if (not story_name
             or _same_character_name(story_name, npc.get("name", ""))
-            or not _is_epithet(npc.get("name", ""))
-            or _is_epithet(story_name)):
+            or _is_epithet(story_name)
+            or _rename_collides(story_name, npc, bank, state)):
         return False
     old = npc.get("name", "")
     npc["name"] = story_name
-    notes = str(npc.get("notes", "")).strip()
-    npc["notes"] = f"{notes} Formerly tracked as {old}.".strip()
+    _finish_rename(npc, old)
     _log_change(npc, state.get("turn", 0),
                 f"Story revealed {old} is named {story_name}", ["name"], "story")
     await _refresh_profile_embedding(npc, ["name"], state, sdk)
@@ -964,7 +995,7 @@ Respond with ONLY valid JSON:
             story_name = str(npc_data.get("name", "")).strip()
             descriptor = next(
                 (p["descriptor"] for p in pending if _same_character_name(p["name"], story_name)), "")
-            if await _maybe_adopt_revealed_name(npc, story_name, state, sdk):
+            if await _adopt_story_name(npc, story_name, state, bank, sdk):
                 added = True
             if not npc.get("introduced"):
                 await _introduce_existing(npc, state, sdk,
@@ -1365,19 +1396,188 @@ async def _independent_travel_pass(state: dict, bank: dict, sdk) -> bool:
     return changed
 
 
+def _tracking_candidates(state: dict, bank: dict) -> list[dict]:
+    """Known, living characters who plausibly appear in this turn's scene --
+    the change-tracking pass only spends prompt space (and the LLM's
+    attention) on them: party members, the published scene roster (when
+    fresh; it is stamped one turn behind by the time the librarian runs),
+    characters the latest narration names, and anyone the reader just
+    touched this turn (introductions, party changes)."""
+    turn = int(state.get("turn") or 0)
+    presence = state.get("module_data", {}).get("wb_npc_system", {}).get("scene_presence")
+    scene_ids = set()
+    if isinstance(presence, dict):
+        try:
+            if abs(turn - int(presence.get("turn"))) <= 1:
+                scene_ids = {str(i) for i in presence.get("npc_ids") or []}
+        except (TypeError, ValueError):
+            pass
+
+    candidates = []
+    for npc in bank.values():
+        if not npc.get("introduced") or npc.get("status") != "active":
+            continue
+        try:
+            recently_touched = turn - int(npc.get("last_interaction_turn") or 0) <= 1
+        except (TypeError, ValueError):
+            recently_touched = False
+        if (npc.get("traveling_with_player") or npc.get("id") in scene_ids
+                or recently_touched or _named_in_latest_story(npc, state)):
+            candidates.append(npc)
+    return candidates
+
+
+def _tracking_record(npc: dict) -> str:
+    personality = ", ".join(npc.get("personality", []))
+    return (
+        f"[{npc['id']}] Name: {npc.get('name', '')}\n"
+        f"  Race/Gender: {npc.get('race', '') or '?'} / {npc.get('gender', '') or '?'}\n"
+        f"  Appearance: {npc.get('appearance', '') or '(not yet described)'}\n"
+        f"  Personality: {personality or '(not yet described)'}\n"
+        f"  Role: {npc.get('role', 'neutral')} | Status: {npc.get('status', 'active')}\n"
+        f"  Pitch: {npc.get('pitch', '') or '(none)'}\n"
+        f"  Notes: {npc.get('notes', '') or '(none)'}"
+    )
+
+
+async def _track_character_changes(state: dict, bank: dict, sdk) -> bool:
+    """Per-turn evolution pass for NPCs, mirroring wb_character_tracker's pass
+    for the player: one batched LLM call checks this turn's scene for lasting
+    changes to the characters plausibly in it -- renames included -- and
+    rewrites the changed record fields. Runs in the librarian phase, parallel
+    with other modules' post-turn work, so it neither burdens the reader's
+    mutation schema nor delays the storyteller."""
+    if not _config(state).get("track_character_changes", True):
+        return False
+    history = state.get("history", [])
+    if not history:
+        return False
+    candidates = _tracking_candidates(state, bank)
+    if not candidates:
+        return False
+
+    turn = state.get("turn", 0)
+    latest = str(history[-1])
+    earlier = "\n".join(str(h) for h in history[-3:-1])
+    earlier_block = f"EARLIER NARRATION (context only):\n{earlier}\n\n" if earlier else ""
+    player_action = str(state.get("last_input_text") or state.get("input_text") or "").strip()
+    action_block = f"THE PLAYER'S ACTION THIS TURN:\n{player_action}\n\n" if player_action else ""
+    records = "\n".join(_tracking_record(npc) for npc in candidates)
+
+    prompt = f"""You maintain the character records for the NPCs of a text RPG. After each scene you check whether any of the tracked characters changed in a LASTING way and bring their records up to date.
+
+TRACKED CHARACTERS (the only characters you may report on):
+{records}
+
+{earlier_block}{action_block}THIS TURN'S SCENE (check this for changes):
+{latest}
+
+Report changes ONLY in these areas:
+- name: what the character is called (see NAME CHANGES below)
+- appearance / physical condition: new scars, wounds, lost limbs, aging, a transformation, altered hair/eyes/skin, changed garb that defines their look
+- personality: a lasting shift in temperament, outlook, values, or defining traits
+- pitch: their concept or role in the story materially changed (a secret revealed, an allegiance switched, their story hook resolved or replaced)
+- role: their narrative function clearly shifted
+- status: the story shows them dying (deceased) or leaving the story for good (departed)
+- notes: noteworthy things they did or revealed, appended to the running log
+
+NAME CHANGES need no ceremony -- report one whenever:
+- the story reveals the actual name of a character recorded under a descriptive epithet (e.g. "The Hooded Stranger" introduces herself as Veyra), OR
+- the character adopts, accepts, or is granted a new name, alias, nickname, or title and answers to it, OR
+- the scene consistently calls the character something other than the recorded name.
+
+Do NOT report momentary emotions, temporary states (drunk, tired, briefly disguised), location changes, or characters who do not actually appear in this turn's scene. Only durable changes to who a character IS, how they LOOK, what they are CALLED, or where their story stands.
+
+For each changed field return its NEW full value (rewrite the field in full, incorporating the change):
+- "name": the new name only
+- "appearance": full rewritten text; keep hair color and eye color stated (updated when the change is about them, otherwise carried over from the record)
+- "personality": the full updated list of exactly 3 trait keywords
+- "pitch": full rewritten text
+- "role": one of {'|'.join(NPC_ROLES)}
+- "status": active|departed|deceased
+- "notes": the existing notes plus the new observations appended (keep it a compact running log)
+Also return "change_note": one short sentence summarizing what changed for that character.
+
+Respond with ONLY valid JSON:
+{{"updates": [{{"npc_id": "id from the list above", "<changed field>": "new value", "change_note": "one short sentence"}}]}}
+Return {{"updates": []}} if nothing durable changed."""
+
+    try:
+        raw = await sdk.llm.generate(prompt, model_preference="balanced")
+    except Exception as e:
+        print(f"[NPC System] Change-tracking pass failed: {e}")
+        return False
+    parsed = _parse_json_block(raw)
+    if not isinstance(parsed, dict):
+        return False
+    updates = parsed.get("updates")
+    if not isinstance(updates, list):
+        return False
+
+    by_id = {npc["id"]: npc for npc in candidates}
+    changed_any = False
+    for entry in updates:
+        if not isinstance(entry, dict):
+            continue
+        ref = str(entry.get("npc_id", "") or "").strip()
+        npc = by_id.get(ref)
+        if npc is None:
+            # Tracker models sometimes echo the character's name instead of
+            # the bank id; accept it when it is unambiguous.
+            matches = [n for n in candidates if _same_character_name(ref, n.get("name", ""))]
+            npc = matches[0] if len(matches) == 1 else None
+        if npc is None:
+            continue
+
+        fields = {k: v for k, v in entry.items() if k in UPDATE_FIELDS}
+        # Story-driven passes may retire a character, never un-introduce one.
+        if fields.get("status") == "unintroduced":
+            del fields["status"]
+        changes = _sanitize_edits(fields, npc)
+        if "name" in changes and _rename_collides(changes["name"], npc, bank, state):
+            del changes["name"]
+        if not changes:
+            continue
+
+        old_name = str(npc.get("name", ""))
+        note = str(entry.get("change_note", "")).strip()
+        npc.update(changes)
+        if "name" in changes:
+            _finish_rename(npc, old_name)
+        _log_change(npc, turn, note or f"Auto-tracked: {', '.join(changes)}", list(changes), "auto")
+        await _refresh_profile_embedding(npc, list(changes), state, sdk)
+        if note:
+            await sdk.memory.remember(npc["id"], note, turn, importance=6)
+        changed_any = True
+        print(f"[NPC System] Tracked change to {npc.get('name', '?')}: {note or ', '.join(changes)}")
+
+    return changed_any
+
+
 async def on_librarian(state: dict, sdk) -> dict | None:
     config = _config(state)
     frequency = config.get("generator_frequency", DEFAULT_GENERATOR_FREQUENCY)
     max_pool = config.get("max_unintroduced_pool", DEFAULT_MAX_POOL)
     turn = state.get("turn", 0)
 
-    if turn == 0 or turn % frequency != 0:
+    if turn == 0:
         return None
 
     bank = _get_bank(state)
 
-    threads = await _update_story_threads(state, sdk)
-    traveled = await _independent_travel_pass(state, bank, sdk)
+    if turn % frequency != 0:
+        evolved = await _track_character_changes(state, bank, sdk)
+        return _set_bank({}, bank) if evolved else None
+
+    # Generator turn: change tracking, thread extraction, and the travel pass
+    # are independent LLM calls touching disjoint record fields, so run them
+    # concurrently.
+    evolved, threads, traveled = await asyncio.gather(
+        _track_character_changes(state, bank, sdk),
+        _update_story_threads(state, sdk),
+        _independent_travel_pass(state, bank, sdk),
+    )
+    bank_changed = evolved or traveled
 
     unintroduced_count = sum(
         1 for n in bank.values()
@@ -1385,7 +1585,7 @@ async def on_librarian(state: dict, sdk) -> dict | None:
     )
 
     if unintroduced_count >= max_pool:
-        return _set_bank({"story_threads": threads}, bank) if (threads or traveled) else None
+        return _set_bank({"story_threads": threads}, bank) if (threads or bank_changed) else None
 
     scene = _scene_summary(state)
     bank_text = _bank_summary(bank)
@@ -1438,11 +1638,11 @@ Respond with ONLY valid JSON:
         parsed = json.loads(result)
     except Exception as e:
         print(f"[NPC System] Generator Agent failed: {e}")
-        return _set_bank({"story_threads": threads}, bank) if (threads or traveled) else None
+        return _set_bank({"story_threads": threads}, bank) if (threads or bank_changed) else None
 
     new_npcs = parsed.get("npcs", [])
     if not new_npcs:
-        return _set_bank({"story_threads": threads}, bank) if (threads or traveled) else None
+        return _set_bank({"story_threads": threads}, bank) if (threads or bank_changed) else None
 
     for npc_data in new_npcs:
         npc_id, record = _build_npc_record(npc_data, turn, bank, source="generated")
@@ -1624,7 +1824,13 @@ Respond with ONLY valid JSON containing just the changed fields (plus change_not
     if not isinstance(parsed, dict):
         return {"message": "[NPC] The update pass returned nothing usable -- try again.", "signal": "end_turn"}
 
-    changes = _sanitize_edits({k: v for k, v in parsed.items() if k in UPDATE_FIELDS}, npc)
+    fields = {k: v for k, v in parsed.items() if k in UPDATE_FIELDS}
+    # Story-driven passes may retire a character, never un-introduce one.
+    if fields.get("status") == "unintroduced":
+        del fields["status"]
+    changes = _sanitize_edits(fields, npc)
+    if "name" in changes and _rename_collides(changes["name"], npc, bank, state):
+        del changes["name"]
     if not changes:
         return {
             "message": f"[NPC] No lasting changes to {npc.get('name', npc_id)} found in the recent story.",
@@ -1633,7 +1839,10 @@ Respond with ONLY valid JSON containing just the changed fields (plus change_not
 
     turn = state.get("turn", 0)
     change_note = str(parsed.get("change_note", "")).strip()
+    old_name = str(npc.get("name", ""))
     npc.update(changes)
+    if "name" in changes:
+        _finish_rename(npc, old_name)
     _log_change(npc, turn, change_note or f"Story update: {', '.join(changes)}", list(changes), "story")
     await _refresh_profile_embedding(npc, list(changes), state, sdk)
 

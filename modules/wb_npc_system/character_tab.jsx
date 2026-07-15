@@ -4,7 +4,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 // Character view. Lists every character in the bank; ones the player hasn't
 // met yet are blurred behind a per-card spoiler reveal. Introduced characters
 // can be refreshed from the recent story (/npc update) and every character can
-// be edited manually (/npc edit). Characters can also be created from scratch
+// be edited manually (/npc edit); a per-turn librarian pass also auto-tracks
+// lasting changes (renames, appearance, personality, pitch, role, status) for
+// characters in the scene. Characters can also be created from scratch
 // (/npc add) or removed (/npc delete). Receives { state, config, onCommand, busy }.
 //
 // Each card also surfaces the booru appearance tags the Image Generation
