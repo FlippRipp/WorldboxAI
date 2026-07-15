@@ -231,6 +231,10 @@ class CreateSaveRequest(BaseModel):
     scenario_request: Optional[str] = None
     character_id: Optional[str] = None
     active_modules: Optional[list[str]] = None
+    # Optional comma-separated player preferences, seeded into the Plot
+    # Director's profile as player-set entries when that module is active.
+    plot_likes: Optional[str] = None
+    plot_dislikes: Optional[str] = None
 
 
 class UndoTurnRequest(BaseModel):
@@ -915,9 +919,24 @@ async def create_save(request: CreateSaveRequest):
             # Record which modules are active for this save (from the start-screen
             # toggle). Stored under a reserved key the engine reads to skip
             # inactive modules.
+            cfgs = dict(session_manager.state.get("module_configs", {}))
+            changed = False
             if request.active_modules is not None:
-                cfgs = dict(session_manager.state.get("module_configs", {}))
                 cfgs["__active_modules__"] = request.active_modules
+                changed = True
+            # Optional creation-time player preferences for the Plot Director.
+            # Stored on its per-save config; the module parses them into its
+            # profile the first time it seeds, so knowledge of the profile
+            # shape stays inside the module.
+            seeds = {}
+            if request.plot_likes and request.plot_likes.strip():
+                seeds["seed_likes"] = request.plot_likes.strip()
+            if request.plot_dislikes and request.plot_dislikes.strip():
+                seeds["seed_dislikes"] = request.plot_dislikes.strip()
+            if seeds:
+                cfgs["wb_plot_director"] = {**cfgs.get("wb_plot_director", {}), **seeds}
+                changed = True
+            if changed:
                 session_manager.update_module_configs(cfgs)
 
         if request.character_id:

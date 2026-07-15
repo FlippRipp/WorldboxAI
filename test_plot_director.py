@@ -1406,3 +1406,30 @@ def test_pivot_needs_commitment_toggle_and_thrash_guard():
     update, captured = run({**pivot_kwargs, "pivot_intent": ""})
     assert "thread_history" not in update
     assert len(captured["prompts"]) == 1
+
+
+def test_creation_seed_likes_and_dislikes_populate_profile():
+    backend = _load_backend()
+    sdk = _make_sdk([], {})
+    config = {"seed_likes": "sea voyages, political intrigue, , sea voyages",
+              "seed_dislikes": "body horror; political intrigue"}
+
+    result = asyncio.run(backend.on_gather_context(_state(data=None, config=config), sdk))
+    profile = _updates(result)["profile"]
+
+    # Both boxes parse (commas/semicolons, blanks and duplicates dropped);
+    # player authority applies even between them -- a dislike beats a like
+    # naming the same thing.
+    assert profile["dislikes"] == [
+        {"text": "body horror", "weight": "medium"},
+        {"text": "political intrigue", "weight": "medium"},
+    ]
+    assert profile["likes"] == [
+        {"text": "sea voyages", "weight": "medium", "evidence": backend.PLAYER_SET_EVIDENCE},
+    ]
+    # Seeded likes carry the player-set marker, so they survive /plot reset.
+
+    # Without seeds the skeleton stays pristine.
+    plain = asyncio.run(backend.on_gather_context(_state(data=None), sdk))
+    assert _updates(plain)["profile"]["likes"] == []
+    assert _updates(plain)["profile"]["dislikes"] == []

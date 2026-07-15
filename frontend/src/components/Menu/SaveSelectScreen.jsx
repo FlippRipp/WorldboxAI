@@ -29,6 +29,11 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
   // setting and the scenario supplies the opening message.
   //   null | { id, modificationRequest }
   const [selectedScenario, setSelectedScenario] = useState(null);
+  // Optional Plot Director preferences (comma-separated), seeded into the
+  // story's plot profile as player-set entries. Only shown/sent when the
+  // plot module is active for the new story.
+  const [plotLikes, setPlotLikes] = useState('');
+  const [plotDislikes, setPlotDislikes] = useState('');
   const [creating, setCreating] = useState(false);
   // Ref mirror of `creating`: state hasn't flushed yet when a second Enter
   // keydown lands in the same tick, so the guard needs a synchronous check.
@@ -223,6 +228,8 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
         scenarioRequest: selectedScenario?.modificationRequest?.trim() || null,
         characterId: selectedCharacter ? selectedCharacter.id : null,
         activeModules: modules.map((m) => m.id).filter((id) => enabledModules.has(id)),
+        plotLikes: enabledModules.has('wb_plot_director') ? (plotLikes.trim() || null) : null,
+        plotDislikes: enabledModules.has('wb_plot_director') ? (plotDislikes.trim() || null) : null,
       });
       onLoad(name);
     } catch (e) {
@@ -447,6 +454,39 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                       )}
                     </div>
                   )}
+                </div>
+              )}
+
+              {enabledModules.has('wb_plot_director') && (
+                <div className="p-4 rounded-lg border border-gray-700 bg-gray-800/30">
+                  <h4 className="text-sm font-medium text-gray-300 mb-2">🎭 Plot Preferences (optional)</h4>
+                  <p className="text-xs text-gray-500 mb-3">
+                    Tell the Plot Director what you enjoy or want kept out. These count as
+                    your own stated preferences: plot threads lean into likes, treat dislikes
+                    as hard no-gos, and both survive plot resets. Separate entries with commas.
+                  </p>
+                  <div className="space-y-2">
+                    <div>
+                      <label className="text-xs text-gray-400 block mb-1" htmlFor="plot-likes-input">Likes</label>
+                      <input
+                        id="plot-likes-input"
+                        value={plotLikes}
+                        onChange={(e) => setPlotLikes(e.target.value)}
+                        placeholder="e.g., political intrigue, found family, sea voyages"
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-400 block mb-1" htmlFor="plot-dislikes-input">Dislikes</label>
+                      <input
+                        id="plot-dislikes-input"
+                        value={plotDislikes}
+                        onChange={(e) => setPlotDislikes(e.target.value)}
+                        placeholder="e.g., body horror, romance subplots"
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500"
+                      />
+                    </div>
+                  </div>
                 </div>
               )}
 

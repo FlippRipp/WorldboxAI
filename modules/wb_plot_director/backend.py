@@ -25,6 +25,7 @@ freeze until /plot resume, and the thread's lifespan clock shifts by the paused
 duration so it never expires the moment it wakes up.
 """
 import json
+import re
 
 MODULE_ID = "wb_plot_director"
 
@@ -332,6 +333,38 @@ def _clean_profile(parsed, previous: dict) -> dict:
         "narrative": _clean_narrative(parsed.get("narrative"), previous.get("narrative")),
         "notes": str(parsed.get("notes") or previous.get("notes") or "").strip()[:PROFILE_NOTES_MAX_CHARS],
     }
+
+
+def _parse_seed_prefs(raw, with_evidence: bool = False) -> list:
+    """Parse a creation-form preference string ("haggling, sea voyages" --
+    commas, semicolons, or newlines) into weighted entries. Deliberate typed
+    input, so likes carry the player-set marker and survive resets."""
+    entries = []
+    seen = set()
+    for part in re.split(r"[,;\n]", str(raw or "")):
+        text = part.strip()[:PROFILE_ENTRY_MAX_CHARS]
+        if not text or _norm_entry(text) in seen:
+            continue
+        seen.add(_norm_entry(text))
+        entry = {"text": text, "weight": "medium"}
+        if with_evidence:
+            entry["evidence"] = PLAYER_SET_EVIDENCE
+        entries.append(entry)
+    return entries[:PROFILE_LIST_CAP]
+
+
+def _seeded_default_data(state: dict) -> dict:
+    """The fresh module_data skeleton, with any creation-form likes/dislikes
+    (stored on this save's config by the create endpoint) parsed into the
+    profile as player-set entries."""
+    data = _default_data()
+    config = _config(state)
+    likes = _parse_seed_prefs(config.get("seed_likes"), with_evidence=True)
+    dislikes = _parse_seed_prefs(config.get("seed_dislikes"))
+    if likes or dislikes:
+        data["profile"] = _merge_player_prefs(data["profile"], likes, dislikes)
+        print(f"[Plot Director] Seeded {len(likes)} like(s) and {len(dislikes)} dislike(s) from story creation.")
+    return data
 
 
 def _merge_player_prefs(profile: dict, kept_likes: list, kept_dislikes: list) -> dict:
@@ -914,7 +947,7 @@ async def _close_thread(state: dict, sdk, data: dict, updates: dict, thread: dic
 async def on_gather_context(state: dict, sdk) -> dict:
     data = _own_data(state)
     if not data:
-        return {"module_data": {MODULE_ID: _default_data()}}
+        return {"module_data": {MODULE_ID: _seeded_default_data(state)}}
 
     if data.get("schema") == 2:
         # v2 -> v3: additive, in place. _deep_merge adds the new keys; the

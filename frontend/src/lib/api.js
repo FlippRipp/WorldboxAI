@@ -31,6 +31,8 @@ export const api = {
                             scenario_request: opts.scenarioRequest ?? null,
                             character_id: opts.characterId ?? null,
                             active_modules: opts.activeModules ?? null,
+                            plot_likes: opts.plotLikes ?? null,
+                            plot_dislikes: opts.plotDislikes ?? null,
                           }) }),
   loadSave:               (saveId) => request(`/api/saves/${saveId}/load`, { method: 'POST' }),
   undoSave:               (saveId, targetTurn) => request(`/api/saves/${saveId}/undo`, { method: 'POST', body: JSON.stringify({ target_turn: targetTurn }) }),
