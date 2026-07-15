@@ -916,3 +916,113 @@ def test_update_command_rename_sweeps_record():
     assert npc["name"] == "Veyra"
     assert npc["pitch"] == "Veyra knows every alley in Harborside."
     assert "Formerly known as Mara." in npc["notes"]
+
+
+# ── Demand-driven character generation ───────────────────────────────────────
+
+def _npc_concept(name, need=None):
+    concept = {
+        "name": name, "race": "human", "gender": "female",
+        "appearance": "Silver hair, gray eyes.",
+        "archetype": "informant", "pitch": f"{name} hears everything.",
+        "personality": ["wry", "careful", "curious"],
+        "role": "informant", "encounter_type": "encounter",
+    }
+    if need is not None:
+        concept["need"] = need
+    return concept
+
+
+def test_generator_is_demand_driven_and_sees_story_direction():
+    backend = _load_backend()
+
+    def reply(prompt):
+        if "casting director" in prompt:
+            return json.dumps({"npcs": []})
+        return "{}"
+
+    sdk, calls = _make_sdk(reply)
+    state = _state(mutation_config={"generator_frequency": 1})
+    state["module_data"]["wb_plot_director"] = {
+        "profile": {"tone": "gritty", "themes": [], "likes": [], "dislikes": [],
+                    "avoids": [{"text": "open brawls", "weight": "medium", "evidence": ""}]},
+        "direction": {"premise": "A quiet war for the harbor's soul.",
+                      "heading": "Reprisal is coming.",
+                      "open_questions": ["Who tipped off the enforcers?"],
+                      "recurring_elements": [], "updated_turn": 3},
+    }
+
+    result = asyncio.run(backend.on_librarian(state, sdk))
+
+    prompt = next(p for p in calls["prompts"] if "casting director" in p)
+    # Zero characters is framed as the normal outcome, and every character
+    # must cite the story signal that demands it.
+    assert '{"npcs": []}' in prompt
+    assert '"need"' in prompt
+    assert "usually zero or one" in prompt
+    # The Plot Director's narrative direction and observed avoids reach the
+    # generator, so "the direction of the story" is what gates creation.
+    assert "A quiet war for the harbor's soul." in prompt
+    assert "Who tipped off the enforcers?" in prompt
+    assert "open brawls" in prompt
+    # An empty reply creates nobody.
+    assert not result or not _bank_from_result(result)
+
+
+def test_generator_drops_characters_without_a_need():
+    backend = _load_backend()
+
+    def reply(prompt):
+        if "casting director" in prompt:
+            return json.dumps({"npcs": [
+                _npc_concept("Sela", need="The open question about the enforcers needs an informant."),
+                _npc_concept("Filler Fred"),  # no need stated -> dropped
+            ]})
+        return "{}"
+
+    sdk, _ = _make_sdk(reply)
+    result = asyncio.run(backend.on_librarian(
+        _state(mutation_config={"generator_frequency": 1}), sdk))
+
+    bank = _bank_from_result(result)
+    names = [n["name"] for n in bank.values()]
+    assert names == ["Sela"]
+    record = next(iter(bank.values()))
+    assert record["creation_need"] == "The open question about the enforcers needs an informant."
+
+
+def test_generator_toggle_restores_pool_filling():
+    backend = _load_backend()
+
+    def reply(prompt):
+        if "character designer" in prompt:
+            return json.dumps({"npcs": [_npc_concept("Ambient Anna")]})
+        return "{}"
+
+    sdk, calls = _make_sdk(reply)
+    result = asyncio.run(backend.on_librarian(
+        _state(mutation_config={"generator_frequency": 1,
+                                "demand_driven_generation": False}), sdk))
+
+    prompt = next(p for p in calls["prompts"] if "character designer" in p)
+    assert "fill gaps NOT covered" in prompt
+    assert "casting director" not in prompt
+    # Legacy mode keeps characters that state no need.
+    assert [n["name"] for n in _bank_from_result(result).values()] == ["Ambient Anna"]
+
+
+def test_introduction_pass_shows_creation_need():
+    backend = _load_backend()
+    bank = {"npc_1": {
+        "id": "npc_1", "name": "Sela", "race": "human", "gender": "female",
+        "archetype": "informant", "pitch": "Sela hears everything.",
+        "personality": ["wry"], "role": "informant", "encounter_type": "encounter",
+        "introduced": False, "status": "unintroduced",
+        "creation_need": "The enforcer question needs an informant.",
+    }}
+    sdk, calls = _make_sdk(json.dumps({"introduce": False, "npc_id": None, "reason": "not yet"}))
+
+    asyncio.run(backend._introduction_pass(_state(bank), sdk))
+
+    prompt = next(p for p in calls["prompts"] if "narrative director" in p)
+    assert "Created for: The enforcer question needs an informant." in prompt

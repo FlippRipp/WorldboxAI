@@ -22,7 +22,14 @@
       "default": 5,
       "label": "NPC Generation Frequency",
       "category": "NPC System",
-      "description": "Generate new NPC concepts every N turns"
+      "description": "Consider generating new NPC concepts every N turns"
+    },
+    "demand_driven_generation": {
+      "type": "toggle",
+      "default": true,
+      "label": "Story-Driven Character Creation",
+      "category": "NPC System",
+      "description": "Only create a new character when the story direction, an open question, or an active thread clearly calls for one -- each new character must cite the need it serves. Off restores the old behavior of speculatively keeping the unintroduced pool topped up."
     },
     "introduction_enabled": {
       "type": "toggle",

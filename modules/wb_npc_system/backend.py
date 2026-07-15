@@ -147,6 +147,7 @@ def _build_npc_record(npc_data: dict, turn: int, bank: dict, *, introduced: bool
         "introduced": introduced,
         "met_turn": turn if introduced else None,
         "status": "active" if introduced else "unintroduced",
+        "creation_need": str(npc_data.get("need", "") or "").strip(),
         "notes": "",
         "created_turn": turn,
         "source": source,
@@ -282,15 +283,17 @@ def _world_context(state: dict) -> str:
 
 def _plot_profile_block(state: dict) -> str:
     """When the Plot Director module is present, surface its learned story
-    profile (tone, themes, and the player's weighted likes/dislikes) so newly
-    generated characters cater to the same direction. Returns "" when the module
-    is absent, unmet, or has learned nothing yet."""
+    profile (tone, themes, the player's weighted likes/dislikes and observed
+    avoids) and its evolving narrative direction (premise, heading, open
+    questions) so newly generated characters serve the same direction. Returns
+    "" when the module is absent, unmet, or has learned nothing yet."""
     plot = state.get("module_data", {}).get("wb_plot_director")
     if not isinstance(plot, dict):
         return ""
     profile = plot.get("profile")
-    if not isinstance(profile, dict):
-        return ""
+    profile = profile if isinstance(profile, dict) else {}
+    direction = plot.get("direction")
+    direction = direction if isinstance(direction, dict) else {}
 
     tone = str(profile.get("tone") or "").strip()
     themes = [str(t).strip() for t in profile.get("themes", []) if str(t).strip()]
@@ -309,8 +312,13 @@ def _plot_profile_block(state: dict) -> str:
 
     likes = _prefs(profile.get("likes"))
     dislikes = _prefs(profile.get("dislikes"))
+    avoids = _prefs(profile.get("avoids"))
 
-    if not (tone or themes or likes or dislikes):
+    premise = str(direction.get("premise") or "").strip()
+    heading = str(direction.get("heading") or "").strip()
+    questions = [str(q).strip() for q in direction.get("open_questions", []) if str(q).strip()]
+
+    if not (tone or themes or likes or dislikes or avoids or premise):
         return ""
 
     lines = [
@@ -318,6 +326,12 @@ def _plot_profile_block(state: dict) -> str:
         "established tone and themes and the player's tastes; the weight in parentheses marks "
         "how strongly the player feels):"
     ]
+    if premise:
+        lines.append(f"Arc premise: {premise}")
+    if heading:
+        lines.append(f"Heading: {heading}")
+    if questions:
+        lines.append("Open questions: " + "; ".join(questions))
     if tone:
         lines.append(f"Tone: {tone}")
     if themes:
@@ -326,6 +340,8 @@ def _plot_profile_block(state: dict) -> str:
         lines.append(f"Player enjoys (lean into these): {'; '.join(likes)}")
     if dislikes:
         lines.append(f"Player dislikes (steer clear of these): {'; '.join(dislikes)}")
+    if avoids:
+        lines.append(f"Player tends to steer away from (observed): {'; '.join(avoids)}")
     return "\n".join(lines)
 
 
@@ -602,11 +618,14 @@ async def _introduction_pass(state: dict, sdk) -> dict | None:
 
     candidate_text = ""
     for i, npc in enumerate(candidates):
+        need = str(npc.get("creation_need", "") or "").strip()
+        need_line = f"    Created for: {need}\n" if need else ""
         candidate_text += (
             f"[{i}] ID: {npc['id']} | {npc['name']} ({npc.get('race', '?')}, {npc.get('gender', '?')})\n"
             f"    Archetype: {npc.get('archetype', '')}\n"
             f"    Role: {npc.get('role', 'neutral')}\n"
             f"    Pitch: {npc.get('pitch', '')}\n"
+            f"{need_line}"
             f"    Personality: {', '.join(npc.get('personality', []))}\n"
             f"    Type: {npc.get('encounter_type', 'encounter')}\n\n"
         )
@@ -1594,6 +1613,7 @@ async def on_librarian(state: dict, sdk) -> dict | None:
     node_id = state.get("player_location_node_id", "")
 
     needed = min(3, max_pool - unintroduced_count)
+    demand_driven = config.get("demand_driven_generation", True)
 
     plot_block = _plot_profile_block(state)
     plot_section = f"\n\n{plot_block}" if plot_block else ""
@@ -1601,7 +1621,39 @@ async def on_librarian(state: dict, sdk) -> dict | None:
                  "and themes, lean into what the player enjoys, and steer clear of what they dislike."
                  if plot_block else "")
 
-    prompt = f"""You are a character designer for a text-based RPG. Create {needed} new NPC concepts for the game.
+    if demand_driven:
+        # Characters exist to serve the story, not to fill a pool: nothing is
+        # created without a concrete, citable story need, and an empty reply
+        # is the normal outcome.
+        task = f"""You are a casting director for a text-based RPG. First decide whether the story ACTUALLY NEEDS any new character right now -- only then design new NPC concepts for the game.
+
+A new character is justified ONLY when a concrete story signal calls for one: the story direction or one of its open questions points at a person who does not exist yet, an active story thread needs an actor no existing character can play, or where the story is clearly heading will obviously require someone new. If an EXISTING character (introduced or not) can serve the need, use them instead and create no one.
+
+If nothing clearly calls for a new character, respond with {{"npcs": []}} -- that is the normal, expected outcome, not a failure."""
+        rules = f"""INSTRUCTIONS (only for characters that pass the test above):
+1. Create at most {needed} characters, and no more than the story clearly needs -- usually zero or one.
+2. Every character carries a "need": one sentence naming the specific story signal (direction, open question, story thread, or scene) that demands them. A character without a concrete need must not be created.
+3. Each character must have a DISTINCT archetype, personality, and role from all existing ones.
+4. Bind a character to a location (current region: {region}) only when their need ties them there; otherwise make them encounter-type.
+5. Characters should feel authentic to this world's genre, factions, and regions.
+6. Pitches should be 2-3 sentences -- a hook that suggests story potential.
+7. Personality should be exactly 3 keywords describing core traits.
+8. Optionally relate 0-2 new characters to EXISTING characters above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.{plot_rule}"""
+        need_field = '"need": "the story signal that demands this character, one sentence", '
+    else:
+        task = f"You are a character designer for a text-based RPG. Create {needed} new NPC concepts for the game."
+        rules = f"""INSTRUCTIONS:
+1. Create {needed} characters that fill gaps NOT covered by existing NPCs.
+2. Each character must have a DISTINCT archetype, personality, and role from all existing ones.
+3. At least one should be location-bound to the current region: {region}
+4. The rest can be encounter-type (can appear anywhere).
+5. Characters should feel authentic to this world's genre, factions, and regions.
+6. Pitches should be 2-3 sentences -- a hook that suggests story potential.
+7. Personality should be exactly 3 keywords describing core traits.
+8. Optionally relate 0-2 new characters to EXISTING characters above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.{plot_rule}"""
+        need_field = ""
+
+    prompt = f"""{task}
 
 WORLD CONTEXT:
 {wctx}{plot_section}
@@ -1612,18 +1664,10 @@ CURRENT STORY STATE:
 EXISTING CHARACTERS (DO NOT duplicate or create similar concepts):
 {bank_text}
 
-INSTRUCTIONS:
-1. Create {needed} characters that fill gaps NOT covered by existing NPCs.
-2. Each character must have a DISTINCT archetype, personality, and role from all existing ones.
-3. At least one should be location-bound to the current region: {region}
-4. The rest can be encounter-type (can appear anywhere).
-5. Characters should feel authentic to this world's genre, factions, and regions.
-6. Pitches should be 2-3 sentences -- a hook that suggests story potential.
-7. Personality should be exactly 3 keywords describing core traits.
-8. Optionally relate 0-2 new characters to EXISTING characters above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.{plot_rule}
+{rules}
 
 Respond with ONLY valid JSON:
-{{"npcs": [{{"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description that always states hair color and eye color (or the being's closest equivalent)", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_layer_id": "layer_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}]}}"""
+{{"npcs": [{{{need_field}"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description that always states hair color and eye color (or the being's closest equivalent)", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_layer_id": "layer_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}]}}"""
 
     try:
         result = await sdk.llm.generate(prompt, model_preference="balanced")
@@ -1641,6 +1685,15 @@ Respond with ONLY valid JSON:
         return _set_bank({"story_threads": threads}, bank) if (threads or bank_changed) else None
 
     new_npcs = parsed.get("npcs", [])
+    if demand_driven:
+        # No citable story need, no character -- drop anything the model
+        # created out of habit, and cap at what was asked for.
+        justified = [n for n in new_npcs
+                     if isinstance(n, dict) and str(n.get("need", "")).strip()]
+        dropped = len(new_npcs) - len(justified)
+        if dropped:
+            print(f"[NPC System] Dropped {dropped} generated NPC(s) without a stated story need.")
+        new_npcs = justified[:needed]
     if not new_npcs:
         return _set_bank({"story_threads": threads}, bank) if (threads or bank_changed) else None
 
