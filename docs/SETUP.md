@@ -63,12 +63,12 @@ are supported, switched with the provider toggle on the Setup tab:
   the WebUI's `models/Lora` folder in the Studio to enable one-click LoRA
   installs from the built-in Civitai/Hugging Face browser.
 
-To set up a local server from scratch, run the bundled script from the repo
-root:
+To set up a local server from scratch, run the module's bundled script from
+the repo root:
 
 ```powershell
-.\image_server.bat        # Windows
-./image_server.sh         # Linux/macOS
+.\modules\wb_image_gen\image_server.bat        # Windows
+./modules/wb_image_gen/image_server.sh         # Linux/macOS
 ```
 
 It clones [SD WebUI Forge](https://github.com/lllyasviel/stable-diffusion-webui-forge)

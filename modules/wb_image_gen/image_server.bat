@@ -10,8 +10,10 @@ setlocal enabledelayedexpansion
 :: private venv and installs its requirements (torch etc.) on first run, so
 :: the first launch downloads several GB.
 ::
-:: Usage:
-::   image_server.bat [install_dir]      (default: .\image_server)
+:: Usage (from the repo root):
+::   .\modules\wb_image_gen\image_server.bat [install_dir]
+::   (default install dir: <repo root>\image_server -- gitignored; kept out of
+::   the module folder so module packaging never picks up a multi-GB WebUI)
 ::
 :: Environment overrides:
 ::   WB_WEBUI_DIR      install directory (same as the argument)
@@ -23,14 +25,17 @@ setlocal enabledelayedexpansion
 ::   WEBUI_EXTRA_ARGS  extra launch flags, e.g. "--api-auth user:pass" or,
 ::                     without an NVIDIA GPU, "--skip-torch-cuda-test --use-cpu all"
 
-cd /d "%~dp0"
+:: The script lives in modules\wb_image_gen\; the default install dir sits at
+:: the repo root.
+for %%i in ("%~dp0..\..") do set "REPO_ROOT=%%~fi"
+cd /d "%REPO_ROOT%"
 title WorldBox Image Server
 
 if not defined WB_WEBUI_PORT set WB_WEBUI_PORT=7860
 if not defined WB_WEBUI_REPO set WB_WEBUI_REPO=https://github.com/lllyasviel/stable-diffusion-webui-forge.git
 set "WEBUI_DIR=%~1"
 if not defined WEBUI_DIR if defined WB_WEBUI_DIR set "WEBUI_DIR=%WB_WEBUI_DIR%"
-if not defined WEBUI_DIR set "WEBUI_DIR=%~dp0image_server"
+if not defined WEBUI_DIR set "WEBUI_DIR=%REPO_ROOT%\image_server"
 
 echo ==============================================
 echo    WorldBox - Local Image Server (SD WebUI)

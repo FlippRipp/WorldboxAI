@@ -8,8 +8,10 @@
 # private venv and installs its requirements (torch etc.) on first run, so
 # the first launch downloads several GB.
 #
-# Usage:
-#   ./image_server.sh [install_dir]      # default: ./image_server
+# Usage (from the repo root):
+#   ./modules/wb_image_gen/image_server.sh [install_dir]
+#   # default install dir: <repo root>/image_server (gitignored; kept out of
+#   # the module folder so module packaging never picks up a multi-GB WebUI)
 #
 # Environment overrides:
 #   WB_WEBUI_DIR      install directory (same as the positional argument)
@@ -22,11 +24,14 @@
 #   WEBUI_EXTRA_ARGS  extra launch flags, e.g. "--api-auth user:pass" or,
 #                     without an NVIDIA GPU, "--skip-torch-cuda-test --use-cpu all"
 set -u
-cd "$(dirname "$0")"
+# The script lives in modules/wb_image_gen/; the default install dir sits at
+# the repo root.
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$REPO_ROOT"
 
 WB_WEBUI_REPO="${WB_WEBUI_REPO:-https://github.com/lllyasviel/stable-diffusion-webui-forge.git}"
 WB_WEBUI_PORT="${WB_WEBUI_PORT:-7860}"
-WEBUI_DIR="${1:-${WB_WEBUI_DIR:-$PWD/image_server}}"
+WEBUI_DIR="${1:-${WB_WEBUI_DIR:-$REPO_ROOT/image_server}}"
 
 echo "=============================================="
 echo "   WorldBox - Local Image Server (SD WebUI)"
