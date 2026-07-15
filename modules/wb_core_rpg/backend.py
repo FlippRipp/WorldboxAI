@@ -1511,7 +1511,12 @@ def _plot_challenge_section(state: dict) -> str:
     """The plot director's active thread, so the wizard can seed abilities
     that could matter against the current challenge. The challenge line is a
     spoiler the player may not have revealed yet, so prompts that use this
-    section must forbid leaking it into player-visible text."""
+    section must forbid leaking it into player-visible text. Optional: the
+    plot_aware_skill_generation toggle turns the whole thing off, leaving
+    every wizard prompt plot-blind."""
+    config = state.get("module_configs", {}).get("wb_core_rpg", {}) or {}
+    if not config.get("plot_aware_skill_generation", True):
+        return ""
     thread = state.get("module_data", {}).get("wb_plot_director", {}).get("thread") or {}
     if thread.get("status") != "active" or not str(thread.get("challenge") or "").strip():
         return ""

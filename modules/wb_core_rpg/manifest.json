@@ -1,11 +1,11 @@
 {
   "id": "wb_core_rpg",
   "name": "Core RPG System",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "dependencies": [],
   "consumes": {
     "state": ["input_text", "turn", "history"],
-    "module_data": ["wb_time_tracker"],
+    "module_data": ["wb_time_tracker", "wb_plot_director"],
     "module_configs": [],
     "world_data": true
   },
@@ -130,6 +130,13 @@
         {"value": "smartest", "label": "Smartest (most creative)"}
       ],
       "default": "smartest"
+    },
+    "plot_aware_skill_generation": {
+      "type": "toggle",
+      "default": true,
+      "label": "Plot-Aware New Skills",
+      "category": "Core RPG System",
+      "description": "When learning a brand-new skill, let the wizard see the Plot Director's active thread so some offered categories and skills could genuinely help against the current challenge (without spoiling it). Turn off for plot-blind skill generation. Has no effect when the Plot Director is disabled or no thread is active."
     },
     "external_skill_events_enabled": {
       "type": "toggle",

@@ -621,6 +621,29 @@ def test_wizard_prompts_carry_active_plot_challenge():
     assert "could bear on the current plot thread's challenge" in calls[2]["prompt"]
 
 
+def test_plot_aware_toggle_off_hides_active_thread():
+    mod = _load_backend()
+    client, sm, calls = _make_client(
+        mod,
+        _rpg(),
+        llm_replies=[CATEGORIES_REPLY, _options_reply(_P0_NAMES), REFINE_REPLY],
+        config={"plot_aware_skill_generation": False},
+    )
+    sm.state["module_data"]["wb_plot_director"] = {"thread": _plot_thread()}
+
+    assert client.post(f"{BASE}/skills/wizard/categories").status_code == 200
+    assert client.post(f"{BASE}/skills/wizard/options", json={"menu": "Flame Arts", "page": 0}).status_code == 200
+    assert client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint"}).status_code == 200
+
+    assert len(calls) == 3
+    for call in calls:
+        prompt = call["prompt"]
+        assert "Current plot thread" not in prompt
+        assert "The Silent Toll" not in prompt
+        assert "genuinely help" not in prompt
+        assert "plot thread's challenge" not in prompt
+
+
 def test_wizard_prompts_skip_inactive_or_missing_plot_thread():
     for module_data in (
         None,  # plot director absent entirely
