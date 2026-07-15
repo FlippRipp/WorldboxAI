@@ -451,6 +451,57 @@ def _character_roster(state: dict) -> str:
     )
 
 
+def _character_sheet_block(state: dict) -> str:
+    """The player character's capabilities from the RPG system, so generated
+    challenges have something to bite on: favored skills get a stage, and the
+    opposition is pitched at abilities that actually exist. Soft-fails to ""
+    when the RPG module is absent."""
+    rpg = state.get("module_data", {}).get("wb_core_rpg", {})
+    if not isinstance(rpg, dict):
+        return ""
+    skills = rpg.get("skills", {})
+    skills = skills if isinstance(skills, dict) else {}
+
+    lines = []
+    header_bits = []
+    level = rpg.get("level")
+    if isinstance(level, int) and level > 0:
+        header_bits.append(f"Level {level}")
+    stats = rpg.get("stats", {})
+    if isinstance(stats, dict):
+        top_stats = sorted(
+            ((k, v) for k, v in stats.items() if isinstance(v, (int, float))),
+            key=lambda kv: kv[1], reverse=True,
+        )[:3]
+        if top_stats:
+            header_bits.append("strongest stats: " + ", ".join(f"{k} {int(v)}" for k, v in top_stats))
+    if header_bits:
+        lines.append(" · ".join(header_bits))
+
+    for name, skill in skills.items():
+        if not isinstance(skill, dict):
+            continue
+        kind = str(skill.get("type", "active")).strip() or "active"
+        rating = skill.get("rating", "")
+        description = str(skill.get("description", "")).strip()
+        line = f"- [{kind}] {name}"
+        if rating != "":
+            line += f" ({rating}/10)"
+        if description:
+            line += f": {description}"
+        lines.append(line)
+
+    if not lines:
+        return ""
+    return (
+        "PLAYER CHARACTER SHEET (from the RPG system -- design the challenge so "
+        "these abilities matter: give favored skills a stage to shine, pitch "
+        "opposition their capabilities can meaningfully engage at the guided "
+        "difficulty, and let a curse or weakness complicate things where one "
+        "exists):\n" + "\n".join(lines) + "\n\n"
+    )
+
+
 def _direction_block(data: dict) -> str:
     """The evolving macro-arc, injected into generation and fit-check prompts.
     Empty while the story is too young to have a premise."""
@@ -681,7 +732,7 @@ CHALLENGE DIFFICULTY:
 {_direction_block(data)}STORY MATERIAL:
 {_story_material(state)}
 
-{_storylines_block(state)}{_character_roster(state)}{_history_block(data)}Design ONE new thread that fits the established genre, tone and current situation, plays to what this player enjoys, and injects challenge at the guided difficulty. GROUND IT: anchor the hook in established characters, places, factions, or unresolved hooks from the material above -- invent at most one new minor element, and only when nothing established fits. Where a past consequence or open question offers a natural seed, grow the thread from it.{different}{critique_block}{pivot_block}{defer_block}
+{_storylines_block(state)}{_character_roster(state)}{_character_sheet_block(state)}{_history_block(data)}Design ONE new thread that fits the established genre, tone and current situation, plays to what this player enjoys, and injects challenge at the guided difficulty. GROUND IT: anchor the hook in established characters, places, factions, or unresolved hooks from the material above -- invent at most one new minor element, and only when nothing established fits. Where a past consequence or open question offers a natural seed, grow the thread from it.{different}{critique_block}{pivot_block}{defer_block}
 
 Respond with ONLY valid JSON:
 {{"title": "3-6 words", "hook": "how it surfaces in the story, one sentence", "challenge": "the complication or opposition, one sentence", "stakes": "what is at risk, one sentence", "appeal": "which player preference this serves, a few words"}}"""

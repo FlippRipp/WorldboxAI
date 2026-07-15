@@ -7,7 +7,7 @@
   "dependencies": [],
   "consumes": {
     "state": "*",
-    "module_data": ["wb_npc_system"],
+    "module_data": ["wb_npc_system", "wb_core_rpg"],
     "module_configs": [],
     "world_data": true
   },

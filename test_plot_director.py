@@ -330,6 +330,7 @@ def test_generation_prompt_includes_profile_difficulty_and_npc_threads():
     assert _updates(result)["status"] == "active"
     assert "OTHER ACTIVE STORYLINES" not in captured2["prompts"][0]
     assert "ESTABLISHED CHARACTERS" not in captured2["prompts"][0]
+    assert "PLAYER CHARACTER SHEET" not in captured2["prompts"][0]
 
 
 def test_generation_prompt_includes_character_roster():
@@ -1433,3 +1434,34 @@ def test_creation_seed_likes_and_dislikes_populate_profile():
     plain = asyncio.run(backend.on_gather_context(_state(data=None), sdk))
     assert _updates(plain)["profile"]["likes"] == []
     assert _updates(plain)["profile"]["dislikes"] == []
+
+
+def test_generation_prompt_includes_rpg_skills():
+    backend = _load_backend()
+    captured = {}
+    sdk = _make_sdk([THREAD_REPLY, CRITIC_ACCEPT], captured)
+    state = _state(turn=1, data=_observing_data(backend))
+    state["module_data"]["wb_core_rpg"] = {
+        "level": 4,
+        "stats": {"might": 16, "cunning": 14, "vitality": 10, "grace": 8},
+        "skills": {
+            "Shadowstep": {"rating": 6, "description": "Short-range teleport between shadows.",
+                           "type": "active"},
+            "Iron Liver": {"rating": 3, "description": "Poisons barely bite.", "type": "passive"},
+            "Moon Frenzy": {"rating": 5, "description": "Loses control under a full moon.",
+                            "type": "curse"},
+        },
+    }
+
+    asyncio.run(backend.on_librarian(state, sdk))
+
+    prompt = captured["prompts"][0]
+    assert "PLAYER CHARACTER SHEET" in prompt
+    assert "[active] Shadowstep (6/10): Short-range teleport between shadows." in prompt
+    assert "[passive] Iron Liver (3/10)" in prompt
+    assert "[curse] Moon Frenzy" in prompt
+    assert "Level 4" in prompt
+    assert "might 16, cunning 14, vitality 10" in prompt
+    assert "grace" not in prompt  # only the strongest three stats
+    # The fit-check critic doesn't need the sheet -- generation only.
+    assert "PLAYER CHARACTER SHEET" not in captured["prompts"][1]
