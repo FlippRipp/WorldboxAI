@@ -88,7 +88,10 @@ Durations, at most one per effect:
   clock passes it. Without the time module there is no clock, so a
   minutes-based effect simply lasts until story events remove it.
 - Neither set — indefinite; only `status_effects_removed` (or manual state
-  editing) ends it.
+  editing) ends it. The Reader is instructed to reserve this for effects with
+  no natural expiry — permanent until cured/dispelled, or actively sustained
+  by an NPC or the environment — and to estimate a duration in all other
+  cases rather than leaving both fields null when unsure.
 
 Effects feed the action feasibility judge (a `[bad]` effect lowers the
 feasibility of actions it would plausibly impede, a `[good]` effect raises
