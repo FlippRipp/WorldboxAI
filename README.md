@@ -42,7 +42,9 @@ Both start scripts pull the latest changes from git on launch (skipped gracefull
 
 Story illustrations render through either the Novita AI cloud API or a local
 A1111/Forge-compatible Stable Diffusion WebUI (started with `--api`), switched
-in the Image Studio main-menu screen. See
+in the Image Studio main-menu screen. `image_server.bat` / `image_server.sh`
+set up and start the local server (clone SD WebUI Forge, install its
+dependencies, launch with the right flags) in one command. See
 [docs/SETUP.md](docs/SETUP.md#image-generation-optional).
 
 ## Documentation

@@ -41,6 +41,9 @@ data/theme.json
 # Image generation runtime data (API key, image index, downloaded images)
 data/wb_image_gen/
 
+# Local SD WebUI installed by image_server.sh / image_server.bat
+image_server/
+
 # Experimental terrain visualization outputs (generated artifacts)
 data/terrain_experiments/
 _scratch/

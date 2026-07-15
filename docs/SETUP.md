@@ -63,6 +63,25 @@ are supported, switched with the provider toggle on the Setup tab:
   the WebUI's `models/Lora` folder in the Studio to enable one-click LoRA
   installs from the built-in Civitai/Hugging Face browser.
 
+To set up a local server from scratch, run the bundled script from the repo
+root:
+
+```powershell
+.\image_server.bat        # Windows
+./image_server.sh         # Linux/macOS
+```
+
+It clones [SD WebUI Forge](https://github.com/lllyasviel/stable-diffusion-webui-forge)
+into `image_server/` (updating it on later runs), lets the WebUI install its
+own dependencies on first launch (several GB, one time), and starts it with
+`--api` on `http://127.0.0.1:7860` — exactly what the Image Studio expects.
+The script prints the server address plus the checkpoint/LoRA folder paths to
+paste into the Studio's Setup tab. An install directory can be passed as the
+first argument, and `WB_WEBUI_REPO` / `WB_WEBUI_PORT` / `WEBUI_EXTRA_ARGS`
+environment variables select a different A1111-compatible fork, port, or
+extra launch flags (e.g. `--api-auth user:pass`, or
+`--skip-torch-cuda-test --use-cpu all` on machines without an NVIDIA GPU).
+
 Start the backend:
 
 ```powershell
