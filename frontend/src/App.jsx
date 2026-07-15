@@ -191,7 +191,7 @@ function AppContent() {
     setDrawerOpen(true);
   }, []);
 
-  const handleSend = useCallback((text) => {
+  const handleSend = useCallback((text, opts) => {
     // A recognized slash command (active module + declared command) is dispatched
     // as a command — its result pops up instead of entering the story feed.
     // Unrecognized "/…" text falls through as a normal turn.
@@ -202,9 +202,17 @@ function AppContent() {
       (m) => (!activeSet || activeSet.has(m.id))
         && Object.prototype.hasOwnProperty.call(m.commands || {}, first)
     );
-    if (isCommand) ws.sendCommand(text);
+    if (isCommand) ws.sendCommand(text, opts);
     else ws.sendMessage(text);
   }, [ws, modules, session.moduleConfigs]);
+
+  // Commands dispatched by module UI buttons (sidebar widgets, character
+  // tabs). The widget already reflects the outcome via state_update, so the
+  // server skips the result popup for these unless the command failed.
+  const handleButtonCommand = useCallback(
+    (text) => handleSend(text, { source: 'button' }),
+    [handleSend]
+  );
 
   const handleContinue = useCallback(() => {
     ws.sendContinue();
@@ -608,7 +616,7 @@ function AppContent() {
           session={session}
           modules={gameModules}
           gameState={gameState}
-          onCommand={handleSend}
+          onCommand={handleButtonCommand}
           generating={generating}
           drawerOpen={drawerOpen}
           onCloseDrawer={() => setDrawerOpen(false)}
@@ -705,7 +713,7 @@ function AppContent() {
           onClose={() => setIsCharacterOpen(false)}
           modules={gameModules}
           gameState={gameState}
-          onCommand={handleSend}
+          onCommand={handleButtonCommand}
           busy={generating}
         />
 

@@ -241,6 +241,7 @@ def test_websocket_slash_command_bypasses_pipeline(tmp_path, monkeypatch):
     assert command_result["type"] == "command_result"
     assert command_result["command"] == "/plot"
     assert command_result["message"].startswith("[Plot]")
+    assert command_result["error"] is False
 
     assert state_update["type"] == "state_update"
     state = state_update["state"]
@@ -251,6 +252,34 @@ def test_websocket_slash_command_bypasses_pipeline(tmp_path, monkeypatch):
     # The story pipeline never ran: no turn consumed, no narration produced.
     assert state["turn"] == 0
     assert session_manager.state["history"] == []
+
+
+def test_websocket_button_command_suppresses_popup_on_success(tmp_path, monkeypatch):
+    client, _ = make_client(tmp_path, monkeypatch)
+
+    with client.websocket_connect("/ws/chat") as websocket:
+        # A module UI button tags its command with source=button: the widget
+        # shows the outcome via state_update, so no popup on success.
+        websocket.send_json({"text": "/plot", "source": "button"})
+        message = websocket.receive_json()
+
+    assert message["type"] == "state_update"
+
+
+def test_websocket_button_command_still_pops_up_on_error(tmp_path, monkeypatch):
+    client, _ = make_client(tmp_path, monkeypatch)
+
+    with client.websocket_connect("/ws/chat") as websocket:
+        # `/plot profile` without arguments fails (usage / not-ready), and a
+        # failed button command must still surface its popup.
+        websocket.send_json({"text": "/plot profile", "source": "button"})
+        command_result = websocket.receive_json()
+        state_update = websocket.receive_json()
+
+    assert command_result["type"] == "command_result"
+    assert command_result["error"] is True
+    assert command_result["message"].startswith("[Plot]")
+    assert state_update["type"] == "state_update"
 
 
 def test_websocket_unknown_or_inactive_command_falls_through_to_turn(tmp_path, monkeypatch):

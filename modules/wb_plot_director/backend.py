@@ -1294,7 +1294,7 @@ async def _command_regen(state: dict, sdk, data: dict) -> dict:
     a failed generation nothing is written back, so the old thread survives.
     Also revives a dormant 'failed' module on success."""
     if not data or data.get("schema") != SCHEMA_VERSION:
-        return {"message": "[Plot] The story is still settling in -- try again next turn.", "signal": "end_turn"}
+        return {"message": "[Plot] The story is still settling in -- try again next turn.", "signal": "end_turn", "error": True}
 
     turn = state.get("turn", 0)
     updates: dict = {}
@@ -1306,7 +1306,7 @@ async def _command_regen(state: dict, sdk, data: dict) -> dict:
     generated = await _generate_checked_thread(
         state, sdk, {**data, **updates, "gen_attempts": 0})
     if "thread" not in generated:
-        return {"message": "[Plot] Couldn't weave a new thread -- nothing changed. Try again.", "signal": "end_turn"}
+        return {"message": "[Plot] Couldn't weave a new thread -- nothing changed. Try again.", "signal": "end_turn", "error": True}
 
     updates.update(generated)
     updates["next_thread_turn"] = 0
@@ -1383,9 +1383,9 @@ def _command_suspend(state: dict, data: dict) -> dict:
     until resume. The armed nudge is cleared -- it was written for a scene that
     may be long gone by the time the player resumes."""
     if not data or data.get("schema") != SCHEMA_VERSION:
-        return {"message": "[Plot] The story is still settling in -- try again next turn.", "signal": "end_turn"}
+        return {"message": "[Plot] The story is still settling in -- try again next turn.", "signal": "end_turn", "error": True}
     if data.get("suspended"):
-        return {"message": "[Plot] Plot direction is already suspended.", "signal": "end_turn"}
+        return {"message": "[Plot] Plot direction is already suspended.", "signal": "end_turn", "error": True}
     return {
         "message": "[Plot] Plot direction suspended -- the thread is frozen until /plot resume.",
         "signal": "end_turn",
@@ -1402,9 +1402,9 @@ def _command_resume(state: dict, data: dict) -> dict:
     forward by the paused duration so the expiry clock resumes where it
     stopped instead of expiring the thread on the next librarian pass."""
     if not data or data.get("schema") != SCHEMA_VERSION:
-        return {"message": "[Plot] The story is still settling in -- try again next turn.", "signal": "end_turn"}
+        return {"message": "[Plot] The story is still settling in -- try again next turn.", "signal": "end_turn", "error": True}
     if not data.get("suspended"):
-        return {"message": "[Plot] Plot direction is not suspended.", "signal": "end_turn"}
+        return {"message": "[Plot] Plot direction is not suspended.", "signal": "end_turn", "error": True}
 
     turn = state.get("turn", 0)
     updates: dict = {"suspended": False, "suspended_turn": 0}
@@ -1444,9 +1444,9 @@ def _command_profile_edit(data: dict, args: list[str]) -> dict:
     past the cap evict the lowest-weight (themes: oldest) entry. Failed
     edits write nothing back."""
     if not data or data.get("schema") != SCHEMA_VERSION:
-        return {"message": "[Plot] The story is still settling in -- try again next turn.", "signal": "end_turn"}
+        return {"message": "[Plot] The story is still settling in -- try again next turn.", "signal": "end_turn", "error": True}
     if not args:
-        return {"message": PROFILE_USAGE, "signal": "end_turn"}
+        return {"message": PROFILE_USAGE, "signal": "end_turn", "error": True}
 
     # Normalize the stored profile as the "previous" side: passing it as the
     # parsed side would discard dislikes, which _clean_profile treats as
@@ -1470,25 +1470,25 @@ def _command_profile_edit(data: dict, args: list[str]) -> dict:
         text = " ".join(args[2:]).strip()
         kept = [e for e in profile["avoids"] if _norm_entry(e["text"]) != _norm_entry(text)]
         if len(kept) == len(profile["avoids"]):
-            return {"message": f'[Plot] "{text}" is not in avoids.', "signal": "end_turn"}
+            return {"message": f'[Plot] "{text}" is not in avoids.', "signal": "end_turn", "error": True}
         profile["avoids"] = kept
         message = f'[Plot] Removed "{text}" from avoids.'
     elif field == "themes" and len(args) >= 3 and args[1].lower() in ("add", "remove"):
         op = args[1].lower()
         text = " ".join(args[2:]).strip()[:PROFILE_ENTRY_MAX_CHARS]
         if not text:
-            return {"message": PROFILE_USAGE, "signal": "end_turn"}
+            return {"message": PROFILE_USAGE, "signal": "end_turn", "error": True}
         entries = list(profile["themes"])
         if op == "add":
             if any(_norm_entry(e) == _norm_entry(text) for e in entries):
-                return {"message": f'[Plot] "{text}" is already in themes.', "signal": "end_turn"}
+                return {"message": f'[Plot] "{text}" is already in themes.', "signal": "end_turn", "error": True}
             entries.append(text)
             entries = entries[-PROFILE_LIST_CAP:]
             message = f'[Plot] Added "{text}" to themes.'
         else:
             kept = [e for e in entries if _norm_entry(e) != _norm_entry(text)]
             if len(kept) == len(entries):
-                return {"message": f'[Plot] "{text}" is not in themes.', "signal": "end_turn"}
+                return {"message": f'[Plot] "{text}" is not in themes.', "signal": "end_turn", "error": True}
             entries = kept
             message = f'[Plot] Removed "{text}" from themes.'
         profile["themes"] = entries
@@ -1501,13 +1501,13 @@ def _command_profile_edit(data: dict, args: list[str]) -> dict:
             rest = rest[1:]
         text = " ".join(rest).strip()[:PROFILE_ENTRY_MAX_CHARS]
         if not text:
-            return {"message": PROFILE_USAGE, "signal": "end_turn"}
+            return {"message": PROFILE_USAGE, "signal": "end_turn", "error": True}
         entries = list(profile[field])
         if op == "add":
             existing = next((e for e in entries if _norm_entry(e["text"]) == _norm_entry(text)), None)
             if existing is not None:
                 if existing["weight"] == weight:
-                    return {"message": f'[Plot] "{existing["text"]}" is already in {field} ({weight}).', "signal": "end_turn"}
+                    return {"message": f'[Plot] "{existing["text"]}" is already in {field} ({weight}).', "signal": "end_turn", "error": True}
                 existing["weight"] = weight
                 message = f'[Plot] "{existing["text"]}" set to {weight}.'
             else:
@@ -1533,12 +1533,12 @@ def _command_profile_edit(data: dict, args: list[str]) -> dict:
         else:
             kept = [e for e in entries if _norm_entry(e["text"]) != _norm_entry(text)]
             if len(kept) == len(entries):
-                return {"message": f'[Plot] "{text}" is not in {field}.', "signal": "end_turn"}
+                return {"message": f'[Plot] "{text}" is not in {field}.', "signal": "end_turn", "error": True}
             entries = kept
             message = f'[Plot] Removed "{text}" from {field}.'
         profile[field] = entries
     else:
-        return {"message": PROFILE_USAGE, "signal": "end_turn"}
+        return {"message": PROFILE_USAGE, "signal": "end_turn", "error": True}
 
     return {
         "message": message,
@@ -1552,7 +1552,7 @@ async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
     data = _own_data(state)
 
     if not config.get("plot_enabled", True):
-        return {"message": "[Plot] Plot direction is inactive.", "signal": "end_turn"}
+        return {"message": "[Plot] Plot direction is inactive.", "signal": "end_turn", "error": True}
 
     if args and args[0].lower() in ("suspend", "pause"):
         return _command_suspend(state, data)
@@ -1562,7 +1562,7 @@ async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
 
     if args and args[0].lower() in ("regen", "reroll", "new"):
         if data.get("suspended"):
-            return {"message": "[Plot] Plot direction is suspended -- /plot resume first.", "signal": "end_turn"}
+            return {"message": "[Plot] Plot direction is suspended -- /plot resume first.", "signal": "end_turn", "error": True}
         return await _command_regen(state, sdk, data)
 
     if args and args[0].lower() == "reset":

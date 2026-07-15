@@ -183,11 +183,11 @@ async def _update_from_story(target: str, state: dict, sdk) -> dict:
     """
     player = _player(state)
     if not player:
-        return {"message": "[Character] No player character loaded.", "signal": "end_turn"}
+        return {"message": "[Character] No player character loaded.", "signal": "end_turn", "error": True}
 
     history = state.get("history", [])
     if not history:
-        return {"message": "[Character] There is no story yet to update from.", "signal": "end_turn"}
+        return {"message": "[Character] There is no story yet to update from.", "signal": "end_turn", "error": True}
 
     story = "\n\n".join(str(h) for h in history)[-12000:]
 
@@ -232,7 +232,7 @@ Respond with ONLY a valid JSON object containing exactly these keys:
 
     parsed = _parse_json_block(raw)
     if not isinstance(parsed, dict):
-        return {"message": "[Character] The update pass returned nothing usable — try again.", "signal": "end_turn"}
+        return {"message": "[Character] The update pass returned nothing usable — try again.", "signal": "end_turn", "error": True}
 
     character_update = {}
     for field in UPDATE_TARGETS[target]:
@@ -241,7 +241,7 @@ Respond with ONLY a valid JSON object containing exactly these keys:
             character_update[field] = val.strip()
 
     if not character_update:
-        return {"message": "[Character] The update pass returned nothing usable — try again.", "signal": "end_turn"}
+        return {"message": "[Character] The update pass returned nothing usable — try again.", "signal": "end_turn", "error": True}
 
     change_note = str(parsed.get("change_note", "")).strip()
     log = list(_own_data(state).get("evolution_log", []))
@@ -275,12 +275,13 @@ async def on_command_character(args: list[str], state: dict, sdk) -> dict:
             return {
                 "message": "[Character] Usage: /character update appearance|personality|both",
                 "signal": "end_turn",
+                "error": True,
             }
         return await _update_from_story(target, state, sdk)
 
     player = _player(state)
     if not player:
-        return {"message": "[Character] No player character loaded.", "signal": "end_turn"}
+        return {"message": "[Character] No player character loaded.", "signal": "end_turn", "error": True}
 
     lines = [f"[Character] {player.get('name', 'Adventurer')}"]
     race = player.get("race", "")

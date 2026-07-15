@@ -1830,11 +1830,11 @@ async def _update_npc_from_story(npc_id: str, state: dict, sdk) -> dict:
     bank = _get_bank(state)
     npc = bank.get(npc_id)
     if not npc:
-        return {"message": f"[NPC] Unknown character id: {npc_id}", "signal": "end_turn"}
+        return {"message": f"[NPC] Unknown character id: {npc_id}", "signal": "end_turn", "error": True}
 
     history = state.get("history", [])
     if not history:
-        return {"message": "[NPC] There is no story yet to update from.", "signal": "end_turn"}
+        return {"message": "[NPC] There is no story yet to update from.", "signal": "end_turn", "error": True}
 
     story = "\n\n".join(str(h) for h in history)[-10000:]
     personality = ", ".join(npc.get("personality", []))
@@ -1875,7 +1875,7 @@ Respond with ONLY valid JSON containing just the changed fields (plus change_not
     raw = await sdk.llm.generate(prompt, model_preference="balanced")
     parsed = _parse_json_block(raw)
     if not isinstance(parsed, dict):
-        return {"message": "[NPC] The update pass returned nothing usable -- try again.", "signal": "end_turn"}
+        return {"message": "[NPC] The update pass returned nothing usable -- try again.", "signal": "end_turn", "error": True}
 
     fields = {k: v for k, v in parsed.items() if k in UPDATE_FIELDS}
     # Story-driven passes may retire a character, never un-introduce one.
@@ -1941,18 +1941,18 @@ async def _apply_manual_edit(npc_id: str, payload: str, state: dict, sdk) -> dic
     bank = _get_bank(state)
     npc = bank.get(npc_id)
     if not npc:
-        return {"message": f"[NPC] Unknown character id: {npc_id}", "signal": "end_turn"}
+        return {"message": f"[NPC] Unknown character id: {npc_id}", "signal": "end_turn", "error": True}
 
     try:
         raw = json.loads(urllib.parse.unquote(payload))
     except (json.JSONDecodeError, ValueError):
         raw = None
     if not isinstance(raw, dict):
-        return {"message": "[NPC] Could not parse the edit payload.", "signal": "end_turn"}
+        return {"message": "[NPC] Could not parse the edit payload.", "signal": "end_turn", "error": True}
 
     edits = _sanitize_edits(raw, npc)
     if not edits:
-        return {"message": f"[NPC] Nothing to change for {npc.get('name', npc_id)}.", "signal": "end_turn"}
+        return {"message": f"[NPC] Nothing to change for {npc.get('name', npc_id)}.", "signal": "end_turn", "error": True}
 
     turn = state.get("turn", 0)
     npc.update(edits)
@@ -2000,11 +2000,11 @@ async def _apply_manual_add(payload: str, state: dict, sdk) -> dict:
     except (json.JSONDecodeError, ValueError):
         raw = None
     if not isinstance(raw, dict):
-        return {"message": "[NPC] Could not parse the character payload.", "signal": "end_turn"}
+        return {"message": "[NPC] Could not parse the character payload.", "signal": "end_turn", "error": True}
 
     name = str(raw.get("name", "")).strip()
     if not name:
-        return {"message": "[NPC] A new character needs a name.", "signal": "end_turn"}
+        return {"message": "[NPC] A new character needs a name.", "signal": "end_turn", "error": True}
 
     introduced = bool(raw.get("introduced", True))
     turn = state.get("turn", 0)
@@ -2113,11 +2113,11 @@ Respond with ONLY valid JSON:
         parsed = json.loads(result)
     except Exception as e:
         print(f"[NPC System] Generate-character command failed: {e}")
-        return {"message": "[NPC] Could not generate a character right now. Try again.", "signal": "end_turn"}
+        return {"message": "[NPC] Could not generate a character right now. Try again.", "signal": "end_turn", "error": True}
 
     npc_data = parsed.get("npc")
     if not isinstance(npc_data, dict) or not str(npc_data.get("name", "")).strip():
-        return {"message": "[NPC] The generator returned nothing usable. Try again.", "signal": "end_turn"}
+        return {"message": "[NPC] The generator returned nothing usable. Try again.", "signal": "end_turn", "error": True}
 
     # Always hidden: force it into the unintroduced pool regardless of what the
     # LLM suggested, so the character stays a spoiler until met in the story.
@@ -2143,7 +2143,7 @@ async def _delete_npc(npc_id: str, state: dict, sdk) -> dict:
     bank = _get_bank(state)
     npc = bank.get(npc_id)
     if not npc:
-        return {"message": f"[NPC] Unknown character id: {npc_id}", "signal": "end_turn"}
+        return {"message": f"[NPC] Unknown character id: {npc_id}", "signal": "end_turn", "error": True}
 
     name = npc.get("name", npc_id)
 
@@ -2172,7 +2172,7 @@ async def on_command_npc(args: list[str], state: dict, sdk) -> dict:
     usage = ("[NPC] Usage: /npc generate | /npc add <data> | /npc update <npc_id> | "
              "/npc edit <npc_id> <data> | /npc delete <npc_id>")
     if not args:
-        return {"message": usage, "signal": "end_turn"}
+        return {"message": usage, "signal": "end_turn", "error": True}
 
     sub = args[0].lower()
     if sub in ("generate", "gen", "random"):

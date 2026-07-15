@@ -264,6 +264,7 @@ export function useWebSocket(onStateChange, onLLMCall) {
           name: data.name,
           icon: data.icon,
           message: data.message,
+          error: !!data.error,
           at: Date.now(),
         });
       } else if (data.type === 'state_update') {
@@ -308,9 +309,11 @@ export function useWebSocket(onStateChange, onLLMCall) {
 
   // A slash command: no user bubble, no stream — the server answers with a
   // `command_result` popup and a `state_update`, leaving the transcript alone.
-  const sendCommand = useCallback((text) => {
+  // `source: 'button'` marks commands dispatched by module UI buttons; the
+  // server then skips the result popup unless the command failed.
+  const sendCommand = useCallback((text, { source } = {}) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ action: 'turn', text }));
+      wsRef.current.send(JSON.stringify({ action: 'turn', text, ...(source ? { source } : {}) }));
     }
   }, []);
 

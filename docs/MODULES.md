@@ -214,6 +214,13 @@ async def on_character_get_defaults(state: dict, world_context: dict) -> dict | 
 
 Called during character creation. Return a dict of default module_data values.
 
+```python
+async def on_command_<name>(args: list[str], state: dict, sdk) -> dict:
+    ...
+```
+
+Called when the player runs a slash command declared in the manifest's `commands` table. Return `{"message": "..."}` — surfaced to the player as an ephemeral popup, never written into the transcript. Optional keys: `module_data` / `module_data_replace` / `character_update` writebacks, and `error: True` to mark the command as failed. Commands dispatched by module UI buttons (`source: "button"` on the wire) skip the popup on success — the widget already reflects the outcome via `state_update` — but an `error: True` result (or a raised exception) always pops up.
+
 ## State Access
 
 Modules receive a **filtered state dict** that only includes fields declared in `consumes`. Always present:

@@ -2037,6 +2037,11 @@ async def websocket_endpoint(websocket: WebSocket):
         the story. Any state the handler wrote back (module_data, player fields)
         is persisted and pushed to the client via ``state_update`` so widgets
         refresh. Unknown commands fall through to a normal turn.
+
+        Commands dispatched by module UI buttons arrive with ``source:
+        "button"``. The widget already reflects the outcome via
+        ``state_update``, so their popup is suppressed unless the command
+        failed (handler raised, or returned ``error: True``).
         """
         text = (data.get("text") or "").strip()
         if not text.startswith("/"):
@@ -2062,15 +2067,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             module_state = engine._build_module_state(state, mod_id, manifest.get("consumes", {}))
+            is_error = False
             try:
                 engine.sdk.llm._current_module = mod_id
                 result = await handler(args, module_state, engine.sdk)
                 message = result.get("message", "") if isinstance(result, dict) else ""
+                is_error = isinstance(result, dict) and bool(result.get("error"))
                 if isinstance(result, dict):
                     apply_command_writebacks(result, mod_id, manifest)
             except Exception as exc:
                 print(f"Error in {mod_id}.{handler_name}: {exc}")
                 message = f"[{manifest.get('name', mod_id)}] Command failed."
+                is_error = True
             finally:
                 engine.sdk.llm._current_module = ""
 
@@ -2081,14 +2089,17 @@ async def websocket_endpoint(websocket: WebSocket):
                 session_manager.active_save_id, state, state.get("turn", 0)
             )
             # Command output never enters the transcript, so state replay can't
-            # resurface it — queue it if the client is gone.
-            await chat_hub.send_or_queue({
-                "type": "command_result",
-                "command": text,
-                "name": manifest.get("name", mod_id),
-                "icon": manifest.get("icon"),
-                "message": message or "(no output)",
-            })
+            # resurface it — queue it if the client is gone. Button-driven
+            # commands skip the popup on success: the widget shows the outcome.
+            if is_error or data.get("source") != "button":
+                await chat_hub.send_or_queue({
+                    "type": "command_result",
+                    "command": text,
+                    "name": manifest.get("name", mod_id),
+                    "icon": manifest.get("icon"),
+                    "message": message or "(no output)",
+                    "error": is_error,
+                })
             await chat_hub.send({"type": "state_update", "state": dict(state)})
             return True
 

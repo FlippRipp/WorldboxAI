@@ -21,13 +21,13 @@ export default function CommandResultModal({ result, onClose }) {
       onMouseDown={onClose}
     >
       <div
-        className="bg-gray-800 w-full max-w-lg rounded-lg shadow-2xl border border-gray-700 flex flex-col max-h-[80vh]"
+        className={`bg-gray-800 w-full max-w-lg rounded-lg shadow-2xl border flex flex-col max-h-[80vh] ${result.error ? 'border-red-800' : 'border-gray-700'}`}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900 rounded-t-lg">
+        <div className={`p-4 border-b flex justify-between items-center bg-gray-900 rounded-t-lg ${result.error ? 'border-red-900' : 'border-gray-700'}`}>
           <h2 className="text-lg font-bold text-gray-100 flex items-center gap-2 min-w-0">
             {result.icon && <span className="shrink-0">{result.icon}</span>}
-            <span className="font-mono text-purple-300 truncate">{result.command}</span>
+            <span className={`font-mono truncate ${result.error ? 'text-red-300' : 'text-purple-300'}`}>{result.command}</span>
             {result.name && <span className="text-sm text-gray-500 truncate">· {result.name}</span>}
           </h2>
           <button
