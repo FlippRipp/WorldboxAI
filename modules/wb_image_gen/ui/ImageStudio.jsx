@@ -561,6 +561,13 @@ function LocalConnectionCard({ config, draft, set }) {
               : status.error}
           </p>
         )}
+        {status && status.ok && (
+          <p className={`text-xs mt-1 ${status.batch_script ? 'text-green-400' : 'text-gray-500'}`}>
+            {status.batch_script
+              ? 'Batch script ✓ — multi-image generations render as GPU batches'
+              : 'Batch script not installed — multi-image generations render one by one (copy modules/wb_image_gen/wb_prompt_batch.py into the WebUI\'s scripts folder and restart it)'}
+          </p>
+        )}
         {status && status.helper && (
           <p className={`text-xs mt-1 ${status.helper.ok ? 'text-green-400' : 'text-red-400'}`}>
             {status.helper.ok
@@ -644,6 +651,24 @@ function LocalConnectionCard({ config, draft, set }) {
             autoComplete="off"
           />
         </div>
+      </div>
+      <div>
+        <label className={labelCls}>GPU batch size</label>
+        <input
+          type="number"
+          min={1}
+          max={config?.image_num_max ?? 8}
+          value={draft.local_batch_size ?? 4}
+          onChange={(e) => set('local_batch_size', e.target.value)}
+          className={inputCls}
+        />
+        <p className="text-xs text-gray-600 mt-1">
+          With the <span className="font-mono">wb_prompt_batch.py</span> script installed in the
+          WebUI's <span className="font-mono">scripts</span> folder (the bundled{' '}
+          <span className="font-mono">image_server</span> launcher does this automatically), up to
+          this many images of a multi-image generation render in one GPU batch. Lower it if renders
+          fail with CUDA out-of-memory.
+        </p>
       </div>
       <div>
         <label className={labelCls}>LoRA folder (optional — enables one-click installs)</label>
@@ -2816,6 +2841,7 @@ export default function ImageStudio({ onBack }) {
         local_lora_dir: draft.local_lora_dir ?? '',
         local_helper_url: draft.local_helper_url ?? '',
         local_helper_token: draft.local_helper_token ?? '',
+        local_batch_size: Math.max(1, Number(draft.local_batch_size) || 4),
       };
       const res = await fetch(`${API_BASE}/config`, {
         method: 'PUT',

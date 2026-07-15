@@ -96,6 +96,16 @@ stays reachable at the printed address) and accepts connections from other
 devices on the same network — the script prints the LAN URL; set
 `WB_WEBUI_LISTEN=0` to bind to `127.0.0.1` only.
 
+The script also copies the module's `wb_prompt_batch.py` into the WebUI's
+`scripts/` folder. With it installed, a multi-image generation ("Images per
+generation" > 1) renders as one GPU batch of different prompts instead of
+queueing single-image requests — substantially faster. For a WebUI you manage
+yourself, copy `modules/wb_image_gen/wb_prompt_batch.py` into
+`<webui>/scripts/` and restart it; the Studio's connection test shows whether
+the script was detected. The Setup tab's "GPU batch size" setting (default 4)
+caps how many images share one batch — lower it if renders fail with CUDA
+out-of-memory. Without the script everything still works, just serially.
+
 All the booru-tag checkpoint families the module recognizes (Pony,
 Illustrious, NoobAI, Animagine) work on the default Forge install, which the
 Studio pairs with tag-style prompts and the family's own quality tags

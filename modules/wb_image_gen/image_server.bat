@@ -122,6 +122,14 @@ if not exist "%WEBUI_DIR%\webui.bat" (
     exit /b 1
 )
 
+:: ── WorldBox prompt-batch script ──
+:: Lets a multi-image generation render as one GPU batch of different prompts
+:: (much faster than the WebUI queueing them one by one). WorldBox detects it
+:: via the API and falls back to serial requests when it's missing.
+if not exist "%WEBUI_DIR%\scripts" mkdir "%WEBUI_DIR%\scripts"
+copy /Y "%~dp0wb_prompt_batch.py" "%WEBUI_DIR%\scripts\" >nul
+if errorlevel 1 echo [WARN] Could not install wb_prompt_batch.py; multi-image generations render serially.
+
 :: ── Launch flags ──
 :: On Windows the WebUI's own entry point is webui-user.bat, which just sets
 :: these variables and calls webui.bat -- this script takes its place, so a

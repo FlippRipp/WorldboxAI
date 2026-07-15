@@ -116,6 +116,14 @@ if [ ! -f "$WEBUI_DIR/webui.sh" ]; then
     exit 1
 fi
 
+# ── WorldBox prompt-batch script ──
+# Lets a multi-image generation render as one GPU batch of different prompts
+# (much faster than the WebUI queueing them one by one). WorldBox detects it
+# via the API and falls back to serial requests when it's missing.
+mkdir -p "$WEBUI_DIR/scripts"
+cp -f "$REPO_ROOT/modules/wb_image_gen/wb_prompt_batch.py" "$WEBUI_DIR/scripts/" \
+    || echo "[WARN] Could not install wb_prompt_batch.py; multi-image generations render serially."
+
 # ── Launch flags ──
 # webui.sh sources webui-user.sh AFTER inheriting the environment, so a
 # customized webui-user.sh that sets COMMANDLINE_ARGS would override ours.

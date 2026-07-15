@@ -155,7 +155,7 @@ GLOBAL_FIELDS = (
     "player_in_images", "chat_image_conceal", "civitai_nsfw",
     "provider", "local_base_url", "local_auth_user", "local_auth_pass",
     "local_checkpoint_dir", "local_lora_dir",
-    "local_helper_url", "local_helper_token",
+    "local_helper_url", "local_helper_token", "local_batch_size",
 )
 LORA_STATE_FIELDS = ("active", "strength", "llm_mode", "condition")
 PROFILES_MAX = 20
@@ -231,6 +231,17 @@ STEP_RETRY_BASE_DELAY_S = 2.0
 # as a single image (but costs one generation per image; the local WebUI
 # renders them one after another instead).
 IMAGE_NUM_MAX = 8
+
+# True GPU batching for the local provider. The plain txt2img API takes ONE
+# prompt string, but with the bundled wb_prompt_batch.py script installed in
+# the WebUI's scripts/ folder a whole multi-image generation renders as one
+# request per LoRA-set group, each a single denoising batch of different
+# prompts. local_batch_size caps images per batch (VRAM), and without the
+# script everything falls back to the serial per-image requests.
+LOCAL_BATCH_SCRIPT_TITLE = "WorldBox Prompt Batch"
+LOCAL_BATCH_SCRIPT_FILE = "wb_prompt_batch.py"
+LOCAL_BATCH_SIZE_DEFAULT = 4
+LOCAL_SCRIPTS_PROBE_TTL_S = 300.0
 
 # Each image in a batch gets its own prompt-writer call, so the images differ
 # in content, not just seed. The hint steers WHICH moment of the scene each
@@ -522,6 +533,7 @@ def _default_config() -> dict:
         "local_lora_dir": "",           # enables LoRA installs from the browser
         "local_helper_url": "",         # helper_server.py next to a remote WebUI
         "local_helper_token": "",       # its WB_HELPER_TOKEN; masked like keys
+        "local_batch_size": LOCAL_BATCH_SIZE_DEFAULT,  # images per GPU batch (wb_prompt_batch.py)
         "lora_library": [],             # saved LoRAs; see _normalize_lora_entry
     }
 
@@ -696,6 +708,11 @@ def _effective_config(store: dict) -> dict:
         cfg["image_num"] = max(1, min(IMAGE_NUM_MAX, int(cfg.get("image_num"))))
     except (TypeError, ValueError):
         cfg["image_num"] = 1
+    try:
+        cfg["local_batch_size"] = max(1, min(IMAGE_NUM_MAX,
+                                             int(cfg.get("local_batch_size"))))
+    except (TypeError, ValueError):
+        cfg["local_batch_size"] = LOCAL_BATCH_SIZE_DEFAULT
     return cfg
 
 
@@ -2017,6 +2034,34 @@ async def _local_list_checkpoints(cfg: dict) -> list[dict]:
     return models
 
 
+# Batch-script probe results by base URL ({"ok": bool, "at": monotonic s}),
+# so a generation doesn't re-ask /sdapi/v1/scripts for every batch.
+_local_scripts_probe: dict = {}
+
+
+async def _local_batch_script_available(cfg: dict, force: bool = False) -> bool:
+    """Whether the WebUI lists wb_prompt_batch.py as a txt2img script. Probe
+    failures return False WITHOUT caching -- batching is an optimization and
+    one hiccup must not disable it for a whole TTL window -- while real
+    answers (installed or not) cache briefly."""
+    base = _local_base(cfg)
+    cached = _local_scripts_probe.get(base)
+    if not force and cached \
+            and time.monotonic() - cached["at"] < LOCAL_SCRIPTS_PROBE_TTL_S:
+        return cached["ok"]
+    try:
+        body = await _local_get(cfg, "/sdapi/v1/scripts")
+    except Exception:
+        return False
+    names = body.get("txt2img") if isinstance(body, dict) else None
+    # Compare lowercased on both sides: the endpoint reports lowercased
+    # titles on some forks and verbatim titles on others.
+    ok = LOCAL_BATCH_SCRIPT_TITLE.lower() in {
+        str(n).strip().lower() for n in (names or [])}
+    _local_scripts_probe[base] = {"ok": ok, "at": time.monotonic()}
+    return ok
+
+
 # The WebUI's APIs expose no usable file hashes (/sdapi/v1/loras only has
 # kohya's sshs_model_hash, a weights hash — never the file SHA256 that
 # Civitai/HF publish) — so matching browse results and library entries to
@@ -2535,14 +2580,20 @@ async def _download_file_pipeline(dl_id: str, url: str, dest_dir: Path,
         _prune_downloads()
 
 
-def _local_payload(cfg: dict, image_prompt: str) -> dict:
-    prompt = image_prompt
+def _local_prompt_with_tags(cfg: dict, image_prompt: str) -> str:
+    """The final prompt string a local render sees: the written prompt plus
+    cfg's <lora:...> tags. Both the single and the batched path go through
+    here, so a batched image gets exactly the prompt its solo render would."""
     lora_tags = _local_prompt_lora_tags(cfg)
     if lora_tags:
-        prompt = f"{prompt} {lora_tags}" if prompt else lora_tags
+        return f"{image_prompt} {lora_tags}" if image_prompt else lora_tags
+    return image_prompt
+
+
+def _local_payload(cfg: dict, image_prompt: str) -> dict:
     # No prompt cap here: local WebUIs chunk long prompts themselves.
     payload = {
-        "prompt": prompt,
+        "prompt": _local_prompt_with_tags(cfg, image_prompt),
         "width": int(cfg.get("width", 1024)),
         "height": int(cfg.get("height", 1024)),
         "steps": int(cfg.get("steps", 28)),
@@ -2564,12 +2615,12 @@ def _local_payload(cfg: dict, image_prompt: str) -> dict:
     return payload
 
 
-async def _local_generate(cfg: dict, image_prompt: str) -> tuple[bytes, str]:
-    """One synchronous txt2img render against the local WebUI."""
-    import base64
+async def _local_txt2img(cfg: dict, payload: dict) -> list[str]:
+    """POST one txt2img request and return the raw base64 images list.
+    Failures split into NonRetryableError vs RuntimeError by whether a
+    resubmission of the same request could succeed."""
     import httpx
     url = f"{_local_base(cfg)}/sdapi/v1/txt2img"
-    payload = _local_payload(cfg, image_prompt)
     try:
         async with httpx.AsyncClient(
                 timeout=httpx.Timeout(LOCAL_TXT2IMG_TIMEOUT_S, connect=10.0),
@@ -2598,9 +2649,56 @@ async def _local_generate(cfg: dict, image_prompt: str) -> tuple[bytes, str]:
     images = (resp.json() or {}).get("images") or []
     if not images:
         raise RuntimeError("The local WebUI returned no images")
+    return [str(img) for img in images]
+
+
+def _local_b64_decode(image: str) -> bytes:
+    import base64
     # Some WebUIs return a data URI, others bare base64.
-    data = base64.b64decode(str(images[0]).split(",", 1)[-1])
-    return data, "png"
+    return base64.b64decode(image.split(",", 1)[-1])
+
+
+async def _local_generate(cfg: dict, image_prompt: str) -> tuple[bytes, str]:
+    """One synchronous txt2img render against the local WebUI."""
+    images = await _local_txt2img(cfg, _local_payload(cfg, image_prompt))
+    return _local_b64_decode(images[0]), "png"
+
+
+def _local_batch_payload(cfg: dict, image_prompts: list[str]) -> dict:
+    """A txt2img payload that renders every prompt in one GPU batch via the
+    bundled wb_prompt_batch.py script. The script reads the JSON prompt list
+    from script_args and sets batch_size itself; the top-level prompt and
+    batch_size stay in their single-image shape so the request remains a
+    valid (if single-image) txt2img body."""
+    payload = _local_payload(cfg, image_prompts[0])
+    payload["script_name"] = LOCAL_BATCH_SCRIPT_TITLE
+    payload["script_args"] = [json.dumps(
+        [_local_prompt_with_tags(cfg, p) for p in image_prompts])]
+    return payload
+
+
+async def _local_generate_batch(cfg: dict,
+                                image_prompts: list[str]) -> list[tuple[bytes, str]]:
+    """One batched txt2img render: all prompts share a single GPU batch and
+    therefore a single LoRA set -- the caller groups prompts so only cells
+    with identical tag strings arrive here together."""
+    images = await _local_txt2img(cfg, _local_batch_payload(cfg, image_prompts))
+    # The script suppresses the grid, but a fork that ignores
+    # do_not_save_grid prepends one; drop it by count.
+    if len(images) == len(image_prompts) + 1:
+        images = images[1:]
+    if len(images) != len(image_prompts):
+        raise RuntimeError(
+            f"the batch script returned {len(images)} images for "
+            f"{len(image_prompts)} prompts — is {LOCAL_BATCH_SCRIPT_FILE} in "
+            f"the WebUI's scripts folder up to date?")
+    return [(_local_b64_decode(img), "png") for img in images]
+
+
+def _local_error_looks_oom(error: BaseException) -> bool:
+    """Whether a local render failure reads like the GPU ran out of memory --
+    the one failure a smaller batch would fix and a same-size retry won't."""
+    return bool(re.search(r"out of memory|outofmemory|allocat", str(error), re.I))
 
 
 async def _generate_image(cfg: dict, image_prompt: str) -> tuple[bytes, str]:
@@ -3675,6 +3773,66 @@ async def _retry_step(step_name: str, fn, retries: int):
     raise last_error
 
 
+def _local_batch_chunks(cells: list[dict], cap: int) -> list[list[int]]:
+    """Cell indices grouped into GPU batches. Cells may share a batch only
+    when their cfgs yield the exact same <lora:...> tag string (same set AND
+    weights): the WebUI activates extra networks batch-wide, so mixing sets
+    would apply every image's LoRAs to every image. Groups then split into
+    chunks of at most `cap` images (the VRAM ceiling)."""
+    cap = max(1, int(cap or 1))
+    groups: dict[str, list[int]] = {}
+    for i, cell in enumerate(cells):
+        groups.setdefault(_local_prompt_lora_tags(cell["cfg"]), []).append(i)
+    return [group[j:j + cap]
+            for group in groups.values()
+            for j in range(0, len(group), cap)]
+
+
+async def _generate_local_batched(cells: list[dict], cfg: dict, retries,
+                                  generate_once) -> list:
+    """Render a local multi-image generation as few GPU batches as possible
+    via the wb_prompt_batch.py script. Returns (bytes, ext) results or
+    exceptions aligned with `cells` -- the exact shape
+    asyncio.gather(return_exceptions=True) produces, so the caller's
+    partial-failure handling stays shared with the per-image path. A chunk
+    that ultimately fails falls back to one request per image for exactly
+    its cells: batching can only add speed, never new failure modes."""
+    results: list = [None] * len(cells)
+    for idxs in _local_batch_chunks(cells, cfg.get("local_batch_size")):
+        if len(idxs) > 1:
+            group_cfg = cells[idxs[0]]["cfg"]
+
+            async def _batch_call(idxs=idxs, group_cfg=group_cfg):
+                prompts = [cells[i]["prompt"] for i in idxs]
+                try:
+                    return await _local_generate_batch(group_cfg, prompts)
+                except NonRetryableError:
+                    raise
+                except Exception as e:
+                    if _local_error_looks_oom(e):
+                        # The same batch would just OOM again; skip the
+                        # step retries and go straight to the fallback.
+                        raise NonRetryableError(str(e)) from e
+                    raise
+
+            try:
+                for i, res in zip(idxs, await _retry_step(
+                        "batched image generation", _batch_call, retries)):
+                    results[i] = res
+                continue
+            except Exception as e:
+                print(f"[Image Gen] batched render of {len(idxs)} images "
+                      f"failed ({e}); retrying one request per image")
+        singles = await asyncio.gather(
+            *(_retry_step("image generation",
+                          lambda i=i: generate_once(cells[i]), retries)
+              for i in idxs),
+            return_exceptions=True)
+        for i, res in zip(idxs, singles):
+            results[i] = res
+    return results
+
+
 async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                                history: str, sdk, prompt_override: str | None,
                                characters: dict | None = None) -> None:
@@ -3793,11 +3951,19 @@ async def _generation_pipeline(record_id: str, cfg: dict, narration: str,
                     raise RuntimeError(
                         f"retrying with a softened prompt after refusal: {e}")
 
-            results = await asyncio.gather(
-                *(_retry_step("image generation",
-                              lambda c=cell: _generate_once(c), retries)
-                  for cell in cells),
-                return_exceptions=True)
+            if (_provider(cfg) == "local" and len(cells) > 1
+                    and await _local_batch_script_available(cfg)):
+                # One request per LoRA-set group renders the whole group as
+                # a single GPU batch -- much faster than the WebUI queueing
+                # the gathered single-image requests one after another.
+                results = await _generate_local_batched(cells, cfg, retries,
+                                                        _generate_once)
+            else:
+                results = await asyncio.gather(
+                    *(_retry_step("image generation",
+                                  lambda c=cell: _generate_once(c), retries)
+                      for cell in cells),
+                    return_exceptions=True)
 
             filenames = []
             kept_prompts = []
@@ -4010,6 +4176,7 @@ def get_router():
         local_lora_dir: str | None = None
         local_helper_url: str | None = None
         local_helper_token: str | None = None
+        local_batch_size: int | None = None
 
     class GenerateRequest(BaseModel):
         prompt_override: str | None = None
@@ -4202,6 +4369,9 @@ def get_router():
                 incoming[side] = max(128, min(2048, (int(incoming[side]) // 8) * 8))
         if "image_num" in incoming:
             incoming["image_num"] = max(1, min(IMAGE_NUM_MAX, int(incoming["image_num"])))
+        if "local_batch_size" in incoming:
+            incoming["local_batch_size"] = max(1, min(IMAGE_NUM_MAX,
+                                                      int(incoming["local_batch_size"])))
         if "steps" in incoming:
             incoming["steps"] = max(1, min(100, int(incoming["steps"])))
         if "guidance_scale" in incoming:
@@ -4505,7 +4675,12 @@ def get_router():
                           .get("sd_model_checkpoint") or "")
             out = {"ok": True, "base_url": _local_base(cfg),
                    "checkpoint_count": len(models if isinstance(models, list) else []),
-                   "current_checkpoint": current}
+                   "current_checkpoint": current,
+                   # Fresh probe (force): the user testing the connection
+                   # right after installing the script deserves the truth,
+                   # not a cached "not installed" from before the restart.
+                   "batch_script": await _local_batch_script_available(
+                       cfg, force=True)}
         if _helper_url(cfg):
             try:
                 health = await _helper_request(cfg, "GET", "/wb-helper/health",

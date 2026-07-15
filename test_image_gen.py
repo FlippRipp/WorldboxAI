@@ -4969,6 +4969,351 @@ def test_local_payload_injects_lora_tags_only_at_payload_time(tmp_path):
     assert backend._local_prompt_lora_tags(gated) == "<lora:other_xl:10.0>"
 
 
+# ---------------------------------------------------------------------------
+# Local GPU batching (wb_prompt_batch.py)
+# ---------------------------------------------------------------------------
+
+def _stub_scripts_probe(backend, ok=True):
+    """Pretend the WebUI does (not) have the batch script installed."""
+    async def probe(cfg, force=False):
+        return ok
+
+    backend._local_batch_script_available = probe
+
+
+def _fake_local_batch(backend):
+    """Monkeypatch the batched renderer, capturing each call's prompt list and
+    returning bytes derived from each prompt so files reveal their prompt."""
+    calls = []
+
+    async def generate_batch(cfg, prompts):
+        calls.append(list(prompts))
+        return [(p.encode(), "png") for p in prompts]
+
+    backend._local_generate_batch = generate_batch
+    return calls
+
+
+def test_local_batch_payload_shape(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = {**backend._default_config(), "provider": "local",
+           "model_name": "juggernautXL.safetensors", "model_base": "SDXL 1.0",
+           "negative_prompt": "blurry",
+           "lora_library": [_local_lora_entry()]}
+
+    payload = backend._local_batch_payload(cfg, ["castle at dawn", "castle at dusk"])
+    assert payload["script_name"] == backend.LOCAL_BATCH_SCRIPT_TITLE
+    # Every prompt in the batch carries the group's LoRA tags, exactly like
+    # its solo render would.
+    assert json.loads(payload["script_args"][0]) == [
+        "castle at dawn <lora:ink_style_xl:0.8>",
+        "castle at dusk <lora:ink_style_xl:0.8>"]
+    # The rest stays a valid single-image body; the script drives the batch.
+    assert payload["batch_size"] == 1 and payload["n_iter"] == 1
+    assert payload["negative_prompt"] == "blurry"
+    assert payload["override_settings"]["sd_model_checkpoint"] == \
+        "juggernautXL.safetensors"
+
+
+def test_local_batch_chunks_groups_by_lora_and_cap(tmp_path):
+    backend = _load_backend(tmp_path)
+    base = {**backend._default_config(), "provider": "local",
+            "model_name": "juggernautXL.safetensors", "model_base": "SDXL 1.0"}
+    cfg_a = {**base, "lora_library": [_local_lora_entry()]}
+    # Same LoRA at a different weight is a different tag string -- it must
+    # not share a GPU batch (extra networks apply batch-wide).
+    cfg_b = {**base, "lora_library": [_local_lora_entry(strength=1.2)]}
+
+    cells = [{"prompt": str(i), "cfg": c}
+             for i, c in enumerate([cfg_a, cfg_a, cfg_b, cfg_a, cfg_b])]
+    assert backend._local_batch_chunks(cells, 2) == [[0, 1], [3], [2, 4]]
+
+    # No LoRAs: one group, chunked by the cap; junk caps clamp to 1.
+    plain = [{"prompt": str(i), "cfg": base} for i in range(5)]
+    assert backend._local_batch_chunks(plain, 2) == [[0, 1], [2, 3], [4]]
+    assert backend._local_batch_chunks(plain, 0) == [[0], [1], [2], [3], [4]]
+
+
+def test_local_scripts_probe_and_cache(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = {**backend._default_config(), "provider": "local"}
+    holder = {"body": {"txt2img": ["X/Y/Z plot", "worldbox prompt batch"]},
+              "exc": None, "n": 0}
+
+    async def fake_get(cfg, path, timeout=backend.LOCAL_API_TIMEOUT_S):
+        holder["n"] += 1
+        assert path == "/sdapi/v1/scripts"
+        if holder["exc"] is not None:
+            raise holder["exc"]
+        return holder["body"]
+
+    backend._local_get = fake_get
+
+    # Found (case-insensitively), then answered from the cache.
+    assert asyncio.run(backend._local_batch_script_available(cfg)) is True
+    assert asyncio.run(backend._local_batch_script_available(cfg)) is True
+    assert holder["n"] == 1
+    # force bypasses the cache (the /local/status connection test).
+    assert asyncio.run(backend._local_batch_script_available(cfg, force=True)) is True
+    assert holder["n"] == 2
+
+    # "Not installed" is a real answer and caches too.
+    backend._local_scripts_probe.clear()
+    holder["body"] = {"txt2img": ["X/Y/Z plot"]}
+    assert asyncio.run(backend._local_batch_script_available(cfg)) is False
+    holder["body"] = {"txt2img": ["WorldBox Prompt Batch"]}
+    assert asyncio.run(backend._local_batch_script_available(cfg)) is False
+    assert holder["n"] == 3
+
+    # A failing probe returns False but does NOT cache -- the next call asks
+    # again instead of sitting on a stale verdict for the whole TTL.
+    backend._local_scripts_probe.clear()
+    holder["exc"] = RuntimeError("WebUI restarting")
+    assert asyncio.run(backend._local_batch_script_available(cfg)) is False
+    holder["exc"] = None
+    assert asyncio.run(backend._local_batch_script_available(cfg)) is True
+
+
+def test_local_pipeline_batches_when_script_installed(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable_local(backend, image_num=3)
+    _stub_scripts_probe(backend)
+    batch_calls = _fake_local_batch(backend)
+    singles = {"n": 0}
+
+    async def single(cfg, prompt):
+        singles["n"] += 1
+        return b"solo", "png"
+
+    backend._local_generate = single
+
+    captured = {"n": 0}
+
+    async def generate(prompt, model_preference="balanced", max_tokens=None):
+        captured["n"] += 1
+        return f"scene take {captured['n']}"
+
+    sdk = SimpleNamespace(llm=SimpleNamespace(generate=generate, _current_module=""))
+
+    async def run():
+        record_id = backend._spawn_generation(
+            save_id="mystory", turn=1, narration="a scene", history="",
+            sdk=sdk, trigger="auto")
+        await asyncio.gather(*backend._tasks)
+        return record_id
+
+    record_id = asyncio.run(run())
+    record = backend._read_index()[0]
+    assert record["id"] == record_id
+    assert record["status"] == "done"
+    # One batched request carried all three distinct prompts; the per-image
+    # path was never used.
+    assert singles["n"] == 0
+    assert len(batch_calls) == 1
+    assert batch_calls[0] == record["image_prompts"]
+    assert len(set(batch_calls[0])) == 3
+    # Results map back to their cells in order.
+    for filename, prompt in zip(record["filenames"], record["image_prompts"]):
+        assert (tmp_path / MID / "images" / filename).read_bytes() == prompt.encode()
+
+
+def test_local_pipeline_batches_prompt_override(tmp_path):
+    """A verbatim-prompt batch (retry / unrefined studio text) shares one
+    prompt and one cfg -- a single batched request of N identical prompts."""
+    backend = _load_backend(tmp_path)
+    _enable_local(backend, image_num=2)
+    _stub_scripts_probe(backend)
+    batch_calls = _fake_local_batch(backend)
+
+    async def run():
+        backend._spawn_generation(
+            save_id="mystory", turn=1, narration="a scene", history="",
+            sdk=None, trigger="manual", prompt_override="exactly this")
+        await asyncio.gather(*backend._tasks)
+
+    asyncio.run(run())
+    record = backend._read_index()[0]
+    assert record["status"] == "done"
+    assert batch_calls == [["exactly this", "exactly this"]]
+    assert len(record["filenames"]) == 2
+
+
+def test_local_batch_grid_image_dropped(tmp_path):
+    import base64
+    backend = _load_backend(tmp_path)
+    cfg = {**backend._default_config(), "provider": "local", "model_name": "m"}
+    encoded = [base64.b64encode(f"img{i}".encode()).decode() for i in range(3)]
+    holder = {"images": list(encoded)}
+
+    async def fake_txt2img(cfg, payload):
+        return list(holder["images"])
+
+    backend._local_txt2img = fake_txt2img
+
+    # Exact count decodes in order.
+    holder["images"] = encoded[:2]
+    out = asyncio.run(backend._local_generate_batch(cfg, ["a", "b"]))
+    assert [d for d, _ in out] == [b"img0", b"img1"]
+
+    # One extra image is a grid a fork refused to suppress: dropped.
+    holder["images"] = [base64.b64encode(b"grid").decode()] + encoded[:2]
+    out = asyncio.run(backend._local_generate_batch(cfg, ["a", "b"]))
+    assert [d for d, _ in out] == [b"img0", b"img1"]
+
+    # Any other mismatch is a retryable failure, not misassigned images.
+    holder["images"] = encoded[:1]
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(backend._local_generate_batch(cfg, ["a", "b"]))
+    assert not isinstance(excinfo.value, backend.NonRetryableError)
+    assert "wb_prompt_batch.py" in str(excinfo.value)
+
+
+def test_local_batch_missing_script_falls_back_per_image(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable_local(backend, image_num=2)
+    _stub_scripts_probe(backend, ok=False)
+    batch_calls = _fake_local_batch(backend)
+    singles = {"n": 0}
+
+    async def single(cfg, prompt):
+        singles["n"] += 1
+        return b"solo", "png"
+
+    backend._local_generate = single
+
+    record = _run_pipeline(backend)
+    assert record["status"] == "done"
+    assert batch_calls == []
+    assert singles["n"] == 2
+
+
+def test_local_batch_oom_falls_back_without_chunk_retry(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend.STEP_RETRY_BASE_DELAY_S = 0
+    _enable_local(backend, image_num=2, step_retries=2)
+    _stub_scripts_probe(backend)
+    attempts = {"batch": 0, "single": 0}
+
+    async def oom_batch(cfg, prompts):
+        attempts["batch"] += 1
+        raise RuntimeError("Local WebUI server error 500: CUDA out of memory")
+
+    backend._local_generate_batch = oom_batch
+
+    async def single(cfg, prompt):
+        attempts["single"] += 1
+        return b"solo", "png"
+
+    backend._local_generate = single
+
+    record = _run_pipeline(backend)
+    assert record["status"] == "done"
+    # The same batch would OOM again, so the step retries are skipped and the
+    # chunk goes straight to one request per image.
+    assert attempts["batch"] == 1
+    assert attempts["single"] == 2
+    assert len(record["filenames"]) == 2
+
+
+def test_local_batch_chunk_failure_retries_then_falls_back_keeping_partials(tmp_path):
+    backend = _load_backend(tmp_path)
+    backend.STEP_RETRY_BASE_DELAY_S = 0
+    _enable_local(backend, image_num=2, step_retries=1)
+    _stub_scripts_probe(backend)
+    attempts = {"batch": 0, "single": 0}
+
+    async def flaky_batch(cfg, prompts):
+        attempts["batch"] += 1
+        raise RuntimeError("connection reset mid-render")
+
+    backend._local_generate_batch = flaky_batch
+
+    async def single(cfg, prompt):
+        attempts["single"] += 1
+        if attempts["single"] == 1:
+            raise backend.NonRetryableError("bad slot")
+        return b"solo", "png"
+
+    backend._local_generate = single
+
+    record = _run_pipeline(backend)
+    # A transient batch failure gets its step retries, then the fallback
+    # keeps today's per-cell partial-failure semantics.
+    assert attempts["batch"] == 2
+    assert record["status"] == "done"
+    assert len(record["filenames"]) == 1
+
+
+def test_local_batch_split_by_lora_set_issues_separate_requests(tmp_path):
+    backend = _load_backend(tmp_path)
+    base = {**backend._default_config(), "provider": "local",
+            "model_name": "juggernautXL.safetensors", "model_base": "SDXL 1.0"}
+    cfg_lora = {**base, "lora_library": [_local_lora_entry()]}
+    cells = [{"prompt": "p0", "cfg": cfg_lora},
+             {"prompt": "p1", "cfg": base},
+             {"prompt": "p2", "cfg": cfg_lora}]
+    batch_calls = _fake_local_batch(backend)
+    singles = []
+
+    async def generate_once(cell):
+        singles.append(cell["prompt"])
+        return cell["prompt"].encode() + b"-solo", "png"
+
+    results = asyncio.run(
+        backend._generate_local_batched(cells, base, 0, generate_once))
+    # The two LoRA cells share one batched request; the lone no-LoRA cell is
+    # a single-cell chunk and skips the script entirely. Results stay
+    # aligned with cell order either way.
+    assert batch_calls == [["p0", "p2"]]
+    assert singles == ["p1"]
+    assert results == [(b"p0", "png"), (b"p1-solo", "png"), (b"p2", "png")]
+
+
+def test_local_batch_size_config_clamped(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    body = client.get("/config").json()
+    assert body["local_batch_size"] == backend.LOCAL_BATCH_SIZE_DEFAULT
+
+    assert client.put("/config", json={"local_batch_size": 99}) \
+        .json()["local_batch_size"] == backend.IMAGE_NUM_MAX
+    assert client.put("/config", json={"local_batch_size": 0}) \
+        .json()["local_batch_size"] == 1
+
+    # A hand-edited config normalizes on load.
+    cfg = backend._load_config()
+    cfg["local_batch_size"] = "bogus"
+    backend._save_config(cfg)
+    assert backend._load_config()["local_batch_size"] == \
+        backend.LOCAL_BATCH_SIZE_DEFAULT
+
+
+def test_local_batching_not_consulted_for_novita_or_single_image(tmp_path):
+    async def boom(cfg, force=False):
+        raise AssertionError("the batch probe must not be consulted")
+
+    # Novita multi-image: untouched by local batching.
+    backend = _load_backend(tmp_path / "novita")
+    backend._local_batch_script_available = boom
+    _enable(backend, image_num=3)
+    _fake_novita(backend)
+    assert _run_pipeline(backend)["status"] == "done"
+
+    # Local single image: no probe, straight to the per-image path.
+    backend = _load_backend(tmp_path / "local")
+    backend._local_batch_script_available = boom
+    _enable_local(backend, image_num=1)
+    _fake_local(backend)
+    assert _run_pipeline(backend)["status"] == "done"
+
+
+def test_batch_script_file_compiles():
+    # The WebUI modules the script imports don't exist here, so compile only.
+    path = Path(__file__).parent / "modules" / MID / "wb_prompt_batch.py"
+    compile(path.read_text(encoding="utf-8"), str(path), "exec")
+
+
 def test_lora_patch_local_name_links_and_clears(tmp_path):
     backend = _load_backend(tmp_path)
     cfg = _enable_local(backend)
