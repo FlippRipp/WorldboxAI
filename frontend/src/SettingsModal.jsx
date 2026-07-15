@@ -135,10 +135,18 @@ const TYPE_COMPONENTS = {
   ),
 };
 
-function SettingControl({ descriptor, value, onChange }) {
+function SettingControl({ descriptor, value, onChange, disabled = false }) {
   const Renderer = TYPE_COMPONENTS[descriptor.type];
   if (!Renderer) {
     return <div className="text-red-400 text-xs">Unknown type: {descriptor.type}</div>;
+  }
+  if (disabled) {
+    // A disabled fieldset natively disables every form control inside it.
+    return (
+      <fieldset disabled className="opacity-40 cursor-not-allowed">
+        <Renderer descriptor={descriptor} value={value} onChange={() => {}} />
+      </fieldset>
+    );
   }
   return <Renderer descriptor={descriptor} value={value} onChange={onChange} />;
 }
@@ -149,7 +157,11 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
   const [moduleValues, setModuleValues] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [saveError, setSaveError] = useState(null);
   const [advSettingsMod, setAdvSettingsMod] = useState(null);
+  // Global cheat toggle; gates the unlock button on hardcore-locked module
+  // settings. The server enforces the same gate, so this is purely cosmetic.
+  const [cheatsEnabled, setCheatsEnabled] = useState(false);
 
   const isGlobal = scope === 'global';
 
@@ -157,6 +169,14 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
     if (!isOpen) return;
     setLoading(true);
     setError(null);
+    setSaveError(null);
+
+    api.getSettings('global').then(data => {
+      for (const items of Object.values(data.settings || {})) {
+        const hit = (items || []).find(s => s.key === 'cheats.enabled');
+        if (hit) { setCheatsEnabled(!!hit.value); return; }
+      }
+    }).catch(() => {});
 
     api.getSettings(scope).then(data => {
       setEngineSettings(data.settings || {});
@@ -200,21 +220,26 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
   };
 
   const handleSave = async () => {
-    const engineUpdates = {};
-    Object.values(engineSettings).forEach(items => {
-      items.forEach(s => {
-        if (engineValues[s.key] !== s.value) {
-          engineUpdates[s.key] = engineValues[s.key];
-        }
+    setSaveError(null);
+    try {
+      const engineUpdates = {};
+      Object.values(engineSettings).forEach(items => {
+        items.forEach(s => {
+          if (engineValues[s.key] !== s.value) {
+            engineUpdates[s.key] = engineValues[s.key];
+          }
+        });
       });
-    });
-    if (Object.keys(engineUpdates).length > 0) {
-      await api.updateSettings(engineUpdates, scope);
+      if (Object.keys(engineUpdates).length > 0) {
+        await api.updateSettings(engineUpdates, scope);
+      }
+      if (!isGlobal) {
+        await onSaveModuleConfigs(moduleValues);
+      }
+      onClose();
+    } catch (e) {
+      setSaveError(e.message || 'Failed to save settings.');
     }
-    if (!isGlobal) {
-      await onSaveModuleConfigs(moduleValues);
-    }
-    onClose();
   };
 
   const handleProviderChange = (newProvider) => {
@@ -283,6 +308,12 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
                 {modules.map(mod => {
                   const schemaKeys = Object.keys(mod.settings_schema || {});
                   if (schemaKeys.length === 0) return null;
+                  // A toggle flagged locks_module_settings (e.g. the RPG
+                  // module's Hardcore Mode) freezes the whole section once
+                  // on: every control greys out, including the toggle
+                  // itself, so the lock is one-way from the settings UI.
+                  const lockKey = schemaKeys.find(k => mod.settings_schema[k]?.locks_module_settings);
+                  const locked = !!(lockKey && (moduleValues[mod.id]?.[lockKey] ?? mod.settings_schema[lockKey].default));
                   return (
                     <div key={mod.id} className="bg-gray-900/50 p-4 rounded border border-gray-700">
                       <h4 className="text-lg font-semibold text-green-400 mb-4">{mod.name}</h4>
@@ -301,16 +332,35 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
                               description: schema.description,
                             }}
                             value={moduleValues[mod.id]?.[key] ?? schema.default}
-                            onChange={(v) => handleModuleChange(mod.id, key, v)}
+                            disabled={locked}
+                            onChange={(v) => {
+                              if (key === lockKey && v === true) {
+                                const msg = schema.confirm || `Lock ${mod.name} settings at their current values? This cannot be undone.`;
+                                if (!window.confirm(msg)) return;
+                              }
+                              handleModuleChange(mod.id, key, v);
+                            }}
                           />
                         ))}
                       </div>
-                      <button
-                        onClick={() => setAdvSettingsMod(mod)}
-                        className="mt-3 text-xs text-purple-400 hover:text-purple-300 hover:underline"
-                      >
-                        Configure Advanced Settings
-                      </button>
+                      <div className="mt-3 flex items-center gap-4">
+                        <button
+                          onClick={() => setAdvSettingsMod(mod)}
+                          disabled={locked}
+                          className="text-xs text-purple-400 hover:text-purple-300 hover:underline disabled:opacity-40 disabled:cursor-not-allowed disabled:no-underline"
+                        >
+                          Configure Advanced Settings
+                        </button>
+                        {locked && cheatsEnabled && (
+                          <button
+                            onClick={() => handleModuleChange(mod.id, lockKey, false)}
+                            className="text-xs text-amber-400 hover:text-amber-300 hover:underline"
+                            title="Cheat — unlock these settings"
+                          >
+                            {'🔓'} Unlock settings (cheat)
+                          </button>
+                        )}
+                      </div>
                     </div>
                   );
                 })}
@@ -323,7 +373,8 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
           )}
         </div>
 
-        <div className="p-4 border-t border-gray-700 bg-gray-900 sm:rounded-b-lg flex justify-end">
+        <div className="p-4 border-t border-gray-700 bg-gray-900 sm:rounded-b-lg flex items-center justify-end gap-4">
+          {saveError && <div className="text-xs text-red-400 flex-1">{saveError}</div>}
           <button
             onClick={handleSave}
             className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-medium transition-colors"

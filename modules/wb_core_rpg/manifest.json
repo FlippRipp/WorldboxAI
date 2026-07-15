@@ -17,6 +17,15 @@
   "ui_slots": ["slot_sidebar"],
   "character_panel": "character_panel.jsx",
   "settings_schema": {
+    "hardcore_mode": {
+      "type": "toggle",
+      "default": false,
+      "label": "Hardcore Mode",
+      "category": "Core RPG System",
+      "locks_module_settings": true,
+      "confirm": "Enable Hardcore Mode?\n\nAll Core RPG settings will be permanently locked at their current values. This cannot be undone.",
+      "description": "Permanently locks all Core RPG settings at their current values."
+    },
     "progression_system": {
       "type": "select",
       "options": [

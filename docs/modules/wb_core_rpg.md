@@ -108,6 +108,7 @@ gate is enforced server-side — with cheats off the endpoint returns 403.
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
+| `hardcore_mode` | toggle | off | Permanently locks all Core RPG settings at their current values. See below. |
 | `progression_system` | select | `xp` | How characters advance: XP-Based, Practice-Based, or Milestone-Based |
 | `xp_gain_condition` | select | `successful_action` | What earns the player XP (XP-Based only). See below. |
 | `xp_per_action` | slider 1-50 | 10 | Base XP granted when the XP gain condition is met, scaled by action difficulty. |
@@ -121,6 +122,21 @@ gate is enforced server-side — with cheats off the endpoint returns 403.
 | `new_skill_cost` | slider 1-5 | 3 | Skill points to learn a brand-new skill from the level-up popup; it starts at a rating equal to this cost. |
 | `evolution_ai_model` | select | `smartest` | Model preference used for skill evolution themes and evolved forms. |
 | `external_skill_events_enabled` | toggle | on | Post-turn detection of skills granted/removed/altered by external forces. |
+
+### Hardcore Mode
+
+`hardcore_mode` is a one-way lock, flagged `locks_module_settings` in the
+manifest. Enabling it asks for confirmation (the flip cannot be undone), then
+greys out every Core RPG control in the settings modal — the toggle itself
+included — and disables the module's advanced-settings button. The lock is
+enforced server-side: while the stored value is on,
+`PUT /api/session/module-configs` rejects any change to the module's section
+with 403 (an unchanged section still saves, so other modules' settings keep
+working). While the global cheat toggle (`cheats.enabled`) is on, an
+"Unlock settings (cheat)" button appears in the locked section and the server
+allows the section to change again, including turning the lock off. Any
+module can opt into the same behavior by flagging one of its toggles with
+`locks_module_settings` (plus an optional `confirm` message for the popup).
 
 ## Progression Systems
 

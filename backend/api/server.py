@@ -402,8 +402,44 @@ async def get_session():
 async def get_module_configs():
     return {"module_configs": session_manager.state.get("module_configs", {})}
 
+def _enforce_settings_locks(incoming: dict):
+    """A module setting flagged ``locks_module_settings`` (e.g. the RPG
+    module's Hardcore Mode) freezes that module's settings once its STORED
+    value is on: any change to the section is rejected, including turning the
+    lock itself back off. The global cheat toggle bypasses the lock — that is
+    how the settings UI's cheat-only unlock button gets through."""
+    if backend_settings.get("cheats.enabled"):
+        return
+    stored_configs = session_manager.state.get("module_configs", {})
+    for mod_id, mod_data in registry.get_modules().items():
+        if mod_id not in incoming:
+            continue
+        schema = mod_data.get("manifest", {}).get("settings_schema") or {}
+        lock_key = next(
+            (k for k, d in schema.items() if isinstance(d, dict) and d.get("locks_module_settings")),
+            None,
+        )
+        if lock_key is None:
+            continue
+        stored = stored_configs.get(mod_id) or {}
+        if not stored.get(lock_key, schema[lock_key].get("default", False)):
+            continue
+        # Compare effective values (defaults applied) so re-sending an
+        # unchanged section — e.g. saving another module's settings — passes.
+        proposed = incoming.get(mod_id) or {}
+        for key, descriptor in schema.items():
+            default = descriptor.get("default") if isinstance(descriptor, dict) else None
+            if proposed.get(key, default) != stored.get(key, default):
+                mod_name = mod_data.get("manifest", {}).get("name", mod_id)
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"{mod_name} settings are locked by Hardcore Mode.",
+                )
+
+
 @app.put("/api/session/module-configs")
 async def update_module_configs(request: ModuleConfigsRequest):
+    _enforce_settings_locks(request.module_configs)
     try:
         state = session_manager.update_module_configs(request.module_configs)
     except ValueError as exc:

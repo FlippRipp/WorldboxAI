@@ -499,3 +499,44 @@ def test_websocket_llm_provider_error_returns_structured_error(tmp_path, monkeyp
     assert message["state"]["input_text"] == ""
     assert session_manager.state["history"] == []
     assert session_manager.state["chat_messages"] == []
+
+
+def test_hardcore_mode_locks_rpg_module_configs(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    cheats = {"on": False}
+    monkeypatch.setattr(
+        server, "backend_settings",
+        SimpleNamespace(get=lambda key: cheats["on"] if key == "cheats.enabled" else None),
+    )
+
+    def put(configs):
+        return client.put("/api/session/module-configs", json={"module_configs": configs})
+
+    # Unlocked: normal edits go through, including the flip that enables the
+    # lock (current values are saved along with it).
+    assert put({"wb_core_rpg": {"xp_per_action": 15}}).status_code == 200
+    assert put({"wb_core_rpg": {"xp_per_action": 15, "hardcore_mode": True}}).status_code == 200
+
+    # Locked: any change to the section is rejected — other values and the
+    # lock itself.
+    assert put({"wb_core_rpg": {"xp_per_action": 20, "hardcore_mode": True}}).status_code == 403
+    assert put({"wb_core_rpg": {"xp_per_action": 15, "hardcore_mode": False}}).status_code == 403
+
+    # An unchanged section still passes (defaults applied on both sides), so
+    # saving other modules' settings keeps working.
+    res = put({
+        "wb_core_rpg": {"xp_per_action": 15, "hardcore_mode": True, "xp_curve_steepness": 2},
+        "wb_time_tracker": {},
+    })
+    assert res.status_code == 200
+
+    # Cheats bypass the lock: values can change and the lock can come off.
+    cheats["on"] = True
+    res = put({"wb_core_rpg": {"xp_per_action": 25, "hardcore_mode": False}})
+    assert res.status_code == 200
+
+    # And once unlocked, editing works again without cheats.
+    cheats["on"] = False
+    assert put({"wb_core_rpg": {"xp_per_action": 30}}).status_code == 200
