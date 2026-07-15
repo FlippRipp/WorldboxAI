@@ -47,6 +47,9 @@ FIT_MAX_REJECTS = 2
 DEFER_MAX_STREAK = 2
 ABANDON_COOLDOWN_FACTOR = 2
 PIVOT_COOLDOWN_TURNS = 3  # min turns between pivot-driven thread replacements
+# Evidence marker distinguishing likes the player typed in themselves from
+# AI-observed ones; player-set entries survive a /plot reset.
+PLAYER_SET_EVIDENCE = "set directly by the player"
 BOOTSTRAP_SCENES = 15
 BOOTSTRAP_SCENES_MAX_CHARS = 12000
 BOOTSTRAP_INPUTS = 15
@@ -331,6 +334,35 @@ def _clean_profile(parsed, previous: dict) -> dict:
     }
 
 
+def _merge_player_prefs(profile: dict, kept_likes: list, kept_dislikes: list) -> dict:
+    """Re-seat player-stated preferences into a rebuilt profile: dislikes
+    replace wholesale (they are player-only), and player-set likes are
+    re-added -- winning over an observed duplicate so their weight and marker
+    survive. Player authority still applies: anything matching a dislike is
+    dropped from likes and avoids."""
+    merged = _clean_profile({}, profile)
+    merged["dislikes"] = _clean_pref_list(kept_dislikes, [])
+    disliked = {_norm_entry(e["text"]) for e in merged["dislikes"]}
+
+    likes = [e for e in merged["likes"] if _norm_entry(e["text"]) not in disliked]
+    for entry in _clean_pref_list(kept_likes, [], with_evidence=True):
+        norm = _norm_entry(entry["text"])
+        if norm in disliked:
+            continue
+        if any(_norm_entry(e["text"]) == norm for e in likes):
+            likes = [entry if _norm_entry(e["text"]) == norm else e for e in likes]
+        else:
+            likes.append(entry)
+    merged["likes"] = _cap_prefs(likes)
+
+    liked = {_norm_entry(e["text"]) for e in merged["likes"]}
+    merged["avoids"] = [
+        e for e in merged["avoids"]
+        if _norm_entry(e["text"]) not in disliked and _norm_entry(e["text"]) not in liked
+    ]
+    return merged
+
+
 def _npc_story_threads(state: dict) -> list[str]:
     threads = state.get("module_data", {}).get("wb_npc_system", {}).get("story_threads", [])
     lines = []
@@ -467,11 +499,29 @@ def _is_profile_empty(profile: dict) -> bool:
     )
 
 
-async def _bootstrap_profile(state: dict, sdk) -> dict | None:
+async def _bootstrap_profile(state: dict, sdk, preserved: dict | None = None) -> dict | None:
     """One-time deep read when the module joins a story already in progress:
     distill an initial player profile from the whole story so far instead of
-    starting blind. Returns the sanitized profile, or None on a bad reply."""
+    starting blind. ``preserved`` optionally carries player-stated likes and
+    dislikes that survived a reset -- they anchor the analysis and are merged
+    back by the caller. Returns the sanitized profile, or None on a bad
+    reply."""
     config = _config(state)
+
+    preserved_block = ""
+    if preserved and (preserved.get("likes") or preserved.get("dislikes")):
+        def _fmt(entries):
+            return "; ".join(f"{e.get('text', '')} ({e.get('weight', 'medium')})" for e in entries)
+        lines = [
+            "PLAYER-STATED PREFERENCES (set directly by the player; they are kept "
+            "verbatim, so do not restate them -- build the rest of the profile "
+            "around them and never contradict them):"
+        ]
+        if preserved.get("likes"):
+            lines.append(f"Likes: {_fmt(preserved['likes'])}")
+        if preserved.get("dislikes"):
+            lines.append(f"Dislikes: {_fmt(preserved['dislikes'])}")
+        preserved_block = "\n".join(lines) + "\n\n"
 
     scenes = "\n\n".join(str(h) for h in state.get("history", [])[-BOOTSTRAP_SCENES:])[-BOOTSTRAP_SCENES_MAX_CHARS:]
     inputs = [
@@ -492,7 +542,7 @@ STORY SO FAR (oldest to newest):
 THE PLAYER'S OWN ACTIONS (their typed inputs, oldest to newest):
 {inputs_block or '(none recorded)'}
 
-Base the profile on demonstrated behavior, not on what the setting suggests. Every field:
+{preserved_block}Base the profile on demonstrated behavior, not on what the setting suggests. Every field:
 - playstyle: integers 0-10 for how much the player actually does each thing.
 - tone: the story's prevailing tone in a few words.
 - themes: short phrases for the story's recurring themes.
@@ -1181,25 +1231,37 @@ async def _command_regen(state: dict, sdk, data: dict) -> dict:
 
 
 async def _command_reset(state: dict, sdk) -> dict:
-    """Cheat: wipe ALL plot data -- profile (player-set dislikes included),
-    narrative direction, thread history, log, and the active thread -- then
-    rebuild from the story so far in the same pass: a fresh player analysis,
-    a newly seeded direction, and a first thread. Any step that fails is
-    retried by the normal librarian machinery on the following turns. The
-    widget empties itself optimistically while this runs."""
+    """Cheat: wipe the plot data -- observed profile, narrative direction,
+    thread history, log, and the active thread -- then rebuild from the story
+    so far in the same pass: a fresh player analysis, a newly seeded
+    direction, and a first thread. Preferences the player stated themselves
+    (all dislikes, and likes carrying the player-set marker) survive the wipe
+    and anchor the new analysis. Any step that fails is retried by the normal
+    librarian machinery on the following turns. The widget empties itself
+    optimistically while this runs."""
     turn = state.get("turn", 0)
     fresh = _default_data()
     notes = []
 
+    # Player-stated taste is not the module's data to lose: it was typed in,
+    # so it carries over and seeds the rebuilt profile.
+    old_profile = _clean_profile({}, _own_data(state).get("profile") or _default_profile())
+    kept_dislikes = old_profile["dislikes"]
+    kept_likes = [e for e in old_profile["likes"] if e.get("evidence") == PLAYER_SET_EVIDENCE]
+    preserved = {"likes": kept_likes, "dislikes": kept_dislikes}
+    fresh["profile"] = _merge_player_prefs(fresh["profile"], kept_likes, kept_dislikes)
+
     if turn >= 2 and state.get("history"):
-        bootstrapped = await _bootstrap_profile(state, sdk)
+        bootstrapped = await _bootstrap_profile(state, sdk, preserved=preserved)
         if bootstrapped is not None:
-            fresh["profile"] = bootstrapped
+            fresh["profile"] = _merge_player_prefs(bootstrapped, kept_likes, kept_dislikes)
             notes.append("player profile rebuilt from the story so far")
         else:
             notes.append("player analysis failed -- profile starts blank")
     else:
         notes.append("story too young to analyze -- profile starts blank")
+    if kept_likes or kept_dislikes:
+        notes.append("your stated likes/dislikes carried over")
 
     seeded, _, deep_fields = await _update_direction(state, sdk, fresh)
     if seeded is not None and seeded.get("premise"):
@@ -1373,7 +1435,7 @@ def _command_profile_edit(data: dict, args: list[str]) -> dict:
                     message = f'[Plot] Added "{text}" to {field} ({weight}).'
                 entry = {"text": text, "weight": weight}
                 if field == "likes":
-                    entry["evidence"] = "set directly by the player"
+                    entry["evidence"] = PLAYER_SET_EVIDENCE
                 entries.append(entry)
                 entries = _cap_prefs(entries)
             # A stated preference supersedes the observed aversion either way:
@@ -1421,10 +1483,11 @@ async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
         # a full reset is the escape hatch.
         if len(args) < 2 or args[1].lower() != "confirm":
             return {"message": (
-                "[Plot] This completely clears the plot data -- story profile "
-                "(including your dislikes), narrative direction, thread history, "
-                "and the active thread -- then rebuilds everything from the story "
-                "so far. Run '/plot reset confirm' to proceed."
+                "[Plot] This clears the plot data -- observed profile, narrative "
+                "direction, thread history, and the active thread -- then rebuilds "
+                "everything from the story so far. Likes and dislikes you added "
+                "yourself are kept and feed the new analysis. Run "
+                "'/plot reset confirm' to proceed."
             ), "signal": "end_turn"}
         return await _command_reset(state, sdk)
 

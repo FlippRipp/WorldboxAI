@@ -1273,6 +1273,10 @@ def test_plot_reset_rebuilds_profile_direction_and_thread():
     data = _active_data(backend, suspended=True, suspended_turn=3)
     data["profile"] = backend._default_profile()
     data["profile"]["dislikes"] = [{"text": "body horror", "weight": "high"}]
+    data["profile"]["likes"] = [
+        {"text": "sea voyages", "weight": "high", "evidence": backend.PLAYER_SET_EVIDENCE},
+        {"text": "ai-observed thing", "weight": "medium", "evidence": "did it twice"},
+    ]
     data["thread_history"] = [{"title": "Old Thread", "outcome": "resolved",
                                "created_turn": 1, "closed_turn": 2, "note": "", "consequence": "x"}]
     captured = {}
@@ -1285,12 +1289,20 @@ def test_plot_reset_rebuilds_profile_direction_and_thread():
     # Bootstrap analysis, direction seed, generation, fit check -- in order.
     assert captured["preferences"] == ["smartest", "balanced", "smartest", "balanced"]
     assert "already in progress" in captured["prompts"][0]
+    # The player's stated taste anchors the fresh analysis...
+    assert "PLAYER-STATED PREFERENCES" in captured["prompts"][0]
+    assert "sea voyages (high)" in captured["prompts"][0]
+    assert "body horror (high)" in captured["prompts"][0]
     update = result["module_data"]["wb_plot_director"]
-    # Every top-level key is replaced wholesale, so old data is truly gone.
+    # Every top-level key is replaced wholesale, so old observed data is gone.
     assert set(result["module_data_replace"]) == set(update)
     assert update["thread_history"] == []
     assert update["log"] == []
-    assert update["profile"]["dislikes"] == []  # complete wipe, dislikes included
+    # ...and survives the wipe, while purely observed entries do not.
+    assert update["profile"]["dislikes"] == [{"text": "body horror", "weight": "high"}]
+    assert {"text": "sea voyages", "weight": "high",
+            "evidence": backend.PLAYER_SET_EVIDENCE} in update["profile"]["likes"]
+    assert all(e["text"] != "ai-observed thing" for e in update["profile"]["likes"])
     assert any(e["text"] == "back-alley deals" for e in update["profile"]["likes"])
     assert update["profile"]["attachments"][0]["name"] == "The Salt Baron"
     assert update["direction"]["premise"].startswith("A quiet war")
@@ -1298,6 +1310,7 @@ def test_plot_reset_rebuilds_profile_direction_and_thread():
     assert update["thread"]["created_turn"] == 6
     assert update["suspended"] is False  # a reset unfreezes
     assert "Reset complete" in result["message"]
+    assert "carried over" in result["message"]
     assert "The Salt Baron's Ledger" in result["message"]
 
 

@@ -549,8 +549,8 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
                       : '☠ Reset plot data (cheat)'}
                 </button>
                 <div className="text-[10px] text-gray-600 mt-1.5 text-center">
-                  Clears the profile (dislikes included), story direction, and thread history,
-                  then rebuilds them all from the story so far.
+                  Clears the observed profile, story direction, and thread history, then rebuilds
+                  them from the story so far. Likes and dislikes you added yourself are kept.
                 </div>
               </div>
             )}
