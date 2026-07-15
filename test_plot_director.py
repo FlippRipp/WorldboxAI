@@ -294,6 +294,11 @@ def test_first_librarian_generates_thread_from_scenario():
     assert len(captured["prompts"]) == 2
     assert "forgotten ruins" in captured["prompts"][0]
     assert "GROUND IT" in captured["prompts"][0]
+    # The challenge must be opposition in the world, never a prescribed course
+    # of action -- generation is told so, and the critic enforces it.
+    assert "NEVER prescribe the player's actions" in captured["prompts"][0]
+    assert "never what the player should do about it" in captured["prompts"][0]
+    assert "Player freedom" in captured["prompts"][1]
     assert captured["preferences"] == ["smartest", "balanced"]
     assert update["status"] == "active"
     assert update["momentum"] == "building"

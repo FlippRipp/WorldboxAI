@@ -723,6 +723,8 @@ async def _generate_thread(state: dict, sdk, data: dict, avoid_previous_kind: bo
 
     prompt = f"""You design short plot threads for a text RPG storyteller. A thread is a small self-contained arc the storyteller can weave in over roughly the next {thread_max_turns} turns: a hook that enters the story naturally, a challenge that opposes or complicates, and stakes. The player will see the thread openly, so make it enticing, not a spoiler-dependent twist.
 
+A challenge is opposition that exists in the world -- forces, obstacles, and agendas working against the player. It must NEVER prescribe the player's actions, name a required solution, or assume how they will respond: what to do about it, and whether to engage at all, is entirely theirs.
+
 PLAYER PROFILE (cater to their demonstrated preferences; weight marks how strongly the player feels -- give high-weight entries the most influence. Dislikes were set directly by the player: steer firmly away from them. Avoids are observed aversions: steer away unless the profile suggests otherwise. Attachments name what the player cares about -- prefer anchoring threads in them. engagement.ignores are hook shapes this player lets pass by -- avoid those shapes):
 {json.dumps(profile, ensure_ascii=False)}
 
@@ -735,7 +737,7 @@ CHALLENGE DIFFICULTY:
 {_storylines_block(state)}{_character_roster(state)}{_character_sheet_block(state)}{_history_block(data)}Design ONE new thread that fits the established genre, tone and current situation, plays to what this player enjoys, and injects challenge at the guided difficulty. GROUND IT: anchor the hook in established characters, places, factions, or unresolved hooks from the material above -- invent at most one new minor element, and only when nothing established fits. Where a past consequence or open question offers a natural seed, grow the thread from it.{different}{critique_block}{pivot_block}{defer_block}
 
 Respond with ONLY valid JSON:
-{{"title": "3-6 words", "hook": "how it surfaces in the story, one sentence", "challenge": "the complication or opposition, one sentence", "stakes": "what is at risk, one sentence", "appeal": "which player preference this serves, a few words"}}"""
+{{"title": "3-6 words", "hook": "how it surfaces in the story, one sentence", "challenge": "what stands in the way -- the opposition itself, one sentence, never what the player should do about it", "stakes": "what is at risk, one sentence", "appeal": "which player preference this serves, a few words"}}"""
 
     model_pref = config.get("thread_ai_model", "smartest")
     try:
@@ -810,6 +812,7 @@ Reject the candidate if ANY of these fail:
 3. Continuity: it does not contradict anything established in the story.
 4. Arc fit: it advances or complicates the narrative direction (skip this check if no direction is given).
 5. It does not touch any player dislike.
+6. Player freedom: the challenge describes opposition in the world, not a course of action -- reject anything that dictates what the player must or should do, or bakes in a specific solution.
 
 Respond with ONLY valid JSON:
 {{"verdict": "accept" | "reject", "critique": "1-2 sentences naming the failed check, only when rejecting"}}"""
