@@ -4197,6 +4197,75 @@ def test_quality_tags_migrate_and_follow_family(tmp_path):
         == backend.QUALITY_TAG_DEFAULTS
 
 
+def test_render_settings_follow_family(tmp_path):
+    backend = _load_backend(tmp_path)
+
+    # A never-touched config on a NoobAI checkpoint picks up the family's
+    # recommended sampler/CFG/negative instead of the generic defaults.
+    cfg = backend._load_config()
+    cfg["model_base"] = "NoobAI XL"
+    cfg["model_name"] = "noobaiXLNAIXL_epsilon.safetensors"
+    backend._save_config(cfg)
+    cfg = backend._load_config()
+    noob = backend.RENDER_DEFAULTS["noob"]
+    assert cfg["sampler_name"] == noob["sampler_name"]
+    assert cfg["guidance_scale"] == noob["guidance_scale"]
+    assert cfg["negative_prompt"] == noob["negative_prompt"]
+    assert "old, early" in cfg["negative_prompt"]
+    # The module supports e621-style subjects, so the anti-furry negatives
+    # from NoobAI's card must never ride along.
+    assert "anthro" not in cfg["negative_prompt"]
+
+    # Stock values keep tracking across a family switch; the resolved values
+    # written back by _save_config still count as stock.
+    cfg["model_base"] = "Pony"
+    backend._save_config(cfg)
+    cfg = backend._load_config()
+    assert cfg["sampler_name"] == backend.RENDER_DEFAULTS["pony"]["sampler_name"]
+    assert cfg["guidance_scale"] == backend.RENDER_DEFAULTS["pony"]["guidance_scale"]
+    assert cfg["negative_prompt"] == backend.RENDER_DEFAULTS["pony"]["negative_prompt"]
+
+    # A customized value is pinned and survives family switches; the other
+    # fields keep tracking independently.
+    cfg["guidance_scale"] = 4.5
+    cfg["negative_prompt"] = "my negative"
+    cfg["model_base"] = "Illustrious XL"
+    backend._save_config(cfg)
+    cfg = backend._load_config()
+    assert cfg["guidance_scale"] == 4.5
+    assert cfg["negative_prompt"] == "my negative"
+    assert cfg["sampler_name"] \
+        == backend.RENDER_DEFAULTS["illustrious"]["sampler_name"]
+
+    # Unrecognized families never touch the fields — a hand-picked sampler on
+    # a Flux/SD1.5/unmarked checkpoint must not snap back to any default.
+    cfg["sampler_name"] = "Euler a"
+    cfg["model_base"] = "SDXL 1.0"
+    backend._save_config(cfg)
+    cfg = backend._load_config()
+    assert cfg["sampler_name"] == "Euler a"
+    assert cfg["guidance_scale"] == 4.5
+    assert cfg["negative_prompt"] == "my negative"
+
+    # The local payload renders with the family-resolved settings.
+    cfg = backend._load_config()
+    cfg["model_base"] = "NoobAI XL"
+    cfg["guidance_scale"] = backend.DEFAULT_GUIDANCE_SCALE
+    cfg["sampler_name"] = backend.DEFAULT_SAMPLER_NAME
+    cfg["negative_prompt"] = backend.DEFAULT_NEGATIVE_PROMPT
+    backend._save_config(cfg)
+    payload = backend._local_payload(backend._load_config(), "1girl, forest")
+    assert payload["sampler_name"] == noob["sampler_name"]
+    assert payload["cfg_scale"] == noob["guidance_scale"]
+    assert payload["negative_prompt"] == noob["negative_prompt"]
+
+    # The Studio reads the per-family table from the config endpoint.
+    client = _client(backend)
+    body = client.get("/config").json()
+    assert body["render_defaults"] == backend.RENDER_DEFAULTS
+    assert body["default_negative_prompt"] == backend.DEFAULT_NEGATIVE_PROMPT
+
+
 def test_clean_character_tags_usage_filter(tmp_path):
     backend = _load_backend(tmp_path)
     backend._tag_dict_cache = dict(_TAG_DICT)

@@ -108,11 +108,15 @@ out-of-memory. Without the script everything still works, just serially.
 
 All the booru-tag checkpoint families the module recognizes (Pony,
 Illustrious, NoobAI, Animagine) work on the default Forge install, which the
-Studio pairs with tag-style prompts and the family's own quality tags
-automatically. Note that NoobAI v-pred checkpoints need a WebUI with SDXL
-v-prediction support — Forge handles them out of the box, classic
-AUTOMATIC1111 does not, so keep the default `WB_WEBUI_REPO` if you plan to
-use them.
+Studio pairs with tag-style prompts, the family's own quality tags, AND the
+family's recommended render settings automatically: sampler, guidance scale,
+and negative prompt follow the model card of the selected checkpoint's family
+(e.g. NoobAI renders with Euler a at CFG 5 and its own negative vocabulary
+instead of the generic DPM++ 2M Karras at CFG 7) as long as they are left at
+stock values — edit any of them in the Studio to pin your own. Note that
+NoobAI v-pred checkpoints need a WebUI with SDXL v-prediction support — Forge
+handles them out of the box, classic AUTOMATIC1111 does not, so keep the
+default `WB_WEBUI_REPO` if you plan to use them.
 
 Start the backend:
 

@@ -402,6 +402,58 @@ QUALITY_TAG_DEFAULTS = {
 DEFAULT_QUALITY_TAGS = QUALITY_TAG_DEFAULTS["pony"]
 STOCK_QUALITY_TAGS = frozenset(QUALITY_TAG_DEFAULTS.values())
 
+# Render settings per tag family, from each family's model card: the booru
+# families were tuned around Euler a at CFG ~5-7 and publish their own
+# negative-prompt vocabulary ("old"/"early" are NoobAI recency tags, the
+# counterpart of "newest" above; score_6/5/4 is Pony's) -- the generic
+# DPM++ 2M Karras at CFG 7 with a generic negative noticeably degrades
+# NoobAI/Illustrious output. Same stock-value rule as QUALITY_TAG_DEFAULTS:
+# a stored value still equal to ANY stock default was never customized and
+# keeps tracking the active checkpoint's family; an edited value is used
+# verbatim. NoobAI's card also lists anti-furry negatives (mammal, anthro,
+# furry, feral); those are deliberately excluded because the module
+# explicitly supports e621-style subjects.
+DEFAULT_SAMPLER_NAME = "DPM++ 2M Karras"
+DEFAULT_GUIDANCE_SCALE = 7.0
+DEFAULT_NEGATIVE_PROMPT = "blurry, low quality, watermark, text, deformed"
+RENDER_DEFAULTS = {
+    "pony": {
+        "sampler_name": "Euler a",
+        "guidance_scale": 7.0,
+        "negative_prompt": ("score_6, score_5, score_4, worst quality, "
+                            "low quality, jpeg artifacts, signature, "
+                            "watermark, username"),
+    },
+    "illustrious": {
+        "sampler_name": "Euler a",
+        "guidance_scale": 6.0,
+        "negative_prompt": ("worst quality, low quality, lowres, bad anatomy, "
+                            "bad hands, extra digits, jpeg artifacts, "
+                            "signature, watermark, username"),
+    },
+    "noob": {
+        "sampler_name": "Euler a",
+        "guidance_scale": 5.0,
+        "negative_prompt": ("worst quality, old, early, low quality, lowres, "
+                            "signature, username, logo, bad hands, "
+                            "mutated hands, ambiguous form, watermark"),
+    },
+    "animagine": {
+        "sampler_name": "Euler a",
+        "guidance_scale": 6.0,
+        "negative_prompt": ("lowres, bad anatomy, bad hands, text, error, "
+                            "missing fingers, extra digit, fewer digits, "
+                            "cropped, worst quality, low quality, "
+                            "jpeg artifacts, signature, watermark, username"),
+    },
+}
+STOCK_RENDER_SETTINGS = {
+    field: frozenset({default, *(d[field] for d in RENDER_DEFAULTS.values())})
+    for field, default in (("sampler_name", DEFAULT_SAMPLER_NAME),
+                           ("guidance_scale", DEFAULT_GUIDANCE_SCALE),
+                           ("negative_prompt", DEFAULT_NEGATIVE_PROMPT))
+}
+
 # Tag-trained checkpoints blend features badly when asked for several distinct
 # characters, so booru_subject_mode "single" narrows the prompt to one.
 BOORU_SINGLE_SUBJECT_RULE = """SINGLE SUBJECT RULE (MANDATORY): this image model renders one character far better than several, so depict exactly ONE. Pick the most relevant subject of the latest scene -- the character the moment centers on (acting, speaking, or being acted upon) -- and tag only them: solo, one subject-count tag (1girl, 1boy, 1other -- or e621 style for anthro/feral subjects: anthro or feral plus male/female), then that character's appearance, pose, and expression. Never tag a second character's count or appearance; at most, imply others through the setting (a shadow, a doorway, an empty chair). A scene with no characters at all may be pure scenery (no humans)."""
@@ -503,9 +555,9 @@ def _default_config() -> dict:
         "height": 1024,
         "image_num": 1,                 # parallel images per generation, 1..IMAGE_NUM_MAX
         "steps": 28,
-        "guidance_scale": 7.0,
-        "sampler_name": "DPM++ 2M Karras",
-        "negative_prompt": "blurry, low quality, watermark, text, deformed",
+        "guidance_scale": DEFAULT_GUIDANCE_SCALE,
+        "sampler_name": DEFAULT_SAMPLER_NAME,
+        "negative_prompt": DEFAULT_NEGATIVE_PROMPT,
         "interval": 3,
         "step_retries": STEP_RETRIES_DEFAULT,
         "prompt_model_preference": "smartest",
@@ -694,6 +746,19 @@ def _effective_config(store: dict) -> dict:
     if cfg.get("quality_tags") in STOCK_QUALITY_TAGS:
         cfg["quality_tags"] = QUALITY_TAG_DEFAULTS.get(
             _tag_model_marker(cfg) or "", DEFAULT_QUALITY_TAGS)
+    # Sampler, guidance scale and negative prompt follow the checkpoint
+    # family the same way (RENDER_DEFAULTS): a stored value still equal to
+    # ANY stock default was never customized, so it keeps tracking the
+    # active checkpoint's recommended settings. Unrecognized families keep
+    # their values verbatim -- there is no render-time withholding like
+    # _quality_tags, and snapping a hand-picked sampler back to the generic
+    # default would discard user input on every Flux/SD1.5/unmarked
+    # checkpoint.
+    family_render = RENDER_DEFAULTS.get(_tag_model_marker(cfg) or "")
+    if family_render:
+        for field, stock in STOCK_RENDER_SETTINGS.items():
+            if cfg.get(field) in stock:
+                cfg[field] = family_render[field]
     if cfg.get("tag_usage_filter") not in TAG_USAGE_FILTER_MODES:
         cfg["tag_usage_filter"] = "off"
     try:
@@ -4285,6 +4350,8 @@ def get_router():
         out["default_prompt_template"] = DEFAULT_PROMPT_TEMPLATE
         out["default_prompt_template_tags"] = DEFAULT_PROMPT_TEMPLATE_TAGS
         out["quality_tag_defaults"] = QUALITY_TAG_DEFAULTS
+        out["render_defaults"] = RENDER_DEFAULTS
+        out["default_negative_prompt"] = DEFAULT_NEGATIVE_PROMPT
         out["prompt_style"] = _prompt_style(cfg)   # resolved; the stored mode rides in as prompt_style_mode
         out["prompt_style_modes"] = PROMPT_STYLE_MODES
         out["civitai_sorts"] = CIVITAI_SORTS

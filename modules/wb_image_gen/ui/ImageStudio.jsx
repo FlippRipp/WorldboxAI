@@ -2777,6 +2777,14 @@ export default function ImageStudio({ onBack }) {
     ['pony', 'illustrious', 'noob', 'animagine'].find((m) => modelIdent.includes(m)) || null;
   const qualityDefault =
     (config?.quality_tag_defaults || {})[qualityMarker || 'pony'] || 'score_9, score_8_up, score_7_up';
+  // Mirror of the backend's RENDER_DEFAULTS resolution: the family's
+  // recommended sampler/CFG/negative prompt. Null for natural-language and
+  // unrecognized models, which keep whatever is stored.
+  const renderDefaults = (config?.render_defaults || {})[qualityMarker] || null;
+  const negativeDefault =
+    renderDefaults?.negative_prompt
+    || config?.default_negative_prompt
+    || 'blurry, low quality, watermark, text, deformed';
   const isLocal = (draft.provider || config?.provider) === 'local';
   const checkpointFamily =
     draft.model_name === config?.flux2_model_name ? 'flux' : baseFamily(modelIdent);
@@ -3321,6 +3329,29 @@ export default function ImageStudio({ onBack }) {
               ))}
             </select>
           </div>
+          {renderDefaults && (
+            <div className="text-xs text-gray-500 bg-gray-950/60 border border-gray-800 rounded-lg px-3 py-2 flex items-center justify-between gap-3">
+              <span>
+                This checkpoint family's recommended settings:{' '}
+                <span className="text-purple-300 font-medium">{renderDefaults.sampler_name}</span> at
+                guidance <span className="text-purple-300 font-medium">{renderDefaults.guidance_scale}</span>.
+                Left at stock values, sampler, guidance and negative prompt follow the
+                family automatically; edited values are kept as-is.
+              </span>
+              {(draft.sampler_name !== renderDefaults.sampler_name
+                || Number(draft.guidance_scale) !== renderDefaults.guidance_scale) && (
+                <button
+                  onClick={() => {
+                    set('sampler_name', renderDefaults.sampler_name);
+                    set('guidance_scale', renderDefaults.guidance_scale);
+                  }}
+                  className="text-xs text-purple-400 hover:text-purple-300 whitespace-nowrap"
+                >
+                  Apply recommended
+                </button>
+              )}
+            </div>
+          )}
         </section>
         )}
 
@@ -3545,13 +3576,27 @@ export default function ImageStudio({ onBack }) {
             />
           </div>
           <div>
-            <label className={labelCls}>Negative Prompt</label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className={labelCls}>Negative Prompt</label>
+              <button
+                onClick={() => set('negative_prompt', negativeDefault)}
+                className="text-xs text-gray-500 hover:text-gray-300"
+              >
+                Reset to default
+              </button>
+            </div>
             <AutoGrowTextarea
               value={draft.negative_prompt || ''}
               onChange={(e) => set('negative_prompt', e.target.value)}
-              placeholder="blurry, low quality, watermark, text"
+              placeholder={negativeDefault}
               className={inputCls}
             />
+            <p className="text-xs text-gray-600 mt-1">
+              Each tag-trained family has its own negative vocabulary — NoobAI knows
+              recency tags (old, early), Pony its score_* scale. Left at a stock value
+              the field follows the checkpoint family automatically; edit it to pin
+              your own for this profile.
+            </p>
           </div>
         </section>
         )}
