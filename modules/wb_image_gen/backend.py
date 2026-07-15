@@ -137,6 +137,24 @@ SCHEDULERS = [
     "DDIM",
     "Beta",
 ]
+# Hires fix (two-pass upscale, the standard fine-detail pass for SDXL
+# checkpoints): render at base size, upscale hires_scale x, re-diffuse at
+# low denoise. Local provider only, like the scheduler. The fallback
+# upscaler list mirrors what A1111/Forge ship built-in; the WebUI's real
+# list comes from /local/upscalers. R-ESRGAN 4x+ Anime6B is bundled and
+# the community default for anime checkpoints.
+UPSCALERS = [
+    "Latent",
+    "Lanczos",
+    "Nearest",
+    "ESRGAN_4x",
+    "R-ESRGAN 4x+",
+    "R-ESRGAN 4x+ Anime6B",
+    "SwinIR 4x",
+]
+DEFAULT_HIRES_UPSCALER = "R-ESRGAN 4x+ Anime6B"
+HIRES_SCALE_MIN, HIRES_SCALE_MAX = 1.0, 4.0
+HIRES_STEPS_MAX = 150
 KEY_MASK_PREFIX = "****"
 
 # Novita rejects prompts over 1024 characters.
@@ -158,7 +176,9 @@ LORA_LLM_MODES = ("off", "gate", "weight", "both")
 # together cover every key of _default_config() except lora_library.
 PROFILE_FIELDS = (
     "model_name", "model_base", "width", "height", "image_num", "steps",
-    "guidance_scale", "sampler_name", "scheduler", "negative_prompt", "style_suffix",
+    "guidance_scale", "sampler_name", "scheduler",
+    "hires_enabled", "hires_scale", "hires_upscaler", "hires_steps",
+    "hires_denoise", "negative_prompt", "style_suffix",
     "quality_tags", "booru_subject_mode", "booru_break_separator",
     "tag_usage_filter", "tag_usage_min_count", "prompt_template",
     "prompt_template_tags", "prompt_style_mode",
@@ -606,6 +626,11 @@ def _default_config() -> dict:
         "guidance_scale": DEFAULT_GUIDANCE_SCALE,
         "sampler_name": DEFAULT_SAMPLER_NAME,
         "scheduler": DEFAULT_SCHEDULER,   # local only; Novita never sees it
+        "hires_enabled": False,           # local only: two-pass hires-fix upscale
+        "hires_scale": 1.5,
+        "hires_upscaler": DEFAULT_HIRES_UPSCALER,
+        "hires_steps": 14,                # second pass; 0 = reuse base steps
+        "hires_denoise": 0.4,             # >0.5 risks anatomy drift
         "negative_prompt": DEFAULT_NEGATIVE_PROMPT,
         "interval": 3,
         "step_retries": STEP_RETRIES_DEFAULT,
@@ -2875,6 +2900,20 @@ def _local_payload(cfg: dict, image_prompt: str,
     scheduler = str(cfg.get("scheduler") or "").strip()
     if scheduler_ok and scheduler and scheduler.lower() != "automatic":
         payload["scheduler"] = scheduler
+    # Hires fix: render at base size, then upscale hires_scale x and
+    # re-diffuse at low denoise — the standard fine-detail pass for SDXL
+    # checkpoints. The enable_hr family of fields has existed since early
+    # A1111, so no probe is needed; hr_additional_modules is Forge-specific
+    # (some builds fail without the key) and unknown keys are ignored by
+    # A1111's API models.
+    if cfg.get("hires_enabled"):
+        payload["enable_hr"] = True
+        payload["hr_scale"] = float(cfg.get("hires_scale", 1.5))
+        payload["hr_upscaler"] = str(cfg.get("hires_upscaler")
+                                     or DEFAULT_HIRES_UPSCALER)
+        payload["hr_second_pass_steps"] = int(cfg.get("hires_steps", 14))
+        payload["denoising_strength"] = float(cfg.get("hires_denoise", 0.4))
+        payload["hr_additional_modules"] = []
     return payload
 
 
@@ -4415,6 +4454,11 @@ def get_router():
         guidance_scale: float | None = None
         sampler_name: str | None = None
         scheduler: str | None = None
+        hires_enabled: bool | None = None
+        hires_scale: float | None = None
+        hires_upscaler: str | None = None
+        hires_steps: int | None = None
+        hires_denoise: float | None = None
         negative_prompt: str | None = None
         interval: int | None = None
         step_retries: int | None = None
@@ -4644,6 +4688,20 @@ def get_router():
             if len(name) > 100:
                 raise HTTPException(status_code=400, detail="Invalid scheduler name")
             incoming["scheduler"] = name or DEFAULT_SCHEDULER
+        if "hires_upscaler" in incoming:
+            # Same deal as the scheduler: the WebUI owns the valid name set.
+            name = str(incoming["hires_upscaler"]).strip()
+            if len(name) > 100:
+                raise HTTPException(status_code=400, detail="Invalid upscaler name")
+            incoming["hires_upscaler"] = name or DEFAULT_HIRES_UPSCALER
+        if "hires_scale" in incoming:
+            incoming["hires_scale"] = round(
+                max(HIRES_SCALE_MIN, min(HIRES_SCALE_MAX, incoming["hires_scale"])), 2)
+        if "hires_steps" in incoming:
+            incoming["hires_steps"] = max(0, min(HIRES_STEPS_MAX, incoming["hires_steps"]))
+        if "hires_denoise" in incoming:
+            incoming["hires_denoise"] = round(
+                max(0.0, min(1.0, incoming["hires_denoise"])), 2)
         for side in ("width", "height"):
             if side in incoming:
                 incoming[side] = max(128, min(2048, (int(incoming[side]) // 8) * 8))
@@ -5266,6 +5324,27 @@ def get_router():
         except RuntimeError:
             names = []
         return {"samplers": names or list(SAMPLERS)}
+
+    @router.get("/local/upscalers")
+    async def local_upscalers():
+        """Upscaler names for the hires-fix dropdown: the WebUI's latent
+        modes (which /sdapi/v1/upscalers omits) plus its upscaler models,
+        or the static fallback when the WebUI can't answer. "None" is
+        dropped — it means "no upscaling" and defeats the feature."""
+        cfg = _load_config()
+        names: list[str] = []
+        for path in ("/sdapi/v1/latent-upscale-modes", "/sdapi/v1/upscalers"):
+            try:
+                body = await _local_get(cfg, path)
+            except RuntimeError:
+                continue
+            for item in body if isinstance(body, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if name and name.lower() != "none" and name not in names:
+                    names.append(name)
+        return {"upscalers": names or list(UPSCALERS)}
 
     @router.get("/local/schedulers")
     async def local_schedulers():

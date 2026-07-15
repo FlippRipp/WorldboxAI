@@ -4350,6 +4350,74 @@ def test_local_payload_scheduler_and_override_pins(tmp_path):
     assert batch["script_name"] == backend.LOCAL_BATCH_SCRIPT_TITLE
 
 
+def test_local_payload_hires_fix(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = {**backend._default_config(), "provider": "local",
+           "model_name": "noob.safetensors"}
+
+    # Off by default: no hires fields at all, so plain renders are unchanged.
+    payload = backend._local_payload(cfg, "1girl")
+    assert "enable_hr" not in payload and "denoising_strength" not in payload
+
+    cfg.update({"hires_enabled": True, "hires_scale": 1.5,
+                "hires_upscaler": "R-ESRGAN 4x+ Anime6B",
+                "hires_steps": 14, "hires_denoise": 0.4})
+    payload = backend._local_payload(cfg, "1girl")
+    assert payload["enable_hr"] is True
+    assert payload["hr_scale"] == 1.5
+    assert payload["hr_upscaler"] == "R-ESRGAN 4x+ Anime6B"
+    assert payload["hr_second_pass_steps"] == 14
+    assert payload["denoising_strength"] == 0.4
+    # Forge-specific key some builds require; ignored elsewhere.
+    assert payload["hr_additional_modules"] == []
+
+    # The GPU-batch payload inherits the hires pass — the script only
+    # overrides prompts/batch_size, so every image in the batch upscales.
+    batch = backend._local_batch_payload(cfg, ["a", "b"])
+    assert batch["enable_hr"] is True
+    assert batch["script_name"] == backend.LOCAL_BATCH_SCRIPT_TITLE
+
+
+def test_hires_config_and_upscalers_endpoint(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    # Numeric fields clamp instead of erroring; the upscaler name validates
+    # like the scheduler (WebUI owns the valid set).
+    body = client.put("/config", json={"hires_enabled": True, "hires_scale": 9.0,
+                                       "hires_steps": 999, "hires_denoise": 3.0}).json()
+    assert body["hires_enabled"] is True
+    assert body["hires_scale"] == backend.HIRES_SCALE_MAX
+    assert body["hires_steps"] == backend.HIRES_STEPS_MAX
+    assert body["hires_denoise"] == 1.0
+    assert client.put("/config", json={"hires_upscaler": "x" * 101}).status_code == 400
+    assert client.put("/config", json={"hires_upscaler": "  "}).json()["hires_upscaler"] \
+        == backend.DEFAULT_HIRES_UPSCALER
+    # Round-trips persist per profile.
+    assert backend._load_config()["hires_enabled"] is True
+
+    # The dropdown list merges latent modes (missing from /upscalers) with
+    # the WebUI's upscaler models, dropping "None" and junk entries.
+    async def fake_get(cfg, path, timeout=None):
+        if path == "/sdapi/v1/latent-upscale-modes":
+            return [{"name": "Latent"}, {"name": "Latent (nearest)"}]
+        if path == "/sdapi/v1/upscalers":
+            return [{"name": "None"}, {"name": "Lanczos"},
+                    {"name": "R-ESRGAN 4x+ Anime6B"}, {"bad": 1}, None]
+        raise AssertionError(path)
+
+    backend._local_get = fake_get
+    assert client.get("/local/upscalers").json()["upscalers"] \
+        == ["Latent", "Latent (nearest)", "Lanczos", "R-ESRGAN 4x+ Anime6B"]
+
+    # Unreachable WebUI: the static fallback keeps the select usable.
+    async def dead_get(cfg, path, timeout=None):
+        raise RuntimeError("down")
+
+    backend._local_get = dead_get
+    assert client.get("/local/upscalers").json()["upscalers"] == list(backend.UPSCALERS)
+
+
 def test_local_schedulers_probe_and_cache(tmp_path):
     backend = _load_backend(tmp_path)
     cfg = {**backend._default_config(), "provider": "local",

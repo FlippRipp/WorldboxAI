@@ -133,6 +133,14 @@ filename) deserve extra care:
 - Classic AUTOMATIC1111 cannot sample SDXL v-pred at all — keep the default
   `WB_WEBUI_REPO` (Forge) if you plan to use these checkpoints.
 
+For finer detail than ~30 base steps can deliver, enable **Hires fix** in the
+Studio's generation settings (local provider only): the image renders at the
+base size, then upscales (default 1.5× with R-ESRGAN 4x+ Anime6B, denoise
+0.4) and re-diffuses — the standard detail pass for SDXL checkpoints. It
+roughly doubles render time and VRAM per image; if batched multi-image
+generations start hitting out-of-memory, lower the "GPU batch size" setting
+(the pipeline also falls back to one-image requests automatically on OOM).
+
 Start the backend:
 
 ```powershell

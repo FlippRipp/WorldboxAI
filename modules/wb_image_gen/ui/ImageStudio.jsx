@@ -2835,6 +2835,20 @@ export default function ImageStudio({ onBack }) {
   }, [isLocal]);
   const schedulerOptions = localSchedulers?.schedulers || ['Automatic', 'SGM Uniform', 'Karras', 'Uniform', 'Simple'];
 
+  // Upscaler names for the hires-fix dropdown, from the WebUI when it answers.
+  const [localUpscalers, setLocalUpscalers] = useState(null);
+  useEffect(() => {
+    if (!isLocal) return undefined;
+    let cancelled = false;
+    fetch(`${API_BASE}/local/upscalers`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => { if (!cancelled && data) setLocalUpscalers(data.upscalers || null); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [isLocal]);
+  const upscalerOptions = localUpscalers
+    || ['Latent', 'Lanczos', 'ESRGAN_4x', 'R-ESRGAN 4x+', 'R-ESRGAN 4x+ Anime6B', 'SwinIR 4x'];
+
   const save = async () => {
     setSaving(true);
     setSaveError('');
@@ -2850,6 +2864,11 @@ export default function ImageStudio({ onBack }) {
         guidance_scale: Number(draft.guidance_scale) || 7,
         sampler_name: draft.sampler_name,
         scheduler: draft.scheduler || 'Automatic',
+        hires_enabled: draft.hires_enabled === true,
+        hires_scale: Number(draft.hires_scale) || 1.5,
+        hires_upscaler: draft.hires_upscaler || 'R-ESRGAN 4x+ Anime6B',
+        hires_steps: Math.max(0, Number(draft.hires_steps) || 0),
+        hires_denoise: Number(draft.hires_denoise ?? 0.4),
         negative_prompt: draft.negative_prompt,
         interval: Number(draft.interval) || 3,
         step_retries: Math.max(0, Number(draft.step_retries) || 0),
@@ -3385,6 +3404,74 @@ export default function ImageStudio({ onBack }) {
                   ? 'Your WebUI predates the scheduler API (A1111 1.9+) — this setting is not sent.'
                   : 'v-pred checkpoints need SGM Uniform — never Karras or Beta. Automatic lets the WebUI pick.'}
               </p>
+            </div>
+          )}
+          {isLocal && (
+            <div className="space-y-2">
+              <Toggle
+                checked={draft.hires_enabled === true}
+                onChange={(v) => set('hires_enabled', v)}
+                label="Hires fix — two-pass upscale for fine detail"
+              />
+              {draft.hires_enabled === true && (
+                <>
+                  <div className="grid sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className={labelCls}>Upscale: {Number(draft.hires_scale) || 1.5}×</label>
+                      <input
+                        type="range" min={1} max={2.5} step={0.05}
+                        value={Number(draft.hires_scale) || 1.5}
+                        onChange={(e) => set('hires_scale', Number(e.target.value))}
+                        className="w-full accent-purple-500"
+                      />
+                    </div>
+                    <div>
+                      <label className={labelCls}>Denoise: {draft.hires_denoise ?? 0.4}</label>
+                      <input
+                        type="range" min={0} max={1} step={0.05}
+                        value={draft.hires_denoise ?? 0.4}
+                        onChange={(e) => set('hires_denoise', Number(e.target.value))}
+                        className="w-full accent-purple-500"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className={labelCls}>Upscaler</label>
+                      <select
+                        value={draft.hires_upscaler || 'R-ESRGAN 4x+ Anime6B'}
+                        onChange={(e) => set('hires_upscaler', e.target.value)}
+                        className={inputCls}
+                      >
+                        {draft.hires_upscaler && !upscalerOptions.includes(draft.hires_upscaler) && (
+                          <option value={draft.hires_upscaler}>{draft.hires_upscaler}</option>
+                        )}
+                        {upscalerOptions.map((u) => (
+                          <option key={u} value={u}>{u}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className={labelCls}>Second-pass steps: {draft.hires_steps ?? 14}</label>
+                      <input
+                        type="range" min={0} max={40}
+                        value={draft.hires_steps ?? 14}
+                        onChange={(e) => set('hires_steps', Number(e.target.value))}
+                        className="w-full accent-purple-500"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-600">
+                    Renders at the base size, then upscales and re-diffuses — the standard
+                    fine-detail pass for SDXL checkpoints (R-ESRGAN 4x+ Anime6B at 1.5×,
+                    denoise 0.35–0.45, 12–16 steps is the anime sweet spot). Keep denoise
+                    ≤ 0.5 or anatomy starts drifting; 0 second-pass steps reuses the base
+                    step count. Roughly doubles render time and VRAM — if multi-image
+                    generations start failing with out-of-memory, lower the GPU batch size
+                    in the Setup tab.
+                  </p>
+                </>
+              )}
             </div>
           )}
           {renderDefaults && (
