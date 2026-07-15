@@ -23,7 +23,7 @@
       "label": "Hardcore Mode",
       "category": "Core RPG System",
       "locks_module_settings": true,
-      "confirm": "Enable Hardcore Mode?\n\nAll Core RPG settings will be permanently locked at their current values. This cannot be undone.",
+      "confirm": "Enable Hardcore Mode?\n\nYour settings will be saved immediately, and all Core RPG settings will be permanently locked at their current values. This cannot be undone.",
       "description": "Permanently locks all Core RPG settings at their current values."
     },
     "progression_system": {

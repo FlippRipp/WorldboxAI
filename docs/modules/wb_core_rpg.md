@@ -126,8 +126,10 @@ gate is enforced server-side — with cheats off the endpoint returns 403.
 ### Hardcore Mode
 
 `hardcore_mode` is a one-way lock, flagged `locks_module_settings` in the
-manifest. Enabling it asks for confirmation (the flip cannot be undone), then
-greys out every Core RPG control in the settings modal — the toggle itself
+manifest. Enabling it opens an in-app confirmation dialog; confirming saves
+all staged settings immediately (the lock freezes the values on screen, so
+they persist together with it — no separate Save & Close needed) and greys
+out every Core RPG control in the settings modal — the toggle itself
 included — and disables the module's advanced-settings button. The lock is
 enforced server-side: while the stored value is on,
 `PUT /api/session/module-configs` rejects any change to the module's section

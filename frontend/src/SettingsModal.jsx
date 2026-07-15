@@ -159,6 +159,8 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
   const [error, setError] = useState(null);
   const [saveError, setSaveError] = useState(null);
   const [advSettingsMod, setAdvSettingsMod] = useState(null);
+  // Pending lock-toggle confirmation: {modId, modName, key, message} | null.
+  const [confirmLock, setConfirmLock] = useState(null);
   // Global cheat toggle; gates the unlock button on hardcore-locked module
   // settings. The server enforces the same gate, so this is purely cosmetic.
   const [cheatsEnabled, setCheatsEnabled] = useState(false);
@@ -219,25 +221,50 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
     }));
   };
 
+  const saveAll = async (modValues) => {
+    const engineUpdates = {};
+    Object.values(engineSettings).forEach(items => {
+      items.forEach(s => {
+        if (engineValues[s.key] !== s.value) {
+          engineUpdates[s.key] = engineValues[s.key];
+        }
+      });
+    });
+    if (Object.keys(engineUpdates).length > 0) {
+      await api.updateSettings(engineUpdates, scope);
+    }
+    if (!isGlobal) {
+      await onSaveModuleConfigs(modValues);
+    }
+  };
+
   const handleSave = async () => {
     setSaveError(null);
     try {
-      const engineUpdates = {};
-      Object.values(engineSettings).forEach(items => {
-        items.forEach(s => {
-          if (engineValues[s.key] !== s.value) {
-            engineUpdates[s.key] = engineValues[s.key];
-          }
-        });
-      });
-      if (Object.keys(engineUpdates).length > 0) {
-        await api.updateSettings(engineUpdates, scope);
-      }
-      if (!isGlobal) {
-        await onSaveModuleConfigs(moduleValues);
-      }
+      await saveAll(moduleValues);
       onClose();
     } catch (e) {
+      setSaveError(e.message || 'Failed to save settings.');
+    }
+  };
+
+  // Confirming a lock toggle persists everything immediately — the lock
+  // freezes the values the user is looking at, so they must be saved with
+  // it, not left staged until Save & Close.
+  const handleConfirmLock = async () => {
+    const { modId, key } = confirmLock;
+    const nextValues = {
+      ...moduleValues,
+      [modId]: { ...moduleValues[modId], [key]: true },
+    };
+    setConfirmLock(null);
+    setSaveError(null);
+    setModuleValues(nextValues);
+    try {
+      await saveAll(nextValues);
+    } catch (e) {
+      // Nothing was persisted; undo the flip so the section stays editable.
+      setModuleValues(moduleValues);
       setSaveError(e.message || 'Failed to save settings.');
     }
   };
@@ -335,8 +362,14 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
                             disabled={locked}
                             onChange={(v) => {
                               if (key === lockKey && v === true) {
-                                const msg = schema.confirm || `Lock ${mod.name} settings at their current values? This cannot be undone.`;
-                                if (!window.confirm(msg)) return;
+                                setConfirmLock({
+                                  modId: mod.id,
+                                  modName: mod.name,
+                                  key,
+                                  label: schema.label || key,
+                                  message: schema.confirm || `${mod.name} settings will be saved and permanently locked at their current values. This cannot be undone.`,
+                                });
+                                return;
                               }
                               handleModuleChange(mod.id, key, v);
                             }}
@@ -392,6 +425,33 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
         moduleConfigs={moduleConfigs}
         onSaveModuleConfigs={onSaveModuleConfigs}
       />
+
+      {confirmLock && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4" role="alertdialog" aria-modal="true" aria-label={confirmLock.label}>
+          <div className="bg-gray-800 w-full max-w-md rounded-lg shadow-2xl border border-gray-700">
+            <div className="p-4 border-b border-gray-700 bg-gray-900 rounded-t-lg">
+              <h3 className="text-lg font-bold text-amber-400">{confirmLock.label}</h3>
+            </div>
+            <div className="p-4 text-sm text-gray-300 whitespace-pre-line leading-relaxed">
+              {confirmLock.message}
+            </div>
+            <div className="p-4 border-t border-gray-700 bg-gray-900 rounded-b-lg flex justify-end gap-3">
+              <button
+                onClick={() => setConfirmLock(null)}
+                className="px-4 py-2 text-sm text-gray-300 bg-gray-700 hover:bg-gray-600 rounded font-medium transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmLock}
+                className="px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-500 rounded font-medium transition-colors"
+              >
+                Save & Lock
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
