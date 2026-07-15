@@ -1147,9 +1147,10 @@ async def _command_regen(state: dict, sdk, data: dict) -> dict:
 async def _command_reset(state: dict, sdk) -> dict:
     """Cheat: wipe ALL plot data -- profile (player-set dislikes included),
     narrative direction, thread history, log, and the active thread -- then
-    rebuild from the story so far: a fresh player analysis, a newly seeded
-    direction, and a first thread. Any step that fails is retried by the
-    normal librarian machinery on the following turns."""
+    rebuild from the story so far in the same pass: a fresh player analysis,
+    a newly seeded direction, and a first thread. Any step that fails is
+    retried by the normal librarian machinery on the following turns. The
+    widget empties itself optimistically while this runs."""
     turn = state.get("turn", 0)
     fresh = _default_data()
     notes = []

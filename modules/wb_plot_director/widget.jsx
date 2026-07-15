@@ -205,11 +205,23 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
   const [editing, setEditing] = useState(false);
   const [toneDraft, setToneDraft] = useState(null);
   const [resetArmed, setResetArmed] = useState(false);
+  // Optimistic wipe: set on reset-confirm so the panel empties immediately as
+  // feedback while the rebuild command (analysis + direction + thread) runs
+  // server-side; the next state_update replaces the module data and clears it.
+  const [resetting, setResetting] = useState(false);
   const cheatMode = useCheatMode();
 
-  const data = state?.module_data?.wb_plot_director;
-  if (!data) return null;
+  const liveData = state?.module_data?.wb_plot_director;
+  useEffect(() => { setResetting(false); }, [liveData]);
+  if (!liveData) return null;
   if (config?.plot_enabled === false) return null;
+
+  // While resetting, render from a blank slate instead of the doomed data.
+  const data = resetting
+    ? { schema: liveData.schema, status: 'observing', thread: { status: 'none' },
+        profile: {}, direction: {}, thread_history: [], momentum: 'observing',
+        ignored_streak: 0 }
+    : liveData;
 
   const legacy = !(data.schema >= 2);
   const thread = data.thread ?? {};
@@ -242,17 +254,19 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
     || attachments.length > 0 || narrativeLine || profile.notes;
   const hasDirection = !legacy && (direction.premise ?? '').trim() !== '';
 
-  const subtitle = suspended
-    ? (hasThread ? `⏸ ${thread.title}` : 'Suspended')
-    : hasThread
-      ? thread.title
-      : data.status === 'failed'
-        ? 'Inactive'
-        : legacy || data.status === 'observing'
-          ? 'Observing your story…'
-          : breathing
-            ? 'Letting the story breathe…'
-            : 'Weaving a new thread…';
+  const subtitle = resetting
+    ? 'Plot data cleared — rebuilding from your story…'
+    : suspended
+      ? (hasThread ? `⏸ ${thread.title}` : 'Suspended')
+      : hasThread
+        ? thread.title
+        : data.status === 'failed'
+          ? 'Inactive'
+          : legacy || data.status === 'observing'
+            ? 'Observing your story…'
+            : breathing
+              ? 'Letting the story breathe…'
+              : 'Weaving a new thread…';
 
   const saveTone = () => {
     if (toneDraft === null || toneDraft.trim() === tone) { setToneDraft(null); return; }
@@ -300,7 +314,7 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
             {data.status === 'failed' ? (
               <div className="text-xs text-gray-600">Plot direction inactive.</div>
             ) : !hasThread ? (
-              <div className="text-xs text-gray-500 italic">{subtitle}</div>
+              <div className={`text-xs text-gray-500 italic ${resetting ? 'animate-pulse' : ''}`}>{subtitle}</div>
             ) : (
               <div className="bg-gray-900/70 rounded-lg border border-gray-700 p-3 space-y-1.5">
                 <div className="text-gray-100 font-semibold leading-snug">{thread.title}</div>
@@ -473,7 +487,7 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
               </div>
             )}
 
-            {!legacy && data.status !== 'failed' && (
+            {!legacy && !resetting && data.status !== 'failed' && (
               <div className="border-t border-gray-700 pt-3 space-y-2">
                 {!suspended && (
                   <div>
@@ -516,17 +530,23 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
                   onClick={() => {
                     if (!resetArmed) { setResetArmed(true); return; }
                     setResetArmed(false);
+                    setResetting(true);
+                    setEditing(false);
                     onCommand?.('/plot reset confirm');
                   }}
                   onBlur={() => setResetArmed(false)}
-                  disabled={!onCommand}
+                  disabled={!onCommand || resetting}
                   className={`w-full py-2 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold transition-colors ${
                     resetArmed
                       ? 'bg-red-600/90 hover:bg-red-500 text-gray-100'
                       : 'bg-gray-800 border border-red-900/60 hover:border-red-700 text-red-400'
                   }`}
                 >
-                  {resetArmed ? '⚠ Really wipe everything? Click again' : '☠ Reset plot data (cheat)'}
+                  {resetting
+                    ? '⏳ Rebuilding from your story…'
+                    : resetArmed
+                      ? '⚠ Really wipe everything? Click again'
+                      : '☠ Reset plot data (cheat)'}
                 </button>
                 <div className="text-[10px] text-gray-600 mt-1.5 text-center">
                   Clears the profile (dislikes included), story direction, and thread history,
