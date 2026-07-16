@@ -1480,3 +1480,55 @@ def test_generation_prompt_includes_rpg_skills():
     assert "grace" not in prompt  # only the strongest three stats
     # The fit-check critic doesn't need the sheet -- generation only.
     assert "PLAYER CHARACTER SHEET" not in captured["prompts"][1]
+
+
+def test_instruction_slots_defaults_and_overrides():
+    """The module exposes customizable instruction slots; defaults appear
+    verbatim in the prompts, an override replaces exactly its directive while
+    the JSON contract scaffolding stays fixed."""
+    backend = _load_backend()
+
+    slots = backend.get_instruction_slots()
+    assert [s["id"] for s in slots] == [
+        "thread_generation", "fit_check", "turn_assessment",
+        "direction_update", "profile_bootstrap",
+    ]
+    assert all(str(s["default"]).strip() and s["label"] and s["description"] for s in slots)
+
+    data = backend._default_data()
+
+    # Thread generation: default directive present...
+    captured = {}
+    asyncio.run(backend._generate_thread(_state(), _make_sdk([THREAD_REPLY], captured), data))
+    assert "GROUND IT" in captured["prompts"][0]
+
+    # ...override replaces it; the JSON contract survives.
+    captured = {}
+    state = _state(module_instructions={"thread_generation": "Threads must always involve the sea."})
+    asyncio.run(backend._generate_thread(state, _make_sdk([THREAD_REPLY], captured), data))
+    prompt = captured["prompts"][0]
+    assert "Threads must always involve the sea." in prompt
+    assert "GROUND IT" not in prompt
+    assert "Respond with ONLY valid JSON" in prompt
+
+    # Fit check: override replaces the criteria list.
+    captured = {}
+    candidate = {"title": "t", "hook": "h", "challenge": "c", "stakes": "s", "appeal": "a"}
+    state = _state(module_instructions={"fit_check": "Reject anything that is not nautical."})
+    asyncio.run(backend._fit_check(state, _make_sdk([CRITIC_ACCEPT], captured), data, candidate))
+    prompt = captured["prompts"][0]
+    assert "Reject anything that is not nautical." in prompt
+    assert "Tone/genre fit" not in prompt
+
+    # Direction update: override lands after the fixed consequence rule.
+    captured = {}
+    state = _state(module_instructions={"direction_update": "Direction leans maritime."})
+    asyncio.run(backend._update_direction(
+        state, _make_sdk([DIRECTION_REPLY], captured), data,
+        closed_thread={"title": "t", "hook": "h", "challenge": "c", "stakes": "s"},
+        outcome="resolved",
+    ))
+    prompt = captured["prompts"][0]
+    assert "Direction leans maritime." in prompt
+    assert "recurring_elements: up to" not in prompt
+    assert "consequence: ONE sentence" in prompt  # fixed scaffolding stays

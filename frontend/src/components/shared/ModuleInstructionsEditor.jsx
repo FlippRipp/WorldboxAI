@@ -113,6 +113,77 @@ function SlotEditor({ modId, slot, text, scenarioDefault, scenarioContext, onTex
   );
 }
 
+// One AI box for the whole module: a single request is applied across every
+// instruction slot in one LLM call. Slots the request doesn't concern are
+// left untouched; the per-slot ✨ Rewrite boxes remain for targeted edits.
+function ModuleRewriteAll({ modId, slots, modValue, scenarioContext, onMerge }) {
+  const [req, setReq] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [applied, setApplied] = useState(null); // slot ids last rewritten
+
+  const rewriteAll = async () => {
+    const request = req.trim();
+    if (!request || busy) return;
+    setBusy(true);
+    setError('');
+    setApplied(null);
+    try {
+      const current = {};
+      for (const slot of slots) {
+        const text = (modValue[slot.id] || '').trim();
+        if (text) current[slot.id] = text;
+      }
+      const res = await api.rewriteAllModuleInstructions(modId, {
+        request,
+        current: Object.keys(current).length ? current : null,
+        scenarioContext: scenarioContext || null,
+      });
+      onMerge(res.instructions || {});
+      setApplied(Object.keys(res.instructions || {}));
+      setReq('');
+    } catch (e) {
+      setError(e.message || 'Rewrite failed.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const labelFor = (id) => slots.find((s) => s.id === id)?.label || id;
+
+  return (
+    <div className="rounded-lg border border-purple-800/50 bg-purple-950/20 p-3 space-y-2">
+      <div className="text-xs text-gray-400">
+        Describe a change once and the AI applies it across all of this module's instructions,
+        touching only the ones it concerns.
+      </div>
+      <div className="flex items-center gap-2">
+        <input
+          value={req}
+          onChange={(e) => { setReq(e.target.value); setError(''); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); rewriteAll(); } }}
+          placeholder='e.g. "everything should revolve around naval life and the sea"'
+          className="flex-1 px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-purple-500"
+        />
+        <button
+          onClick={rewriteAll}
+          disabled={busy || !req.trim()}
+          className="shrink-0 px-3 py-1.5 rounded-lg text-xs bg-purple-700 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed text-white transition-colors"
+          title="One AI call rewrites every instruction this request concerns"
+        >
+          {busy ? 'Rewriting…' : '✨ Rewrite all'}
+        </button>
+      </div>
+      {error && <p className="text-xs text-red-400">{error}</p>}
+      {applied && (
+        <p className="text-xs text-emerald-400/90">
+          Updated: {applied.map(labelFor).join(', ')}. Review below and adjust freely.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function ModuleSection({ mod, value, scenarioDefaults, scenarioContext, onChange }) {
   const [slots, setSlots] = useState(null);
   const [loadError, setLoadError] = useState('');
@@ -131,12 +202,28 @@ function ModuleSection({ mod, value, scenarioDefaults, scenarioContext, onChange
     if (!text) delete nextMod[slotId];
     onChange({ ...(value || {}), [mod.id]: nextMod });
   };
+  const mergeSlotTexts = (instructions) => {
+    const nextMod = { ...modValue };
+    for (const [slotId, text] of Object.entries(instructions)) {
+      if (text) nextMod[slotId] = text;
+    }
+    onChange({ ...(value || {}), [mod.id]: nextMod });
+  };
 
   if (loadError) return <p className="text-xs text-red-400">{mod.name || mod.id}: {loadError}</p>;
   if (!slots) return <p className="text-xs text-gray-500">Loading {mod.name || mod.id} instructions…</p>;
 
   return (
     <div className="space-y-2">
+      {slots.length > 1 && (
+        <ModuleRewriteAll
+          modId={mod.id}
+          slots={slots}
+          modValue={modValue}
+          scenarioContext={scenarioContext}
+          onMerge={mergeSlotTexts}
+        />
+      )}
       {slots.map((slot) => (
         <SlotEditor
           key={slot.id}

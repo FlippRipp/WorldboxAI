@@ -1,7 +1,7 @@
 {
   "id": "wb_plot_director",
   "name": "Plot Director",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "icon": "🎭",
   "description": "Watches how you play, builds a deep profile of the story's themes and your preferences, and weaves short plot threads that build on each other -- grounded in established characters, guided by an evolving narrative direction, and quality-checked before they go live. The active thread is visible in the sidebar and via /plot.",
   "dependencies": [],

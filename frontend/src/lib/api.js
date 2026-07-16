@@ -59,6 +59,10 @@ export const api = {
   setSaveModuleInstructions:  (saveId, instructions) => request(`/api/saves/${saveId}/module-instructions`, { method: 'PUT', body: JSON.stringify({ module_instructions: instructions }) }),
   rewriteModuleInstruction:   (modId, slotId, { request: req, currentText = null, scenarioContext = null }) =>
     request(`/api/modules/${modId}/instructions/${slotId}/rewrite`, { method: 'POST', body: JSON.stringify({ request: req, current_text: currentText, scenario_context: scenarioContext }) }),
+  // One request, every slot of the module: a single LLM call rewrites each
+  // slot the request concerns and skips the rest ({instructions: {slotId: text}}).
+  rewriteAllModuleInstructions: (modId, { request: req, current = null, scenarioContext = null }) =>
+    request(`/api/modules/${modId}/instructions/rewrite-all`, { method: 'POST', body: JSON.stringify({ request: req, current, scenario_context: scenarioContext }) }),
   getModules:             () => request('/api/modules'),
   getModuleConfigs:       () => request('/api/session/module-configs'),
   updateModuleConfigs:    (configs) => request('/api/session/module-configs', { method: 'PUT', body: JSON.stringify({ module_configs: configs }) }),

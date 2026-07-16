@@ -856,6 +856,85 @@ def test_rewrite_instruction_endpoint(tmp_path, monkeypatch):
     ).status_code == 502
 
 
+def test_rewrite_all_instructions_endpoint(tmp_path, monkeypatch):
+    import json as _json
+    client, _ = make_client(tmp_path, monkeypatch)
+
+    seen = {}
+
+    async def fake_completion(messages, model=None, response_format=None, inspector_ctx=None, **kwargs):
+        seen["messages"] = messages
+        seen["inspector_ctx"] = inspector_ctx
+        # The request concerns two of the plot director's five slots; the rest
+        # come back empty (= keep as-is).
+        return _json.dumps({
+            "thread_generation": "Threads always grow from naval life and the sea.",
+            "fit_check": "",
+            "turn_assessment": "",
+            "direction_update": "The direction charts a maritime saga.",
+            "profile_bootstrap": "",
+        })
+
+    monkeypatch.setattr(server.engine.llm, "simple_completion", fake_completion)
+
+    res = client.post(
+        "/api/modules/wb_plot_director/instructions/rewrite-all",
+        json={
+            "request": "make everything nautical",
+            "current": {"thread_generation": "Threads lean on tavern gossip."},
+            "scenario_context": {"name": "Saltwind Voyage"},
+        },
+    )
+    assert res.status_code == 200
+    assert res.json()["instructions"] == {
+        "thread_generation": "Threads always grow from naval life and the sea.",
+        "direction_update": "The direction charts a maritime saga.",
+    }
+    user_msg = seen["messages"][1]["content"]
+    # Every slot rides along with its default; the edited one carries its
+    # current override; the request and scenario context are present.
+    assert '<slot id="thread_generation">' in user_msg
+    assert '<slot id="profile_bootstrap">' in user_msg
+    assert "GROUND IT" in user_msg
+    assert "Threads lean on tavern gossip." in user_msg
+    assert "make everything nautical" in user_msg
+    assert "Saltwind Voyage" in user_msg
+    assert seen["inspector_ctx"]["step"] == "instructions:wb_plot_director:all"
+    # The JSON contract names every slot id.
+    assert "profile_bootstrap" in seen["messages"][0]["content"]
+
+    # Blank request and unknown module are rejected without an LLM call.
+    assert client.post(
+        "/api/modules/wb_plot_director/instructions/rewrite-all",
+        json={"request": "   "},
+    ).status_code == 400
+    assert client.post(
+        "/api/modules/no_such_module/instructions/rewrite-all",
+        json={"request": "x"},
+    ).status_code == 404
+
+    # A reply that touches no slot is a 502, not a silent no-op.
+    async def all_empty(messages, **kwargs):
+        return _json.dumps({s: "" for s in (
+            "thread_generation", "fit_check", "turn_assessment", "direction_update", "profile_bootstrap",
+        )})
+
+    monkeypatch.setattr(server.engine.llm, "simple_completion", all_empty)
+    assert client.post(
+        "/api/modules/wb_plot_director/instructions/rewrite-all",
+        json={"request": "x"},
+    ).status_code == 502
+
+    async def garbage(messages, **kwargs):
+        return "not json"
+
+    monkeypatch.setattr(server.engine.llm, "simple_completion", garbage)
+    assert client.post(
+        "/api/modules/wb_plot_director/instructions/rewrite-all",
+        json={"request": "x"},
+    ).status_code == 502
+
+
 def test_rewrite_scenario_prompt_endpoint(tmp_path, monkeypatch):
     client, _ = make_client(tmp_path, monkeypatch)
 

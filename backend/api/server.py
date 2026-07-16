@@ -513,6 +513,96 @@ async def rewrite_module_instruction(mod_id: str, slot_id: str, payload: Rewrite
         raise HTTPException(status_code=502, detail="Instruction rewrite returned no instruction text.")
     return {"instruction": rewritten}
 
+
+class RewriteAllInstructionsRequest(BaseModel):
+    request: str
+    # Current per-slot overrides ({slot_id: text}); slots being iterated on.
+    current: Optional[dict] = None
+    # Optional scenario the instructions are authored for (same shape as the
+    # single-slot endpoint's scenario_context).
+    scenario_context: Optional[dict] = None
+
+
+@app.post("/api/modules/{mod_id}/instructions/rewrite-all")
+async def rewrite_all_module_instructions(mod_id: str, payload: RewriteAllInstructionsRequest):
+    """One request, every instruction slot of a module: a single LLM call
+    reads all of the module's slots (defaults plus any current overrides) and
+    the player's request, and rewrites each slot the request concerns. Slots
+    the request does not touch come back empty and are omitted from the
+    response, so the UI leaves them as they are."""
+    import json as _json
+    slots = _module_instruction_slots(mod_id)
+    request_text = (payload.request or "").strip()
+    if not request_text:
+        raise HTTPException(status_code=400, detail="A rewrite request is required.")
+    current = payload.current if isinstance(payload.current, dict) else {}
+
+    slot_parts = []
+    for slot in slots:
+        sid = slot.get("id")
+        part = [
+            f'<slot id="{sid}">',
+            f"<label>{slot.get('label') or sid}</label>",
+            f"<purpose>{slot.get('description') or ''}</purpose>",
+            f"<default_instruction>\n{str(slot.get('default') or '').strip()}\n</default_instruction>",
+        ]
+        current_text = str(current.get(sid) or "").strip()
+        if current_text and current_text != str(slot.get("default") or "").strip():
+            part.append(f"<current_instruction>\n{current_text}\n</current_instruction>")
+        part.append("</slot>")
+        slot_parts.append("\n".join(part))
+
+    user_parts = ["<slots>\n" + "\n\n".join(slot_parts) + "\n</slots>"]
+    scenario_parts = _scenario_context_parts(payload.scenario_context)
+    if scenario_parts:
+        user_parts.append("<scenario_context>\n" + "\n".join(scenario_parts) + "\n</scenario_context>")
+    user_parts.append(f"<user_request>\n{request_text}\n</user_request>")
+
+    slot_ids = [s.get("id") for s in slots]
+    messages = [
+        {"role": "system", "content": (
+            "You customize the generation instructions of a text-RPG game system. The module has "
+            "several instruction slots, each steering one of its AI prompts; the player gives ONE "
+            "request that may concern some or all of them. For each slot, decide whether the request "
+            "applies to it. If it does, rewrite that slot's instruction to fit the request - base the "
+            "rewrite on the default instruction, or on the current instruction when one is given "
+            "(the player is iterating on it). Keep everything the request does not ask to change, "
+            "keep roughly the same length and the same imperative style, and write instructions as "
+            "plain prose or dash bullets. If the request does NOT apply to a slot, return an empty "
+            "string for it - never rewrite a slot just to rephrase it. The instruction text itself "
+            "must never mention JSON, output formats, field names, or how many items to produce - "
+            "the game system handles those separately. "
+            "Output only valid JSON with exactly these keys: "
+            + _json.dumps({sid: "rewritten instruction or \"\"" for sid in slot_ids})
+        )},
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+    try:
+        content = await engine.llm.simple_completion(
+            messages,
+            model=engine.llm.storyteller_model,
+            response_format={"type": "json_object"},
+            inspector_ctx={"call_type": "instruction_rewrite", "step": f"instructions:{mod_id}:all"},
+        )
+        parsed = _json.loads(content)
+    except LLMProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=502, detail=f"Instruction rewrite returned unusable output: {exc}")
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=502, detail="Instruction rewrite returned unusable output.")
+    instructions = {
+        sid: str(parsed.get(sid) or "").strip()
+        for sid in slot_ids
+        if str(parsed.get(sid) or "").strip()
+    }
+    if not instructions:
+        raise HTTPException(
+            status_code=502,
+            detail="The AI found no instruction this request applies to. Try wording it toward what the module should do.",
+        )
+    return {"instructions": instructions}
+
 @app.get("/api/session")
 async def get_session():
     return session_manager.get_status()

@@ -77,6 +77,106 @@ DIFFICULTY_GUIDANCE = {
 }
 
 
+# --------------------------------------------------------------------------
+# Customizable instruction slots
+#
+# Same contract as wb_core_rpg: each LLM prompt splits into a creative
+# "directive" a scenario or story may override via module_instructions, and
+# fixed scaffolding (context sections, event blocks, JSON contracts) that
+# overrides can never touch, so output parsing cannot break. The defaults are
+# the verbatim directive text the prompts have always used.
+# --------------------------------------------------------------------------
+
+DIRECTIVE_THREAD_GENERATION = """Design ONE new thread that fits the established genre, tone and current situation, plays to what this player enjoys, and injects challenge at the guided difficulty. GROUND IT: anchor the hook in established characters, places, factions, or unresolved hooks from the material above -- invent at most one new minor element, and only when nothing established fits. Where a past consequence or open question offers a natural seed, grow the thread from it."""
+
+DIRECTIVE_FIT_CHECK = """Reject the candidate if ANY of these fail:
+1. Tone/genre fit: it belongs in this story's genre and prevailing tone.
+2. Grounding: its hook rises from established characters, places, or events -- not a disconnected new invention.
+3. Continuity: it does not contradict anything established in the story.
+4. Arc fit: it advances or complicates the narrative direction (skip this check if no direction is given).
+5. It does not touch any player dislike.
+6. Player freedom: the challenge describes opposition in the world, not a course of action -- reject anything that dictates what the player must or should do, or bakes in a specific solution."""
+
+DIRECTIVE_TURN_ASSESSMENT = f"""- thread_engaged: did the player or the scene meaningfully interact with the active thread this turn?
+- thread_resolved: is the thread's challenge definitively over (overcome, defused, or conclusively failed)?
+- player_pivot: has the player clearly COMMITTED to a different pursuit than the active thread -- a stated intention, a new goal, leaving the situation behind for good? A brief detour, a side errand, or a single scene elsewhere is NOT a pivot.
+- pivot_intent: one sentence naming what the player is now pursuing (only when player_pivot is true).
+- opportunity: does the scene end with a natural opening to bring the thread forward next turn?
+- nudge: one subtle piece of story material (a rumor, an arrival, a discovery) that could pull the scene toward the thread without contradicting what the player is doing. Never an instruction to the player.
+- momentum: building | steady | stalled
+- profile: the updated fast-moving profile fields. playstyle values are integers 0-10 for what the player actually does. tone is the story's prevailing tone in a few words. themes are short phrases. likes are what the player demonstrably enjoys; avoids are what they consistently steer away from in practice -- both carry a weight (low, medium, high) for how strongly the player seems to feel and one clause of evidence citing what the player actually did (an entry without real evidence does not belong). At most {PROFILE_LIST_CAP} entries per list -- drop the least relevant to make room. Some entries may have been set directly by the player; preserve those (including their weight) unless the story clearly contradicts them. The profile's dislikes are set by the player themselves and are NOT yours to change -- do not include dislikes in your reply, and never add a like that contradicts one. A character acting averse to something in-story does not mean the player dislikes it. The profile's attachments, engagement, narrative, and notes fields are maintained elsewhere -- do not include them."""
+
+DIRECTIVE_DIRECTION_UPDATE = f"""- premise: 1-2 sentences: the larger arc the story seems to be telling.
+- heading: one sentence: where events look to be going next.
+- open_questions: up to {DIRECTION_LIST_CAP} short unresolved questions the story has raised.
+- recurring_elements: up to {DIRECTION_LIST_CAP} named characters, places, factions, or motifs worth returning to.
+- attachments: named story elements the player keeps gravitating to (name, kind, why they matter).
+- engagement: bites_on -- hook shapes this player pursues (update with what this thread's fate reveals); ignores -- hook shapes they let pass by.
+- narrative: pacing, agency, and emotional register preferences the play so far demonstrates.
+- notes: anything else a storyteller should know about this player, a few sentences.
+Keep everything grounded in what actually happened -- never invent."""
+
+DIRECTIVE_PROFILE_BOOTSTRAP = f"""Base the profile on demonstrated behavior, not on what the setting suggests. Every field:
+- playstyle: integers 0-10 for how much the player actually does each thing.
+- tone: the story's prevailing tone in a few words.
+- themes: short phrases for the story's recurring themes.
+- likes: what the player demonstrably enjoys -- each with a weight (low, medium, high) for how strongly they seem to feel and one clause of evidence citing what they actually did.
+- avoids: what the player consistently steers away from in practice -- observed behavior only, each with weight and evidence. These are soft observations, not vetoes.
+- attachments: named characters, places, factions, or objects the player keeps returning to -- name, kind, and a short note on why they seem to matter.
+- engagement: bites_on lists the shapes of hooks this player pursues ("a mystery with a personal stake"); ignores lists shapes they let pass by.
+- narrative: pacing (slow-burn vs action-forward), agency (drives the story vs reacts to it), register (the emotional payoffs that visibly land).
+- notes: anything else a storyteller should know about this player, a few sentences.
+At most {PROFILE_LIST_CAP} entries per list. Do not infer dislikes -- those are set by the player themselves, and a character acting averse to something in-story does not mean the player dislikes it."""
+
+INSTRUCTION_SLOTS = [
+    {
+        "id": "thread_generation",
+        "label": "Thread Generation",
+        "description": "What new plot threads should be like: how they ground in the story, what they draw on, and what flavors to favor.",
+        "default": DIRECTIVE_THREAD_GENERATION,
+    },
+    {
+        "id": "fit_check",
+        "label": "Thread Quality Gate",
+        "description": "The criteria a candidate thread must pass before it goes live.",
+        "default": DIRECTIVE_FIT_CHECK,
+    },
+    {
+        "id": "turn_assessment",
+        "label": "Turn Assessment",
+        "description": "How each turn is judged for thread engagement, pivots, nudges, and the live player profile.",
+        "default": DIRECTIVE_TURN_ASSESSMENT,
+    },
+    {
+        "id": "direction_update",
+        "label": "Narrative Direction",
+        "description": "How the long-term narrative direction and deep player profile evolve when a thread closes.",
+        "default": DIRECTIVE_DIRECTION_UPDATE,
+    },
+    {
+        "id": "profile_bootstrap",
+        "label": "Profile Bootstrap",
+        "description": "How the initial player profile is distilled when the module joins a story already in progress.",
+        "default": DIRECTIVE_PROFILE_BOOTSTRAP,
+    },
+]
+
+_SLOT_DEFAULTS = {slot["id"]: slot["default"] for slot in INSTRUCTION_SLOTS}
+
+
+def get_instruction_slots() -> list[dict]:
+    """Generic module contract: the customizable instruction slots this module
+    exposes. The host serves these to the UI and the rewrite endpoints."""
+    return [dict(slot) for slot in INSTRUCTION_SLOTS]
+
+
+def _directive(slot_id: str, instructions: dict | None) -> str:
+    """The directive text for a prompt slot: the story/scenario override when
+    one is set, otherwise the built-in default."""
+    text = str((instructions or {}).get(slot_id) or "").strip()
+    return text or _SLOT_DEFAULTS[slot_id]
+
+
 def _config(state: dict) -> dict:
     return state.get("module_configs", {}).get(MODULE_ID, {})
 
@@ -627,17 +727,7 @@ STORY SO FAR (oldest to newest):
 THE PLAYER'S OWN ACTIONS (their typed inputs, oldest to newest):
 {inputs_block or '(none recorded)'}
 
-{preserved_block}Base the profile on demonstrated behavior, not on what the setting suggests. Every field:
-- playstyle: integers 0-10 for how much the player actually does each thing.
-- tone: the story's prevailing tone in a few words.
-- themes: short phrases for the story's recurring themes.
-- likes: what the player demonstrably enjoys -- each with a weight (low, medium, high) for how strongly they seem to feel and one clause of evidence citing what they actually did.
-- avoids: what the player consistently steers away from in practice -- observed behavior only, each with weight and evidence. These are soft observations, not vetoes.
-- attachments: named characters, places, factions, or objects the player keeps returning to -- name, kind, and a short note on why they seem to matter.
-- engagement: bites_on lists the shapes of hooks this player pursues ("a mystery with a personal stake"); ignores lists shapes they let pass by.
-- narrative: pacing (slow-burn vs action-forward), agency (drives the story vs reacts to it), register (the emotional payoffs that visibly land).
-- notes: anything else a storyteller should know about this player, a few sentences.
-At most {PROFILE_LIST_CAP} entries per list. Do not infer dislikes -- those are set by the player themselves, and a character acting averse to something in-story does not mean the player dislikes it.
+{preserved_block}{_directive("profile_bootstrap", state.get("module_instructions"))}
 
 Respond with ONLY valid JSON:
 {{"playstyle": {{{", ".join(f'"{k}": 0' for k in PLAYSTYLE_KEYS)}}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high", "evidence": "..."}}], "avoids": [{{"text": "...", "weight": "low|medium|high", "evidence": "..."}}], "attachments": [{{"name": "...", "kind": "...", "note": "..."}}], "engagement": {{"bites_on": [], "ignores": []}}, "narrative": {{"pacing": "...", "agency": "...", "register": "..."}}, "notes": "..."}}"""
@@ -735,7 +825,7 @@ CHALLENGE DIFFICULTY:
 {_direction_block(data)}STORY MATERIAL:
 {_story_material(state)}
 
-{_storylines_block(state)}{_character_roster(state)}{_character_sheet_block(state)}{_history_block(data)}Design ONE new thread that fits the established genre, tone and current situation, plays to what this player enjoys, and injects challenge at the guided difficulty. GROUND IT: anchor the hook in established characters, places, factions, or unresolved hooks from the material above -- invent at most one new minor element, and only when nothing established fits. Where a past consequence or open question offers a natural seed, grow the thread from it.{different}{critique_block}{pivot_block}{defer_block}
+{_storylines_block(state)}{_character_roster(state)}{_character_sheet_block(state)}{_history_block(data)}{_directive("thread_generation", state.get("module_instructions"))}{different}{critique_block}{pivot_block}{defer_block}
 
 Respond with ONLY valid JSON:
 {{"title": "3-6 words", "hook": "how it surfaces in the story, one sentence", "challenge": "what stands in the way -- the opposition itself, one sentence, never what the player should do about it", "stakes": "what is at risk, one sentence", "appeal": "which player preference this serves, a few words"}}"""
@@ -807,13 +897,7 @@ STORY MATERIAL:
 {_storylines_block(state)}{_character_roster(state)}CANDIDATE THREAD:
 {json.dumps(shown, ensure_ascii=False)}
 
-Reject the candidate if ANY of these fail:
-1. Tone/genre fit: it belongs in this story's genre and prevailing tone.
-2. Grounding: its hook rises from established characters, places, or events -- not a disconnected new invention.
-3. Continuity: it does not contradict anything established in the story.
-4. Arc fit: it advances or complicates the narrative direction (skip this check if no direction is given).
-5. It does not touch any player dislike.
-6. Player freedom: the challenge describes opposition in the world, not a course of action -- reject anything that dictates what the player must or should do, or bakes in a specific solution.
+{_directive("fit_check", state.get("module_instructions"))}
 
 Respond with ONLY valid JSON:
 {{"verdict": "accept" | "reject", "critique": "1-2 sentences naming the failed check, only when rejecting"}}"""
@@ -906,15 +990,7 @@ CURRENT PLAYER PROFILE:
 {_story_material(state)}
 
 Update:
-{consequence_rule}- premise: 1-2 sentences: the larger arc the story seems to be telling.
-- heading: one sentence: where events look to be going next.
-- open_questions: up to {DIRECTION_LIST_CAP} short unresolved questions the story has raised.
-- recurring_elements: up to {DIRECTION_LIST_CAP} named characters, places, factions, or motifs worth returning to.
-- attachments: named story elements the player keeps gravitating to (name, kind, why they matter).
-- engagement: bites_on -- hook shapes this player pursues (update with what this thread's fate reveals); ignores -- hook shapes they let pass by.
-- narrative: pacing, agency, and emotional register preferences the play so far demonstrates.
-- notes: anything else a storyteller should know about this player, a few sentences.
-Keep everything grounded in what actually happened -- never invent.
+{consequence_rule}{_directive("direction_update", state.get("module_instructions"))}
 
 Respond with ONLY valid JSON:
 {{"consequence": "...", "premise": "...", "heading": "...", "open_questions": [], "recurring_elements": [], "attachments": [{{"name": "...", "kind": "...", "note": "..."}}], "engagement": {{"bites_on": [], "ignores": []}}, "narrative": {{"pacing": "...", "agency": "...", "register": "..."}}, "notes": "..."}}"""
@@ -1189,14 +1265,7 @@ LAST PLAYER INPUT:
 {player_input or '(none)'}
 
 Judge and update:
-- thread_engaged: did the player or the scene meaningfully interact with the active thread this turn?
-- thread_resolved: is the thread's challenge definitively over (overcome, defused, or conclusively failed)?
-- player_pivot: has the player clearly COMMITTED to a different pursuit than the active thread -- a stated intention, a new goal, leaving the situation behind for good? A brief detour, a side errand, or a single scene elsewhere is NOT a pivot.
-- pivot_intent: one sentence naming what the player is now pursuing (only when player_pivot is true).
-- opportunity: does the scene end with a natural opening to bring the thread forward next turn?
-- nudge: one subtle piece of story material (a rumor, an arrival, a discovery) that could pull the scene toward the thread without contradicting what the player is doing. Never an instruction to the player.
-- momentum: building | steady | stalled
-- profile: the updated fast-moving profile fields. playstyle values are integers 0-10 for what the player actually does. tone is the story's prevailing tone in a few words. themes are short phrases. likes are what the player demonstrably enjoys; avoids are what they consistently steer away from in practice -- both carry a weight (low, medium, high) for how strongly the player seems to feel and one clause of evidence citing what the player actually did (an entry without real evidence does not belong). At most {PROFILE_LIST_CAP} entries per list -- drop the least relevant to make room. Some entries may have been set directly by the player; preserve those (including their weight) unless the story clearly contradicts them. The profile's dislikes are set by the player themselves and are NOT yours to change -- do not include dislikes in your reply, and never add a like that contradicts one. A character acting averse to something in-story does not mean the player dislikes it. The profile's attachments, engagement, narrative, and notes fields are maintained elsewhere -- do not include them.
+{_directive("turn_assessment", state.get("module_instructions"))}
 
 Respond with ONLY valid JSON:
 {{"thread_engaged": false, "thread_resolved": false, "resolution_note": "one sentence, only if resolved", "player_pivot": false, "pivot_intent": "", "opportunity": false, "nudge": "...", "momentum": "steady", "profile": {{"playstyle": {{{", ".join(f'"{k}": 0' for k in PLAYSTYLE_KEYS)}}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high", "evidence": "..."}}], "avoids": [{{"text": "...", "weight": "low|medium|high", "evidence": "..."}}]}}}}"""
