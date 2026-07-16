@@ -785,3 +785,70 @@ def test_rewrite_instruction_endpoint(tmp_path, monkeypatch):
         "/api/modules/wb_core_rpg/instructions/skill_categories/rewrite",
         json={"request": "x"},
     ).status_code == 502
+
+
+def test_rewrite_scenario_prompt_endpoint(tmp_path, monkeypatch):
+    client, _ = make_client(tmp_path, monkeypatch)
+
+    seen = {}
+
+    async def fake_completion(messages, model=None, response_format=None, inspector_ctx=None, **kwargs):
+        seen["messages"] = messages
+        seen["model"] = model
+        seen["inspector_ctx"] = inspector_ctx
+        return '{"text": "The storm swallows the road behind you as the tavern door slams shut."}'
+
+    monkeypatch.setattr(server.engine.llm, "simple_completion", fake_completion)
+
+    # Editing the starting prompt carries the scenario description as context.
+    res = client.post(
+        "/api/scenarios/rewrite-prompt",
+        json={
+            "request": "make it darker and more tense",
+            "current_text": "You walk into the tavern.",
+            "field": "starting_prompt",
+            "name": "The Lonely Tavern",
+            "scenario_description": "A rain-soaked frontier town.",
+        },
+    )
+    assert res.status_code == 200
+    assert res.json()["text"].startswith("The storm swallows")
+    user_msg = seen["messages"][1]["content"]
+    assert "make it darker and more tense" in user_msg
+    assert "You walk into the tavern." in user_msg
+    assert "A rain-soaked frontier town." in user_msg
+    assert seen["model"] == server.engine.llm.storyteller_model
+    assert seen["inspector_ctx"]["step"] == "scenario:starting_prompt"
+
+    # Editing the description does not pull in the description as extra context,
+    # and an empty current_text is allowed (draft from scratch).
+    res = client.post(
+        "/api/scenarios/rewrite-prompt",
+        json={"request": "add a sense of dread", "field": "scenario_description"},
+    )
+    assert res.status_code == 200
+    assert "draft the text from scratch" in seen["messages"][1]["content"]
+    assert seen["inspector_ctx"]["step"] == "scenario:scenario_description"
+
+    # An unknown field falls back to starting_prompt framing rather than erroring.
+    res = client.post(
+        "/api/scenarios/rewrite-prompt",
+        json={"request": "x", "field": "bogus"},
+    )
+    assert res.status_code == 200
+    assert seen["inspector_ctx"]["step"] == "scenario:starting_prompt"
+
+    # A blank request is rejected.
+    assert client.post(
+        "/api/scenarios/rewrite-prompt",
+        json={"request": "   "},
+    ).status_code == 400
+
+    async def garbage_completion(messages, **kwargs):
+        return "not json"
+
+    monkeypatch.setattr(server.engine.llm, "simple_completion", garbage_completion)
+    assert client.post(
+        "/api/scenarios/rewrite-prompt",
+        json={"request": "x"},
+    ).status_code == 502

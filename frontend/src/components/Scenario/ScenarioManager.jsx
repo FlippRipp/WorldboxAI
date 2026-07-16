@@ -3,6 +3,97 @@ import { api } from '../../lib/api';
 import ModuleTogglePanel from '../shared/ModuleTogglePanel';
 import ModuleInstructionsEditor from '../shared/ModuleInstructionsEditor';
 
+// A textarea with an "AI edit" button. Pressing it reveals a request box; the
+// player describes a change ("make it darker", "improve the writing") and the
+// LLM rewrites the field's text in place. `field` tells the backend whether it
+// is editing the opening message or the framing description; `getContext`
+// returns surrounding scenario fields so the rewrite fits.
+function AiEditablePrompt({ label, hint, value, onChange, rows, placeholder, field, getContext }) {
+  const [open, setOpen] = useState(false);
+  const [req, setReq] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const runEdit = async () => {
+    const request = req.trim();
+    if (!request || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const ctx = getContext ? getContext() : {};
+      const res = await api.rewriteScenarioPrompt({
+        request,
+        currentText: (value || '').trim() || null,
+        field,
+        name: ctx.name || null,
+        scenarioDescription: ctx.scenarioDescription || null,
+      });
+      onChange(res.text);
+      setReq('');
+      setOpen(false);
+    } catch (e) {
+      setError(e.message || 'AI edit failed.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-baseline justify-between gap-2">
+        <label className="text-sm font-medium text-gray-300">{label}</label>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-500">{hint}</span>
+          <button
+            type="button"
+            onClick={() => { setOpen((v) => !v); setError(''); }}
+            className={`shrink-0 px-2 py-1 rounded text-xs border transition-colors ${
+              open
+                ? 'border-purple-500 text-purple-300 bg-purple-900/30'
+                : 'border-gray-700 text-gray-400 hover:bg-gray-700'
+            }`}
+            title="Let the AI rewrite this text to fit a request"
+          >
+            ✨ AI edit
+          </button>
+        </div>
+      </div>
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={rows}
+        placeholder={placeholder}
+        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500 resize-y"
+      />
+      {open && (
+        <div className="rounded-lg border border-purple-800/50 bg-purple-950/20 p-3 space-y-2">
+          <p className="text-xs text-gray-400">
+            Describe the change and the AI will rewrite the text above. Leave the field blank first to draft from scratch.
+          </p>
+          <div className="flex items-center gap-2">
+            <input
+              value={req}
+              onChange={(e) => setReq(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); runEdit(); } }}
+              placeholder='e.g. "make it darker and more tense" or "improve the writing"'
+              className="flex-1 px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-purple-500"
+            />
+            <button
+              type="button"
+              onClick={runEdit}
+              disabled={busy || !req.trim()}
+              className="shrink-0 px-3 py-1.5 rounded-lg text-xs bg-purple-700 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed text-white transition-colors"
+            >
+              {busy ? 'Editing…' : 'Apply'}
+            </button>
+          </div>
+          {error && <p className="text-xs text-red-400">{error}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Simple manager for "basic scenarios" — the default story source. A scenario
 // is just a starting prompt (the literal first AI message) plus a scenario
 // description (the system prompt that frames the story for the AI). This is the
@@ -177,27 +268,27 @@ export default function ScenarioManager({ onBack }) {
                 />
               </div>
 
-              <div className="space-y-1.5">
-                {field('Scenario description', 'system prompt — describes the setting to the AI')}
-                <textarea
-                  value={editing.scenario_description}
-                  onChange={(e) => setEditing({ ...editing, scenario_description: e.target.value })}
-                  rows={6}
-                  placeholder="A rain-soaked frontier town where strangers gather at the only inn for miles..."
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500 resize-y"
-                />
-              </div>
+              <AiEditablePrompt
+                label="Scenario description"
+                hint="system prompt — describes the setting to the AI"
+                value={editing.scenario_description}
+                onChange={(v) => setEditing({ ...editing, scenario_description: v })}
+                rows={6}
+                placeholder="A rain-soaked frontier town where strangers gather at the only inn for miles..."
+                field="scenario_description"
+                getContext={() => ({ name: editing.name })}
+              />
 
-              <div className="space-y-1.5">
-                {field('Starting prompt', 'optional — the literal first AI message; leave blank to have the AI write the opening')}
-                <textarea
-                  value={editing.starting_prompt}
-                  onChange={(e) => setEditing({ ...editing, starting_prompt: e.target.value })}
-                  rows={5}
-                  placeholder="The tavern door groans shut behind you, cutting off the storm..."
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500 resize-y"
-                />
-              </div>
+              <AiEditablePrompt
+                label="Starting prompt"
+                hint="optional — the literal first AI message; leave blank to have the AI write the opening"
+                value={editing.starting_prompt}
+                onChange={(v) => setEditing({ ...editing, starting_prompt: v })}
+                rows={5}
+                placeholder="The tavern door groans shut behind you, cutting off the storm..."
+                field="starting_prompt"
+                getContext={() => ({ name: editing.name, scenarioDescription: editing.scenario_description })}
+              />
 
               <div className="space-y-3 p-4 rounded-lg border border-gray-700 bg-gray-800/30">
                 <div>

@@ -130,6 +130,12 @@ export const api = {
   loadScenario:           (scenarioId) => request(`/api/scenarios/${scenarioId}`),
   saveScenario:           (data) => request('/api/scenarios', { method: 'POST', body: JSON.stringify(data) }),
   deleteScenario:         (scenarioId) => request(`/api/scenarios/${scenarioId}`, { method: 'DELETE' }),
+  // LLM-as-editor: rewrite a scenario's starting_prompt/scenario_description to
+  // fit a natural-language request. `field` picks which prose field is edited.
+  rewriteScenarioPrompt:  ({ request: req, currentText = null, field = 'starting_prompt', name = null, scenarioDescription = null }) =>
+                            request('/api/scenarios/rewrite-prompt', { method: 'POST', body: JSON.stringify({
+                              request: req, current_text: currentText, field, name, scenario_description: scenarioDescription,
+                            }) }),
 
   // Lorebooks (SillyTavern World Info imports, RAG-retrieved lore)
   importLorebook:          (data, name = null) => request('/api/lorebooks/import', { method: 'POST', body: JSON.stringify({ data, name }) }),

@@ -1504,6 +1504,92 @@ async def save_scenario(request: ScenarioRequest):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+class RewriteScenarioPromptRequest(BaseModel):
+    request: str
+    current_text: Optional[str] = None
+    # Which field is being edited — "starting_prompt" (the literal first AI
+    # message) or "scenario_description" (the system prompt framing the story).
+    # Governs how the rewrite is framed.
+    field: Optional[str] = "starting_prompt"
+    # Optional surrounding context so the rewrite fits the scenario.
+    name: Optional[str] = None
+    scenario_description: Optional[str] = None
+
+
+@app.post("/api/scenarios/rewrite-prompt")
+async def rewrite_scenario_prompt(payload: RewriteScenarioPromptRequest):
+    """Use the LLM as an editor for a scenario's prose fields. The player
+    supplies a free-text request ("make it darker", "tighten the writing") and
+    the current text; the model returns a rewritten version. Handles both the
+    starting prompt (the opening message) and the scenario description (the
+    system prompt), differing only in how the task is framed."""
+    import json as _json
+    request_text = (payload.request or "").strip()
+    if not request_text:
+        raise HTTPException(status_code=400, detail="An edit request is required.")
+    current_text = (payload.current_text or "").strip()
+    field = payload.field if payload.field in ("starting_prompt", "scenario_description") else "starting_prompt"
+
+    if field == "starting_prompt":
+        role = (
+            "You are an expert interactive-fiction editor. The text is the opening message of a "
+            "text-RPG story — the literal first thing the player reads, written in second person "
+            "and in-fiction (no meta commentary, no headings, no quotation marks around the whole "
+            "thing). Revise it to fit the player's request while keeping it a self-contained "
+            "opening scene that hands the story to the player."
+        )
+    else:
+        role = (
+            "You are an expert interactive-fiction editor. The text is a scenario description — a "
+            "system prompt that frames the setting, situation, and tone for the AI game master. "
+            "It is written as instructional/descriptive prose about the world, not as in-story "
+            "narration. Revise it to fit the player's request while keeping it usable as a "
+            "framing prompt for the AI."
+        )
+
+    context_parts = []
+    if (payload.name or "").strip():
+        context_parts.append(f"<scenario_name>\n{payload.name.strip()}\n</scenario_name>")
+    if field == "starting_prompt" and (payload.scenario_description or "").strip():
+        context_parts.append(
+            f"<scenario_description>\n{payload.scenario_description.strip()}\n</scenario_description>"
+        )
+
+    user_parts = list(context_parts)
+    if current_text:
+        user_parts.append(f"<current_text>\n{current_text}\n</current_text>")
+    else:
+        user_parts.append("<current_text>\n(empty — draft the text from scratch)\n</current_text>")
+    user_parts.append(f"<edit_request>\n{request_text}\n</edit_request>")
+
+    messages = [
+        {"role": "system", "content": (
+            f"{role} Apply only what the request asks for and preserve everything it does not "
+            "mention. When the request is about writing quality (clarity, flow, vividness), improve "
+            "the prose without changing the meaning or events. Keep roughly the same length unless "
+            "the request implies otherwise. Return only the rewritten text with no preamble, "
+            "explanation, or surrounding quotes. "
+            "Output only valid JSON: {\"text\": \"...\"}"
+        )},
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+    try:
+        content = await engine.llm.simple_completion(
+            messages,
+            model=engine.llm.storyteller_model,
+            response_format={"type": "json_object"},
+            inspector_ctx={"call_type": "scenario_prompt_rewrite", "step": f"scenario:{field}"},
+        )
+        rewritten = str(_json.loads(content).get("text") or "").strip()
+    except LLMProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=502, detail=f"Scenario prompt rewrite returned unusable output: {exc}")
+    if not rewritten:
+        raise HTTPException(status_code=502, detail="Scenario prompt rewrite returned no text.")
+    return {"text": rewritten}
+
+
 @app.delete("/api/scenarios/{scenario_id}")
 async def delete_scenario(scenario_id: str):
     try:
