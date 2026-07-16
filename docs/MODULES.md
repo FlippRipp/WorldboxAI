@@ -229,7 +229,44 @@ Modules receive a **filtered state dict** that only includes fields declared in 
 - `turn`
 - Your own `module_data.<self>`
 - Your own `module_configs.<self>`
+- Your own `module_instructions` (only when the story has instruction overrides for you — see below)
 
 Additional state fields, other modules' data, other modules' configs, and world data are only present if declared in `consumes`.
 
 Modules should treat `state` as read-only unless returning a partial update from a mutation hook.
+
+## Customizable Instruction Slots
+
+A module whose prompts should be customizable per scenario/story can expose
+**instruction slots** by defining a module-level function in its backend:
+
+```python
+def get_instruction_slots() -> list[dict]:
+    return [
+        {"id": "slot_id", "label": "Shown in the UI",
+         "description": "What this instruction steers.",
+         "default": "The built-in directive text."},
+    ]
+```
+
+The host then:
+
+- Reports `has_instruction_slots: true` for the module in `GET /api/modules` and
+  serves the slots at `GET /api/modules/{mod_id}/instruction-slots`.
+- Stores per-story overrides under the reserved
+  `module_configs["__module_instructions__"]` key, shaped
+  `{mod_id: {slot_id: text}}` (editable via
+  `GET/PUT /api/saves/{save_id}/module-instructions`). Scenarios carry the same
+  shape in their `module_instructions` field and seed new saves with it.
+- Injects your own overrides into hook state as
+  `state["module_instructions"]` (`{slot_id: text}`, no `consumes` declaration
+  needed; absent when the story has none). Router code can read the reserved
+  key from `sm.state` directly.
+- Offers a generic LLM rewrite at
+  `POST /api/modules/{mod_id}/instructions/{slot_id}/rewrite` that adapts the
+  slot's default text to a player request.
+
+Keep slot text purely *creative* direction: output formats, JSON contracts,
+and exact counts belong in the fixed parts of your prompts so a custom
+instruction can never break parsing. An empty or missing override always means
+"use the default". See `wb_core_rpg` for a full implementation.

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { api } from '../../lib/api';
 import ModuleTogglePanel from '../shared/ModuleTogglePanel';
 import ModuleInline from '../shared/ModuleInline';
+import ModuleInstructionsEditor from '../shared/ModuleInstructionsEditor';
 import BranchNameDialog from '../shared/BranchNameDialog';
 
 function formatLastPlayed(iso) {
@@ -29,6 +30,11 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
   // setting and the scenario supplies the opening message.
   //   null | { id, modificationRequest }
   const [selectedScenario, setSelectedScenario] = useState(null);
+  // Per-module instruction overrides for the new story ({mod_id: {slot_id:
+  // text}}). Pre-filled from the selected scenario and editable before
+  // creation; the scenario's own values are kept for per-field reset.
+  const [moduleInstructions, setModuleInstructions] = useState({});
+  const [scenarioInstructionDefaults, setScenarioInstructionDefaults] = useState(null);
   // Optional Plot Director preferences (comma-separated), seeded into the
   // story's plot profile as player-set entries. Only shown/sent when the
   // plot module is active for the new story.
@@ -47,6 +53,10 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
   const [editName, setEditName] = useState('');
   // Story direction (themes/tags/pacing) injected into every turn's prompt.
   const [editStyle, setEditStyle] = useState({ themes: '', tags: '', pacing: '' });
+  // Per-module instruction overrides of the save being edited, plus the
+  // values frozen from its scenario at creation (the reset baseline).
+  const [editInstructions, setEditInstructions] = useState({});
+  const [editScenarioDefaults, setEditScenarioDefaults] = useState(null);
   const [savingSettings, setSavingSettings] = useState(false);
   const [branching, setBranching] = useState(false);
   // Branch naming dialog: { defaultName } | null. Branching always goes
@@ -99,6 +109,33 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
     });
   };
 
+  // Selecting a scenario pre-fills the module toggles and instruction fields
+  // from it (still editable before creating); deselecting restores the
+  // defaults. Re-clicking the already-selected scenario must not clobber the
+  // user's edits.
+  const selectScenario = async (id) => {
+    if (id === null) {
+      setSelectedScenario(null);
+      setEnabledModules(new Set(modules.map((m) => m.id)));
+      setModuleInstructions({});
+      setScenarioInstructionDefaults(null);
+      return;
+    }
+    if (selectedScenario?.id === id) return;
+    setSelectedScenario({ id });
+    try {
+      const { scenario } = await api.loadScenario(id);
+      setEnabledModules(new Set(
+        Array.isArray(scenario.active_modules) ? scenario.active_modules : modules.map((m) => m.id)
+      ));
+      const instructions = scenario.module_instructions || {};
+      setModuleInstructions(instructions);
+      setScenarioInstructionDefaults(Object.keys(instructions).length ? instructions : null);
+    } catch {
+      // The scenario list may be stale; creation itself will surface the error.
+    }
+  };
+
   const toggleEditModule = (modId, on) => {
     setEditModules((prev) => {
       const next = new Set(prev);
@@ -145,6 +182,8 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
     // result (legacy save) means every module is active.
     setEditModules(new Set(modules.map((m) => m.id)));
     setEditStyle({ themes: '', tags: '', pacing: '' });
+    setEditInstructions({});
+    setEditScenarioDefaults(null);
     try {
       const data = await api.getSaveActiveModules(saveId);
       const active = data.active_modules;
@@ -152,6 +191,10 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
       const styleData = await api.getStoryStyle(saveId);
       const style = styleData.story_style || {};
       setEditStyle({ themes: style.themes || '', tags: style.tags || '', pacing: style.pacing || '' });
+      const instrData = await api.getSaveModuleInstructions(saveId);
+      setEditInstructions(instrData.module_instructions || {});
+      const scenarioDefaults = instrData.scenario_module_instructions || {};
+      setEditScenarioDefaults(Object.keys(scenarioDefaults).length ? scenarioDefaults : null);
     } catch (e) {
       setSettingsError(`Failed to load story settings: ${e.message}`);
     }
@@ -167,6 +210,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
         modules.map((m) => m.id).filter((id) => editModules.has(id)),
       );
       await api.setStoryStyle(editingSave, editStyle);
+      await api.setSaveModuleInstructions(editingSave, editInstructions);
       const save = saves.find((s) => s.id === editingSave);
       const name = editName.trim();
       if (name && name !== (save?.display_name || editingSave)) {
@@ -228,6 +272,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
         scenarioRequest: selectedScenario?.modificationRequest?.trim() || null,
         characterId: selectedCharacter ? selectedCharacter.id : null,
         activeModules: modules.map((m) => m.id).filter((id) => enabledModules.has(id)),
+        moduleInstructions: Object.keys(moduleInstructions).length ? moduleInstructions : null,
         plotLikes: enabledModules.has('wb_plot_director') ? (plotLikes.trim() || null) : null,
         plotDislikes: enabledModules.has('wb_plot_director') ? (plotDislikes.trim() || null) : null,
       });
@@ -404,7 +449,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                   </p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button
-                      onClick={() => setSelectedScenario(null)}
+                      onClick={() => selectScenario(null)}
                       aria-pressed={!selectedScenario}
                       className={`p-3 rounded-lg border text-sm text-left transition-colors ${
                         !selectedScenario
@@ -418,7 +463,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                     {scenarios.map(s => (
                       <button
                         key={s.id}
-                        onClick={() => setSelectedScenario(prev => (prev?.id === s.id ? prev : { id: s.id }))}
+                        onClick={() => selectScenario(s.id)}
                         aria-pressed={selectedScenario?.id === s.id}
                         className={`p-3 rounded-lg border text-sm text-left transition-colors ${
                           selectedScenario?.id === s.id
@@ -454,6 +499,24 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                       )}
                     </div>
                   )}
+                </div>
+              )}
+
+              {modules.some((m) => m.has_instruction_slots && enabledModules.has(m.id)) && (
+                <div className="p-4 rounded-lg border border-gray-700 bg-gray-800/30">
+                  <h4 className="text-sm font-medium text-gray-300 mb-2">Module Instructions (optional)</h4>
+                  <p className="text-xs text-gray-500 mb-3">
+                    Customize how modules generate for this story — e.g. what kinds of skills the RPG
+                    module proposes, or how actions are judged for XP.
+                    {selectedScenario ? ' Pre-filled from the selected scenario; edit freely.' : ''}
+                  </p>
+                  <ModuleInstructionsEditor
+                    modules={modules}
+                    enabledModules={enabledModules}
+                    value={moduleInstructions}
+                    onChange={setModuleInstructions}
+                    scenarioDefaults={scenarioInstructionDefaults}
+                  />
                 </div>
               )}
 
@@ -626,6 +689,23 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                 {branching ? 'Branching…' : 'Create Branch'}
               </button>
             </div>
+
+            {modules.some((m) => m.has_instruction_slots && editModules.has(m.id)) && (
+            <div className="p-4 border-b border-gray-700">
+              <h4 className="text-sm font-medium text-gray-300 mb-1">Module Instructions</h4>
+              <p className="text-xs text-gray-500 mb-3">
+                Customize how modules generate for this story. Empty fields use the
+                {editScenarioDefaults ? " scenario's" : ''} defaults.
+              </p>
+              <ModuleInstructionsEditor
+                modules={modules}
+                enabledModules={editModules}
+                value={editInstructions}
+                onChange={setEditInstructions}
+                scenarioDefaults={editScenarioDefaults}
+              />
+            </div>
+            )}
 
             <div className="p-4">
               <h4 className="text-sm font-medium text-gray-300 mb-1">Active Modules</h4>

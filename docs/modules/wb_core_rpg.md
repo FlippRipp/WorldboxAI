@@ -139,6 +139,32 @@ working). While the global cheat toggle (`cheats.enabled`) is on, an
 allows the section to change again, including turning the lock off. Any
 module can opt into the same behavior by flagging one of its toggles with
 `locks_module_settings` (plus an optional `confirm` message for the popup).
+Hardcore Mode also freezes the module's custom instructions (below).
+
+## Custom Instructions (per scenario / per story)
+
+Every creative directive in the module's LLM prompts is a customizable
+**instruction slot** (see `docs/MODULES.md`, "Customizable Instruction
+Slots"). The scenario editor, story creation screen, and story settings modal
+render one field per slot: empty means the built-in default, and an
+AI-rewrite button adapts the default text to a typed request. A scenario's
+values seed stories created from it, where they stay editable per story;
+reset restores the scenario's value (or the built-in default when the story
+has no scenario).
+
+| Slot | Customizes |
+|---|---|
+| `action_assessment` | The judging guidelines of the action feasibility call — what kinds of attempts succeed, and therefore what earns XP. The strictness tier, outcome bands, and JSON contract stay fixed. |
+| `skill_categories` | What the 10 add-skill wizard categories should be like (always exactly 10). |
+| `skill_options` | What the 5 skill proposals in a category or search should be like (always exactly 5, uniform base strength). |
+| `skill_refine` | How a picked draft skill is finalized. Fate's rolled rarity ladder stays fixed. |
+| `evolution_options` | What the 4 evolution paths should be like (always 4, pure path listed first). |
+| `evolve` | How the evolved Tier N+1 form is designed. The chosen theme requirement stays fixed. |
+
+Overrides are stored under the reserved
+`module_configs["__module_instructions__"]["wb_core_rpg"]` key; the wizard
+and evolution routes read it from session state, and `on_gather_context`
+receives it as `state["module_instructions"]` for the assessment call.
 
 ## Progression Systems
 

@@ -31,6 +31,7 @@ export const api = {
                             scenario_request: opts.scenarioRequest ?? null,
                             character_id: opts.characterId ?? null,
                             active_modules: opts.activeModules ?? null,
+                            module_instructions: opts.moduleInstructions ?? null,
                             plot_likes: opts.plotLikes ?? null,
                             plot_dislikes: opts.plotDislikes ?? null,
                           }) }),
@@ -52,6 +53,12 @@ export const api = {
   exportSaveUrl:          (saveId, format = 'md') => `${API}/api/saves/${saveId}/export?format=${encodeURIComponent(format)}`,
   getSaveActiveModules:   (saveId) => request(`/api/saves/${saveId}/active-modules`),
   setSaveActiveModules:   (saveId, activeModules) => request(`/api/saves/${saveId}/active-modules`, { method: 'PUT', body: JSON.stringify({ active_modules: activeModules }) }),
+  // Per-module instruction-slot overrides (customizable LLM directives)
+  getInstructionSlots:        (modId) => request(`/api/modules/${modId}/instruction-slots`),
+  getSaveModuleInstructions:  (saveId) => request(`/api/saves/${saveId}/module-instructions`),
+  setSaveModuleInstructions:  (saveId, instructions) => request(`/api/saves/${saveId}/module-instructions`, { method: 'PUT', body: JSON.stringify({ module_instructions: instructions }) }),
+  rewriteModuleInstruction:   (modId, slotId, { request: req, currentText = null }) =>
+    request(`/api/modules/${modId}/instructions/${slotId}/rewrite`, { method: 'POST', body: JSON.stringify({ request: req, current_text: currentText }) }),
   getModules:             () => request('/api/modules'),
   getModuleConfigs:       () => request('/api/session/module-configs'),
   updateModuleConfigs:    (configs) => request('/api/session/module-configs', { method: 'PUT', body: JSON.stringify({ module_configs: configs }) }),

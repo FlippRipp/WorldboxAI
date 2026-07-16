@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api } from '../../lib/api';
+import ModuleTogglePanel from '../shared/ModuleTogglePanel';
+import ModuleInstructionsEditor from '../shared/ModuleInstructionsEditor';
 
 // Simple manager for "basic scenarios" — the default story source. A scenario
 // is just a starting prompt (the literal first AI message) plus a scenario
@@ -12,6 +14,7 @@ export default function ScenarioManager({ onBack }) {
   const [saving, setSaving] = useState(false);
   const [allLorebooks, setAllLorebooks] = useState([]);
   const [linkedLorebooks, setLinkedLorebooks] = useState([]);
+  const [modules, setModules] = useState([]);
 
   const refresh = () => {
     setLoading(true);
@@ -22,13 +25,19 @@ export default function ScenarioManager({ onBack }) {
     api.listLorebooks()
       .then((d) => setAllLorebooks(d.lorebooks || []))
       .catch(() => {});
+    api.getModules()
+      .then((d) => setModules(d.modules || []))
+      .catch(() => {});
   };
 
   useEffect(refresh, []);
 
   const startNew = () => {
     setLinkedLorebooks([]);
-    setEditing({ name: '', scenario_description: '', starting_prompt: '', themes: '', tags: '', pacing: '' });
+    setEditing({
+      name: '', scenario_description: '', starting_prompt: '', themes: '', tags: '', pacing: '',
+      active_modules: null, module_instructions: {},
+    });
   };
 
   const startEdit = async (id) => {
@@ -36,11 +45,21 @@ export default function ScenarioManager({ onBack }) {
       const { scenario } = await api.loadScenario(id);
       const { lorebook_ids } = await api.getLorebookLinks('scenario', id).catch(() => ({ lorebook_ids: [] }));
       setLinkedLorebooks(lorebook_ids || []);
-      // Older scenarios predate themes/tags/pacing; backfill so the inputs stay controlled.
-      setEditing({ themes: '', tags: '', pacing: '', ...scenario });
+      // Older scenarios predate themes/tags/pacing and the module fields;
+      // backfill so the inputs stay controlled.
+      setEditing({ themes: '', tags: '', pacing: '', active_modules: null, module_instructions: {}, ...scenario });
     } catch (e) {
       alert(`Failed to load scenario: ${e.message}`);
     }
+  };
+
+  // active_modules of null means "unset": every module is on until the user
+  // makes a choice, at which point the explicit list is stored.
+  const enabledModuleIds = editing?.active_modules ?? modules.map((m) => m.id);
+  const toggleModule = (id, on) => {
+    const next = new Set(enabledModuleIds);
+    if (on) next.add(id); else next.delete(id);
+    setEditing({ ...editing, active_modules: [...next] });
   };
 
   const handleSave = async () => {
@@ -138,7 +157,15 @@ export default function ScenarioManager({ onBack }) {
           </>
         ) : (
           <>
-            <h2 className="text-3xl font-bold text-gray-100 mb-6">{editing.id ? 'Edit Scenario' : 'New Scenario'}</h2>
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-3xl font-bold text-gray-100">{editing.id ? 'Edit Scenario' : 'New Scenario'}</h2>
+              <ModuleTogglePanel
+                modules={modules}
+                enabled={enabledModuleIds}
+                onToggle={toggleModule}
+                label="Active Modules"
+              />
+            </div>
             <div className="space-y-5">
               <div className="space-y-1.5">
                 {field('Name', 'shown in the story picker')}
@@ -206,6 +233,17 @@ export default function ScenarioManager({ onBack }) {
                     className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500"
                   />
                 </div>
+              </div>
+
+              <div className="space-y-1.5">
+                {field('Module instructions', 'customize how active modules generate — stories created from this scenario inherit these')}
+                <ModuleInstructionsEditor
+                  modules={modules}
+                  enabledModules={enabledModuleIds}
+                  value={editing.module_instructions}
+                  onChange={(mi) => setEditing({ ...editing, module_instructions: mi })}
+                  scenarioDefaults={null}
+                />
               </div>
 
               {allLorebooks.length > 0 && (
