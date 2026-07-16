@@ -6,7 +6,7 @@ from backend.engine.graph import EngineGraph, CHARACTER_UPDATE_FIELDS
 from backend.engine.llm import LLMProviderError
 from backend.engine.llm_inspector import LLMInspector
 from backend.engine.log_store import LogStore, install_log_capture
-from backend.engine.session import GameSessionManager
+from backend.engine.session import GameSessionManager, sanitize_module_instructions
 from backend.engine.settings_registry import SettingsRegistry
 from backend.engine.character_builder import CharacterBuilder
 from backend.engine.scenario import ScenarioStore
@@ -231,6 +231,10 @@ class CreateSaveRequest(BaseModel):
     scenario_request: Optional[str] = None
     character_id: Optional[str] = None
     active_modules: Optional[list[str]] = None
+    # Per-module instruction-slot overrides, {mod_id: {slot_id: text}}. The
+    # frontend pre-fills these from the linked scenario; None falls back to
+    # the scenario's own module_instructions.
+    module_instructions: Optional[dict] = None
     # Optional comma-separated player preferences, seeded into the Plot
     # Director's profile as player-set entries when that module is active.
     plot_likes: Optional[str] = None
@@ -395,8 +399,84 @@ async def get_modules():
             "character_panel": manifest.get("character_panel"),
             "character_tab": manifest.get("character_tab"),
             "character_tab_label": manifest.get("character_tab_label"),
+            "has_instruction_slots": callable(getattr(mod_data.get("backend"), "get_instruction_slots", None)),
         })
     return {"modules": modules}
+
+
+def _module_instruction_slots(mod_id: str) -> list[dict]:
+    """The instruction slots a module declares via its backend's
+    ``get_instruction_slots()`` contract. 404s for unknown modules and for
+    modules that expose no slots."""
+    mod_data = registry.get_modules().get(mod_id)
+    if mod_data is None:
+        raise HTTPException(status_code=404, detail=f"Module '{mod_id}' not found.")
+    getter = getattr(mod_data.get("backend"), "get_instruction_slots", None)
+    if not callable(getter):
+        raise HTTPException(status_code=404, detail=f"Module '{mod_id}' has no instruction slots.")
+    slots = getter()
+    return slots if isinstance(slots, list) else []
+
+
+@app.get("/api/modules/{mod_id}/instruction-slots")
+async def get_module_instruction_slots(mod_id: str):
+    return {"slots": _module_instruction_slots(mod_id)}
+
+
+class RewriteInstructionRequest(BaseModel):
+    request: str
+    current_text: Optional[str] = None
+
+
+@app.post("/api/modules/{mod_id}/instructions/{slot_id}/rewrite")
+async def rewrite_module_instruction(mod_id: str, slot_id: str, payload: RewriteInstructionRequest):
+    """Rewrite an instruction slot's directive to fit a natural-language
+    request. The default directive is always the base; the current (edited)
+    text is offered as extra context so the player can iterate."""
+    import json as _json
+    slots = {s.get("id"): s for s in _module_instruction_slots(mod_id)}
+    slot = slots.get(slot_id)
+    if slot is None:
+        raise HTTPException(status_code=404, detail=f"Module '{mod_id}' has no instruction slot '{slot_id}'.")
+    request_text = (payload.request or "").strip()
+    if not request_text:
+        raise HTTPException(status_code=400, detail="A rewrite request is required.")
+    default_text = str(slot.get("default") or "").strip()
+    current_text = (payload.current_text or "").strip()
+    user_parts = [f"<default_instruction>\n{default_text}\n</default_instruction>"]
+    if current_text and current_text != default_text:
+        user_parts.append(f"<current_instruction>\n{current_text}\n</current_instruction>")
+    user_parts.append(f"<user_request>\n{request_text}\n</user_request>")
+    messages = [
+        {"role": "system", "content": (
+            "You customize the generation instructions of a text-RPG game system. The player "
+            "describes how they want this piece of the game's behavior to change; rewrite the "
+            "instruction text to fit their request. Base the rewrite on the default instruction; "
+            "when a current instruction is also given, the player is iterating on it, so treat it "
+            "as the starting point and the default as reference. Keep everything the request does "
+            "not ask to change, keep roughly the same length and the same imperative style, and "
+            "write the instruction as plain prose or dash bullets. The instruction text itself "
+            "must never mention JSON, output formats, field names, or how many items to produce - "
+            "the game system handles those separately. "
+            "Output only valid JSON: {\"instruction\": \"...\"}"
+        )},
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+    try:
+        content = await engine.llm.simple_completion(
+            messages,
+            model=engine.llm.storyteller_model,
+            response_format={"type": "json_object"},
+            inspector_ctx={"call_type": "instruction_rewrite", "step": f"instructions:{mod_id}:{slot_id}"},
+        )
+        rewritten = str(_json.loads(content).get("instruction") or "").strip()
+    except LLMProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=502, detail=f"Instruction rewrite returned unusable output: {exc}")
+    if not rewritten:
+        raise HTTPException(status_code=502, detail="Instruction rewrite returned no instruction text.")
+    return {"instruction": rewritten}
 
 @app.get("/api/session")
 async def get_session():
@@ -918,11 +998,24 @@ async def create_save(request: CreateSaveRequest):
         def _persist_active_modules():
             # Record which modules are active for this save (from the start-screen
             # toggle). Stored under a reserved key the engine reads to skip
-            # inactive modules.
+            # inactive modules. When the request doesn't choose, a linked
+            # scenario's module set applies (API parity with the frontend,
+            # which pre-fills its toggles from the scenario).
             cfgs = dict(session_manager.state.get("module_configs", {}))
             changed = False
-            if request.active_modules is not None:
-                cfgs["__active_modules__"] = request.active_modules
+            active = request.active_modules
+            if active is None and scenario is not None and isinstance(scenario.get("active_modules"), list):
+                active = scenario["active_modules"]
+            if active is not None:
+                cfgs["__active_modules__"] = active
+                changed = True
+            # Instruction-slot overrides: the request's (already user-edited)
+            # values win; otherwise a linked scenario's defaults seed the save.
+            instructions = sanitize_module_instructions(request.module_instructions)
+            if not instructions and scenario is not None:
+                instructions = sanitize_module_instructions(scenario.get("module_instructions"))
+            if instructions:
+                cfgs["__module_instructions__"] = instructions
                 changed = True
             # Optional creation-time player preferences for the Plot Director.
             # Stored on its per-save config; the module parses them into its
@@ -1097,6 +1190,71 @@ async def set_save_active_modules(save_id: str, request: ActiveModulesRequest):
     try:
         active = session_manager.set_save_active_modules(save_id, request.active_modules)
         return {"active_modules": active}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class ModuleInstructionsRequest(BaseModel):
+    module_instructions: dict
+
+
+def _enforce_instruction_locks(save_id: str, incoming: dict):
+    """A module whose ``locks_module_settings`` setting is on (Hardcore Mode)
+    also freezes its instruction overrides — the action-judging directive is
+    exactly what Hardcore is meant to lock. Cheats bypass, like settings."""
+    if backend_settings.get("cheats.enabled"):
+        return
+    if save_id == session_manager.active_save_id:
+        stored_configs = session_manager.state.get("module_configs", {})
+    else:
+        stored_configs = session_manager.save_manager.read_module_configs(save_id)
+    stored_instructions = stored_configs.get("__module_instructions__") or {}
+    for mod_id, mod_data in registry.get_modules().items():
+        schema = mod_data.get("manifest", {}).get("settings_schema") or {}
+        lock_key = next(
+            (k for k, d in schema.items() if isinstance(d, dict) and d.get("locks_module_settings")),
+            None,
+        )
+        if lock_key is None:
+            continue
+        stored = stored_configs.get(mod_id) or {}
+        if not stored.get(lock_key, schema[lock_key].get("default", False)):
+            continue
+        if (incoming.get(mod_id) or {}) != (stored_instructions.get(mod_id) or {}):
+            mod_name = mod_data.get("manifest", {}).get("name", mod_id)
+            raise HTTPException(
+                status_code=403,
+                detail=f"{mod_name} instructions are locked by Hardcore Mode.",
+            )
+
+
+@app.get("/api/saves/{save_id}/module-instructions")
+async def get_save_module_instructions(save_id: str):
+    """A save's instruction-slot overrides, plus the values frozen from its
+    scenario at creation (the reset-to-scenario-default baseline)."""
+    try:
+        instructions = session_manager.get_save_module_instructions(save_id)
+        scenario_copy = session_manager.save_manager.read_scenario_copy(save_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {
+        "module_instructions": instructions,
+        "scenario_module_instructions": sanitize_module_instructions(scenario_copy.get("module_instructions")),
+    }
+
+
+@app.put("/api/saves/{save_id}/module-instructions")
+async def set_save_module_instructions(save_id: str, request: ModuleInstructionsRequest):
+    """Edit a save's instruction overrides after creation (without loading it)."""
+    sanitized = sanitize_module_instructions(request.module_instructions)
+    try:
+        _enforce_instruction_locks(save_id, sanitized)
+        stored = session_manager.set_save_module_instructions(save_id, sanitized)
+        return {"module_instructions": stored}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
@@ -1315,6 +1473,10 @@ class ScenarioRequest(BaseModel):
     themes: Optional[str] = ""
     tags: Optional[str] = ""
     pacing: Optional[str] = ""
+    # Module defaults for stories created from this scenario: which modules
+    # are active (None = unset) and per-module instruction-slot overrides.
+    active_modules: Optional[list[str]] = None
+    module_instructions: Optional[dict] = None
 
 
 @app.get("/api/scenarios")
@@ -1335,7 +1497,9 @@ async def load_scenario(scenario_id: str):
 @app.post("/api/scenarios")
 async def save_scenario(request: ScenarioRequest):
     try:
-        return {"scenario": scenario_store.save_scenario(request.model_dump())}
+        data = request.model_dump()
+        data["module_instructions"] = sanitize_module_instructions(data.get("module_instructions"))
+        return {"scenario": scenario_store.save_scenario(data)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

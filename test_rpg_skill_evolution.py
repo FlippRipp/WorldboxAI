@@ -126,6 +126,32 @@ def test_options_returns_four_themes_and_caches():
     assert len(calls) == 1
 
 
+def test_evolution_prompts_use_instruction_overrides():
+    """Overrides under module_configs["__module_instructions__"] replace the
+    creative directive in both evolution prompts; scaffolding stays fixed."""
+    mod = _load_backend()
+    client, sm, calls = _make_client(mod, _rpg(), llm_replies=[OPTIONS_REPLY, EVOLVE_REPLY])
+    sm.state["module_configs"]["__module_instructions__"] = {"wb_core_rpg": {
+        "evolution_options": "Every path must turn the skill toward necromancy.",
+        "evolve": "- The evolved form must demand a blood price.",
+    }}
+
+    res = client.post(f"{BASE}/skills/swordplay/evolution-options")
+    assert res.status_code == 200
+    prompt = calls[0]["prompt"]
+    assert "Every path must turn the skill toward necromancy." in prompt
+    assert "exactly 4 evolution paths" in prompt          # count is fixed
+    assert "JSON response (pure path first):" in prompt   # contract is fixed
+    assert "SIGNIFICANT power-up - a major leap" not in prompt
+
+    res = client.post(f"{BASE}/skills/swordplay/evolve", json={"theme": "Brutal"})
+    assert res.status_code == 200
+    prompt = calls[1]["prompt"]
+    assert "The evolved form must demand a blood price." in prompt
+    assert 'embody the "Brutal" theme' in prompt          # theme requirement is fixed
+    assert "BENEFITS only" not in prompt
+
+
 def test_options_concurrent_requests_share_one_generation():
     """Two overlapping requests (StrictMode double-mount) must produce one
     LLM call and identical option sets, not two racing generations."""

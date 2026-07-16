@@ -285,6 +285,25 @@ class SaveManager:
                 return json.load(f)
         return {}
 
+    def read_scenario_copy(self, save_id: str) -> dict:
+        """Read the scenario frozen into a save at creation time (the save's
+        Scenario/scenario.json), extracting the .wbx first if needed. Returns
+        {} for saves not created from a scenario."""
+        save_path = self.saves_dir / save_id
+        wbx_path = self.saves_dir / f"{save_id}.wbx"
+
+        if not save_path.exists() and wbx_path.exists():
+            with zipfile.ZipFile(wbx_path, 'r') as zipf:
+                zipf.extractall(save_path)
+        elif not save_path.exists():
+            raise FileNotFoundError(f"Save {save_id} not found.")
+
+        scenario_path = save_path / "Scenario" / "scenario.json"
+        if scenario_path.exists():
+            with open(scenario_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return {}
+
     def save_module_configs(self, save_id: str, module_configs: dict):
         """Persist module settings without creating a gameplay snapshot."""
         save_path = self.saves_dir / save_id

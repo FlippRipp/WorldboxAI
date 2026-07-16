@@ -569,3 +569,219 @@ def test_hardcore_mode_locks_rpg_module_configs(tmp_path, monkeypatch):
     # And once unlocked, editing works again without cheats.
     cheats["on"] = False
     assert put({"wb_core_rpg": {"xp_per_action": 30}}).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# module instruction slots + per-scenario/per-save custom instructions
+# ---------------------------------------------------------------------------
+
+def test_instruction_slots_endpoint_and_modules_flag(tmp_path, monkeypatch):
+    client, _ = make_client(tmp_path, monkeypatch)
+
+    modules = {m["id"]: m for m in client.get("/api/modules").json()["modules"]}
+    assert modules["wb_core_rpg"]["has_instruction_slots"] is True
+
+    res = client.get("/api/modules/wb_core_rpg/instruction-slots")
+    assert res.status_code == 200
+    slots = res.json()["slots"]
+    assert [s["id"] for s in slots] == [
+        "action_assessment", "skill_categories", "skill_options",
+        "skill_refine", "evolution_options", "evolve",
+    ]
+    assert all(s["label"] and s["description"] and s["default"] for s in slots)
+
+    assert client.get("/api/modules/no_such_module/instruction-slots").status_code == 404
+    # Any module without the contract 404s (and is flagged accordingly).
+    slotless = next((mid for mid, m in modules.items() if not m["has_instruction_slots"]), None)
+    if slotless:
+        assert client.get(f"/api/modules/{slotless}/instruction-slots").status_code == 404
+
+
+def test_scenario_module_fields_roundtrip_and_legacy_load(tmp_path, monkeypatch):
+    client, _ = make_client(tmp_path, monkeypatch)
+
+    from backend.engine.scenario import ScenarioStore
+    store = ScenarioStore(str(tmp_path / "data"))
+    monkeypatch.setattr(server, "scenario_store", store)
+
+    create = client.post("/api/scenarios", json={
+        "name": "Culinary Court",
+        "scenario_description": "A palace kitchen at war.",
+        "active_modules": ["wb_core_rpg"],
+        "module_instructions": {
+            "wb_core_rpg": {"skill_categories": "Culinary disciplines only.", "skill_options": "  "},
+            "junk": "not a dict",
+        },
+    })
+    assert create.status_code == 200
+    scenario_id = create.json()["scenario"]["id"]
+    loaded = client.get(f"/api/scenarios/{scenario_id}").json()["scenario"]
+    assert loaded["active_modules"] == ["wb_core_rpg"]
+    # Blank slots and malformed modules are sanitized out at save time.
+    assert loaded["module_instructions"] == {"wb_core_rpg": {"skill_categories": "Culinary disciplines only."}}
+
+    # A scenario saved without module fields (legacy shape) loads with defaults.
+    legacy = store.save_scenario({"name": "Old One", "scenario_description": "Plain."})
+    loaded_legacy = client.get(f"/api/scenarios/{legacy['id']}").json()["scenario"]
+    assert loaded_legacy["active_modules"] is None
+    assert loaded_legacy["module_instructions"] == {}
+
+
+def test_create_save_seeds_module_instructions_from_scenario(tmp_path, monkeypatch):
+    client, session_manager = make_client(tmp_path, monkeypatch)
+
+    from backend.engine.scenario import ScenarioStore
+    store = ScenarioStore(str(tmp_path / "data"))
+    monkeypatch.setattr(server, "scenario_store", store)
+
+    record = store.save_scenario({
+        "name": "Seeded",
+        "scenario_description": "A city of chefs.",
+        "active_modules": ["wb_core_rpg", "wb_time_tracker"],
+        "module_instructions": {"wb_core_rpg": {"skill_categories": "Culinary only."}},
+    })
+
+    # Request omits both: the scenario's module defaults seed the save.
+    resp = client.post("/api/saves", json={"save_id": "seeded_save", "scenario_id": record["id"]})
+    assert resp.status_code == 200
+    cfgs = session_manager.state["module_configs"]
+    assert cfgs["__active_modules__"] == ["wb_core_rpg", "wb_time_tracker"]
+    assert cfgs["__module_instructions__"] == {"wb_core_rpg": {"skill_categories": "Culinary only."}}
+
+    # The GET endpoint reports both the live overrides and the frozen
+    # scenario defaults (the reset baseline).
+    res = client.get("/api/saves/seeded_save/module-instructions")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["module_instructions"] == {"wb_core_rpg": {"skill_categories": "Culinary only."}}
+    assert body["scenario_module_instructions"] == {"wb_core_rpg": {"skill_categories": "Culinary only."}}
+
+    # Request-supplied values (the user edited the pre-filled form) win.
+    resp = client.post("/api/saves", json={
+        "save_id": "edited_save",
+        "scenario_id": record["id"],
+        "active_modules": ["wb_core_rpg"],
+        "module_instructions": {"wb_core_rpg": {"skill_categories": "Edited by user."}},
+    })
+    assert resp.status_code == 200
+    cfgs = session_manager.state["module_configs"]
+    assert cfgs["__active_modules__"] == ["wb_core_rpg"]
+    assert cfgs["__module_instructions__"] == {"wb_core_rpg": {"skill_categories": "Edited by user."}}
+    # The frozen scenario copy still holds the scenario's own values for reset.
+    body = client.get("/api/saves/edited_save/module-instructions").json()
+    assert body["scenario_module_instructions"] == {"wb_core_rpg": {"skill_categories": "Culinary only."}}
+
+
+def test_save_module_instructions_get_put(tmp_path, monkeypatch):
+    client, session_manager = make_client(tmp_path, monkeypatch)
+
+    # A save with no scenario and no overrides reads as empty on both sides.
+    res = client.get("/api/saves/autosave/module-instructions")
+    assert res.status_code == 200
+    assert res.json() == {"module_instructions": {}, "scenario_module_instructions": {}}
+
+    put = client.put("/api/saves/autosave/module-instructions", json={
+        "module_instructions": {"wb_core_rpg": {"evolve": "Blood price.", "skill_refine": "   "}},
+    })
+    assert put.status_code == 200
+    assert put.json()["module_instructions"] == {"wb_core_rpg": {"evolve": "Blood price."}}
+    assert session_manager.state["module_configs"]["__module_instructions__"] == {
+        "wb_core_rpg": {"evolve": "Blood price."}
+    }
+
+    # Clearing works: an empty payload resets everything to defaults.
+    put = client.put("/api/saves/autosave/module-instructions", json={"module_instructions": {}})
+    assert put.status_code == 200
+    assert client.get("/api/saves/autosave/module-instructions").json()["module_instructions"] == {}
+
+    assert client.get("/api/saves/no_such_save/module-instructions").status_code == 404
+    assert client.put(
+        "/api/saves/no_such_save/module-instructions", json={"module_instructions": {}}
+    ).status_code == 404
+
+
+def test_hardcore_mode_locks_module_instructions(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    client, _ = make_client(tmp_path, monkeypatch)
+    cheats = {"on": False}
+    monkeypatch.setattr(
+        server, "backend_settings",
+        SimpleNamespace(get=lambda key: cheats["on"] if key == "cheats.enabled" else None),
+    )
+
+    def put(instructions):
+        return client.put(
+            "/api/saves/autosave/module-instructions", json={"module_instructions": instructions}
+        )
+
+    # Unlocked: overrides can be set freely.
+    assert put({"wb_core_rpg": {"action_assessment": "Be kind."}}).status_code == 200
+
+    # Turn on Hardcore Mode (the lock) via the settings endpoint.
+    res = client.put("/api/session/module-configs", json={
+        "module_configs": {"wb_core_rpg": {"hardcore_mode": True}},
+    })
+    assert res.status_code == 200
+
+    # Locked: changing the RPG module's instructions is rejected...
+    assert put({"wb_core_rpg": {"action_assessment": "Everything succeeds."}}).status_code == 403
+    assert put({}).status_code == 403  # ...including clearing them.
+    # ...but an unchanged section still passes (e.g. editing another module).
+    assert put({"wb_core_rpg": {"action_assessment": "Be kind."}}).status_code == 200
+
+    # Cheats bypass the lock.
+    cheats["on"] = True
+    assert put({"wb_core_rpg": {"action_assessment": "Everything succeeds."}}).status_code == 200
+
+
+def test_rewrite_instruction_endpoint(tmp_path, monkeypatch):
+    client, _ = make_client(tmp_path, monkeypatch)
+
+    seen = {}
+
+    async def fake_completion(messages, model=None, response_format=None, inspector_ctx=None, **kwargs):
+        seen["messages"] = messages
+        seen["model"] = model
+        return '{"instruction": "All categories must be culinary disciplines."}'
+
+    monkeypatch.setattr(server.engine.llm, "simple_completion", fake_completion)
+
+    res = client.post(
+        "/api/modules/wb_core_rpg/instructions/skill_categories/rewrite",
+        json={"request": "make everything about cooking"},
+    )
+    assert res.status_code == 200
+    assert res.json()["instruction"] == "All categories must be culinary disciplines."
+    # The default directive is always the rewrite base; the user request rides along.
+    user_msg = seen["messages"][1]["content"]
+    assert "BROAD domains of ability" in user_msg
+    assert "make everything about cooking" in user_msg
+    assert "<current_instruction>" not in user_msg
+    assert seen["model"] == server.engine.llm.storyteller_model
+
+    # Iterating: a current text different from the default is passed as context.
+    res = client.post(
+        "/api/modules/wb_core_rpg/instructions/skill_categories/rewrite",
+        json={"request": "more baking", "current_text": "All categories must be culinary."},
+    )
+    assert res.status_code == 200
+    assert "<current_instruction>" in seen["messages"][1]["content"]
+
+    assert client.post(
+        "/api/modules/wb_core_rpg/instructions/no_such_slot/rewrite",
+        json={"request": "x"},
+    ).status_code == 404
+    assert client.post(
+        "/api/modules/wb_core_rpg/instructions/skill_categories/rewrite",
+        json={"request": "   "},
+    ).status_code == 400
+
+    async def garbage_completion(messages, **kwargs):
+        return "not json"
+
+    monkeypatch.setattr(server.engine.llm, "simple_completion", garbage_completion)
+    assert client.post(
+        "/api/modules/wb_core_rpg/instructions/skill_categories/rewrite",
+        json={"request": "x"},
+    ).status_code == 502

@@ -196,6 +196,32 @@ async def run_all_tests():
     await _librarian_skill_removal_survives_merge()
 
 
+def test_build_module_state_injects_module_instructions():
+    """A module's instruction overrides (reserved __module_instructions__ key)
+    are injected as state["module_instructions"] for that module only —
+    without any consumes declaration."""
+    full_state = {
+        "active_save_id": "test",
+        "turn": 3,
+        "module_data": {"wb_core_rpg": {"hp": 85}},
+        "module_configs": {
+            "wb_core_rpg": {"xp_per_action": 10},
+            "__module_instructions__": {"wb_core_rpg": {"action_assessment": "Gravity is optional."}},
+        },
+    }
+    build = EngineGraph._build_module_state
+
+    rpg_view = build(None, full_state, "wb_core_rpg", {})
+    assert rpg_view["module_instructions"] == {"action_assessment": "Gravity is optional."}
+    # Injected as a copy: mutating the view can't corrupt the real state.
+    rpg_view["module_instructions"]["action_assessment"] = "tampered"
+    assert full_state["module_configs"]["__module_instructions__"]["wb_core_rpg"]["action_assessment"] == "Gravity is optional."
+
+    # A module with no overrides gets no key at all.
+    other_view = build(None, full_state, "wb_time_tracker", {})
+    assert "module_instructions" not in other_view
+
+
 def test_module_owned_mutation_dispatch():
     asyncio.run(_module_owned_mutation_dispatch())
 

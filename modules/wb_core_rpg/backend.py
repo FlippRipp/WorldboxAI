@@ -104,6 +104,92 @@ except (OSError, json.JSONDecodeError):
     _BASE_MUTATION_SCHEMA = {}
 
 
+# --------------------------------------------------------------------------
+# Customizable instruction slots
+#
+# Each LLM prompt this module builds splits into a creative "directive" -- the
+# part a scenario or story may override via module_instructions -- and fixed
+# scaffolding (context sections, exact counts, JSON contracts) that overrides
+# can never touch, so output parsing cannot break. The defaults below are the
+# verbatim directive text the prompts have always used; a missing or empty
+# override means the default applies.
+# --------------------------------------------------------------------------
+
+DIRECTIVE_ACTION_ASSESSMENT = """- Social actions: the outcome depends on the TARGET's likely disposition as shown in the recent story and world context, not on the player's stats. A bold ask to a receptive, bored, curious, or amused character is plausible even for a weak character. Only rate a social action 1-2 if the target's established nature makes acceptance truly impossible.
+- Reward creativity: a clever, novel, or dramatically interesting approach that fits the established fiction rates one band higher than a blunt attempt at the same goal. Punish contradiction of established facts, not ambition.
+- Status effects: weigh them like circumstances, not stats. A [bad] effect lowers feasibility of actions it would plausibly impede (a broken leg makes sprinting far harder) and can push a directly-blocked attempt to 1-2; a [good] effect raises feasibility of actions it aids. The higher an effect's severity, the more it sways the score. Effects unrelated to the attempt change nothing."""
+
+DIRECTIVE_SKILL_CATEGORIES = """BROAD domains of ability this character could plausibly begin learning in this world and at this point in the story. Each category is a wide umbrella that could hold dozens of very different skills - broad strokes, never narrow specialties like "dagger throwing" or "rose gardening". But name them with imagination, in this world's own voice: "The Red Trades" beats "Combat", "Whisperwork" beats "Stealth", "Hearth & Harvest" beats "Survival". A bland textbook label is a failure; so is a name so cryptic the summary can't rescue it. Let the one-clause summary make plain what broad ground the name covers. The 10 must be meaningfully different from each other and together should span most of what anyone could learn in this world. Split them evenly: 5 drawn from the story - its themes, its current events, what this character already does or what the tale has hinted at - and 5 that stand apart from all of that, ability domains this world supports regardless of where the story happens to be right now."""
+
+DIRECTIVE_SKILL_OPTIONS = """The 5 must vary widely in flavor and approach - do not make them five shades of the same idea. Most should belong squarely to the theme, but 1-2 may take a loose, sideways, or surprising interpretation of it; a skill that fits the theme imperfectly but fits the character or story well is better than a fifth on-the-nose variant."""
+
+DIRECTIVE_SKILL_REFINE = """- Keep its identity: same ability, same manner of working. You may polish the name (1-4 words) but never change what the skill IS.
+- The description is 1-2 tight sentences and completely FREE-STANDING: exactly what the power does, how it manifests, and any limit or cost, grounded in this world and where the story stands now. Concrete over flowery."""
+
+DIRECTIVE_EVOLUTION_OPTIONS = """Every path must promise a SIGNIFICANT power-up - a major leap beyond the current form, never a sidegrade, tradeoff, or flavor change.
+
+The FIRST path is the pure path: the skill stays exactly what it is but grows dramatically stronger - same identity, same manner of working, pushed far past its current limits. Its theme is a short label conveying refinement or ascension of the skill as it already is (like "Perfected", "Transcendent", "True Mastery" - but fitting THIS skill), and its summary says how the skill's existing strengths intensify.
+
+The other THREE paths each take the skill in a distinct new direction. Each theme is a short evocative label of 1-3 words (like "Brutal", "Efficiency", "Stealthy" - but fitting THIS skill and world), plus one short clause summarizing what that path emphasizes. These three directions must be meaningfully different from each other, from the pure path, and from the skill's current form. Do not repeat the skill's current evolution theme."""
+
+DIRECTIVE_EVOLVE = """- It MUST be a SIGNIFICANT power-up over the current form: broader in scope, stronger in effect, and with fewer limits - a dramatic leap, not a rename or minor tweak. It should feel like a new class of power.
+- The power-up applies to the skill's BENEFITS only. Any costs, drawbacks, or negative side effects must NOT grow stronger with the evolution: keep them at their current severity or reduce them, and never introduce new ones."""
+
+INSTRUCTION_SLOTS = [
+    {
+        "id": "action_assessment",
+        "label": "Action Judging & XP",
+        "description": "How player actions are judged for feasibility and difficulty. Succeeding at judged actions is what earns XP, so this steers what kinds of attempts pay off.",
+        "default": DIRECTIVE_ACTION_ASSESSMENT,
+    },
+    {
+        "id": "skill_categories",
+        "label": "Skill Menu: Categories",
+        "description": "What the 10 browsable skill categories in the add-skill menu should be like.",
+        "default": DIRECTIVE_SKILL_CATEGORIES,
+    },
+    {
+        "id": "skill_options",
+        "label": "Skill Menu: Skills",
+        "description": "What the 5 skill proposals inside a category (or search) should be like.",
+        "default": DIRECTIVE_SKILL_OPTIONS,
+    },
+    {
+        "id": "skill_refine",
+        "label": "Skill Menu: Finalize Skill",
+        "description": "How a chosen draft skill is polished before it lands on the character sheet.",
+        "default": DIRECTIVE_SKILL_REFINE,
+    },
+    {
+        "id": "evolution_options",
+        "label": "Evolution: Paths",
+        "description": "What the 4 evolution paths offered for a maxed-out skill should be like.",
+        "default": DIRECTIVE_EVOLUTION_OPTIONS,
+    },
+    {
+        "id": "evolve",
+        "label": "Evolution: Final Form",
+        "description": "How the evolved form of a skill is designed once a path is chosen.",
+        "default": DIRECTIVE_EVOLVE,
+    },
+]
+
+_SLOT_DEFAULTS = {slot["id"]: slot["default"] for slot in INSTRUCTION_SLOTS}
+
+
+def get_instruction_slots() -> list[dict]:
+    """Generic module contract: the customizable instruction slots this module
+    exposes. The host serves these to the UI and the rewrite endpoint."""
+    return [dict(slot) for slot in INSTRUCTION_SLOTS]
+
+
+def _directive(slot_id: str, instructions: dict | None) -> str:
+    """The directive text for a prompt slot: the story/scenario override when
+    one is set, otherwise the built-in default."""
+    text = str((instructions or {}).get(slot_id) or "").strip()
+    return text or _SLOT_DEFAULTS[slot_id]
+
+
 # Status effects are temporary conditions (broken leg, poisoned, blessed,
 # brainwashed) with a ONE-sentence description and a severity (1-10). They
 # expire after a number of player turns (duration_turns) or at an in-world
@@ -402,7 +488,10 @@ async def on_gather_context(state: dict, sdk) -> dict:
         # Pre-assess action feasibility with a fast model call
         model_pref = config.get("practice_ai_model", "fastest")
         recent_story = [entry[-1200:] for entry in (state.get("history") or [])[-2:]]
-        assessment = await _assess_action(input_text, char, config, sdk, model_pref, state.get("world_data"), recent_story)
+        assessment = await _assess_action(
+            input_text, char, config, sdk, model_pref, state.get("world_data"), recent_story,
+            instructions=state.get("module_instructions"),
+        )
         char.action_assessment = assessment
 
     # Practice-based progression: use AI to detect which skill the action uses
@@ -433,7 +522,7 @@ async def on_gather_context(state: dict, sdk) -> dict:
     return updates
 
 
-async def _assess_action(input_text: str, char: Character, config: dict, sdk, model_pref: str = "fastest", world_data: dict = None, recent_story: list = None) -> dict:
+async def _assess_action(input_text: str, char: Character, config: dict, sdk, model_pref: str = "fastest", world_data: dict = None, recent_story: list = None, instructions: dict = None) -> dict:
     tier_list = config.get("stat_tiers", DEFAULT_STAT_TIERS) or DEFAULT_STAT_TIERS
     difficulty_label, difficulty_guidance, no_and_max, fail_max, success_min = _strictness_tier(config)
     outcome_parts = []
@@ -506,9 +595,7 @@ Feasibility scale (rate the attempt, not the ambition):
 Outcome mapping at this difficulty: {outcome_mapping}.
 
 Judging guidelines:
-- Social actions: the outcome depends on the TARGET's likely disposition as shown in the recent story and world context, not on the player's stats. A bold ask to a receptive, bored, curious, or amused character is plausible even for a weak character. Only rate a social action 1-2 if the target's established nature makes acceptance truly impossible.
-- Reward creativity: a clever, novel, or dramatically interesting approach that fits the established fiction rates one band higher than a blunt attempt at the same goal. Punish contradiction of established facts, not ambition.
-- Status effects: weigh them like circumstances, not stats. A [bad] effect lowers feasibility of actions it would plausibly impede (a broken leg makes sprinting far harder) and can push a directly-blocked attempt to 1-2; a [good] effect raises feasibility of actions it aids. The higher an effect's severity, the more it sways the score. Effects unrelated to the attempt change nothing.
+{_directive("action_assessment", instructions)}
 - Difficulty is set to "{difficulty_label}": {difficulty_guidance}
 
 You are a referee, not a narrator: determine the outcome, do not describe it. Never write story prose.
@@ -1446,7 +1533,7 @@ def _character_context_block(rpg: dict) -> str:
     return "\n".join(lines)
 
 
-def _evolution_options_prompt(rpg: dict, key: str, data: dict, state: dict) -> str:
+def _evolution_options_prompt(rpg: dict, key: str, data: dict, state: dict, instructions: dict | None = None) -> str:
     tier = _skill_tier(data)
     world_section = _world_context_section(state.get("world_data"))
     story_section = _story_context_section(state)
@@ -1458,17 +1545,13 @@ def _evolution_options_prompt(rpg: dict, key: str, data: dict, state: dict) -> s
 Skill ready to evolve:
 {_skill_record_block(key, data)}
 
-Propose exactly 4 evolution paths. Every path must promise a SIGNIFICANT power-up - a major leap beyond the current form, never a sidegrade, tradeoff, or flavor change.
-
-The FIRST path is the pure path: the skill stays exactly what it is but grows dramatically stronger - same identity, same manner of working, pushed far past its current limits. Its theme is a short label conveying refinement or ascension of the skill as it already is (like "Perfected", "Transcendent", "True Mastery" - but fitting THIS skill), and its summary says how the skill's existing strengths intensify.
-
-The other THREE paths each take the skill in a distinct new direction. Each theme is a short evocative label of 1-3 words (like "Brutal", "Efficiency", "Stealthy" - but fitting THIS skill and world), plus one short clause summarizing what that path emphasizes. These three directions must be meaningfully different from each other, from the pure path, and from the skill's current form. Do not repeat the skill's current evolution theme.
+Propose exactly 4 evolution paths. {_directive("evolution_options", instructions)}
 
 JSON response (pure path first):
 {{"options": [{{"theme": "1-3 words", "summary": "one short clause"}}, {{"theme": "...", "summary": "..."}}, {{"theme": "...", "summary": "..."}}, {{"theme": "...", "summary": "..."}}]}}"""
 
 
-def _evolve_prompt(rpg: dict, key: str, data: dict, theme: str, state: dict, pure: bool = False) -> str:
+def _evolve_prompt(rpg: dict, key: str, data: dict, theme: str, state: dict, pure: bool = False, instructions: dict | None = None) -> str:
     tier = _skill_tier(data)
     world_section = _world_context_section(state.get("world_data"))
     story_section = _story_context_section(state)
@@ -1491,8 +1574,7 @@ Skill that is evolving:
 Chosen evolution theme: {theme}
 
 Design the evolved Tier {tier + 1} form. Requirements:
-- It MUST be a SIGNIFICANT power-up over the current form: broader in scope, stronger in effect, and with fewer limits - a dramatic leap, not a rename or minor tweak. It should feel like a new class of power.
-- The power-up applies to the skill's BENEFITS only. Any costs, drawbacks, or negative side effects must NOT grow stronger with the evolution: keep them at their current severity or reduce them, and never introduce new ones.
+{_directive("evolve", instructions)}
 {theme_req}
 - Give it a new evocative name of 2-4 words. It must not be the same as the old name.
 - The description is 1-2 tight sentences and completely FREE-STANDING: it states exactly what the power does, how it manifests, and any remaining limit or cost, readable by someone who has never heard of the previous form. Never mention, compare to, or assume knowledge of the old skill - no "now", "no longer", "unlike before", "twice as far", or naming the prior form. Concrete over flowery.
@@ -1528,7 +1610,7 @@ def _plot_challenge_section(state: dict) -> str:
     return "\n".join(lines) + "\n\n"
 
 
-def _skill_categories_prompt(rpg: dict, state: dict) -> str:
+def _skill_categories_prompt(rpg: dict, state: dict, instructions: dict | None = None) -> str:
     world_section = _world_context_section(state.get("world_data"))
     story_section = _story_context_section(state)
     plot_section = _plot_challenge_section(state)
@@ -1545,13 +1627,13 @@ def _skill_categories_prompt(rpg: dict, state: dict) -> str:
 {world_section}{story_section}{plot_section}Character:
 {_character_context_block(rpg)}
 
-Propose exactly 10 skill categories - BROAD domains of ability this character could plausibly begin learning in this world and at this point in the story. Each category is a wide umbrella that could hold dozens of very different skills - broad strokes, never narrow specialties like "dagger throwing" or "rose gardening". But name them with imagination, in this world's own voice: "The Red Trades" beats "Combat", "Whisperwork" beats "Stealth", "Hearth & Harvest" beats "Survival". A bland textbook label is a failure; so is a name so cryptic the summary can't rescue it. Let the one-clause summary make plain what broad ground the name covers. The 10 must be meaningfully different from each other and together should span most of what anyone could learn in this world. Split them evenly: 5 drawn from the story - its themes, its current events, what this character already does or what the tale has hinted at - and 5 that stand apart from all of that, ability domains this world supports regardless of where the story happens to be right now.{plot_req} Do not mark or group which is which. Each has a name of 1-3 words and one short clause summary.
+Propose exactly 10 skill categories - {_directive("skill_categories", instructions)}{plot_req} Do not mark or group which is which. Each has a name of 1-3 words and one short clause summary.
 
 JSON response:
 {{"categories": [{{"name": "1-3 words", "summary": "one short clause"}}, ... 10 total]}}"""
 
 
-def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], state: dict, search: bool = False) -> str:
+def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], state: dict, search: bool = False, instructions: dict | None = None) -> str:
     world_section = _world_context_section(state.get("world_data"))
     story_section = _story_context_section(state)
     plot_section = _plot_challenge_section(state)
@@ -1582,7 +1664,7 @@ def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], state: dict,
 
 Do NOT propose any of these skills or trivial variants of them (already known or already offered): {exclude_line}
 
-{task}, each learnable NOW by this character. The 5 must vary widely in flavor and approach - do not make them five shades of the same idea. Most should belong squarely to the theme, but 1-2 may take a loose, sideways, or surprising interpretation of it; a skill that fits the theme imperfectly but fits the character or story well is better than a fifth on-the-nose variant.{plot_req} Every proposal is a starting-level ability at its base form - the power each one ultimately awakens with is decided later by fate, so write none of the 5 as stronger or weaker than the others.
+{task}, each learnable NOW by this character. {_directive("skill_options", instructions)}{plot_req} Every proposal is a starting-level ability at its base form - the power each one ultimately awakens with is decided later by fate, so write none of the 5 as stronger or weaker than the others.
 
 Each skill:
 - name: 1-4 evocative words, distinct from every excluded name above and from the other 4 proposals
@@ -1594,7 +1676,7 @@ JSON response:
 {{"skills": [{{"name": "...", "type": "active", "description": "...", "trigger_words": ["w1", "w2"]}}, ... 5 total]}}"""
 
 
-def _skill_refine_prompt(rpg: dict, skill: dict, menu: str | None, state: dict) -> str:
+def _skill_refine_prompt(rpg: dict, skill: dict, menu: str | None, state: dict, instructions: dict | None = None) -> str:
     world_section = _world_context_section(state.get("world_data"))
     story_section = _story_context_section(state)
     plot_section = _plot_challenge_section(state)
@@ -1638,8 +1720,7 @@ Description: {skill.get('description') or '(none)'}
 Trigger words: {', '.join(skill.get('trigger_words') or []) or '(none)'}
 
 Refine this skill. Requirements:
-- Keep its identity: same ability, same manner of working. You may polish the name (1-4 words) but never change what the skill IS.
-- The description is 1-2 tight sentences and completely FREE-STANDING: exactly what the power does, how it manifests, and any limit or cost, grounded in this world and where the story stands now. Concrete over flowery.{plot_req}{strength_req}
+{_directive("skill_refine", instructions)}{plot_req}{strength_req}
 - type: "active" (deliberately used) or "passive" (always on).
 - Trigger words: 2-5 short words or phrases a player would naturally use.
 
@@ -1725,6 +1806,12 @@ def get_router():
 
     def _config(sm) -> dict:
         return sm.state.get("module_configs", {}).get("wb_core_rpg", {}) or {}
+
+    def _instructions(sm) -> dict:
+        # Story/scenario instruction overrides live under a host-owned
+        # reserved key, alongside (not inside) the per-module settings.
+        overrides = sm.state.get("module_configs", {}).get("__module_instructions__", {}) or {}
+        return overrides.get("wb_core_rpg", {}) or {}
 
     def _llm_bridge():
         engine = _services.get("engine")
@@ -2033,7 +2120,7 @@ def get_router():
 
             llm = _llm_bridge()
             config = _config(sm)
-            prompt = _evolution_options_prompt(rpg, key, data, sm.state)
+            prompt = _evolution_options_prompt(rpg, key, data, sm.state, instructions=_instructions(sm))
             try:
                 llm._current_module = "wb_core_rpg"
                 raw = await llm.generate(prompt, model_preference=config.get("evolution_ai_model", "smartest"))
@@ -2100,7 +2187,7 @@ def get_router():
         async def _do_evolve():
             llm = _llm_bridge()
             config = _config(sm)
-            prompt = _evolve_prompt(rpg, key, data, theme, sm.state, pure=pure)
+            prompt = _evolve_prompt(rpg, key, data, theme, sm.state, pure=pure, instructions=_instructions(sm))
             try:
                 llm._current_module = "wb_core_rpg"
                 raw = await llm.generate(prompt, model_preference=config.get("evolution_ai_model", "smartest"))
@@ -2218,7 +2305,7 @@ def get_router():
             return {"categories": entry["categories"]}
 
         async def _generate():
-            raw = await _wizard_generate(sm, _skill_categories_prompt(rpg, sm.state))
+            raw = await _wizard_generate(sm, _skill_categories_prompt(rpg, sm.state, instructions=_instructions(sm)))
             parsed = _parse_json_repair(raw)
             categories = parsed.get("categories") if isinstance(parsed, dict) else None
             cleaned, seen = [], set()
@@ -2265,7 +2352,7 @@ def get_router():
 
             exclude = [s["name"] for page in pages for s in page] + list(rpg.get("skills", {}).keys())
             raw = await _wizard_generate(
-                sm, _skill_options_prompt(rpg, menu, exclude, sm.state, search=payload.search)
+                sm, _skill_options_prompt(rpg, menu, exclude, sm.state, search=payload.search, instructions=_instructions(sm))
             )
             parsed = _parse_json_repair(raw)
             proposals = parsed.get("skills") if isinstance(parsed, dict) else None
@@ -2326,7 +2413,7 @@ def get_router():
                 "strength": strength,
             }
 
-            raw = await _wizard_generate(sm, _skill_refine_prompt(rpg, draft, payload.menu, sm.state))
+            raw = await _wizard_generate(sm, _skill_refine_prompt(rpg, draft, payload.menu, sm.state, instructions=_instructions(sm)))
             parsed = _parse_json_repair(raw)
             if not isinstance(parsed, dict) or not str(parsed.get("name", "")).strip():
                 raise HTTPException(status_code=502, detail="The AI failed to refine the skill. Try again.")

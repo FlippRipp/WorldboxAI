@@ -677,6 +677,37 @@ def test_wizard_prompts_skip_empty_story_context():
     assert "Recent story" not in prompt
 
 
+def test_wizard_uses_instruction_overrides_from_reserved_key():
+    """Story/scenario instruction overrides stored under
+    module_configs["__module_instructions__"] replace the creative directive
+    in every wizard prompt, while counts and JSON contracts stay fixed."""
+    mod = _load_backend()
+    client, sm, calls = _make_client(
+        mod, _rpg(), llm_replies=[CATEGORIES_REPLY, _options_reply(_P0_NAMES), REFINE_REPLY]
+    )
+    sm.state["module_configs"]["__module_instructions__"] = {"wb_core_rpg": {
+        "skill_categories": "All categories must be culinary disciplines.",
+        "skill_options": "Every skill must involve cooking.",
+        "skill_refine": "- Descriptions must mention an ingredient.",
+    }}
+
+    assert client.post(f"{BASE}/skills/wizard/categories").status_code == 200
+    assert client.post(f"{BASE}/skills/wizard/options", json={"menu": "Flame Arts", "page": 0}).status_code == 200
+    assert client.post(f"{BASE}/skills/wizard/refine", json={"name": "Ember Feint"}).status_code == 200
+
+    assert "All categories must be culinary disciplines." in calls[0]["prompt"]
+    assert "exactly 10 skill categories" in calls[0]["prompt"]
+    assert "BROAD domains of ability" not in calls[0]["prompt"]
+
+    assert "Every skill must involve cooking." in calls[1]["prompt"]
+    assert "exactly 5 NEW skills" in calls[1]["prompt"]
+    assert "vary widely in flavor and approach" not in calls[1]["prompt"]
+
+    assert "Descriptions must mention an ingredient." in calls[2]["prompt"]
+    assert "Refine this skill. Requirements:" in calls[2]["prompt"]
+    assert "Keep its identity" not in calls[2]["prompt"]
+
+
 def test_wizard_uses_new_skill_ai_model_config():
     mod = _load_backend()
     client, _, calls = _make_client(

@@ -183,6 +183,50 @@ def test_update_module_configs_preserves_active_modules():
     shutil.rmtree(data_dir)
 
 
+def test_module_instructions_persist_and_survive_settings_saves():
+    """Instruction overrides live under the reserved __module_instructions__
+    key: they must survive the settings modal's schema-only rebuild, work on
+    unloaded saves, sanitize away blanks, and persist across reloads."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(base_dir, "test_session_module_instructions_data")
+
+    if os.path.exists(data_dir):
+        shutil.rmtree(data_dir)
+
+    session = GameSessionManager(data_dir)
+    session.create_save("story_one")
+
+    # Never set: reads empty.
+    assert session.get_save_module_instructions("story_one") == {}
+
+    # Set on the active save; blanks and malformed entries are dropped.
+    stored = session.set_save_module_instructions("story_one", {
+        "wb_core_rpg": {"skill_categories": "  Culinary only.  ", "skill_options": "   ", "evolve": 7},
+        "bad_module": "not a dict",
+    })
+    assert stored == {"wb_core_rpg": {"skill_categories": "Culinary only."}}
+    assert session.get_save_module_instructions("story_one") == stored
+
+    # The settings modal's per-module payload must not wipe the overrides.
+    session.update_module_configs({"wb_core_rpg": {"progression_system": "practice"}})
+    assert session.get_save_module_instructions("story_one") == stored
+
+    # Editable on a save that is not the active one.
+    session.create_save("story_two")
+    assert session.active_save_id == "story_two"
+    session.set_save_module_instructions("story_one", {"wb_core_rpg": {"evolve": "Blood price."}})
+    assert session.get_save_module_instructions("story_one") == {"wb_core_rpg": {"evolve": "Blood price."}}
+    assert session.get_save_module_instructions("story_two") == {}
+
+    # Survives a reload from disk.
+    session.load_save("story_one")
+    assert session.get_save_module_instructions("story_one") == {"wb_core_rpg": {"evolve": "Blood price."}}
+    reloaded = GameSessionManager(data_dir)
+    assert reloaded.get_save_module_instructions("story_one") == {"wb_core_rpg": {"evolve": "Blood price."}}
+
+    shutil.rmtree(data_dir)
+
+
 def test_session_manager_refuses_turns_without_active_save():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(base_dir, "test_session_no_save_data")

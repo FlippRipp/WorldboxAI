@@ -76,6 +76,12 @@ class ScenarioStore:
             "themes": data.get("themes", ""),
             "tags": data.get("tags", ""),
             "pacing": data.get("pacing", ""),
+            # Module defaults seeded onto saves created from this scenario.
+            # active_modules: list of module ids, or None meaning "unset"
+            # (story creation decides). module_instructions: per-module
+            # instruction-slot overrides, {mod_id: {slot_id: text}}.
+            "active_modules": data.get("active_modules") if isinstance(data.get("active_modules"), list) else None,
+            "module_instructions": data.get("module_instructions") or {},
             "created_at": data.get("created_at") or datetime.now(timezone.utc).isoformat(),
         }
         self.scenarios_dir.mkdir(parents=True, exist_ok=True)

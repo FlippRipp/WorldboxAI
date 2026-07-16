@@ -298,6 +298,13 @@ class EngineGraph:
         if own_config is not None:
             filtered.setdefault("module_configs", {})[mod_id] = deepcopy(own_config)
 
+        # Story/scenario instruction-slot overrides for this module, stored
+        # under the reserved __module_instructions__ key. Injected like the
+        # module's own config: no consumes declaration needed.
+        own_instructions = (full_state.get("module_configs", {}).get("__module_instructions__") or {}).get(mod_id)
+        if own_instructions:
+            filtered["module_instructions"] = deepcopy(own_instructions)
+
         dep_data = consumes.get("module_data", [])
         if dep_data == "*":
             for did, dval in full_state.get("module_data", {}).items():

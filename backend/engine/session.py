@@ -10,6 +10,24 @@ from backend.engine.prompt_pipeline import PromptCompiler, STORY_STYLE_FIELDS
 from backend.engine.settings_registry import SettingsRegistry
 
 
+def sanitize_module_instructions(value: Any) -> dict[str, dict[str, str]]:
+    """Coerce instruction overrides to {mod_id: {slot_id: text}} with stripped,
+    non-empty strings only; anything malformed is dropped silently."""
+    out: dict[str, dict[str, str]] = {}
+    if not isinstance(value, dict):
+        return out
+    for mod_id, slots in value.items():
+        if not isinstance(mod_id, str) or not isinstance(slots, dict):
+            continue
+        clean = {}
+        for slot_id, text in slots.items():
+            if isinstance(slot_id, str) and isinstance(text, str) and text.strip():
+                clean[slot_id] = text.strip()
+        if clean:
+            out[mod_id] = clean
+    return out
+
+
 class GameSessionManager:
     """Owns the active local play session and bridges saves to engine state."""
 
@@ -345,6 +363,35 @@ class GameSessionManager:
             configs["__active_modules__"] = active
             self.save_manager.save_module_configs(save_id, configs)
         return active
+
+    def get_save_module_instructions(self, save_id: str) -> dict[str, dict[str, str]]:
+        """Per-module instruction-slot overrides for a save, shaped
+        {mod_id: {slot_id: text}}. Stored under the reserved
+        ``__module_instructions__`` key so the settings modal's schema-only
+        rebuild can never drop them. Empty dict = all defaults."""
+        self._validate_save_id(save_id)
+        if save_id == self.active_save_id:
+            configs = self.state.get("module_configs", {})
+        else:
+            configs = self.save_manager.read_module_configs(save_id)
+        value = configs.get("__module_instructions__")
+        return value if isinstance(value, dict) else {}
+
+    def set_save_module_instructions(self, save_id: str, module_instructions: dict) -> dict[str, dict[str, str]]:
+        """Persist instruction overrides for a save (loaded or on disk).
+        Values are sanitized: non-string or blank slot texts are dropped, and
+        modules with no remaining overrides are omitted entirely."""
+        self._validate_save_id(save_id)
+        sanitized = sanitize_module_instructions(module_instructions)
+        if save_id == self.active_save_id:
+            configs = dict(self.state.get("module_configs", {}))
+            configs["__module_instructions__"] = sanitized
+            self.update_module_configs(configs)
+        else:
+            configs = dict(self.save_manager.read_module_configs(save_id))
+            configs["__module_instructions__"] = sanitized
+            self.save_manager.save_module_configs(save_id, configs)
+        return sanitized
 
     def get_story_style(self, save_id: str) -> dict[str, str]:
         """The save's editable story direction (themes/tags/pacing); every
