@@ -585,7 +585,7 @@ def test_instruction_slots_endpoint_and_modules_flag(tmp_path, monkeypatch):
     assert res.status_code == 200
     slots = res.json()["slots"]
     assert [s["id"] for s in slots] == [
-        "action_assessment", "skill_categories", "skill_options",
+        "action_assessment", "xp_judgment", "skill_categories", "skill_options",
         "skill_refine", "evolution_options", "evolve",
     ]
     assert all(s["label"] and s["description"] and s["default"] for s in slots)

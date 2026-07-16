@@ -49,7 +49,7 @@ def _run(backend, mutation, config, char):
 def test_level_up_banks_points_and_skips_auto_stats():
     backend = _load_backend()
     char = _char(xp=45, action_assessment={"feasibility": 8, "difficulty": "moderate"})
-    result = _run(backend, {}, {"xp_per_action": 10}, char)
+    result = _run(backend, {}, {"xp_gain_condition": "successful_action", "xp_per_action": 10}, char)
     rpg = result["module_data"]["wb_core_rpg"]
     assert rpg["level"] == 2
     assert rpg["unspent_attribute_points"] == 2
@@ -62,7 +62,7 @@ def test_level_up_banks_points_and_skips_auto_stats():
 def test_points_per_level_are_configurable():
     backend = _load_backend()
     char = _char(xp=45, action_assessment={"feasibility": 8, "difficulty": "moderate"})
-    config = {"xp_per_action": 10, "attribute_points_per_level": 4, "skill_points_per_level": 3}
+    config = {"xp_gain_condition": "successful_action", "xp_per_action": 10, "attribute_points_per_level": 4, "skill_points_per_level": 3}
     rpg = _run(backend, {}, config, char)["module_data"]["wb_core_rpg"]
     assert rpg["unspent_attribute_points"] == 4
     assert rpg["unspent_skill_points"] == 3
@@ -73,7 +73,7 @@ def test_multi_level_up_in_one_turn_accumulates_points():
     # 50 (L2) + 200 (L3) = 250 total XP needed; start just below and gain enough
     # for two levels at once.
     char = _char(xp=240, action_assessment={"feasibility": 8, "difficulty": "extreme"})
-    rpg = _run(backend, {}, {"xp_per_action": 10}, char)["module_data"]["wb_core_rpg"]
+    rpg = _run(backend, {}, {"xp_gain_condition": "successful_action", "xp_per_action": 10}, char)["module_data"]["wb_core_rpg"]
     assert rpg["level"] == 3
     assert rpg["unspent_attribute_points"] == 4
     assert rpg["unspent_skill_points"] == 2

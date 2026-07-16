@@ -4,7 +4,7 @@
   "version": "1.9.1",
   "dependencies": [],
   "consumes": {
-    "state": ["input_text", "turn", "history"],
+    "state": ["input_text", "last_input_text", "turn", "history", "story_style"],
     "module_data": ["wb_time_tracker", "wb_plot_director"],
     "module_configs": [],
     "world_data": true
@@ -48,15 +48,28 @@
       "type": "select",
       "label": "XP Gain Condition",
       "category": "Core RPG System",
-      "description": "Defines what earns the player XP (XP-Based progression only). The automatic options award XP each turn from the action assessment, scaled by difficulty. 'AI Reader decides' defers to the story reader's per-turn judgement; 'Disabled' turns XP off.",
+      "description": "Defines what earns the player XP (XP-Based progression only). 'AI judges each action' runs a dedicated post-turn call that weighs the action and its outcome against the customizable XP Judgment instruction. The automatic options award XP each turn from the action assessment, scaled by difficulty. 'AI Reader decides' defers to the story reader's per-turn judgement; 'Disabled' turns XP off.",
       "options": [
+        {"value": "llm_judge", "label": "AI judges each action (default)"},
         {"value": "successful_action", "label": "Successful actions"},
         {"value": "any_action", "label": "Any substantive action"},
         {"value": "challenging_action", "label": "Only challenging actions"},
         {"value": "reader", "label": "AI Reader decides"},
         {"value": "disabled", "label": "Disabled"}
       ],
-      "default": "successful_action"
+      "default": "llm_judge"
+    },
+    "xp_judge_ai_model": {
+      "type": "select",
+      "label": "XP Judge AI Model",
+      "category": "Core RPG System",
+      "description": "Model preference for the post-turn XP judge (used when the XP Gain Condition is 'AI judges each action'). Runs off the critical path, so a stronger model adds no visible latency.",
+      "options": [
+        {"value": "fastest", "label": "Fastest (cheapest)"},
+        {"value": "balanced", "label": "Balanced (default)"},
+        {"value": "smartest", "label": "Smartest (most accurate)"}
+      ],
+      "default": "balanced"
     },
     "xp_per_action": {
       "type": "slider",

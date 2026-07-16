@@ -110,7 +110,8 @@ gate is enforced server-side — with cheats off the endpoint returns 403.
 |---|---|---|---|
 | `hardcore_mode` | toggle | off | Permanently locks all Core RPG settings at their current values. See below. |
 | `progression_system` | select | `xp` | How characters advance: XP-Based, Practice-Based, or Milestone-Based |
-| `xp_gain_condition` | select | `successful_action` | What earns the player XP (XP-Based only). See below. |
+| `xp_gain_condition` | select | `llm_judge` | What earns the player XP (XP-Based only). See below. |
+| `xp_judge_ai_model` | select | `balanced` | Model preference for the post-turn XP judge (`llm_judge` condition only). |
 | `xp_per_action` | slider 1-50 | 10 | Base XP granted when the XP gain condition is met, scaled by action difficulty. |
 | `xp_curve_steepness` | slider 1-5 | 2 | Controls the exponential XP curve. Higher = slower leveling. |
 | `hp_per_vitality` | slider 3-15 | 7 | Multiplier for HP calculation. Vitality 10 = 70 base HP at level 1. |
@@ -154,7 +155,8 @@ has no scenario).
 
 | Slot | Customizes |
 |---|---|
-| `action_assessment` | The judging guidelines of the action feasibility call — what kinds of attempts succeed, and therefore what earns XP. The strictness tier, outcome bands, and JSON contract stay fixed. |
+| `action_assessment` | The judging guidelines of the action feasibility call — what kinds of attempts succeed in this story. The strictness tier, outcome bands, and JSON contract stay fixed. |
+| `xp_judgment` | When an action deserves XP, for the post-turn XP judge (the default `llm_judge` gain condition). |
 | `skill_categories` | What the 10 add-skill wizard categories should be like (always exactly 10). |
 | `skill_options` | What the 5 skill proposals in a category or search should be like (always exactly 5, uniform base strength). |
 | `skill_refine` | How a picked draft skill is finalized. Fate's rolled rarity ladder stays fixed. |
@@ -173,23 +175,25 @@ receives it as `state["module_instructions"]` for the assessment call.
 - Level-up: full heal, +2 max HP per level, and **banked points** — `attribute_points_per_level` attribute points and `skill_points_per_level` skill points the player allocates in the level-up popup (multiple level-ups in one turn accumulate points). There is no automatic stat assignment.
 - XP curve example (steepness=2): L1→L2: 50 XP, L2→L3: 200 XP, L3→L4: 450 XP.
 
-**XP Gain Condition (`xp_gain_condition`)** defines what actually earns XP. The
-first three options award XP automatically each turn from the module's own
-action assessment (the same fast-model pre-assessment used for feasibility), so
-XP no longer depends on the Reader agent choosing to emit an `xp_gained` value:
+**XP Gain Condition (`xp_gain_condition`)** defines what actually earns XP:
 
 | Condition | Awards XP when… |
 |---|---|
-| `successful_action` (default) | The turn's action is assessed and does **not** resolve as a hard failure (feasibility ≥ 3). |
+| `llm_judge` (default) | A dedicated post-turn judge LLM rules the action deserved XP, weighing the player's action against how the scene actually resolved, guided by the customizable `xp_judgment` instruction. Runs in the librarian phase concurrently with the external-skill-events call, so it adds no player-visible latency and can afford a stronger model (`xp_judge_ai_model`, default `balanced`). A bold failure can earn XP; an undeserving success earns none. |
+| `successful_action` | The turn's action is assessed and does **not** resolve as a hard failure (per the strictness tier's failure band). |
 | `any_action` | Any substantive action is assessed, success or failure. |
 | `challenging_action` | The action's difficulty is `hard` or `extreme`. |
 | `reader` | The Reader agent emits an `xp_gained` mutation (legacy AI-driven behaviour). |
 | `disabled` | Never — XP progression is effectively off. |
 
-For the automatic conditions the amount is `xp_per_action` scaled by the
+The mechanical conditions award XP each turn from the module's own action
+assessment (the same fast-model pre-assessment used for feasibility), so XP
+does not depend on the Reader agent choosing to emit an `xp_gained` value.
+
+For all conditions except `reader`, the amount is `xp_per_action` scaled by the
 assessed difficulty: trivial ×0.25, easy ×0.5, moderate ×1.0, hard ×1.75,
 extreme ×2.5, impossible ×0. Only substantive actions are assessed — pure dialog
-and trivial moves grant no XP.
+and trivial moves grant no XP (and the judge is never called for them).
 
 ### Practice-Based
 - Each time a skill is used (detected via keyword matching in the action text), its practice counter increments by the skill's current rating.
@@ -279,7 +283,8 @@ Only substantive actions are assessed: pure dialog with nothing at stake or triv
 |---|---|
 | `on_gather_context` | Injects action feasibility prompt into context before Storyteller |
 | `on_render_prompt_block` | Renders `character_sheet` (system) and `action_feasibility` (chat-depth-0) prompt blocks |
-| `on_mutate_state` | Processes `hp_change`, `stat_changes`, `skill_changes` from Reader. Awards XP per the `xp_gain_condition` (from the action assessment, or the Reader's `xp_gained` in `reader` mode). Handles level-ups, skill practice, and milestone detection. |
+| `on_mutate_state` | Processes `hp_change`, `stat_changes`, `skill_changes` from Reader. Awards XP per the `xp_gain_condition` (from the action assessment, or the Reader's `xp_gained` in `reader` mode; the default `llm_judge` mode awards in `on_librarian` instead). Handles level-ups, skill practice, and milestone detection. |
+| `on_librarian` | Post-turn phase, off the player's critical path: runs the external-skill-events detector and the XP judge (`llm_judge` mode) as concurrent LLM calls. |
 
 ## Slash Commands
 

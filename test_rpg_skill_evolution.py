@@ -644,7 +644,7 @@ def test_deferred_entry_not_requeued_as_pending():
         "pending_evolutions": [{"skill": "swordplay", "options": None, "status": "deferred"}],
         "action_assessment": {"feasibility": 8, "difficulty": "moderate"},
     }
-    state = {"module_configs": {"wb_core_rpg": {}}, "module_data": {"wb_core_rpg": char}}
+    state = {"module_configs": {"wb_core_rpg": {"xp_gain_condition": "successful_action"}}, "module_data": {"wb_core_rpg": char}}
     result = asyncio.run(backend.on_mutate_state({}, state, None))
     rpg = result["module_data"]["wb_core_rpg"]
     assert rpg["pending_evolutions"] == [{"skill": "swordplay", "options": None, "status": "deferred"}]
