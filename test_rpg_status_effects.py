@@ -204,8 +204,8 @@ def test_difficulty_tier_reaches_the_prompt_as_a_label_not_a_scale():
 
 def test_brutal_widens_the_failure_band_for_ruling_and_xp():
     backend = _load_backend()
-    brutal = {"action_rating_strictness": 10}
-    balanced = {"action_rating_strictness": 5}
+    brutal = {"xp_gain_condition": "successful_action", "action_rating_strictness": 10}
+    balanced = {"xp_gain_condition": "successful_action", "action_rating_strictness": 5}
 
     def char_at(feasibility):
         return backend.Character.from_dict({"action_assessment": {

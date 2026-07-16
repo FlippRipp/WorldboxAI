@@ -16,6 +16,7 @@ def _load_backend():
 
 SLOT_IDS = [
     "action_assessment",
+    "xp_judgment",
     "skill_categories",
     "skill_options",
     "skill_refine",
@@ -148,6 +149,18 @@ def test_evolve_prompt_directive():
                            instructions={"evolve": CUSTOM}),
         mod.DIRECTIVE_EVOLVE,
         ['embody the "Brutal" theme', "new evocative name of 2-4 words", '{"name":'],
+    )
+
+
+def test_xp_judge_prompt_directive():
+    mod = _load_backend()
+    assessment = {"feasibility": 7, "difficulty": "hard"}
+    _check(
+        mod._xp_judge_prompt(_rpg(), "I leap the chasm", assessment, _state()),
+        mod._xp_judge_prompt(_rpg(), "I leap the chasm", assessment, _state(),
+                             instructions={"xp_judgment": CUSTOM}),
+        mod.DIRECTIVE_XP_JUDGMENT,
+        ["You are the XP judge", "I leap the chasm", "difficulty hard", '{"xp_deserved":'],
     )
 
 

@@ -26,6 +26,7 @@ VALID_STATE_KEYS = {
     "player_location_layer_id", "revealed_node_ids",
     "current_context", "prompt_pipeline", "last_prompt_trace",
     "needs_rewrite", "veto_retries", "veto_reason", "active_save_id",
+    "story_style",
 }
 
 

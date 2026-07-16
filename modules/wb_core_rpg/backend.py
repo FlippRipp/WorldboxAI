@@ -119,6 +119,8 @@ DIRECTIVE_ACTION_ASSESSMENT = """- Social actions: the outcome depends on the TA
 - Reward creativity: a clever, novel, or dramatically interesting approach that fits the established fiction rates one band higher than a blunt attempt at the same goal. Punish contradiction of established facts, not ambition.
 - Status effects: weigh them like circumstances, not stats. A [bad] effect lowers feasibility of actions it would plausibly impede (a broken leg makes sprinting far harder) and can push a directly-blocked attempt to 1-2; a [good] effect raises feasibility of actions it aids. The higher an effect's severity, the more it sways the score. Effects unrelated to the attempt change nothing."""
 
+DIRECTIVE_XP_JUDGMENT = """Award XP when the attempt genuinely earned it: a substantive action tackled with real effort, risk, or ingenuity. Success at anything non-trivial deserves XP, and so does a bold failure that meaningfully taught the character something or changed their situation. Withhold XP for trivial or routine actions, for safe repetition of an already-mastered trick, and for attempts that never truly engaged with a challenge."""
+
 DIRECTIVE_SKILL_CATEGORIES = """BROAD domains of ability this character could plausibly begin learning in this world and at this point in the story. Each category is a wide umbrella that could hold dozens of very different skills - broad strokes, never narrow specialties like "dagger throwing" or "rose gardening". But name them with imagination, in this world's own voice: "The Red Trades" beats "Combat", "Whisperwork" beats "Stealth", "Hearth & Harvest" beats "Survival". A bland textbook label is a failure; so is a name so cryptic the summary can't rescue it. Let the one-clause summary make plain what broad ground the name covers. The 10 must be meaningfully different from each other and together should span most of what anyone could learn in this world. Split them evenly: 5 drawn from the story - its themes, its current events, what this character already does or what the tale has hinted at - and 5 that stand apart from all of that, ability domains this world supports regardless of where the story happens to be right now."""
 
 DIRECTIVE_SKILL_OPTIONS = """The 5 must vary widely in flavor and approach - do not make them five shades of the same idea. Most should belong squarely to the theme, but 1-2 may take a loose, sideways, or surprising interpretation of it; a skill that fits the theme imperfectly but fits the character or story well is better than a fifth on-the-nose variant."""
@@ -138,9 +140,15 @@ DIRECTIVE_EVOLVE = """- It MUST be a SIGNIFICANT power-up over the current form:
 INSTRUCTION_SLOTS = [
     {
         "id": "action_assessment",
-        "label": "Action Judging & XP",
-        "description": "How player actions are judged for feasibility and difficulty. Succeeding at judged actions is what earns XP, so this steers what kinds of attempts pay off.",
+        "label": "Action Judging",
+        "description": "How player actions are judged for feasibility and difficulty — what kinds of attempts succeed in this story.",
         "default": DIRECTIVE_ACTION_ASSESSMENT,
+    },
+    {
+        "id": "xp_judgment",
+        "label": "XP Judgment",
+        "description": "When an action deserves experience points. Used while the XP Gain Condition setting is 'AI judges each action' (the default).",
+        "default": DIRECTIVE_XP_JUDGMENT,
     },
     {
         "id": "skill_categories",
@@ -401,6 +409,15 @@ class Character:
         return c
 
 
+# What earns XP when the setting was never touched: the assessment LLM judges
+# each action against the (customizable) xp_judgment directive.
+DEFAULT_XP_CONDITION = "llm_judge"
+
+
+def _llm_judges_xp(config: dict) -> bool:
+    return str(config.get("xp_gain_condition", DEFAULT_XP_CONDITION)) == "llm_judge"
+
+
 # How much the base XP award is scaled by the assessed difficulty of an action.
 # Harder actions are worth more; an impossible attempt earns nothing.
 DIFFICULTY_XP_WEIGHT = {
@@ -417,8 +434,10 @@ def _xp_from_assessment(char: "Character", config: dict) -> int:
     """Deterministic XP for the turn, driven by the configured XP gain condition
     and this turn's action assessment. Returns 0 when the condition isn't met or
     no substantive action was assessed."""
-    condition = config.get("xp_gain_condition", "successful_action")
-    if condition in ("reader", "disabled"):
+    condition = config.get("xp_gain_condition", DEFAULT_XP_CONDITION)
+    if condition in ("reader", "disabled", "llm_judge"):
+        # "reader" defers to the Reader's per-turn xp_gained; "llm_judge" is
+        # ruled by the dedicated post-turn judge call (_judge_xp) instead.
         return 0
 
     assessment = char.action_assessment or {}
@@ -441,11 +460,25 @@ def _xp_from_assessment(char: "Character", config: dict) -> int:
         return 0
     # "any_action" awards regardless of outcome.
 
+    return _xp_award_amount(assessment, config)
+
+
+def _xp_award_amount(assessment: dict, config: dict) -> int:
+    """Base XP scaled by the assessed difficulty (impossible earns nothing)."""
     base = config.get("xp_per_action", 10)
     if not isinstance(base, (int, float)) or base <= 0:
         base = 10
+    difficulty = str(assessment.get("difficulty", "moderate")).lower()
     weight = DIFFICULTY_XP_WEIGHT.get(difficulty, 1.0)
     return max(0, round(base * weight))
+
+
+def _grant_xp(char: "Character", xp_gained: int, config: dict) -> None:
+    """Bank XP on the character and process any level-ups it triggers."""
+    char.xp += xp_gained
+    steepness = config.get("xp_curve_steepness", 2)
+    while total_xp_for_level(char.level + 1, steepness) <= char.xp:
+        _apply_level_up(char, char.level + 1, config)
 
 
 def xp_for_level(level: int, steepness: int = 2) -> int:
@@ -843,7 +876,7 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
     progression = config.get("progression_system", "xp")
 
     if progression == "xp":
-        condition = config.get("xp_gain_condition", "successful_action")
+        condition = config.get("xp_gain_condition", DEFAULT_XP_CONDITION)
         if condition == "reader":
             # Defer entirely to the Reader agent's per-turn judgement.
             raw = mutation.get("xp_gained", 0)
@@ -852,10 +885,7 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
             # Award XP deterministically from the turn's action assessment.
             xp_gained = _xp_from_assessment(char, config)
         if xp_gained > 0:
-            char.xp += xp_gained
-            steepness = config.get("xp_curve_steepness", 2)
-            while total_xp_for_level(char.level + 1, steepness) <= char.xp:
-                _apply_level_up(char, char.level + 1, config)
+            _grant_xp(char, xp_gained, config)
             updated = True
 
     elif progression == "practice" and _progression_enabled(config):
@@ -936,22 +966,105 @@ def _parse_json_block(raw: str):
 
 
 async def on_librarian(state: dict, sdk) -> dict | None:
-    """After the storyteller, detect skills granted, removed, or altered by
-    EXTERNAL forces acting on the player (divine boons, curses, blessings,
-    magical injuries, a mentor's gift). This is distinct from the player's own
-    practice/XP progression and from the Reader's action-driven skill_changes."""
+    """Post-turn phase: external skill events and the XP judge, run as
+    concurrent LLM calls (this phase is off the player's critical path, so the
+    judge adds no visible latency)."""
     config = state.get("module_configs", {}).get("wb_core_rpg", {})
-    if not config.get("external_skill_events_enabled", True):
-        return None
-
     if state.get("turn", 0) == 0:
         return None
 
-    history = state.get("history", [])
-    if not history:
+    char = Character.from_dict(state.get("module_data", {}).get("wb_core_rpg", {}))
+
+    tasks = []
+    if config.get("external_skill_events_enabled", True) and state.get("history"):
+        tasks.append(("events", _detect_external_skill_events(char, state, config, sdk)))
+    if config.get("progression_system", "xp") == "xp" and _llm_judges_xp(config):
+        tasks.append(("xp", _judge_xp(char, state, config, sdk)))
+    if not tasks:
         return None
 
-    char = Character.from_dict(state.get("module_data", {}).get("wb_core_rpg", {}))
+    try:
+        sdk.llm._current_module = "wb_core_rpg"
+        results = dict(zip(
+            [name for name, _ in tasks],
+            await asyncio.gather(*(coro for _, coro in tasks)),
+        ))
+    finally:
+        sdk.llm._current_module = ""
+
+    if not any(results.values()):
+        return None
+    update = {"module_data": {"wb_core_rpg": char.to_dict()}}
+    if results.get("events"):
+        # module_data is deep-merged into state (additive), which can't delete
+        # a dict entry — a removed skill would silently reappear. Skills and
+        # practice counters are returned complete, so replace them wholesale.
+        update["module_data_replace"] = ["skills", "practice_counters"]
+    return update
+
+
+def _xp_judge_prompt(rpg: dict, action_text: str, assessment: dict, state: dict, instructions: dict | None = None) -> str:
+    story_section = _story_context_section(state)
+    difficulty = str(assessment.get("difficulty", "moderate"))
+    feasibility = assessment.get("feasibility")
+    return f"""You are the XP judge for a text RPG. The turn is over; decide whether the player's action deserved experience points. Output ONLY valid JSON, no other text.
+
+{story_section}Character:
+{_character_context_block(rpg)}
+
+Player action this turn: "{action_text}"
+Action assessment: difficulty {difficulty}, feasibility {feasibility}/10. The most recent scene above is how the action actually played out.
+
+Judgment guidelines:
+{_directive("xp_judgment", instructions)}
+
+JSON response:
+{{"xp_deserved": true or false, "reason": "one short factual clause naming what earned or forfeited the XP"}}"""
+
+
+async def _judge_xp(char: "Character", state: dict, config: dict, sdk) -> bool:
+    """Dedicated post-turn XP ruling for the 'llm_judge' gain condition: a
+    judge LLM weighs the player's action against the (customizable)
+    xp_judgment directive, seeing how the turn actually resolved. Returns True
+    when XP was awarded."""
+    assessment = char.action_assessment or {}
+    try:
+        int(assessment.get("feasibility"))
+    except (TypeError, ValueError):
+        # No substantive action was assessed this turn -> nothing to judge.
+        return False
+    action_text = str(state.get("last_input_text") or "").strip()
+    if not action_text:
+        return False
+    amount = _xp_award_amount(assessment, config)
+    if amount <= 0:
+        return False
+
+    prompt = _xp_judge_prompt(
+        char.to_dict(), action_text, assessment, state,
+        instructions=state.get("module_instructions"),
+    )
+    model_pref = config.get("xp_judge_ai_model", "balanced")
+    try:
+        raw = await sdk.llm.generate(prompt, model_preference=model_pref)
+    except Exception as e:
+        print(f"[RPG] XP judgment failed: {type(e).__name__}: {e}")
+        return False
+    parsed = _parse_json_repair(raw)
+    if not isinstance(parsed, dict) or not parsed.get("xp_deserved"):
+        return False
+    _grant_xp(char, amount, config)
+    print(f"[RPG] XP judge awarded {amount} XP: {parsed.get('reason', '')}")
+    return True
+
+
+async def _detect_external_skill_events(char: "Character", state: dict, config: dict, sdk) -> bool:
+    """Detect skills granted, removed, or altered by EXTERNAL forces acting on
+    the player (divine boons, curses, blessings, magical injuries, a mentor's
+    gift). This is distinct from the player's own practice/XP progression and
+    from the Reader's action-driven skill_changes. Mutates ``char`` in place
+    and returns True when anything changed."""
+    history = state.get("history", [])
 
     # The grant/curse being detected happened in THIS turn's scene, so that
     # scene must always be in the prompt (a tail-truncated join of the last 3
@@ -995,15 +1108,11 @@ For each added or altered skill, the description must capture the nuance of the 
 Respond with ONLY valid JSON:
 {{"added": [{{"name": "skill_name", "rating": 1-10, "description": "what it does, how it manifests, source, limits — 1-2 tight sentences", "trigger_words": ["word1", "word2"], "type": "active|passive|curse"}}], "removed": ["skill_name"], "altered": [{{"name": "existing_skill_name", "new_rating": 1-10, "description": "optional updated description"}}]}}"""
 
-    try:
-        sdk.llm._current_module = "wb_core_rpg"
-        raw = await sdk.llm.generate(prompt, model_preference=model_pref)
-    finally:
-        sdk.llm._current_module = ""
+    raw = await sdk.llm.generate(prompt, model_preference=model_pref)
 
     parsed = _parse_json_block(raw)
     if not isinstance(parsed, dict):
-        return None
+        return False
 
     updated = False
 
@@ -1060,14 +1169,7 @@ Respond with ONLY valid JSON:
 
     if updated:
         _check_evolution_ready(char, _progression_enabled(config))
-        # module_data is deep-merged into state (additive), which can't delete
-        # a dict entry — a removed skill would silently reappear. Skills and
-        # practice counters are returned complete, so replace them wholesale.
-        return {
-            "module_data": {"wb_core_rpg": char.to_dict()},
-            "module_data_replace": ["skills", "practice_counters"],
-        }
-    return None
+    return updated
 
 
 async def on_command_stats(args: list[str], state: dict, sdk):
