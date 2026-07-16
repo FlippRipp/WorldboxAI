@@ -1064,6 +1064,18 @@ async def create_save(request: CreateSaveRequest):
             if seeds:
                 cfgs["wb_plot_director"] = {**cfgs.get("wb_plot_director", {}), **seeds}
                 changed = True
+            # RPG choices made on the scenario seed the save's module config,
+            # so they behave like normal story settings afterwards (visible
+            # and editable in the module settings UI).
+            if scenario is not None:
+                rpg_seed = {}
+                if scenario.get("disable_skill_progression"):
+                    rpg_seed["skill_progression_enabled"] = False
+                if isinstance(scenario.get("skill_points_per_level"), int):
+                    rpg_seed["skill_points_per_level"] = scenario["skill_points_per_level"]
+                if rpg_seed:
+                    cfgs["wb_core_rpg"] = {**cfgs.get("wb_core_rpg", {}), **rpg_seed}
+                    changed = True
             if changed:
                 session_manager.update_module_configs(cfgs)
 
@@ -1511,6 +1523,10 @@ class ScenarioRequest(BaseModel):
     # RPG add-skill wizard: skip the category-picking step in stories created
     # from this scenario and offer skills directly.
     skip_skill_categories: Optional[bool] = False
+    # RPG module-config seeds: freeze skill ratings/evolution, and how many
+    # skill points each level-up banks (None = module default).
+    disable_skill_progression: Optional[bool] = False
+    skill_points_per_level: Optional[int] = None
     # Module defaults for stories created from this scenario: which modules
     # are active (None = unset) and per-module instruction-slot overrides.
     active_modules: Optional[list[str]] = None

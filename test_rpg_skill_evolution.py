@@ -264,6 +264,21 @@ def _cached_rpg():
     return rpg
 
 
+def test_evolution_endpoints_409_when_progression_disabled():
+    mod = _load_backend()
+    config = {"skill_progression_enabled": False}
+
+    client, _, calls = _make_client(mod, _cached_rpg(), llm_replies=[OPTIONS_REPLY], config=config)
+    res = client.post(f"{BASE}/skills/swordplay/evolution-options")
+    assert res.status_code == 409
+    assert "disabled" in res.json()["detail"]
+
+    client, _, calls = _make_client(mod, _cached_rpg(), llm_replies=[EVOLVE_REPLY], config=config)
+    res = client.post(f"{BASE}/skills/swordplay/evolve", json={"theme": "Brutal"})
+    assert res.status_code == 409
+    assert calls == []  # no LLM spent on a disabled feature
+
+
 def test_evolve_applies_tiered_form():
     mod = _load_backend()
     client, sm, calls = _make_client(mod, _cached_rpg(), llm_replies=[EVOLVE_REPLY], config={"evolution_ai_model": "smartest"})

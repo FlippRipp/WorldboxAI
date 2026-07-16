@@ -608,6 +608,8 @@ def test_scenario_module_fields_roundtrip_and_legacy_load(tmp_path, monkeypatch)
         "name": "Culinary Court",
         "scenario_description": "A palace kitchen at war.",
         "skip_skill_categories": True,
+        "disable_skill_progression": True,
+        "skill_points_per_level": 2,
         "active_modules": ["wb_core_rpg"],
         "module_instructions": {
             "wb_core_rpg": {"skill_categories": "Culinary disciplines only.", "skill_options": "  "},
@@ -619,6 +621,8 @@ def test_scenario_module_fields_roundtrip_and_legacy_load(tmp_path, monkeypatch)
     loaded = client.get(f"/api/scenarios/{scenario_id}").json()["scenario"]
     assert loaded["active_modules"] == ["wb_core_rpg"]
     assert loaded["skip_skill_categories"] is True
+    assert loaded["disable_skill_progression"] is True
+    assert loaded["skill_points_per_level"] == 2
     # Blank slots and malformed modules are sanitized out at save time.
     assert loaded["module_instructions"] == {"wb_core_rpg": {"skill_categories": "Culinary disciplines only."}}
 
@@ -628,6 +632,8 @@ def test_scenario_module_fields_roundtrip_and_legacy_load(tmp_path, monkeypatch)
     assert loaded_legacy["active_modules"] is None
     assert loaded_legacy["module_instructions"] == {}
     assert loaded_legacy["skip_skill_categories"] is False
+    assert loaded_legacy["disable_skill_progression"] is False
+    assert loaded_legacy["skill_points_per_level"] is None
 
 
 def test_create_save_seeds_module_instructions_from_scenario(tmp_path, monkeypatch):
@@ -673,6 +679,36 @@ def test_create_save_seeds_module_instructions_from_scenario(tmp_path, monkeypat
     # The frozen scenario copy still holds the scenario's own values for reset.
     body = client.get("/api/saves/edited_save/module-instructions").json()
     assert body["scenario_module_instructions"] == {"wb_core_rpg": {"skill_categories": "Culinary only."}}
+
+
+def test_create_save_seeds_rpg_config_from_scenario(tmp_path, monkeypatch):
+    client, session_manager = make_client(tmp_path, monkeypatch)
+
+    from backend.engine.scenario import ScenarioStore
+    store = ScenarioStore(str(tmp_path / "data"))
+    monkeypatch.setattr(server, "scenario_store", store)
+
+    record = store.save_scenario({
+        "name": "Frozen Skills",
+        "scenario_description": "No grinding here.",
+        "disable_skill_progression": True,
+        "skill_points_per_level": 3,
+    })
+    resp = client.post("/api/saves", json={"save_id": "frozen_save", "scenario_id": record["id"]})
+    assert resp.status_code == 200
+    rpg_cfg = session_manager.state["module_configs"]["wb_core_rpg"]
+    assert rpg_cfg["skill_progression_enabled"] is False
+    assert rpg_cfg["skill_points_per_level"] == 3
+
+    # A scenario that leaves both unset seeds nothing (module defaults apply).
+    plain = store.save_scenario({"name": "Plain", "scenario_description": "Defaults."})
+    resp = client.post("/api/saves", json={"save_id": "plain_save", "scenario_id": plain["id"]})
+    assert resp.status_code == 200
+    assert "wb_core_rpg" not in session_manager.state["module_configs"]
+
+    # Out-of-range points are clamped by the scenario store.
+    clamped = store.save_scenario({"name": "Clamped", "skill_points_per_level": 99})
+    assert clamped["skill_points_per_level"] == 3
 
 
 def test_save_module_instructions_get_put(tmp_path, monkeypatch):

@@ -27,6 +27,14 @@ def _slugify(name: str) -> str:
     return slug or "scenario"
 
 
+def _clamp_optional_int(value, lo: int, hi: int):
+    """An optional numeric field: None (or junk) stays None, numbers are
+    clamped into [lo, hi]."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return max(lo, min(hi, int(value)))
+
+
 class ScenarioStore:
     def __init__(self, data_dir):
         self.scenarios_dir = Path(data_dir) / "scenarios"
@@ -80,6 +88,13 @@ class ScenarioStore:
             # scenario skips the category-picking step and offers skills
             # directly (search stays available).
             "skip_skill_categories": bool(data.get("skip_skill_categories") or False),
+            # RPG module-config seeds for stories created from this scenario.
+            # disable_skill_progression: freeze skill ratings and turn off
+            # evolution (skill points only buy new skills).
+            # skill_points_per_level: points banked per level-up; None means
+            # "use the module default".
+            "disable_skill_progression": bool(data.get("disable_skill_progression") or False),
+            "skill_points_per_level": _clamp_optional_int(data.get("skill_points_per_level"), 0, 3),
             # Module defaults seeded onto saves created from this scenario.
             # active_modules: list of module ids, or None meaning "unset"
             # (story creation decides). module_instructions: per-module

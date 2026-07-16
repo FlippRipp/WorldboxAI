@@ -725,7 +725,11 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
             else:
                 continue
             if name in char.skills:
-                char.skills[name]["rating"] = max(1, min(10, char.skills[name]["rating"] + rating))
+                # With progression off, ratings are frozen at their starting
+                # value: story-driven rating bumps are ignored, but freshened
+                # descriptions/triggers still land.
+                if _progression_enabled(config):
+                    char.skills[name]["rating"] = max(1, min(10, char.skills[name]["rating"] + rating))
                 if description:
                     char.skills[name]["description"] = description
                 if trigger_words:
@@ -854,7 +858,7 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
                 _apply_level_up(char, char.level + 1, config)
             updated = True
 
-    elif progression == "practice":
+    elif progression == "practice" and _progression_enabled(config):
         improve_rate = config.get("skill_improvement_rate", 5)
         for skill_name, counter in list(char.practice_counters.items()):
             if skill_name in char.skills:
@@ -873,7 +877,7 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
     if updated:
         if char.max_hp == 0:
             char.recalc_hp(hp_per_con)
-        _check_evolution_ready(char)
+        _check_evolution_ready(char, _progression_enabled(config))
         return {"module_data": {"wb_core_rpg": char.to_dict()}}
     return {}
 
@@ -1039,7 +1043,9 @@ Respond with ONLY valid JSON:
         key = _match_skill_key(entry.get("name", ""), char.skills)
         if key is None:
             continue
-        if entry.get("new_rating") is not None:
+        # Frozen ratings (progression off) ignore external rating changes too;
+        # the updated description still lands.
+        if entry.get("new_rating") is not None and _progression_enabled(config):
             try:
                 char.skills[key]["rating"] = max(1, min(10, int(entry["new_rating"])))
                 updated = True
@@ -1053,7 +1059,7 @@ Respond with ONLY valid JSON:
             print(f"[RPG] External event altered skill '{key}' -> {char.skills[key]['rating']}/10")
 
     if updated:
-        _check_evolution_ready(char)
+        _check_evolution_ready(char, _progression_enabled(config))
         # module_data is deep-merged into state (additive), which can't delete
         # a dict entry — a removed skill would silently reappear. Skills and
         # practice counters are returned complete, so replace them wholesale.
@@ -1327,6 +1333,14 @@ EVOLVABLE_TYPES = ("active", "passive")
 MAX_SKILL_RATING = 10
 EVOLVED_RESET_RATING = 5
 
+
+def _progression_enabled(config: dict | None) -> bool:
+    """Skill rating growth and evolution. When off (a story/scenario choice),
+    every skill keeps the rating it was born with: no point allocations, no
+    practice growth, no story-driven rating changes, and evolution never
+    triggers - skill points only buy new skills."""
+    return bool((config or {}).get("skill_progression_enabled", True))
+
 # In-flight generation tasks shared across requests (evolution options,
 # wizard categories/options/refine, evolve), keyed per save + operation.
 # Requests await them through asyncio.shield, so a client disconnect (the app
@@ -1395,11 +1409,14 @@ def _match_skill_key(name, skills: dict) -> str | None:
     return key if key in skills else None
 
 
-def _sync_pending_evolutions(skills: dict, pending: list) -> list:
+def _sync_pending_evolutions(skills: dict, pending: list, enabled: bool = True) -> list:
     """Keep pending_evolutions in sync with the skill list: enqueue any
     evolvable skill that reached max rating, prune entries whose skill no
     longer exists or dropped below max (deferred entries survive as long as
-    the skill still qualifies)."""
+    the skill still qualifies). With progression disabled the queue is always
+    empty - nothing evolves, and stale entries are cleared."""
+    if not enabled:
+        return []
     if not isinstance(pending, list):
         pending = []
     pending = [
@@ -1420,8 +1437,8 @@ def _sync_pending_evolutions(skills: dict, pending: list) -> list:
     return pending
 
 
-def _check_evolution_ready(char: Character) -> None:
-    char.pending_evolutions = _sync_pending_evolutions(char.skills, char.pending_evolutions)
+def _check_evolution_ready(char: Character, enabled: bool = True) -> None:
+    char.pending_evolutions = _sync_pending_evolutions(char.skills, char.pending_evolutions, enabled)
 
 
 PHYSICAL_ACTION_KEYWORDS = [
@@ -1849,10 +1866,18 @@ def get_router():
         if not _cheats_enabled():
             raise HTTPException(status_code=403, detail="Editing the character sheet requires cheat mode.")
 
-    def _sync_evolutions(rpg: dict):
+    def _sync_evolutions(rpg: dict, sm=None):
+        enabled = _progression_enabled(_config(sm)) if sm is not None else True
         rpg["pending_evolutions"] = _sync_pending_evolutions(
-            rpg.get("skills", {}), rpg.get("pending_evolutions", [])
+            rpg.get("skills", {}), rpg.get("pending_evolutions", []), enabled
         )
+
+    def _require_progression(sm):
+        if not _progression_enabled(_config(sm)):
+            raise HTTPException(
+                status_code=409,
+                detail="Skill ratings & evolution are disabled for this story.",
+            )
 
     def _pending_entry(rpg: dict, key: str) -> dict | None:
         for entry in rpg.get("pending_evolutions", []):
@@ -1937,7 +1962,7 @@ def get_router():
             "trigger_words": _clean_triggers(payload.trigger_words or []),
             "type": payload.type or "active",
         }
-        _sync_evolutions(rpg)
+        _sync_evolutions(rpg, sm)
         _clear_addskill_cache(sm)
         _persist(sm)
         return {"skills": skills}
@@ -1986,7 +2011,7 @@ def get_router():
                 if isinstance(entry, dict) and entry.get("skill") == key:
                     entry["skill"] = new_name
 
-        _sync_evolutions(rpg)
+        _sync_evolutions(rpg, sm)
         _persist(sm)
         return {"skills": skills}
 
@@ -2003,7 +2028,7 @@ def get_router():
         counters = rpg.get("practice_counters")
         if isinstance(counters, dict):
             counters.pop(key, None)
-        _sync_evolutions(rpg)
+        _sync_evolutions(rpg, sm)
         _persist(sm)
         return {"skills": skills}
 
@@ -2048,6 +2073,12 @@ def get_router():
                 raise HTTPException(status_code=400, detail=f"Stat '{stat}' cannot exceed {max_stat}.")
         if sum(stat_allocations.values()) > attr_available:
             raise HTTPException(status_code=400, detail=f"Not enough attribute points (have {attr_available}).")
+
+        if skill_allocations and not _progression_enabled(config):
+            raise HTTPException(
+                status_code=400,
+                detail="Skill ratings & evolution are disabled for this story; skill points can only buy new skills.",
+            )
 
         resolved_skills: dict[str, int] = {}
         for skill_name, delta in skill_allocations.items():
@@ -2107,13 +2138,14 @@ def get_router():
 
         rpg["unspent_attribute_points"] = attr_available - sum(stat_allocations.values())
         rpg["unspent_skill_points"] = skill_available - skill_cost
-        _sync_evolutions(rpg)
+        _sync_evolutions(rpg, sm)
         _persist(sm)
         return rpg
 
     @router.post("/skills/{skill_name}/evolution-options")
     async def evolution_options(skill_name: str):
         sm = _session_manager()
+        _require_progression(sm)
         rpg = _rpg_data(sm)
         skills = rpg.setdefault("skills", {})
         key = _find_key(skills, skill_name)
@@ -2122,7 +2154,7 @@ def get_router():
         data = skills[key]
         _evolvable_or_409(key, data)
 
-        _sync_evolutions(rpg)
+        _sync_evolutions(rpg, sm)
         entry = _pending_entry(rpg, key)
         if entry is None:  # unreachable after sync, but stay defensive
             entry = {"skill": key, "options": None, "status": "pending"}
@@ -2168,7 +2200,7 @@ def get_router():
             if sm.active_save_id != save_id:
                 return {"skill": key, "tier": _skill_tier(data), "options": cleaned}
             live_rpg = _rpg_data(sm)
-            _sync_evolutions(live_rpg)
+            _sync_evolutions(live_rpg, sm)
             live_entry = _pending_entry(live_rpg, key)
             if live_entry is not None:
                 live_entry["options"] = cleaned
@@ -2180,6 +2212,7 @@ def get_router():
     @router.post("/skills/{skill_name}/evolve")
     async def evolve_skill(skill_name: str, payload: EvolvePayload):
         sm = _session_manager()
+        _require_progression(sm)
         rpg = _rpg_data(sm)
         skills = rpg.setdefault("skills", {})
         key = _find_key(skills, skill_name)
@@ -2270,7 +2303,7 @@ def get_router():
                 "description": evolved["description"],
                 "announced": False,
             })
-            _sync_evolutions(live_rpg)
+            _sync_evolutions(live_rpg, sm)
             _persist(sm)
             return {
                 "rpg": live_rpg,

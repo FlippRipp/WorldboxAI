@@ -309,6 +309,10 @@ function LevelUpModal({ rpg, config, generating, saveId, resume, onClose, onAppl
   const skillPts = rpg.unspent_skill_points ?? 0;
   const maxStat = config?.max_stat_value ?? 20;
   const newSkillCost = config?.new_skill_cost ?? 3;
+  // With progression off (a scenario/story setting), ratings are frozen and
+  // the server rejects allocations: skill points only buy new skills, so the
+  // per-skill +/- rows are hidden.
+  const progressionOn = config?.skill_progression_enabled !== false;
 
   const [pendingStats, setPendingStats] = useState({});
   const [pendingSkills, setPendingSkills] = useState({});
@@ -465,7 +469,7 @@ function LevelUpModal({ rpg, config, generating, saveId, resume, onClose, onAppl
             <section>
               <h3 className="text-xs uppercase tracking-wider text-gray-500 mb-2">Skills</h3>
               <div className="space-y-1.5">
-                {raisableSkills.map(([name, data]) => {
+                {progressionOn && raisableSkills.map(([name, data]) => {
                   const added = pendingSkills[name] || 0;
                   return (
                     <div key={name} className="flex items-center justify-between text-sm bg-gray-800/40 rounded px-3 py-1.5 border border-gray-700/50">
@@ -537,7 +541,7 @@ function LevelUpModal({ rpg, config, generating, saveId, resume, onClose, onAppl
               disabled={!canConfirm}
               className="flex-1 py-2 text-sm font-semibold text-amber-100 bg-amber-600/70 hover:bg-amber-600/90 disabled:opacity-40 border border-amber-500/50 rounded-lg transition-colors"
             >
-              {saving ? 'Applying…' : newSkill?.strength === 10 ? <>Confirm {'—'} something stirs{'…'}</> : 'Confirm'}
+              {saving ? 'Applying…' : newSkill?.strength === 10 && progressionOn ? <>Confirm {'—'} something stirs{'…'}</> : 'Confirm'}
             </button>
             <button
               onClick={onClose}
@@ -555,6 +559,7 @@ function LevelUpModal({ rpg, config, generating, saveId, resume, onClose, onAppl
           generating={generating}
           saveId={saveId}
           resume={wizardResume.current}
+          progressionOn={progressionOn}
           costLabel={`${newSkillCost} pt${newSkillCost === 1 ? '' : 's'}`}
           onCancel={() => { wizardResume.current = null; clearResume(saveId, ['wizard']); setShowAddWizard(false); }}
           onConfirm={async (skill) => { wizardResume.current = null; clearResume(saveId, ['wizard']); setNewSkill(skill); setShowAddWizard(false); }}
@@ -781,7 +786,7 @@ function SkillEvolutionModal({ skillName, rpg, generating, saveId, resumeTheme, 
 // skill options with rolled strength/rarity -> refine -> reveal. Mirrors
 // SkillEvolutionModal's phase machine; all generation is server-cached, so
 // back-navigation and re-requests never pay for a second LLM call.
-function AddSkillModal({ generating, costLabel, saveId, resume, onCancel, onConfirm }) {
+function AddSkillModal({ generating, costLabel, saveId, resume, progressionOn = true, onCancel, onConfirm }) {
   const [phase, setPhase] = useState('categories-loading'); // categories-loading | categories | skills-loading | skills | refining | reveal
   const [categories, setCategories] = useState(null);
   const [menu, setMenu] = useState(null); // {name, search, direct}
@@ -1324,7 +1329,7 @@ function AddSkillModal({ generating, costLabel, saveId, resume, onCancel, onConf
                   </span>
                 )}
               </div>
-              {mythicReveal && (
+              {mythicReveal && progressionOn && (
                 <div className="text-[11px] text-red-300/90 font-semibold">
                   A mythic power {'—'} the moment it is learned it will surge toward evolution.
                 </div>

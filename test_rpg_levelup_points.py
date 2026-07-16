@@ -317,6 +317,65 @@ def test_spend_to_max_queues_evolution():
     assert out["pending_evolutions"] == [{"skill": "swordplay", "options": None, "status": "pending"}]
 
 
+def test_spend_with_progression_disabled_only_buys_new_skills():
+    mod = _load_backend()
+    config = {"skill_progression_enabled": False}
+
+    # Raising a rating is rejected outright; nothing is mutated.
+    client, sm, _ = _make_client(mod, _spend_rpg(), config=config)
+    res = client.post(f"{BASE}/levelup/spend", json={"skill_allocations": {"swordplay": 1}})
+    assert res.status_code == 400
+    assert "disabled" in res.json()["detail"]
+    assert sm.state["module_data"]["wb_core_rpg"]["skills"]["swordplay"]["rating"] == 5
+
+    # Buying a new skill (and spending attribute points) still works.
+    client, _, _ = _make_client(mod, _spend_rpg(), config=config)
+    res = client.post(f"{BASE}/levelup/spend", json={
+        "stat_allocations": {"power": 1},
+        "new_skill": {"name": "Ember Feint", "description": "d", "trigger_words": ["feint"], "type": "active", "rating": 5},
+    })
+    assert res.status_code == 200
+    out = res.json()
+    assert out["skills"]["ember feint"]["rating"] == 5
+    assert out["unspent_skill_points"] == 1  # 4 - default cost 3
+
+    # A skill at max rating queues no evolution while disabled.
+    rpg = _spend_rpg()
+    rpg["skills"]["swordplay"]["rating"] = 10
+    rpg["pending_evolutions"] = [{"skill": "swordplay", "options": None, "status": "pending"}]
+    client, _, _ = _make_client(mod, rpg, config=config)
+    res = client.post(f"{BASE}/levelup/spend", json={"stat_allocations": {"power": 1}})
+    assert res.status_code == 200
+    # Even a stale queued entry is cleared by the sync.
+    assert res.json()["pending_evolutions"] == []
+
+
+def test_progression_disabled_freezes_practice_and_reader_ratings():
+    backend = _load_backend()
+    config = {"progression_system": "practice", "skill_improvement_rate": 1, "skill_progression_enabled": False}
+    char = _char(
+        skills={"swordplay": {"rating": 5, "description": "old", "trigger_words": [], "type": "active"}},
+        practice_counters={"swordplay": 50},
+    )
+    # Practice growth is frozen...
+    result = _run(backend, {}, config, char)
+    assert result == {} or result["module_data"]["wb_core_rpg"]["skills"]["swordplay"]["rating"] == 5
+
+    # ...and Reader rating bumps are ignored, while description updates land.
+    char = _char(skills={"swordplay": {"rating": 5, "description": "old", "trigger_words": [], "type": "active"}})
+    mutation = {"skill_changes": {"swordplay": {"rating": 3, "description": "sharper than ever"}}}
+    rpg = _run(backend, mutation, {"skill_progression_enabled": False}, char)["module_data"]["wb_core_rpg"]
+    assert rpg["skills"]["swordplay"]["rating"] == 5
+    assert rpg["skills"]["swordplay"]["description"] == "sharper than ever"
+
+    # New story-granted skills still arrive (frozen at their birth rating).
+    char = _char()
+    mutation = {"skill_changes": {"emberkiss": {"rating": 4, "description": "a boon", "trigger_words": ["fire"], "type": "active"}}}
+    rpg = _run(backend, mutation, {"skill_progression_enabled": False}, char)["module_data"]["wb_core_rpg"]
+    assert rpg["skills"]["emberkiss"]["rating"] == 4
+    assert rpg["pending_evolutions"] == []
+
+
 def test_no_active_save_conflict():
     mod = _load_backend()
     client, _, _ = _make_client(mod, _spend_rpg())

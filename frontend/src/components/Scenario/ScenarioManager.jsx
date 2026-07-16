@@ -126,7 +126,8 @@ export default function ScenarioManager({ onBack }) {
     setLinkedLorebooks([]);
     setEditing({
       name: '', scenario_description: '', starting_prompt: '', themes: '', tags: '', pacing: '',
-      skip_skill_categories: false, active_modules: null, module_instructions: {},
+      skip_skill_categories: false, disable_skill_progression: false, skill_points_per_level: null,
+      active_modules: null, module_instructions: {},
     });
   };
 
@@ -137,7 +138,11 @@ export default function ScenarioManager({ onBack }) {
       setLinkedLorebooks(lorebook_ids || []);
       // Older scenarios predate themes/tags/pacing and the module fields;
       // backfill so the inputs stay controlled.
-      setEditing({ themes: '', tags: '', pacing: '', skip_skill_categories: false, active_modules: null, module_instructions: {}, ...scenario });
+      setEditing({
+        themes: '', tags: '', pacing: '', skip_skill_categories: false,
+        disable_skill_progression: false, skill_points_per_level: null,
+        active_modules: null, module_instructions: {}, ...scenario,
+      });
     } catch (e) {
       alert(`Failed to load scenario: ${e.message}`);
     }
@@ -342,21 +347,67 @@ export default function ScenarioManager({ onBack }) {
               </div>
 
               {enabledModuleIds.includes('wb_core_rpg') && (
-                <label className="flex items-start gap-2 p-4 rounded-lg border border-gray-700 bg-gray-800/30 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={!!editing.skip_skill_categories}
-                    onChange={(e) => setEditing({ ...editing, skip_skill_categories: e.target.checked })}
-                    className="accent-purple-600 mt-1"
-                  />
-                  <span>
-                    <span className="block text-sm font-medium text-gray-300">Skip skill categories in the add-skill menu</span>
-                    <span className="block text-xs text-gray-500 mt-0.5">
-                      When learning a new skill, stories from this scenario jump straight to suggested
-                      skills instead of picking a category first. Searching for an ability stays available.
+                <div className="space-y-3 p-4 rounded-lg border border-gray-700 bg-gray-800/30">
+                  <div>
+                    <h4 className="text-sm font-medium text-gray-300">Core RPG</h4>
+                    <p className="text-xs text-gray-500">
+                      Skill-system choices for stories created from this scenario. Editable per story
+                      afterwards in the module settings.
+                    </p>
+                  </div>
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={!!editing.skip_skill_categories}
+                      onChange={(e) => setEditing({ ...editing, skip_skill_categories: e.target.checked })}
+                      className="accent-purple-600 mt-1"
+                    />
+                    <span>
+                      <span className="block text-sm text-gray-300">Skip skill categories in the add-skill menu</span>
+                      <span className="block text-xs text-gray-500 mt-0.5">
+                        When learning a new skill, jump straight to suggested skills instead of picking a
+                        category first. Searching for an ability stays available.
+                      </span>
                     </span>
-                  </span>
-                </label>
+                  </label>
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={!!editing.disable_skill_progression}
+                      onChange={(e) => setEditing({ ...editing, disable_skill_progression: e.target.checked })}
+                      className="accent-purple-600 mt-1"
+                    />
+                    <span>
+                      <span className="block text-sm text-gray-300">Disable skill ratings &amp; evolution</span>
+                      <span className="block text-xs text-gray-500 mt-0.5">
+                        Every skill keeps the rating it was born with: no rating growth, no evolution.
+                        Skill points can only be spent on learning new skills.
+                      </span>
+                    </span>
+                  </label>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>
+                      <span className="block text-sm text-gray-300">Skill points per level</span>
+                      <span className="block text-xs text-gray-500 mt-0.5">
+                        Banked on each level-up and spent in the level-up screen.
+                      </span>
+                    </span>
+                    <select
+                      value={editing.skill_points_per_level ?? ''}
+                      onChange={(e) => setEditing({
+                        ...editing,
+                        skill_points_per_level: e.target.value === '' ? null : Number(e.target.value),
+                      })}
+                      className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
+                    >
+                      <option value="">Default (1)</option>
+                      <option value="0">0</option>
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="3">3</option>
+                    </select>
+                  </div>
+                </div>
               )}
 
               <div className="space-y-1.5">

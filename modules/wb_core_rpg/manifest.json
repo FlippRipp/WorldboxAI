@@ -1,7 +1,7 @@
 {
   "id": "wb_core_rpg",
   "name": "Core RPG System",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "dependencies": [],
   "consumes": {
     "state": ["input_text", "turn", "history"],
@@ -97,6 +97,13 @@
       "label": "Skill Points per Level",
       "category": "Core RPG System",
       "description": "Skill points banked on each level-up. Spend 1 point for +1 rating on an existing skill, or save up to learn a brand-new skill (XP and Milestone progression only)."
+    },
+    "skill_progression_enabled": {
+      "type": "toggle",
+      "default": true,
+      "label": "Skill Ratings & Evolution",
+      "category": "Core RPG System",
+      "description": "Skills gain rating from points, practice, and story events, and evolve at max rating. Turn off to freeze every skill at its starting rating: no rating allocations, no growth, no evolution — skill points only buy new skills."
     },
     "new_skill_cost": {
       "type": "slider",
