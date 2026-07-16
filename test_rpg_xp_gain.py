@@ -155,39 +155,59 @@ def _run_librarian(backend, state, sdk):
     return asyncio.run(backend.on_librarian(state, sdk))
 
 
-def test_llm_judge_awards_scaled_xp_when_deserved():
+def test_llm_judge_awards_the_amount_it_names():
     backend = _load_backend()
     calls = []
-    sdk = _judge_sdk('{"xp_deserved": true, "reason": "bold leap"}', calls)
+    sdk = _judge_sdk('{"xp_awarded": 17, "reason": "bold leap"}', calls)
     char = _char(action_assessment={"feasibility": 8, "difficulty": "hard"})
     result = _run_librarian(backend, _judge_state(char), sdk)
-    # hard weight = 1.75 -> 18 XP, judged post-turn
-    assert result["module_data"]["wb_core_rpg"]["xp"] == 18
+    # The judge names the actual amount; no difficulty scaling, no cap.
+    assert result["module_data"]["wb_core_rpg"]["xp"] == 17
     assert len(calls) == 1
     prompt = calls[0]["prompt"]
     assert "You are the XP judge" in prompt
     assert "I leap the chasm" in prompt
     assert "somehow you land it" in prompt  # the turn's outcome is in scope
+    # The default sizing scale is part of the customizable directive.
+    assert "Size the award to the feat" in prompt
 
 
-def test_llm_judge_withholds_xp_when_not_deserved():
+def test_llm_judge_withholds_xp_on_zero_award():
     backend = _load_backend()
     calls = []
-    sdk = _judge_sdk('{"xp_deserved": false, "reason": "routine"}', calls)
+    sdk = _judge_sdk('{"xp_awarded": 0, "reason": "routine"}', calls)
     char = _char(action_assessment={"feasibility": 8, "difficulty": "hard"})
     result = _run_librarian(backend, _judge_state(char), sdk)
     assert result is None
     assert len(calls) == 1
 
 
+def test_llm_judge_amount_is_uncapped():
+    # No server-side ceiling: the directive (customizable per scenario) is the
+    # only thing bounding the scale.
+    backend = _load_backend()
+    sdk = _judge_sdk('{"xp_awarded": 500, "reason": "slew the engine-god"}', [])
+    char = _char(action_assessment={"feasibility": 8, "difficulty": "hard"})
+    result = _run_librarian(backend, _judge_state(char), sdk)
+    assert result["module_data"]["wb_core_rpg"]["xp"] == 500
+
+
 def test_llm_judge_a_deserving_failure_still_earns():
     # The judge rules on merit, not on the outcome bands: a bold failure can
     # earn XP (this is the point of judge mode over successful_action).
     backend = _load_backend()
-    sdk = _judge_sdk('{"xp_deserved": true, "reason": "ambitious failure taught much"}', [])
-    char = _char(action_assessment={"feasibility": 2, "difficulty": "extreme"})
+    sdk = _judge_sdk('{"xp_awarded": 25, "reason": "ambitious failure taught much"}', [])
+    char = _char(action_assessment={"feasibility": 2, "difficulty": "impossible"})
     result = _run_librarian(backend, _judge_state(char), sdk)
     assert result["module_data"]["wb_core_rpg"]["xp"] == 25
+
+
+def test_llm_judge_invalid_amounts_award_nothing():
+    backend = _load_backend()
+    for reply in ('{"xp_awarded": -5}', '{"xp_awarded": "lots"}', '{"reason": "no amount field"}'):
+        sdk = _judge_sdk(reply, [])
+        char = _char(action_assessment={"feasibility": 8, "difficulty": "hard"})
+        assert _run_librarian(backend, _judge_state(char), sdk) is None
 
 
 def test_llm_judge_skips_without_assessment_or_action():
@@ -197,7 +217,7 @@ def test_llm_judge_skips_without_assessment_or_action():
         (_char(action_assessment={"feasibility": 8}), {"last_input_text": ""}),  # no input
     ):
         calls = []
-        sdk = _judge_sdk('{"xp_deserved": true}', calls)
+        sdk = _judge_sdk('{"xp_awarded": 10}', calls)
         state = _judge_state(char)
         state.update(state_patch)
         assert _run_librarian(backend, state, sdk) is None
@@ -214,7 +234,7 @@ def test_llm_judge_garbage_reply_awards_nothing():
 def test_llm_judge_not_called_for_other_conditions():
     backend = _load_backend()
     calls = []
-    sdk = _judge_sdk('{"xp_deserved": true}', calls)
+    sdk = _judge_sdk('{"xp_awarded": 10}', calls)
     char = _char(action_assessment={"feasibility": 8, "difficulty": "hard"})
     state = _judge_state(char, config={"xp_gain_condition": "successful_action"})
     assert _run_librarian(backend, state, sdk) is None
@@ -223,7 +243,7 @@ def test_llm_judge_not_called_for_other_conditions():
 
 def test_llm_judge_award_triggers_level_up():
     backend = _load_backend()
-    sdk = _judge_sdk('{"xp_deserved": true, "reason": "earned"}', [])
+    sdk = _judge_sdk('{"xp_awarded": 25, "reason": "earned"}', [])
     # L1->L2 needs 50 total XP; 40 + 25 (extreme) = 65 -> level 2.
     char = _char(xp=40, action_assessment={"feasibility": 8, "difficulty": "extreme"})
     result = _run_librarian(backend, _judge_state(char), sdk)
@@ -235,7 +255,7 @@ def test_llm_judge_award_triggers_level_up():
 def test_llm_judge_uses_custom_instruction_and_model_pref():
     backend = _load_backend()
     calls = []
-    sdk = _judge_sdk('{"xp_deserved": true, "reason": "cooked well"}', calls)
+    sdk = _judge_sdk('{"xp_awarded": 18, "reason": "cooked well"}', calls)
     char = _char(action_assessment={"feasibility": 8, "difficulty": "hard"})
     state = _judge_state(
         char, config={"xp_judge_ai_model": "smartest"},

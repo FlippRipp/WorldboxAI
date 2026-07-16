@@ -119,7 +119,9 @@ DIRECTIVE_ACTION_ASSESSMENT = """- Social actions: the outcome depends on the TA
 - Reward creativity: a clever, novel, or dramatically interesting approach that fits the established fiction rates one band higher than a blunt attempt at the same goal. Punish contradiction of established facts, not ambition.
 - Status effects: weigh them like circumstances, not stats. A [bad] effect lowers feasibility of actions it would plausibly impede (a broken leg makes sprinting far harder) and can push a directly-blocked attempt to 1-2; a [good] effect raises feasibility of actions it aids. The higher an effect's severity, the more it sways the score. Effects unrelated to the attempt change nothing."""
 
-DIRECTIVE_XP_JUDGMENT = """Award XP when the attempt genuinely earned it: a substantive action tackled with real effort, risk, or ingenuity. Success at anything non-trivial deserves XP, and so does a bold failure that meaningfully taught the character something or changed their situation. Withhold XP for trivial or routine actions, for safe repetition of an already-mastered trick, and for attempts that never truly engaged with a challenge."""
+DIRECTIVE_XP_JUDGMENT = """Award XP when the attempt genuinely earned it: a substantive action tackled with real effort, risk, or ingenuity. Success at anything non-trivial deserves XP, and so does a bold failure that meaningfully taught the character something or changed their situation. Withhold XP for trivial or routine actions, for safe repetition of an already-mastered trick, and for attempts that never truly engaged with a challenge.
+
+Size the award to the feat. As a guide: a marginal but deserving attempt earns 2-5 XP, a solid success around 10 XP, a hard-won or inventive feat 15-25 XP, and only a truly extraordinary, story-defining moment up to 50 XP. Award 0 XP when nothing was earned."""
 
 DIRECTIVE_SKILL_CATEGORIES = """BROAD domains of ability this character could plausibly begin learning in this world and at this point in the story. Each category is a wide umbrella that could hold dozens of very different skills - broad strokes, never narrow specialties like "dagger throwing" or "rose gardening". But name them with imagination, in this world's own voice: "The Red Trades" beats "Combat", "Whisperwork" beats "Stealth", "Hearth & Harvest" beats "Survival". A bland textbook label is a failure; so is a name so cryptic the summary can't rescue it. Let the one-clause summary make plain what broad ground the name covers. The 10 must be meaningfully different from each other and together should span most of what anyone could learn in this world. Split them evenly: 5 drawn from the story - its themes, its current events, what this character already does or what the tale has hinted at - and 5 that stand apart from all of that, ability domains this world supports regardless of where the story happens to be right now."""
 
@@ -147,7 +149,7 @@ INSTRUCTION_SLOTS = [
     {
         "id": "xp_judgment",
         "label": "XP Judgment",
-        "description": "When an action deserves experience points. Used while the XP Gain Condition setting is 'AI judges each action' (the default).",
+        "description": "When an action deserves experience points and how much to award — including the XP scale itself, which custom instructions may redefine. Used while the XP Gain Condition setting is 'AI judges each action' (the default).",
         "default": DIRECTIVE_XP_JUDGMENT,
     },
     {
@@ -1007,7 +1009,7 @@ def _xp_judge_prompt(rpg: dict, action_text: str, assessment: dict, state: dict,
     story_section = _story_context_section(state)
     difficulty = str(assessment.get("difficulty", "moderate"))
     feasibility = assessment.get("feasibility")
-    return f"""You are the XP judge for a text RPG. The turn is over; decide whether the player's action deserved experience points. Output ONLY valid JSON, no other text.
+    return f"""You are the XP judge for a text RPG. The turn is over; decide whether the player's action deserved experience points and, if so, how much XP to award. Output ONLY valid JSON, no other text.
 
 {story_section}Character:
 {_character_context_block(rpg)}
@@ -1019,14 +1021,16 @@ Judgment guidelines:
 {_directive("xp_judgment", instructions)}
 
 JSON response:
-{{"xp_deserved": true or false, "reason": "one short factual clause naming what earned or forfeited the XP"}}"""
+{{"xp_awarded": <whole number of XP to grant, 0 if none was earned>, "reason": "one short factual clause naming what earned or forfeited the XP"}}"""
 
 
 async def _judge_xp(char: "Character", state: dict, config: dict, sdk) -> bool:
     """Dedicated post-turn XP ruling for the 'llm_judge' gain condition: a
     judge LLM weighs the player's action against the (customizable)
-    xp_judgment directive, seeing how the turn actually resolved. Returns True
-    when XP was awarded."""
+    xp_judgment directive, seeing how the turn actually resolved, and names
+    the actual amount to grant. The directive carries the sizing scale, so
+    scenario/story instructions can redefine it; the server applies no cap.
+    Returns True when XP was awarded."""
     assessment = char.action_assessment or {}
     try:
         int(assessment.get("feasibility"))
@@ -1035,9 +1039,6 @@ async def _judge_xp(char: "Character", state: dict, config: dict, sdk) -> bool:
         return False
     action_text = str(state.get("last_input_text") or "").strip()
     if not action_text:
-        return False
-    amount = _xp_award_amount(assessment, config)
-    if amount <= 0:
         return False
 
     prompt = _xp_judge_prompt(
@@ -1051,7 +1052,13 @@ async def _judge_xp(char: "Character", state: dict, config: dict, sdk) -> bool:
         print(f"[RPG] XP judgment failed: {type(e).__name__}: {e}")
         return False
     parsed = _parse_json_repair(raw)
-    if not isinstance(parsed, dict) or not parsed.get("xp_deserved"):
+    if not isinstance(parsed, dict):
+        return False
+    try:
+        amount = int(parsed.get("xp_awarded"))
+    except (TypeError, ValueError):
+        return False
+    if amount <= 0:
         return False
     _grant_xp(char, amount, config)
     print(f"[RPG] XP judge awarded {amount} XP: {parsed.get('reason', '')}")

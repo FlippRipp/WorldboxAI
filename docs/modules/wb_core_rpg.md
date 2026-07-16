@@ -156,7 +156,7 @@ has no scenario).
 | Slot | Customizes |
 |---|---|
 | `action_assessment` | The judging guidelines of the action feasibility call — what kinds of attempts succeed in this story. The strictness tier, outcome bands, and JSON contract stay fixed. |
-| `xp_judgment` | When an action deserves XP, for the post-turn XP judge (the default `llm_judge` gain condition). |
+| `xp_judgment` | When an action deserves XP and how much — including the sizing scale itself — for the post-turn XP judge (the default `llm_judge` gain condition). |
 | `skill_categories` | What the 10 add-skill wizard categories should be like (always exactly 10). |
 | `skill_options` | What the 5 skill proposals in a category or search should be like (always exactly 5, uniform base strength). |
 | `skill_refine` | How a picked draft skill is finalized. Fate's rolled rarity ladder stays fixed. |
@@ -179,7 +179,7 @@ receives it as `state["module_instructions"]` for the assessment call.
 
 | Condition | Awards XP when… |
 |---|---|
-| `llm_judge` (default) | A dedicated post-turn judge LLM rules the action deserved XP, weighing the player's action against how the scene actually resolved, guided by the customizable `xp_judgment` instruction. Runs in the librarian phase concurrently with the external-skill-events call, so it adds no player-visible latency and can afford a stronger model (`xp_judge_ai_model`, default `balanced`). A bold failure can earn XP; an undeserving success earns none. |
+| `llm_judge` (default) | A dedicated post-turn judge LLM rules whether the action deserved XP **and names the actual amount**, weighing the player's action against how the scene actually resolved, guided by the customizable `xp_judgment` instruction. The sizing scale (default: 2-5 marginal, ~10 solid, 15-25 hard-won, up to 50 extraordinary, 0 undeserved) lives in that instruction, so scenarios/stories can redefine it — the server applies no cap. Runs in the librarian phase concurrently with the external-skill-events call, so it adds no player-visible latency and can afford a stronger model (`xp_judge_ai_model`, default `balanced`). A bold failure can earn XP; an undeserving success earns none. |
 | `successful_action` | The turn's action is assessed and does **not** resolve as a hard failure (per the strictness tier's failure band). |
 | `any_action` | Any substantive action is assessed, success or failure. |
 | `challenging_action` | The action's difficulty is `hard` or `extreme`. |
@@ -190,10 +190,12 @@ The mechanical conditions award XP each turn from the module's own action
 assessment (the same fast-model pre-assessment used for feasibility), so XP
 does not depend on the Reader agent choosing to emit an `xp_gained` value.
 
-For all conditions except `reader`, the amount is `xp_per_action` scaled by the
+For the mechanical conditions the amount is `xp_per_action` scaled by the
 assessed difficulty: trivial ×0.25, easy ×0.5, moderate ×1.0, hard ×1.75,
-extreme ×2.5, impossible ×0. Only substantive actions are assessed — pure dialog
-and trivial moves grant no XP (and the judge is never called for them).
+extreme ×2.5, impossible ×0. In `llm_judge` mode the judge names the actual
+amount itself and `xp_per_action` is not used. Only substantive actions are
+assessed — pure dialog and trivial moves grant no XP (and the judge is never
+called for them).
 
 ### Practice-Based
 - Each time a skill is used (detected via keyword matching in the action text), its practice counter increments by the skill's current rating.
