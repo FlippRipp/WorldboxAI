@@ -118,6 +118,9 @@ def test_options_returns_four_themes_and_caches():
     assert "A wandering duelist." in prompt
     assert "exactly 4 evolution paths" in prompt
     assert "pure path" in prompt
+    # The current level is stated up front so custom instructions can scale
+    # evolution power with level.
+    assert "A Level 5 character's skill" in prompt
 
     # Second call returns the cached options with zero extra LLM calls.
     res2 = client.post(f"{BASE}/skills/swordplay/evolution-options")
@@ -295,6 +298,9 @@ def test_evolve_applies_tiered_form():
     assert "must NOT grow stronger" in calls[0]["prompt"]
     # The description must stand alone, never referencing the prior form.
     assert "FREE-STANDING" in calls[0]["prompt"]
+    # The current level is stated up front so custom instructions can scale
+    # the evolved power with level.
+    assert "A Level 5 character's maxed-out skill" in calls[0]["prompt"]
 
 
 def test_evolve_pure_path_keeps_skill_identity_in_prompt():

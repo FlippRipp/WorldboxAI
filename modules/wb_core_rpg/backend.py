@@ -151,25 +151,25 @@ INSTRUCTION_SLOTS = [
     {
         "id": "skill_options",
         "label": "Skill Menu: Skills",
-        "description": "What the 5 skill proposals inside a category (or search) should be like.",
+        "description": "What the 5 skill proposals inside a category (or search) should be like. The prompt states the character's current level, so instructions here can scale what is offered with level.",
         "default": DIRECTIVE_SKILL_OPTIONS,
     },
     {
         "id": "skill_refine",
         "label": "Skill Menu: Finalize Skill",
-        "description": "How a chosen draft skill is polished before it lands on the character sheet.",
+        "description": "How a chosen draft skill is polished before it lands on the character sheet. The prompt states the character's current level, so instructions here can scale skill strength with level.",
         "default": DIRECTIVE_SKILL_REFINE,
     },
     {
         "id": "evolution_options",
         "label": "Evolution: Paths",
-        "description": "What the 4 evolution paths offered for a maxed-out skill should be like.",
+        "description": "What the 4 evolution paths offered for a maxed-out skill should be like. The prompt states the character's current level, so instructions here can scale the paths with level.",
         "default": DIRECTIVE_EVOLUTION_OPTIONS,
     },
     {
         "id": "evolve",
         "label": "Evolution: Final Form",
-        "description": "How the evolved form of a skill is designed once a path is chosen.",
+        "description": "How the evolved form of a skill is designed once a path is chosen. The prompt states the character's current level, so instructions here can scale the evolved power with level.",
         "default": DIRECTIVE_EVOLVE,
     },
 ]
@@ -642,26 +642,32 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
 
 
 async def on_mutation_schema(state: dict, sdk) -> dict:
-    """Make the Reader aware of the character's current skills and status
-    effects, so it never reports one as the other or duplicates a name."""
+    """Make the Reader aware of the character's current level, skills, and
+    status effects: the level so new-skill ratings can be judged against where
+    the character stands, the lists so it never reports a skill as an effect
+    (or vice versa) or duplicates a name."""
     char = Character.from_dict(state.get("module_data", {}).get("wb_core_rpg", {}))
+    out = {
+        "skill_changes": (
+            f"{_BASE_MUTATION_SCHEMA.get('skill_changes', '')} "
+            f"The player is currently Level {char.level}."
+        ),
+    }
     if not char.skills and not char.status_effects:
-        return {}
+        return out
     skill_list = ", ".join(f"{n} ({d.get('type', 'active')})" for n, d in char.skills.items()) or "(none)"
     effect_list = ", ".join(
         f"{e['name']} ({e['kind']}, severity {e.get('severity', 3)})" for e in char.status_effects) or "(none)"
-    return {
-        "status_effects_gained": (
-            f"{_BASE_MUTATION_SCHEMA.get('status_effects_gained', '')} "
-            f"The player's existing skills and curses: {skill_list}. Active status effects: {effect_list}. "
-            "Never report an existing skill or curse as a new status effect; re-report an active effect only if the story changed it."
-        ),
-        "skill_changes": (
-            f"{_BASE_MUTATION_SCHEMA.get('skill_changes', '')} "
-            f"Active status effects (temporary conditions, NOT skills): {effect_list}. "
-            "Never report a temporary condition as a skill, and never duplicate an active status effect's name as a skill."
-        ),
-    }
+    out["status_effects_gained"] = (
+        f"{_BASE_MUTATION_SCHEMA.get('status_effects_gained', '')} "
+        f"The player's existing skills and curses: {skill_list}. Active status effects: {effect_list}. "
+        "Never report an existing skill or curse as a new status effect; re-report an active effect only if the story changed it."
+    )
+    out["skill_changes"] += (
+        f" Active status effects (temporary conditions, NOT skills): {effect_list}. "
+        "Never report a temporary condition as a skill, and never duplicate an active status effect's name as a skill."
+    )
+    return out
 
 
 async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
@@ -968,6 +974,8 @@ async def on_librarian(state: dict, sdk) -> dict | None:
 Read the recent narration and detect ONLY skill changes that an EXTERNAL force imposed on the player: a god or spirit granting a power, a curse or hex stripping/weakening an ability, a blessing or artifact bestowing a skill, a magical injury disabling a skill, or a mentor/entity directly gifting knowledge.
 
 Do NOT report skills the player improved through their own effort, practice, training, or repeated use — those are handled elsewhere. If nothing external happened, return empty arrays.
+
+The player is currently Level {char.level}.
 
 The player's current skills: {skill_lines}
 
@@ -1537,7 +1545,7 @@ def _evolution_options_prompt(rpg: dict, key: str, data: dict, state: dict, inst
     tier = _skill_tier(data)
     world_section = _world_context_section(state.get("world_data"))
     story_section = _story_context_section(state)
-    return f"""You are the game system for a text RPG. A character's skill has reached maximum rating and is ready to EVOLVE into a more powerful Tier {tier + 1} form. Output ONLY valid JSON, no other text.
+    return f"""You are the game system for a text RPG. A Level {rpg.get('level', 1)} character's skill has reached maximum rating and is ready to EVOLVE into a more powerful Tier {tier + 1} form. Output ONLY valid JSON, no other text.
 
 {world_section}{story_section}Character:
 {_character_context_block(rpg)}
@@ -1563,7 +1571,7 @@ def _evolve_prompt(rpg: dict, key: str, data: dict, theme: str, state: dict, pur
         )
     else:
         theme_req = f'- It must embody the "{theme}" theme and stay true to the world\'s tone and the skill\'s history.'
-    return f"""You are the game system for a text RPG. A character's maxed-out skill is evolving from Tier {tier} to Tier {tier + 1} down the "{theme}" path. Output ONLY valid JSON, no other text.
+    return f"""You are the game system for a text RPG. A Level {rpg.get('level', 1)} character's maxed-out skill is evolving from Tier {tier} to Tier {tier + 1} down the "{theme}" path. Output ONLY valid JSON, no other text.
 
 {world_section}{story_section}Character:
 {_character_context_block(rpg)}
@@ -1672,7 +1680,7 @@ def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], state: dict,
 
 Do NOT propose any of these skills or trivial variants of them (already known or already offered): {exclude_line}
 
-{task}, each learnable NOW by this character. {_directive("skill_options", instructions)}{plot_req} Every proposal is a starting-level ability at its base form - the power each one ultimately awakens with is decided later by fate, so write none of the 5 as stronger or weaker than the others.
+{task}, each learnable NOW by this Level {rpg.get('level', 1)} character. {_directive("skill_options", instructions)}{plot_req} Every proposal is a starting-level ability at its base form - the power each one ultimately awakens with is decided later by fate, so write none of the 5 as stronger or weaker than the others.
 
 Each skill:
 - name: 1-4 evocative words, distinct from every excluded name above and from the other 4 proposals
@@ -1716,7 +1724,7 @@ def _skill_refine_prompt(rpg: dict, skill: dict, menu: str | None, state: dict, 
                 "\n- This Mythic skill sits at the absolute peak of its tier: write it as a fully "
                 "realized ability already trembling at the edge of transcending its current form."
             )
-    return f"""You are the game system for a text RPG. The player has chosen to learn the new skill "{name}"{menu_note}. Finalize it before it is added to their sheet. Output ONLY valid JSON, no other text.
+    return f"""You are the game system for a text RPG. The player (currently Level {rpg.get('level', 1)}) has chosen to learn the new skill "{name}"{menu_note}. Finalize it before it is added to their sheet. Output ONLY valid JSON, no other text.
 
 {world_section}{story_section}{plot_section}Character:
 {_character_context_block(rpg)}

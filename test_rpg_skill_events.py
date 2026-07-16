@@ -44,6 +44,8 @@ def test_grant_early_in_a_long_scene_reaches_the_prompt():
 
     assert sentinel in captured["prompt"]
     assert "THIS TURN'S SCENE" in captured["prompt"]
+    # The current level is in the prompt so granted-skill ratings can weigh it.
+    assert "currently Level 1" in captured["prompt"]
 
 
 def test_external_grant_adds_the_skill():

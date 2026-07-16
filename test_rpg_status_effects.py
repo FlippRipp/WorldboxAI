@@ -413,9 +413,14 @@ def test_mutation_schema_feeds_the_reader_both_lists():
     assert "temporary conditions the PLAYER gained" in schema["status_effects_gained"]
     assert "broken leg (bad, severity 5)" in schema["skill_changes"]
     assert "never duplicate an active status effect's name" in schema["skill_changes"]
+    # The Reader always learns the current level so skill ratings can weigh it.
+    assert "currently Level 1" in schema["skill_changes"]
 
-    # Nothing to report when the character is blank.
-    assert asyncio.run(backend.on_mutation_schema(_state(), _make_sdk())) == {}
+    # A blank character still reports its level for skill_changes; the
+    # skill/effect lists have nothing to add.
+    blank = asyncio.run(backend.on_mutation_schema(_state(), _make_sdk()))
+    assert "currently Level 1" in blank["skill_changes"]
+    assert "status_effects_gained" not in blank
 
 
 def test_legacy_saves_over_the_cap_are_trimmed_to_the_strongest():

@@ -283,6 +283,9 @@ def test_options_page0_returns_five_base_level_skills():
     assert '"Flame Arts" category' in prompt
     assert "swordplay" in prompt  # existing skills excluded
     assert "exactly 5 NEW skills" in prompt
+    # The current level is stated where the proposals are requested, so custom
+    # instructions can scale skill strength with level.
+    assert "this Level 5 character" in prompt
     # Page skills are uniform base-level with one-sentence descriptions.
     assert "ONE tight sentence" in prompt
     assert "has power" not in prompt  # no per-slot power lines anymore
@@ -444,6 +447,9 @@ def test_refine_rolls_strength_and_carries_draft_and_context_in_prompt():
     # Higher rarity = stronger benefits, weaker drawbacks - stated explicitly.
     assert "STRONGER" in prompt and "WEAKER" in prompt
     assert "Flame Arts" in prompt
+    # The current level is stated up front so custom instructions can scale
+    # the finalized skill's strength with level.
+    assert "currently Level 5" in prompt
 
 
 def test_refine_ignores_client_supplied_strength():
