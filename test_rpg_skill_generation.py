@@ -452,6 +452,35 @@ def test_refine_rolls_strength_and_carries_draft_and_context_in_prompt():
     assert "currently Level 5" in prompt
 
 
+def test_refine_skips_the_roll_when_progression_disabled():
+    mod = _load_backend()
+    _fix_roll(mod, 7)  # would roll 7 if the roll happened at all
+    config = {"skill_progression_enabled": False}
+
+    # Even with cheats on and a forced strength, no rarity is rolled: the
+    # skill is finalized plain and the prompt carries no rarity ladder.
+    client, _, calls = _make_client(mod, _rpg(), llm_replies=[REFINE_REPLY], config=config, cheats=True)
+    res = client.post(f"{BASE}/skills/wizard/refine", json={
+        "name": "Ember Feint",
+        "description": "A draft description.",
+        "forced_strength": 10,
+    })
+    assert res.status_code == 200
+    skill = res.json()["skill"]
+    assert skill["strength"] is None
+    prompt = calls[0]["prompt"]
+    assert "rarity" not in prompt.lower()
+    assert "Mythic" not in prompt
+
+    # The options prompt drops the fate clause too.
+    client, _, calls = _make_client(mod, _rpg(), llm_replies=[_options_reply(_P0_NAMES)], config=config)
+    res = client.post(f"{BASE}/skills/wizard/options", json={"menu": "Flame Arts", "page": 0})
+    assert res.status_code == 200
+    prompt = calls[0]["prompt"]
+    assert "decided later by fate" not in prompt
+    assert "write none of the 5 as stronger or weaker" in prompt
+
+
 def test_refine_ignores_client_supplied_strength():
     mod = _load_backend()
     _fix_roll(mod, 9)

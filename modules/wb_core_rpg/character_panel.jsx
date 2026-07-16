@@ -97,6 +97,9 @@ export default function CharacterPanel({ state, config }) {
 
   const maxStatVal = Math.max(20, ...Object.values(stats));
   const skillEntries = Object.entries(skills).sort((a, b) => b[1].rating - a[1].rating);
+  // Progression off: ratings are frozen and never rolled, so the per-skill
+  // rating numbers/bars are hidden (matches the sidebar widget).
+  const progressionOn = config?.skill_progression_enabled !== false;
 
   return (
     <div className="space-y-5">
@@ -201,11 +204,13 @@ export default function CharacterPanel({ state, config }) {
                     )}
                     <span className={`text-[10px] px-1.5 py-0.5 rounded border ${TYPE_STYLES[data.type] || TYPE_STYLES.active}`}>{TYPE_LABELS[data.type] || TYPE_LABELS.active}</span>
                   </span>
-                  <span className="text-purple-400 font-mono font-bold text-sm">{data.rating}/10</span>
+                  {progressionOn && <span className="text-purple-400 font-mono font-bold text-sm">{data.rating}/10</span>}
                 </div>
-                <div className="w-full h-2 bg-gray-700 rounded-full overflow-hidden mb-1.5">
-                  <div className="h-full bg-purple-500 rounded-full transition-all" style={{ width: `${(data.rating / 10) * 100}%` }} />
-                </div>
+                {progressionOn && (
+                  <div className="w-full h-2 bg-gray-700 rounded-full overflow-hidden mb-1.5">
+                    <div className="h-full bg-purple-500 rounded-full transition-all" style={{ width: `${(data.rating / 10) * 100}%` }} />
+                  </div>
+                )}
                 {(data.tier ?? 1) > 1 && data.evolution_theme && (
                   <div className="text-[10px] text-amber-400/80 mb-1">Tier {data.tier} evolution {'•'} {data.evolution_theme} path</div>
                 )}

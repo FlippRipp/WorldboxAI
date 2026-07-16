@@ -1658,7 +1658,7 @@ JSON response:
 {{"categories": [{{"name": "1-3 words", "summary": "one short clause"}}, ... 10 total]}}"""
 
 
-def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], state: dict, search: bool = False, direct: bool = False, instructions: dict | None = None) -> str:
+def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], state: dict, search: bool = False, direct: bool = False, rolling: bool = True, instructions: dict | None = None) -> str:
     world_section = _world_context_section(state.get("world_data"))
     story_section = _story_context_section(state)
     plot_section = _plot_challenge_section(state)
@@ -1697,7 +1697,7 @@ def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], state: dict,
 
 Do NOT propose any of these skills or trivial variants of them (already known or already offered): {exclude_line}
 
-{task}, each learnable NOW by this Level {rpg.get('level', 1)} character. {_directive("skill_options", instructions)}{plot_req} Every proposal is a starting-level ability at its base form - the power each one ultimately awakens with is decided later by fate, so write none of the 5 as stronger or weaker than the others.
+{task}, each learnable NOW by this Level {rpg.get('level', 1)} character. {_directive("skill_options", instructions)}{plot_req} Every proposal is a starting-level ability at its base form - {"the power each one ultimately awakens with is decided later by fate, so " if rolling else ""}write none of the 5 as stronger or weaker than the others.
 
 Each skill:
 - name: 1-4 evocative words, distinct from every excluded name above and from the other 4 proposals
@@ -2127,9 +2127,12 @@ def get_router():
         if new_skill_name:
             spec = payload.new_skill
             # Wizard skills carry their rolled strength as the starting rating;
-            # the cost stays new_skill_cost regardless (high rolls are lucky pulls).
+            # the cost stays new_skill_cost regardless (high rolls are lucky
+            # pulls). With progression off there is no roll: every bought
+            # skill starts (and stays) at the solid-ordinary rating of 5.
+            default_rating = 5 if not _progression_enabled(config) else min(MAX_SKILL_RATING, max(1, int(new_skill_cost)))
             skills[new_skill_name] = {
-                "rating": spec.rating if spec.rating is not None else min(MAX_SKILL_RATING, max(1, int(new_skill_cost))),
+                "rating": spec.rating if spec.rating is not None else default_rating,
                 "description": (spec.description or "").strip(),
                 "trigger_words": _clean_triggers(spec.trigger_words or []),
                 "type": spec.type or "active",
@@ -2411,7 +2414,8 @@ def get_router():
                 sm,
                 _skill_options_prompt(
                     rpg, menu, exclude, sm.state,
-                    search=payload.search, direct=payload.direct, instructions=_instructions(sm),
+                    search=payload.search, direct=payload.direct,
+                    rolling=_progression_enabled(_config(sm)), instructions=_instructions(sm),
                 ),
             )
             parsed = _parse_json_repair(raw)
@@ -2442,8 +2446,10 @@ def get_router():
 
         # The cheat gate lives server-side: a forced strength from the client
         # only counts while the global cheat toggle is on; otherwise it is
-        # silently ignored and fate rolls as usual.
-        forced = payload.forced_strength if _cheats_enabled() else None
+        # silently ignored and fate rolls as usual. With progression disabled
+        # there is no rarity roll at all - forced strengths are ignored too.
+        rolling = _progression_enabled(_config(sm))
+        forced = payload.forced_strength if _cheats_enabled() and rolling else None
         if forced is not None and not (5 <= forced <= MAX_SKILL_RATING):
             raise HTTPException(status_code=400, detail="Forced strength must be between 5 and 10.")
 
@@ -2464,7 +2470,9 @@ def get_router():
 
             # The gacha moment: the rarity is rolled here, when the player
             # first commits to a pick, never client-supplied (cheats aside).
-            strength = forced if forced is not None else _roll_strength()
+            # No roll with progression disabled: the skill is finalized plain,
+            # with no strength, and lands at the standard starting rating.
+            strength = (forced if forced is not None else _roll_strength()) if rolling else None
             draft = {
                 "name": name,
                 "type": payload.type or "active",

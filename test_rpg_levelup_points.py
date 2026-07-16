@@ -328,11 +328,12 @@ def test_spend_with_progression_disabled_only_buys_new_skills():
     assert "disabled" in res.json()["detail"]
     assert sm.state["module_data"]["wb_core_rpg"]["skills"]["swordplay"]["rating"] == 5
 
-    # Buying a new skill (and spending attribute points) still works.
+    # Buying a new skill (and spending attribute points) still works. With no
+    # roll there is no wizard-supplied rating: the default is a solid 5.
     client, _, _ = _make_client(mod, _spend_rpg(), config=config)
     res = client.post(f"{BASE}/levelup/spend", json={
         "stat_allocations": {"power": 1},
-        "new_skill": {"name": "Ember Feint", "description": "d", "trigger_words": ["feint"], "type": "active", "rating": 5},
+        "new_skill": {"name": "Ember Feint", "description": "d", "trigger_words": ["feint"], "type": "active"},
     })
     assert res.status_code == 200
     out = res.json()

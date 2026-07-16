@@ -494,15 +494,16 @@ function LevelUpModal({ rpg, config, generating, saveId, resume, onClose, onAppl
                 })}
 
                 {newSkill ? (() => {
-                  const r = rarityFor(newSkill.strength);
+                  // No rarity without a roll (progression off): neutral card.
+                  const r = newSkill.strength != null ? rarityFor(newSkill.strength) : null;
                   return (
-                    <div className={`bg-gray-800/60 rounded-lg border p-3 space-y-1.5 ${r.border}`}>
+                    <div className={`bg-gray-800/60 rounded-lg border p-3 space-y-1.5 ${r ? r.border : 'border-gray-700'}`}>
                       <div className="flex items-center justify-between">
                         <span className="text-xs text-purple-300 font-semibold">New skill {'—'} {newSkillCost} point{newSkillCost === 1 ? '' : 's'}</span>
                         <button onClick={() => setNewSkill(null)} className="text-gray-500 hover:text-gray-200 text-sm leading-none">{'✕'}</button>
                       </div>
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className={`text-sm font-bold ${r.text}`}>{newSkill.name}</span>
+                        <span className={`text-sm font-bold ${r ? r.text : 'text-indigo-200'}`}>{newSkill.name}</span>
                         <span className={`text-[9px] px-1.5 py-px rounded border ${TYPE_STYLES[newSkill.type] || TYPE_STYLES.active}`}>
                           {TYPE_LABELS[newSkill.type] || 'Active'}
                         </span>
@@ -1006,8 +1007,9 @@ function AddSkillModal({ generating, costLabel, saveId, resume, progressionOn = 
     setPhase('refining');
     setError('');
     // The refine request runs WHILE the fate-roll animation plays; the reveal
-    // waits for both so the ladder climb never gets cut short.
-    const minDelay = new Promise((resolve) => setTimeout(resolve, 2800));
+    // waits for both so the ladder climb never gets cut short. Without
+    // progression there is no roll to dramatize - just a brief settle.
+    const minDelay = new Promise((resolve) => setTimeout(resolve, progressionOn ? 2800 : 300));
     try {
       const request = fetch(`${API_BASE}/skills/wizard/refine`, {
         method: 'POST',
@@ -1077,7 +1079,9 @@ function AddSkillModal({ generating, costLabel, saveId, resume, progressionOn = 
   );
 
   const rollingRarity = RARITY_TIERS[rollIdx % RARITY_TIERS.length];
-  const revealRarity = refined ? rarityFor(refined.strength) : null;
+  // No rarity exists without a roll (progression off → strength is null):
+  // the reveal renders plain, with no tier label or chip.
+  const revealRarity = refined?.strength != null ? rarityFor(refined.strength) : null;
   const mythicReveal = phase === 'reveal' && refined?.strength === 10;
 
   return (
@@ -1092,13 +1096,17 @@ function AddSkillModal({ generating, costLabel, saveId, resume, progressionOn = 
       <style>{WBRPG_CSS}</style>
       <div
         className={`bg-gray-900 border rounded-xl w-full max-w-md max-h-[85vh] overflow-y-auto shadow-2xl wbrpg-burst ${
-          phase === 'refining' ? `${rollingRarity.border}` : mythicReveal ? 'border-red-500/70 wbrpg-glow-red' : 'border-indigo-500/40'
+          phase === 'refining' && progressionOn ? `${rollingRarity.border}` : mythicReveal ? 'border-red-500/70 wbrpg-glow-red' : 'border-indigo-500/40'
         }`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="px-5 pt-6 pb-4 text-center border-b border-gray-800">
           <div className="text-2xl font-extrabold tracking-wide text-indigo-300">{'✦'} LEARN A NEW SKILL {'✦'}</div>
-          {costLabel && <div className="text-xs text-gray-400 mt-1">Costs {costLabel} {'—'} rarity is rolled by fate.</div>}
+          {costLabel && (
+            <div className="text-xs text-gray-400 mt-1">
+              Costs {costLabel}{progressionOn ? <> {'—'} rarity is rolled by fate.</> : '.'}
+            </div>
+          )}
         </div>
 
         <div className="px-5 py-5 space-y-4">
@@ -1248,7 +1256,7 @@ function AddSkillModal({ generating, costLabel, saveId, resume, progressionOn = 
                 </span>
                 <span className="text-gray-500 font-mono">Page {pageIndex + 1}</span>
               </div>
-              {cheatMode && (
+              {cheatMode && progressionOn && (
                 <div className="flex items-center gap-1.5 flex-wrap bg-gray-800/40 border border-dashed border-gray-700 rounded-lg px-2.5 py-2">
                   <span className="text-[10px] text-gray-500 uppercase tracking-wider mr-0.5">Cheat {'—'} fate's hand:</span>
                   <button
@@ -1306,19 +1314,27 @@ function AddSkillModal({ generating, costLabel, saveId, resume, progressionOn = 
           {phase === 'refining' && (
             <div className="text-center py-8 space-y-4">
               <div className="text-lg font-bold text-gray-200 wbrpg-dissolve">{chosen?.name}</div>
-              <div className="text-xs text-gray-500 wbrpg-shimmer">Fate weighs this ability{'…'}</div>
-              <div key={rollIdx} className={`text-3xl font-extrabold tracking-widest uppercase wbrpg-burst ${rollingRarity.text}`}>
-                {rollingRarity.label}
-              </div>
+              {progressionOn ? (
+                <>
+                  <div className="text-xs text-gray-500 wbrpg-shimmer">Fate weighs this ability{'…'}</div>
+                  <div key={rollIdx} className={`text-3xl font-extrabold tracking-widest uppercase wbrpg-burst ${rollingRarity.text}`}>
+                    {rollingRarity.label}
+                  </div>
+                </>
+              ) : (
+                <div className="text-xs text-gray-500 wbrpg-shimmer">Finalizing this ability{'…'}</div>
+              )}
             </div>
           )}
 
           {phase === 'reveal' && refined && (
             <div className="text-center py-4 space-y-3">
-              <div className={`text-2xl font-extrabold tracking-widest uppercase wbrpg-burst ${revealRarity.text}`}>
-                {revealRarity.label}
-              </div>
-              <div className={`text-xl font-extrabold wbrpg-burst ${revealRarity.text}`}>{refined.name}</div>
+              {revealRarity && (
+                <div className={`text-2xl font-extrabold tracking-widest uppercase wbrpg-burst ${revealRarity.text}`}>
+                  {revealRarity.label}
+                </div>
+              )}
+              <div className={`text-xl font-extrabold wbrpg-burst ${revealRarity ? revealRarity.text : 'text-indigo-200'}`}>{refined.name}</div>
               <div className="flex items-center justify-center gap-2">
                 <span className={`text-[10px] px-1.5 py-px rounded border ${TYPE_STYLES[refined.type] || TYPE_STYLES.active}`}>
                   {TYPE_LABELS[refined.type] || 'Active'}
@@ -1418,6 +1434,9 @@ export default function CoreRpgWidget({ state, config, generating }) {
   const liveLevel = rpg?.level ?? 1;
   const attrPts = rpg?.unspent_attribute_points ?? 0;
   const skillPts = rpg?.unspent_skill_points ?? 0;
+  // Progression off: ratings are frozen and rarity is never rolled, so the
+  // per-skill rating numbers/bars are meaningless noise - hide them.
+  const progressionOn = config?.skill_progression_enabled !== false;
   const pendingEvos = (rpg?.pending_evolutions ?? []).filter((e) => e && e.skill);
   const nextPendingEvo = pendingEvos.find((e) => e.status === 'pending');
   const pendingEvoSkills = new Set(pendingEvos.map((e) => e.skill));
@@ -1873,7 +1892,7 @@ export default function CoreRpgWidget({ state, config, generating }) {
                                 {'⬆'} Evolve
                               </button>
                             )}
-                            <span className="text-purple-400 font-mono font-bold text-sm">{data.rating}/10</span>
+                            {progressionOn && <span className="text-purple-400 font-mono font-bold text-sm">{data.rating}/10</span>}
                             {cheatMode && (
                               <button
                                 onClick={() => startEdit(name, data)}
@@ -1885,12 +1904,14 @@ export default function CoreRpgWidget({ state, config, generating }) {
                             )}
                           </span>
                         </div>
-                        <div className="w-full h-2 bg-gray-700 rounded-full overflow-hidden mb-1.5">
-                          <div
-                            className="h-full bg-purple-500 rounded-full transition-all"
-                            style={{ width: `${(data.rating / 10) * 100}%` }}
-                          />
-                        </div>
+                        {progressionOn && (
+                          <div className="w-full h-2 bg-gray-700 rounded-full overflow-hidden mb-1.5">
+                            <div
+                              className="h-full bg-purple-500 rounded-full transition-all"
+                              style={{ width: `${(data.rating / 10) * 100}%` }}
+                            />
+                          </div>
+                        )}
                         {(data.tier ?? 1) > 1 && data.evolution_theme && (
                           <div className="text-[10px] text-amber-400/80 mb-1">
                             Tier {data.tier} evolution {'•'} {data.evolution_theme} path
