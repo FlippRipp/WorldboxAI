@@ -48,7 +48,7 @@
       "type": "select",
       "label": "XP Gain Condition",
       "category": "Core RPG System",
-      "description": "Defines what earns the player XP (XP-Based progression only). 'AI judges each action' runs a dedicated post-turn call that weighs the action and its outcome against the customizable XP Judgment instruction. The automatic options award XP each turn from the action assessment, scaled by difficulty. 'AI Reader decides' defers to the story reader's per-turn judgement; 'Disabled' turns XP off.",
+      "description": "Defines what earns the player XP (XP-Based progression only). 'AI judges each action' runs a dedicated post-turn call that weighs the action and its outcome against the customizable XP Judgment instruction and names the actual amount to grant (the instruction carries the sizing scale; no server cap). The automatic options award XP each turn from the action assessment, scaled by difficulty. 'AI Reader decides' defers to the story reader's per-turn judgement; 'Disabled' turns XP off.",
       "options": [
         {"value": "llm_judge", "label": "AI judges each action (default)"},
         {"value": "successful_action", "label": "Successful actions"},
@@ -78,7 +78,7 @@
       "default": 10,
       "label": "Base XP per Action",
       "category": "Core RPG System",
-      "description": "Base XP granted when the XP gain condition is met, scaled by the action's difficulty (trivial x0.25 up to extreme x2.5)."
+      "description": "Base XP granted when a mechanical XP gain condition is met, scaled by the action's difficulty (trivial x0.25 up to extreme x2.5). Not used in 'AI judges each action' mode, where the judge names the amount itself."
     },
     "xp_curve_steepness": {"type": "slider", "min": 1, "max": 5, "default": 2},
     "hp_per_vitality": {"type": "slider", "min": 3, "max": 15, "default": 7},

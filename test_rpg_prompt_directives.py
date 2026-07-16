@@ -160,7 +160,7 @@ def test_xp_judge_prompt_directive():
         mod._xp_judge_prompt(_rpg(), "I leap the chasm", assessment, _state(),
                              instructions={"xp_judgment": CUSTOM}),
         mod.DIRECTIVE_XP_JUDGMENT,
-        ["You are the XP judge", "I leap the chasm", "difficulty hard", '{"xp_deserved":'],
+        ["You are the XP judge", "I leap the chasm", "difficulty hard", '{"xp_awarded":'],
     )
 
 
