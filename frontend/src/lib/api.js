@@ -57,8 +57,8 @@ export const api = {
   getInstructionSlots:        (modId) => request(`/api/modules/${modId}/instruction-slots`),
   getSaveModuleInstructions:  (saveId) => request(`/api/saves/${saveId}/module-instructions`),
   setSaveModuleInstructions:  (saveId, instructions) => request(`/api/saves/${saveId}/module-instructions`, { method: 'PUT', body: JSON.stringify({ module_instructions: instructions }) }),
-  rewriteModuleInstruction:   (modId, slotId, { request: req, currentText = null }) =>
-    request(`/api/modules/${modId}/instructions/${slotId}/rewrite`, { method: 'POST', body: JSON.stringify({ request: req, current_text: currentText }) }),
+  rewriteModuleInstruction:   (modId, slotId, { request: req, currentText = null, scenarioContext = null }) =>
+    request(`/api/modules/${modId}/instructions/${slotId}/rewrite`, { method: 'POST', body: JSON.stringify({ request: req, current_text: currentText, scenario_context: scenarioContext }) }),
   getModules:             () => request('/api/modules'),
   getModuleConfigs:       () => request('/api/session/module-configs'),
   updateModuleConfigs:    (configs) => request('/api/session/module-configs', { method: 'PUT', body: JSON.stringify({ module_configs: configs }) }),
@@ -132,9 +132,15 @@ export const api = {
   deleteScenario:         (scenarioId) => request(`/api/scenarios/${scenarioId}`, { method: 'DELETE' }),
   // LLM-as-editor: rewrite a scenario's starting_prompt/scenario_description to
   // fit a natural-language request. `field` picks which prose field is edited.
-  rewriteScenarioPrompt:  ({ request: req, currentText = null, field = 'starting_prompt', name = null, scenarioDescription = null }) =>
+  rewriteScenarioPrompt:  ({ request: req, currentText = null, field = 'starting_prompt', context = {} }) =>
                             request('/api/scenarios/rewrite-prompt', { method: 'POST', body: JSON.stringify({
-                              request: req, current_text: currentText, field, name, scenario_description: scenarioDescription,
+                              request: req, current_text: currentText, field,
+                              name: context.name ?? null,
+                              scenario_description: context.scenario_description ?? null,
+                              starting_prompt: context.starting_prompt ?? null,
+                              themes: context.themes ?? null,
+                              tags: context.tags ?? null,
+                              pacing: context.pacing ?? null,
                             }) }),
 
   // Lorebooks (SillyTavern World Info imports, RAG-retrieved lore)

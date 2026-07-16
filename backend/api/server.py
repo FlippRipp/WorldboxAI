@@ -423,16 +423,45 @@ async def get_module_instruction_slots(mod_id: str):
     return {"slots": _module_instruction_slots(mod_id)}
 
 
+def _scenario_context_parts(ctx: Optional[dict], exclude: tuple = ()) -> list[str]:
+    """Render a scenario's fields as tagged context blocks for the LLM editors.
+    ``exclude`` names fields to skip (e.g. the one currently being edited, which
+    the caller already supplies as the working text). Empty fields are omitted."""
+    if not isinstance(ctx, dict):
+        return []
+    labels = [
+        ("name", "scenario_name"),
+        ("scenario_description", "scenario_description"),
+        ("starting_prompt", "starting_prompt"),
+        ("themes", "themes"),
+        ("tags", "tags"),
+        ("pacing", "pacing"),
+    ]
+    parts = []
+    for key, tag in labels:
+        if key in exclude:
+            continue
+        val = str(ctx.get(key) or "").strip()
+        if val:
+            parts.append(f"<{tag}>\n{val}\n</{tag}>")
+    return parts
+
+
 class RewriteInstructionRequest(BaseModel):
     request: str
     current_text: Optional[str] = None
+    # Optional scenario the instruction is being authored for, so the rewrite
+    # can fit the story: {name, scenario_description, starting_prompt, themes,
+    # tags, pacing}. Any subset; empty fields are ignored.
+    scenario_context: Optional[dict] = None
 
 
 @app.post("/api/modules/{mod_id}/instructions/{slot_id}/rewrite")
 async def rewrite_module_instruction(mod_id: str, slot_id: str, payload: RewriteInstructionRequest):
     """Rewrite an instruction slot's directive to fit a natural-language
     request. The default directive is always the base; the current (edited)
-    text is offered as extra context so the player can iterate."""
+    text is offered as extra context so the player can iterate. When a scenario
+    context is supplied, the rewrite is made aware of the story it belongs to."""
     import json as _json
     slots = {s.get("id"): s for s in _module_instruction_slots(mod_id)}
     slot = slots.get(slot_id)
@@ -446,6 +475,9 @@ async def rewrite_module_instruction(mod_id: str, slot_id: str, payload: Rewrite
     user_parts = [f"<default_instruction>\n{default_text}\n</default_instruction>"]
     if current_text and current_text != default_text:
         user_parts.append(f"<current_instruction>\n{current_text}\n</current_instruction>")
+    scenario_parts = _scenario_context_parts(payload.scenario_context)
+    if scenario_parts:
+        user_parts.append("<scenario_context>\n" + "\n".join(scenario_parts) + "\n</scenario_context>")
     user_parts.append(f"<user_request>\n{request_text}\n</user_request>")
     messages = [
         {"role": "system", "content": (
@@ -453,7 +485,10 @@ async def rewrite_module_instruction(mod_id: str, slot_id: str, payload: Rewrite
             "describes how they want this piece of the game's behavior to change; rewrite the "
             "instruction text to fit their request. Base the rewrite on the default instruction; "
             "when a current instruction is also given, the player is iterating on it, so treat it "
-            "as the starting point and the default as reference. Keep everything the request does "
+            "as the starting point and the default as reference. When a scenario context is given, "
+            "it describes the story these instructions are for — use it to make the instruction fit "
+            "that setting and tone, but keep the instruction general module guidance rather than "
+            "narrating the scenario. Keep everything the request does "
             "not ask to change, keep roughly the same length and the same imperative style, and "
             "write the instruction as plain prose or dash bullets. The instruction text itself "
             "must never mention JSON, output formats, field names, or how many items to produce - "
@@ -1511,9 +1546,15 @@ class RewriteScenarioPromptRequest(BaseModel):
     # message) or "scenario_description" (the system prompt framing the story).
     # Governs how the rewrite is framed.
     field: Optional[str] = "starting_prompt"
-    # Optional surrounding context so the rewrite fits the scenario.
+    # The rest of the scenario, so the rewrite is aware of everything else the
+    # player has entered. The field being edited is excluded automatically
+    # (it arrives as ``current_text``). Any subset; empty fields are ignored.
     name: Optional[str] = None
     scenario_description: Optional[str] = None
+    starting_prompt: Optional[str] = None
+    themes: Optional[str] = None
+    tags: Optional[str] = None
+    pacing: Optional[str] = None
 
 
 @app.post("/api/scenarios/rewrite-prompt")
@@ -1547,13 +1588,19 @@ async def rewrite_scenario_prompt(payload: RewriteScenarioPromptRequest):
             "framing prompt for the AI."
         )
 
-    context_parts = []
-    if (payload.name or "").strip():
-        context_parts.append(f"<scenario_name>\n{payload.name.strip()}\n</scenario_name>")
-    if field == "starting_prompt" and (payload.scenario_description or "").strip():
-        context_parts.append(
-            f"<scenario_description>\n{payload.scenario_description.strip()}\n</scenario_description>"
-        )
+    # Everything else in the scenario is context; the field being edited is
+    # excluded (it is the working text) so it is not duplicated back.
+    context_parts = _scenario_context_parts(
+        {
+            "name": payload.name,
+            "scenario_description": payload.scenario_description,
+            "starting_prompt": payload.starting_prompt,
+            "themes": payload.themes,
+            "tags": payload.tags,
+            "pacing": payload.pacing,
+        },
+        exclude=(field,),
+    )
 
     user_parts = list(context_parts)
     if current_text:

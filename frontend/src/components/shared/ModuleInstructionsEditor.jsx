@@ -6,9 +6,12 @@ import { api } from '../../lib/api';
 // settings modal. The host owns the value; this component only edits it.
 // An empty field means "use the built-in default". `scenarioDefaults`, when
 // given, is the linked scenario's override map: reset restores that value
-// instead of clearing. Modules without instruction slots are skipped; modules
-// toggled off are hidden but their entered data stays in the host's state
-// (same convention as ModuleTogglePanel).
+// instead of clearing. `scenarioContext`, when given, is the surrounding
+// scenario ({name, scenario_description, starting_prompt, themes, tags,
+// pacing}); it rides along with the AI rewrite so the instruction can be made
+// aware of the story it belongs to. Modules without instruction slots are
+// skipped; modules toggled off are hidden but their entered data stays in the
+// host's state (same convention as ModuleTogglePanel).
 
 // Slot lists are static per server run: fetch each module's once and share.
 const slotsCache = {};
@@ -20,7 +23,7 @@ async function fetchSlots(modId) {
   return slotsCache[modId];
 }
 
-function SlotEditor({ modId, slot, text, scenarioDefault, onText }) {
+function SlotEditor({ modId, slot, text, scenarioDefault, scenarioContext, onText }) {
   const [rewriteReq, setRewriteReq] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -37,6 +40,7 @@ function SlotEditor({ modId, slot, text, scenarioDefault, onText }) {
       const res = await api.rewriteModuleInstruction(modId, slot.id, {
         request: req,
         currentText: (text || '').trim() || null,
+        scenarioContext: scenarioContext || null,
       });
       onText(res.instruction);
       setRewriteReq('');
@@ -109,7 +113,7 @@ function SlotEditor({ modId, slot, text, scenarioDefault, onText }) {
   );
 }
 
-function ModuleSection({ mod, value, scenarioDefaults, onChange }) {
+function ModuleSection({ mod, value, scenarioDefaults, scenarioContext, onChange }) {
   const [slots, setSlots] = useState(null);
   const [loadError, setLoadError] = useState('');
 
@@ -140,6 +144,7 @@ function ModuleSection({ mod, value, scenarioDefaults, onChange }) {
           slot={slot}
           text={modValue[slot.id] || ''}
           scenarioDefault={scenarioDefaults?.[mod.id]?.[slot.id] || ''}
+          scenarioContext={scenarioContext}
           onText={(text) => setSlotText(slot.id, text)}
         />
       ))}
@@ -147,7 +152,7 @@ function ModuleSection({ mod, value, scenarioDefaults, onChange }) {
   );
 }
 
-export default function ModuleInstructionsEditor({ modules = [], enabledModules, value, onChange, scenarioDefaults = null }) {
+export default function ModuleInstructionsEditor({ modules = [], enabledModules, value, onChange, scenarioDefaults = null, scenarioContext = null }) {
   const isEnabled = (id) => {
     if (!enabledModules) return true;
     return enabledModules instanceof Set ? enabledModules.has(id) : enabledModules.includes(id);
@@ -166,7 +171,7 @@ export default function ModuleInstructionsEditor({ modules = [], enabledModules,
             )}
           </summary>
           <div className="p-3 pt-1">
-            <ModuleSection mod={mod} value={value} scenarioDefaults={scenarioDefaults} onChange={onChange} />
+            <ModuleSection mod={mod} value={value} scenarioDefaults={scenarioDefaults} scenarioContext={scenarioContext} onChange={onChange} />
           </div>
         </details>
       ))}

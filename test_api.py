@@ -768,6 +768,36 @@ def test_rewrite_instruction_endpoint(tmp_path, monkeypatch):
     assert res.status_code == 200
     assert "<current_instruction>" in seen["messages"][1]["content"]
 
+    # A scenario context makes the rewrite aware of the story it belongs to;
+    # empty context fields are dropped.
+    res = client.post(
+        "/api/modules/wb_core_rpg/instructions/skill_categories/rewrite",
+        json={
+            "request": "fit the setting",
+            "scenario_context": {
+                "name": "Frostspire Siege",
+                "scenario_description": "A frozen citadel under endless winter war.",
+                "themes": "survival, sacrifice",
+                "tags": "",
+            },
+        },
+    )
+    assert res.status_code == 200
+    ctx_msg = seen["messages"][1]["content"]
+    assert "<scenario_context>" in ctx_msg
+    assert "Frostspire Siege" in ctx_msg
+    assert "A frozen citadel under endless winter war." in ctx_msg
+    assert "survival, sacrifice" in ctx_msg
+    assert "<tags>" not in ctx_msg  # empty fields omitted
+
+    # No scenario context → no scenario_context block.
+    res = client.post(
+        "/api/modules/wb_core_rpg/instructions/skill_categories/rewrite",
+        json={"request": "plain rewrite"},
+    )
+    assert res.status_code == 200
+    assert "<scenario_context>" not in seen["messages"][1]["content"]
+
     assert client.post(
         "/api/modules/wb_core_rpg/instructions/no_such_slot/rewrite",
         json={"request": "x"},
@@ -800,7 +830,8 @@ def test_rewrite_scenario_prompt_endpoint(tmp_path, monkeypatch):
 
     monkeypatch.setattr(server.engine.llm, "simple_completion", fake_completion)
 
-    # Editing the starting prompt carries the scenario description as context.
+    # Editing the starting prompt sees every other scenario field, but not the
+    # field being edited (that arrives as current_text, not context).
     res = client.post(
         "/api/scenarios/rewrite-prompt",
         json={
@@ -809,6 +840,10 @@ def test_rewrite_scenario_prompt_endpoint(tmp_path, monkeypatch):
             "field": "starting_prompt",
             "name": "The Lonely Tavern",
             "scenario_description": "A rain-soaked frontier town.",
+            "starting_prompt": "You walk into the tavern.",
+            "themes": "isolation, dread",
+            "tags": "horror, slow burn",
+            "pacing": "slow and atmospheric",
         },
     )
     assert res.status_code == 200
@@ -817,17 +852,31 @@ def test_rewrite_scenario_prompt_endpoint(tmp_path, monkeypatch):
     assert "make it darker and more tense" in user_msg
     assert "You walk into the tavern." in user_msg
     assert "A rain-soaked frontier town." in user_msg
+    assert "isolation, dread" in user_msg
+    assert "horror, slow burn" in user_msg
+    assert "slow and atmospheric" in user_msg
+    # The edited field is not echoed back as a <starting_prompt> context block.
+    assert "<starting_prompt>" not in user_msg
     assert seen["model"] == server.engine.llm.storyteller_model
     assert seen["inspector_ctx"]["step"] == "scenario:starting_prompt"
 
-    # Editing the description does not pull in the description as extra context,
-    # and an empty current_text is allowed (draft from scratch).
+    # Editing the description sees the starting prompt as context (and excludes
+    # its own field); an empty current_text is allowed (draft from scratch).
     res = client.post(
         "/api/scenarios/rewrite-prompt",
-        json={"request": "add a sense of dread", "field": "scenario_description"},
+        json={
+            "request": "add a sense of dread",
+            "field": "scenario_description",
+            "scenario_description": "should be excluded",
+            "starting_prompt": "The door groans shut.",
+        },
     )
     assert res.status_code == 200
-    assert "draft the text from scratch" in seen["messages"][1]["content"]
+    desc_msg = seen["messages"][1]["content"]
+    assert "draft the text from scratch" in desc_msg
+    assert "The door groans shut." in desc_msg
+    assert "<scenario_description>" not in desc_msg  # edited field excluded
+    assert "should be excluded" not in desc_msg
     assert seen["inspector_ctx"]["step"] == "scenario:scenario_description"
 
     # An unknown field falls back to starting_prompt framing rather than erroring.

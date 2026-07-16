@@ -7,7 +7,8 @@ import ModuleInstructionsEditor from '../shared/ModuleInstructionsEditor';
 // player describes a change ("make it darker", "improve the writing") and the
 // LLM rewrites the field's text in place. `field` tells the backend whether it
 // is editing the opening message or the framing description; `getContext`
-// returns surrounding scenario fields so the rewrite fits.
+// returns the rest of the scenario (name, the other prose field, themes/tags/
+// pacing) so the rewrite is aware of everything else the player has entered.
 function AiEditablePrompt({ label, hint, value, onChange, rows, placeholder, field, getContext }) {
   const [open, setOpen] = useState(false);
   const [req, setReq] = useState('');
@@ -20,13 +21,11 @@ function AiEditablePrompt({ label, hint, value, onChange, rows, placeholder, fie
     setBusy(true);
     setError('');
     try {
-      const ctx = getContext ? getContext() : {};
       const res = await api.rewriteScenarioPrompt({
         request,
         currentText: (value || '').trim() || null,
         field,
-        name: ctx.name || null,
-        scenarioDescription: ctx.scenarioDescription || null,
+        context: getContext ? getContext() : {},
       });
       onChange(res.text);
       setReq('');
@@ -147,6 +146,22 @@ export default function ScenarioManager({ onBack }) {
   // active_modules of null means "unset": every module is on until the user
   // makes a choice, at which point the explicit list is stored.
   const enabledModuleIds = editing?.active_modules ?? modules.map((m) => m.id);
+
+  // Everything the player has entered on this scenario, shared with every AI
+  // helper so a rewrite is aware of the rest of the scenario. The backend
+  // ignores empty fields and (for the prose editors) the field being edited.
+  // Module instruction rewrites read this; scenario-prompt rewrites do not read
+  // the module instructions in return.
+  const scenarioContextValue = {
+    name: editing?.name,
+    scenario_description: editing?.scenario_description,
+    starting_prompt: editing?.starting_prompt,
+    themes: editing?.themes,
+    tags: editing?.tags,
+    pacing: editing?.pacing,
+  };
+  const scenarioContext = () => scenarioContextValue;
+
   const toggleModule = (id, on) => {
     const next = new Set(enabledModuleIds);
     if (on) next.add(id); else next.delete(id);
@@ -276,7 +291,7 @@ export default function ScenarioManager({ onBack }) {
                 rows={6}
                 placeholder="A rain-soaked frontier town where strangers gather at the only inn for miles..."
                 field="scenario_description"
-                getContext={() => ({ name: editing.name })}
+                getContext={scenarioContext}
               />
 
               <AiEditablePrompt
@@ -287,7 +302,7 @@ export default function ScenarioManager({ onBack }) {
                 rows={5}
                 placeholder="The tavern door groans shut behind you, cutting off the storm..."
                 field="starting_prompt"
-                getContext={() => ({ name: editing.name, scenarioDescription: editing.scenario_description })}
+                getContext={scenarioContext}
               />
 
               <div className="space-y-3 p-4 rounded-lg border border-gray-700 bg-gray-800/30">
@@ -334,6 +349,7 @@ export default function ScenarioManager({ onBack }) {
                   value={editing.module_instructions}
                   onChange={(mi) => setEditing({ ...editing, module_instructions: mi })}
                   scenarioDefaults={null}
+                  scenarioContext={scenarioContextValue}
                 />
               </div>
 
