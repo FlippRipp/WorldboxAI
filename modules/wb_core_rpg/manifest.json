@@ -1,7 +1,7 @@
 {
   "id": "wb_core_rpg",
   "name": "Core RPG System",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "dependencies": [],
   "consumes": {
     "state": ["input_text", "turn", "history"],

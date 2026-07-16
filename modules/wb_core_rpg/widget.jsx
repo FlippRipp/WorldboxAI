@@ -784,7 +784,12 @@ function SkillEvolutionModal({ skillName, rpg, generating, saveId, resumeTheme, 
 function AddSkillModal({ generating, costLabel, saveId, resume, onCancel, onConfirm }) {
   const [phase, setPhase] = useState('categories-loading'); // categories-loading | categories | skills-loading | skills | refining | reveal
   const [categories, setCategories] = useState(null);
-  const [menu, setMenu] = useState(null); // {name, search}
+  const [menu, setMenu] = useState(null); // {name, search, direct}
+  // The scenario can opt out of the categories step (skip_skill_categories):
+  // the categories endpoint answers {skip:true} and the wizard browses the
+  // category-free "direct" menu instead. Search stays available.
+  const [skipCats, setSkipCats] = useState(false);
+  const DIRECT_MENU = { name: 'All Skills', search: false, direct: true };
   const [pagesByMenu, setPagesByMenu] = useState({}); // menuKey -> [[skill x5], ...]
   const [pageIndex, setPageIndex] = useState(0);
   const [chosen, setChosen] = useState(null);
@@ -841,7 +846,7 @@ function AddSkillModal({ generating, costLabel, saveId, resume, onCancel, onConf
     return () => clearInterval(id);
   }, [phase]);
 
-  const menuKey = (m) => (m.search ? 'search:' : 'cat:') + m.name.toLowerCase();
+  const menuKey = (m) => (m.direct ? 'direct:' : m.search ? 'search:' : 'cat:') + m.name.toLowerCase();
   const pages = menu ? pagesByMenu[menuKey(menu)] || [] : [];
 
   async function loadCategories(regenerate = false) {
@@ -857,6 +862,7 @@ function AddSkillModal({ generating, costLabel, saveId, resume, onCancel, onConf
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || `Failed to prepare categories (HTTP ${res.status})`);
       if (seq !== loadSeq.current) return;
+      if (data.skip) { setSkipCats(true); openMenu(DIRECT_MENU); return; }
       setCategories(data.categories || []);
       setPhase('categories');
     } catch (e) {
@@ -875,6 +881,7 @@ function AddSkillModal({ generating, costLabel, saveId, resume, onCancel, onConf
         body: JSON.stringify({ regenerate: false }),
       });
       const data = await res.json().catch(() => ({}));
+      if (res.ok && data.skip) { setSkipCats(true); return; }
       if (res.ok) setCategories(data.categories || []);
     } catch { /* back-nav will retry via loadCategories */ }
   }
@@ -897,7 +904,7 @@ function AddSkillModal({ generating, costLabel, saveId, resume, onCancel, onConf
         const res = await fetch(`${API_BASE}/skills/wizard/options`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ menu: m.name, search: !!m.search, page: p }),
+          body: JSON.stringify({ menu: m.name, search: !!m.search, direct: !!m.direct, page: p }),
         });
         if (!res.ok) break; // server cache gone (restart) - keep what we have
         const data = await res.json().catch(() => ({}));
@@ -939,7 +946,7 @@ function AddSkillModal({ generating, costLabel, saveId, resume, onCancel, onConf
       const res = await fetch(`${API_BASE}/skills/wizard/options`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ menu: m.name, search: !!m.search, page }),
+        body: JSON.stringify({ menu: m.name, search: !!m.search, direct: !!m.direct, page }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || `Failed to generate skills (HTTP ${res.status})`);
@@ -1000,7 +1007,7 @@ function AddSkillModal({ generating, costLabel, saveId, resume, onCancel, onConf
       const request = fetch(`${API_BASE}/skills/wizard/refine`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...skill, menu: menu?.name || null, forced_strength: forced }),
+        body: JSON.stringify({ ...skill, menu: menu?.direct ? null : menu?.name || null, forced_strength: forced }),
       }).then(async (res) => {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.detail || `Failed to refine the skill (HTTP ${res.status})`);
@@ -1162,7 +1169,9 @@ function AddSkillModal({ generating, costLabel, saveId, resume, onCancel, onConf
           {phase === 'skills-loading' && !error && (
             <div className="text-center py-6">
               <div className="text-sm text-indigo-300 wbrpg-shimmer">
-                {menu?.search ? <>Seeking skills for {'"'}{menu.name}{'"'}{'…'}</> : <>Uncovering {menu?.name} skills{'…'}</>}
+                {menu?.direct ? <>Uncovering new skills{'…'}</>
+                  : menu?.search ? <>Seeking skills for {'"'}{menu.name}{'"'}{'…'}</>
+                  : <>Uncovering {menu?.name} skills{'…'}</>}
               </div>
               <div className="text-[11px] text-gray-500 mt-2">Five paths take shape{'…'}</div>
             </div>
@@ -1195,13 +1204,40 @@ function AddSkillModal({ generating, costLabel, saveId, resume, onCancel, onConf
 
           {phase === 'skills' && (
             <>
+              {menu?.direct && (
+                <div className="flex gap-2">
+                  <input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') submitSearch(); }}
+                    placeholder="Search for an ability…"
+                    className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-200 focus:border-indigo-500 focus:outline-none"
+                  />
+                  <button
+                    onClick={submitSearch}
+                    disabled={!query.trim()}
+                    className="px-3 py-1.5 text-xs font-semibold text-indigo-200 bg-indigo-600/50 hover:bg-indigo-600/70 disabled:opacity-40 border border-indigo-500/50 rounded transition-colors"
+                  >
+                    Search
+                  </button>
+                </div>
+              )}
               <div className="flex items-center justify-between text-xs">
-                <button
-                  onClick={() => { setError(''); if (categories) setPhase('categories'); else loadCategories(); }}
-                  className="text-gray-400 hover:text-indigo-300 transition-colors"
-                >
-                  {'←'} Categories
-                </button>
+                {menu?.direct ? (
+                  <span /> /* the direct list is the wizard's root — nothing to go back to */
+                ) : (
+                  <button
+                    onClick={() => {
+                      setError('');
+                      if (skipCats) openMenu(DIRECT_MENU);
+                      else if (categories) setPhase('categories');
+                      else loadCategories();
+                    }}
+                    className="text-gray-400 hover:text-indigo-300 transition-colors"
+                  >
+                    {'←'} {skipCats ? 'All skills' : 'Categories'}
+                  </button>
+                )}
                 <span className={`font-semibold ${menu?.search ? 'text-cyan-300' : 'text-indigo-300'}`}>
                   {menu?.search ? <>Search: {'"'}{menu.name}{'"'}</> : menu?.name}
                 </span>
@@ -1254,6 +1290,11 @@ function AddSkillModal({ generating, costLabel, saveId, resume, onCancel, onConf
                   {pageIndex + 1 < pages.length ? <>Next {'→'}</> : <>More skills {'→'}</>}
                 </button>
               </div>
+              {menu?.direct && (
+                <button onClick={onCancel} className="w-full py-1.5 text-xs text-gray-500 hover:text-gray-300 transition-colors">
+                  Cancel
+                </button>
+              )}
             </>
           )}
 

@@ -252,6 +252,17 @@ def test_categories_duplicate_names_rejected():
     assert res.status_code == 502
 
 
+def test_categories_skipped_when_scenario_opts_out():
+    mod = _load_backend()
+    client, sm, calls = _make_client(mod, _rpg(), llm_replies=[CATEGORIES_REPLY])
+    sm.state["scenario_data"] = {"skip_skill_categories": True}
+    res = client.post(f"{BASE}/skills/wizard/categories")
+    assert res.status_code == 200
+    assert res.json() == {"categories": None, "skip": True}
+    # Decided before generation: no LLM call is spent on categories nobody sees.
+    assert calls == []
+
+
 # ---------------------------------------------------------------------------
 # wizard/options
 # ---------------------------------------------------------------------------
@@ -364,6 +375,37 @@ def test_options_search_mode_prompt_and_separate_cache():
     assert res2.status_code == 200
     assert len(calls) == 2
     assert res.json()["skills"] != res2.json()["skills"]
+
+
+def test_options_direct_mode_prompt_cache_and_pagination():
+    mod = _load_backend()
+    client, _, calls = _make_client(
+        mod, _rpg(), llm_replies=[_options_reply(_P0_NAMES), _options_reply(_P1_NAMES)]
+    )
+
+    # Direct mode needs no menu; the prompt browses across all domains.
+    res = client.post(f"{BASE}/skills/wizard/options", json={"direct": True, "page": 0})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["direct"] is True
+    assert [s["name"] for s in body["skills"]] == _P0_NAMES
+    prompt = calls[0]["prompt"]
+    assert "drawn from any domain of ability" in prompt
+    assert "spanning clearly different domains" in prompt
+    assert "swordplay" in prompt  # existing skills still excluded
+
+    # Page 1 excludes page 0's names, like category pages do.
+    res1 = client.post(f"{BASE}/skills/wizard/options", json={"direct": True, "page": 1})
+    assert res1.status_code == 200
+    for name in _P0_NAMES:
+        assert name in calls[1]["prompt"]
+
+    # Cached page re-serves without an LLM call, and any menu text is ignored
+    # in direct mode - the cache is one shared "direct" menu.
+    res0 = client.post(f"{BASE}/skills/wizard/options", json={"menu": "whatever", "direct": True, "page": 0})
+    assert res0.status_code == 200
+    assert [s["name"] for s in res0.json()["skills"]] == _P0_NAMES
+    assert len(calls) == 2
 
 
 def test_roll_strength_always_five_to_ten():

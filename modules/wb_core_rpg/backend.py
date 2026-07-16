@@ -1633,7 +1633,7 @@ JSON response:
 {{"categories": [{{"name": "1-3 words", "summary": "one short clause"}}, ... 10 total]}}"""
 
 
-def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], state: dict, search: bool = False, instructions: dict | None = None) -> str:
+def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], state: dict, search: bool = False, direct: bool = False, instructions: dict | None = None) -> str:
     world_section = _world_context_section(state.get("world_data"))
     story_section = _story_context_section(state)
     plot_section = _plot_challenge_section(state)
@@ -1645,7 +1645,15 @@ def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], state: dict,
             "the theme and stand on its own as an ability, and no name or description may mention "
             "the thread or echo the hidden challenge."
         )
-    if search:
+    if direct:
+        # Category-free browsing (the scenario opted out of the categories
+        # step): each page is a fresh spread across unrelated domains.
+        intro = "The player is browsing new skills to learn, drawn from any domain of ability."
+        task = (
+            "Propose exactly 5 NEW skills spanning clearly different domains of ability "
+            "(no two from the same domain)"
+        )
+    elif search:
         intro = (
             f'The player searched for "{menu}" and is browsing skills themed on that search. '
             "If the request is a basic ability you may match it exactly; for elaborate or very "
@@ -1777,8 +1785,9 @@ def get_router():
         regenerate: bool = False
 
     class SkillOptionsPayload(BaseModel):
-        menu: str  # category name or search query
+        menu: str = ""  # category name or search query; ignored in direct mode
         search: bool = False
+        direct: bool = False  # category-free browsing (scenario skipped categories)
         page: int = 0
 
     class SkillRefinePayload(BaseModel):
@@ -2299,6 +2308,12 @@ def get_router():
     async def generate_skill_categories(payload: CategoriesPayload | None = None):
         sm = _session_manager()
         rpg = _rpg_data(sm)
+        # A scenario can opt the wizard out of the categories step entirely;
+        # the widget reads `skip` and browses skills directly instead. Decided
+        # server-side so no LLM call is spent preparing categories nobody sees.
+        scenario_data = sm.state.get("scenario_data") or {}
+        if scenario_data.get("skip_skill_categories"):
+            return {"categories": None, "skip": True}
         regenerate = bool(payload and payload.regenerate)
         entry = _addskill_cache.setdefault(sm.active_save_id, {"categories": None, "pages": {}})
         if entry["categories"] and not regenerate:
@@ -2332,15 +2347,15 @@ def get_router():
     async def generate_skill_options(payload: SkillOptionsPayload):
         sm = _session_manager()
         rpg = _rpg_data(sm)
-        menu = payload.menu.strip()
-        if not menu:
+        menu = "" if payload.direct else payload.menu.strip()
+        if not menu and not payload.direct:
             raise HTTPException(status_code=400, detail="A category or search query is required.")
-        menu_key = ("search:" if payload.search else "cat:") + menu.lower()
+        menu_key = "direct:all" if payload.direct else ("search:" if payload.search else "cat:") + menu.lower()
 
         entry = _addskill_cache.setdefault(sm.active_save_id, {"categories": None, "pages": {}})
         pages = entry["pages"].setdefault(menu_key, [])
         if payload.page < len(pages):
-            return {"menu": menu, "search": payload.search, "page": payload.page, "skills": pages[payload.page]}
+            return {"menu": menu, "search": payload.search, "direct": payload.direct, "page": payload.page, "skills": pages[payload.page]}
         if payload.page > len(pages):
             raise HTTPException(status_code=409, detail="Page out of order; request the next ungenerated page.")
 
@@ -2348,11 +2363,15 @@ def get_router():
             # A joined duplicate may arrive after the original already
             # appended the page; serve it from the cache.
             if payload.page < len(pages):
-                return {"menu": menu, "search": payload.search, "page": payload.page, "skills": pages[payload.page]}
+                return {"menu": menu, "search": payload.search, "direct": payload.direct, "page": payload.page, "skills": pages[payload.page]}
 
             exclude = [s["name"] for page in pages for s in page] + list(rpg.get("skills", {}).keys())
             raw = await _wizard_generate(
-                sm, _skill_options_prompt(rpg, menu, exclude, sm.state, search=payload.search, instructions=_instructions(sm))
+                sm,
+                _skill_options_prompt(
+                    rpg, menu, exclude, sm.state,
+                    search=payload.search, direct=payload.direct, instructions=_instructions(sm),
+                ),
             )
             parsed = _parse_json_repair(raw)
             proposals = parsed.get("skills") if isinstance(parsed, dict) else None
@@ -2368,7 +2387,7 @@ def get_router():
                 raise HTTPException(status_code=502, detail="The AI failed to produce 5 new skills. Try again.")
 
             pages.append(cleaned)
-            return {"menu": menu, "search": payload.search, "page": payload.page, "skills": cleaned}
+            return {"menu": menu, "search": payload.search, "direct": payload.direct, "page": payload.page, "skills": cleaned}
 
         return await _join_generation(f"{sm.active_save_id}:options:{menu_key}", _generate)
 

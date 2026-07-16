@@ -76,6 +76,10 @@ class ScenarioStore:
             "themes": data.get("themes", ""),
             "tags": data.get("tags", ""),
             "pacing": data.get("pacing", ""),
+            # When true, the RPG add-skill wizard in stories created from this
+            # scenario skips the category-picking step and offers skills
+            # directly (search stays available).
+            "skip_skill_categories": bool(data.get("skip_skill_categories") or False),
             # Module defaults seeded onto saves created from this scenario.
             # active_modules: list of module ids, or None meaning "unset"
             # (story creation decides). module_instructions: per-module

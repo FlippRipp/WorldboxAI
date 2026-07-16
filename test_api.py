@@ -607,6 +607,7 @@ def test_scenario_module_fields_roundtrip_and_legacy_load(tmp_path, monkeypatch)
     create = client.post("/api/scenarios", json={
         "name": "Culinary Court",
         "scenario_description": "A palace kitchen at war.",
+        "skip_skill_categories": True,
         "active_modules": ["wb_core_rpg"],
         "module_instructions": {
             "wb_core_rpg": {"skill_categories": "Culinary disciplines only.", "skill_options": "  "},
@@ -617,6 +618,7 @@ def test_scenario_module_fields_roundtrip_and_legacy_load(tmp_path, monkeypatch)
     scenario_id = create.json()["scenario"]["id"]
     loaded = client.get(f"/api/scenarios/{scenario_id}").json()["scenario"]
     assert loaded["active_modules"] == ["wb_core_rpg"]
+    assert loaded["skip_skill_categories"] is True
     # Blank slots and malformed modules are sanitized out at save time.
     assert loaded["module_instructions"] == {"wb_core_rpg": {"skill_categories": "Culinary disciplines only."}}
 
@@ -625,6 +627,7 @@ def test_scenario_module_fields_roundtrip_and_legacy_load(tmp_path, monkeypatch)
     loaded_legacy = client.get(f"/api/scenarios/{legacy['id']}").json()["scenario"]
     assert loaded_legacy["active_modules"] is None
     assert loaded_legacy["module_instructions"] == {}
+    assert loaded_legacy["skip_skill_categories"] is False
 
 
 def test_create_save_seeds_module_instructions_from_scenario(tmp_path, monkeypatch):

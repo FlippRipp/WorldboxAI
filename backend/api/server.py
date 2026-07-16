@@ -1508,6 +1508,9 @@ class ScenarioRequest(BaseModel):
     themes: Optional[str] = ""
     tags: Optional[str] = ""
     pacing: Optional[str] = ""
+    # RPG add-skill wizard: skip the category-picking step in stories created
+    # from this scenario and offer skills directly.
+    skip_skill_categories: Optional[bool] = False
     # Module defaults for stories created from this scenario: which modules
     # are active (None = unset) and per-module instruction-slot overrides.
     active_modules: Optional[list[str]] = None

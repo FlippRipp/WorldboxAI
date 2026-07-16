@@ -126,7 +126,7 @@ export default function ScenarioManager({ onBack }) {
     setLinkedLorebooks([]);
     setEditing({
       name: '', scenario_description: '', starting_prompt: '', themes: '', tags: '', pacing: '',
-      active_modules: null, module_instructions: {},
+      skip_skill_categories: false, active_modules: null, module_instructions: {},
     });
   };
 
@@ -137,7 +137,7 @@ export default function ScenarioManager({ onBack }) {
       setLinkedLorebooks(lorebook_ids || []);
       // Older scenarios predate themes/tags/pacing and the module fields;
       // backfill so the inputs stay controlled.
-      setEditing({ themes: '', tags: '', pacing: '', active_modules: null, module_instructions: {}, ...scenario });
+      setEditing({ themes: '', tags: '', pacing: '', skip_skill_categories: false, active_modules: null, module_instructions: {}, ...scenario });
     } catch (e) {
       alert(`Failed to load scenario: ${e.message}`);
     }
@@ -340,6 +340,24 @@ export default function ScenarioManager({ onBack }) {
                   />
                 </div>
               </div>
+
+              {enabledModuleIds.includes('wb_core_rpg') && (
+                <label className="flex items-start gap-2 p-4 rounded-lg border border-gray-700 bg-gray-800/30 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!!editing.skip_skill_categories}
+                    onChange={(e) => setEditing({ ...editing, skip_skill_categories: e.target.checked })}
+                    className="accent-purple-600 mt-1"
+                  />
+                  <span>
+                    <span className="block text-sm font-medium text-gray-300">Skip skill categories in the add-skill menu</span>
+                    <span className="block text-xs text-gray-500 mt-0.5">
+                      When learning a new skill, stories from this scenario jump straight to suggested
+                      skills instead of picking a category first. Searching for an ability stays available.
+                    </span>
+                  </span>
+                </label>
+              )}
 
               <div className="space-y-1.5">
                 {field('Module instructions', 'customize how active modules generate — stories created from this scenario inherit these')}
