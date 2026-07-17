@@ -267,11 +267,19 @@ def compile_world(world_state: dict, steps: Optional[dict] = None) -> dict:
     # Compiled worlds are always world_format 2: legacy flat/layered map data
     # (from old step data) is migrated into the hierarchical maps+connections
     # shape here, so every downstream reader sees one format only.
-    # Template-declared hierarchy levels (free text) ride into the compiled
-    # world; migrate fills the default [world, interior] when absent.
-    if world_state.get("hierarchy_levels"):
+    # The world's hierarchy levels (free text) ride into the compiled world:
+    # an explicit hierarchy_levels override wins, else the world's own
+    # AI-designed structure; migrate fills the default [world, interior] when
+    # neither exists (old worlds). Resolved HERE, in the pure compiler, so
+    # every caller (facade, enrichment engine, runtime) sees the same
+    # hierarchy.
+    levels = world_state.get("hierarchy_levels")
+    if not levels:
+        from wbworldgen.worldgen.steps.hierarchy_design import designed_levels
+        levels = designed_levels(world_state)
+    if levels:
         compiled["hierarchy"] = {
-            "levels": world_state["hierarchy_levels"],
+            "levels": levels,
             "notes": steps_data.get("hierarchy_design", {}).get("data", {}).get("notes", ""),
         }
 

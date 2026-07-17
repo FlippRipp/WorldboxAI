@@ -782,6 +782,9 @@ async def save_world_step(world_id: str, step_id: str, request: SaveStepRequest 
 
 class ExpandSiteRequest(BaseModel):
     force: bool = False
+    #: Optional pin for the child map's level (e.g. "planet", "city",
+    #: "interior"); the LLM chooses from the allowed levels when omitted.
+    level_type: Optional[str] = None
 
 
 @router.post("/api/world/{world_id}/site/{node_id}/expand")
@@ -791,10 +794,12 @@ async def expand_world_site(world_id: str, node_id: str, request: ExpandSiteRequ
     site-era clients; the payload now carries the map bundle.)"""
     try:
         force = request.force if request else False
+        level_type = (request.level_type or None) if request else None
         compiled = world_builder.compile_world(world_builder.load_world(world_id))
         from wbworldgen.worldgen import mapspace as _ms
         map_id = _ms.map_of_node(compiled, node_id) or compiled.get("root_map_id", "root")
-        bundle = await world_builder.expand_node(world_id, map_id, node_id, force=force)
+        bundle = await world_builder.expand_node(world_id, map_id, node_id, force=force,
+                                                 level_type=level_type)
         return {"world_id": world_id, "node_id": node_id, **bundle}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -812,6 +817,7 @@ async def get_world_sites(world_id: str):
 
 class SessionExpandSiteRequest(BaseModel):
     node_id: str
+    level_type: Optional[str] = None
 
 
 @router.post("/api/world/session/expand-site")
@@ -826,7 +832,8 @@ async def expand_site_in_session(request: SessionExpandSiteRequest):
     try:
         from wbworldgen.worldgen import mapspace as _ms
         map_id = (_ms.map_of_node(wd, request.node_id) if wd else None) or "root"
-        bundle = await world_builder.expand_node(world_id, map_id, request.node_id)
+        bundle = await world_builder.expand_node(world_id, map_id, request.node_id,
+                                                 level_type=request.level_type or None)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:

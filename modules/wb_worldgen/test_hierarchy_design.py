@@ -214,8 +214,9 @@ def test_designed_levels_ride_into_compiled_world(builder):
     assert compiled["template_vocab"] == {
         "site_sub_noun": "decks, domes and installations",
         "connection_looks": {"shuttle": "a shuttle pad"}}
-    # M1: expansion below the root offers interior levels only.
-    assert [l["level_type"] for l in allowed_child_levels(compiled, root)] == ["interior"]
+    # Expansion below the root offers every implemented lower level (M3).
+    assert [l["level_type"] for l in allowed_child_levels(compiled, root)] == \
+        ["planet", "interior"]
 
 
 def test_template_vocab_snapshot_wins_over_designed(builder):

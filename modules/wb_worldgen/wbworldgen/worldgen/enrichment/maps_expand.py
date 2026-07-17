@@ -1,11 +1,21 @@
 """On-demand child-map expansion: a location opens into its own map.
 
-One full-attention LLM call authors the child map's content (label, level,
-locations with adjacency, connections back out); the level's generator lays
-it out deterministically. The result is a real MapRecord + ConnectionRecords
-— rendered, traveled and fogged like any map. Generated lazily the first
-time the story approaches the location (or on explicit request), cached
-write-once in the world's ``maps/`` directory.
+One full-attention LLM call decides the child map's level and authors its
+identity (label, description, entrance). The content contract then branches
+on the chosen level's generator:
+
+- authored generators (``interior``): the same call authors the locations
+  with adjacency and connections back out; the generator lays them out
+  deterministically.
+- procedural generators (``world_map``, ``city_roadnet``): no locations are
+  authored — the generator builds the map offline with a deterministic seed,
+  and the play-time enrichment engine names/describes its nodes lazily,
+  closest-to-the-story first, exactly like the root map.
+
+Either way the result is a real MapRecord + ConnectionRecords — rendered,
+traveled and fogged like any map. Generated lazily the first time the story
+approaches the location (or on explicit request), cached in the world's
+``maps/`` directory (write-once content; enrichment fills in names later).
 
 Generator contract: every expansion MUST anchor the child to its parent with
 at least one entrance connection — a child map you cannot enter or leave is
@@ -22,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 MAX_DEPTH = 6
 
+#: Node budget for procedurally generated child maps (a planet or city opened
+#: from a larger map). Deliberately smaller than a root map.
+CHILD_MAP_TOTAL_NODES = 60
+
 
 def child_map_id(parent_map_id: str, node_id: str) -> str:
     """Deterministic child map id for an anchor position."""
@@ -29,14 +43,21 @@ def child_map_id(parent_map_id: str, node_id: str) -> str:
     return f"m_{digest[:8]}"
 
 
+def _generator_spec(level: dict):
+    from wbworldgen.worldgen.generation.registry import GENERATOR_REGISTRY
+    return GENERATOR_REGISTRY.get(level.get("generator_id", "interior"))
+
+
+def _is_authored(level: dict) -> bool:
+    spec = _generator_spec(level)
+    return bool(spec and spec.needs_llm_content)
+
+
 def allowed_child_levels(compiled: dict, parent_map: dict) -> list[dict]:
     """Levels a child of this map may use: any level strictly below the
     parent's, plus the parent's own level when it declares ``nestable`` (a
-    ship inside a station, a vault inside a castle).
-
-    For now only levels whose generator is implemented for expansion
-    (``interior``) are offered; wider-scale child generators arrive with the
-    pipeline rework."""
+    ship inside a station, a vault inside a castle). Only levels whose
+    generator is implemented are offered."""
     levels = (compiled.get("hierarchy") or {}).get("levels") or []
     parent_type = (parent_map or {}).get("level_type", "")
     parent_idx = next((i for i, l in enumerate(levels)
@@ -45,7 +66,8 @@ def allowed_child_levels(compiled: dict, parent_map: dict) -> list[dict]:
     for i, level in enumerate(levels):
         if i > parent_idx or (i == parent_idx and level.get("nestable")):
             allowed.append(level)
-    return [l for l in allowed if l.get("generator_id", "interior") == "interior"]
+    return [l for l in allowed
+            if (spec := _generator_spec(l)) is not None and spec.build is not None]
 
 
 def is_expandable(compiled: dict, map_id: str, node: dict) -> bool:
@@ -121,16 +143,25 @@ class MapExpansionEngine:
         return self._host._llm_service
 
     async def expand(self, compiled: dict, parent_map_id: str, node: dict, *,
-                     max_locations: int = 10, template_vocab: dict = None) -> dict:
+                     max_locations: int = 10, template_vocab: dict = None,
+                     level_type: str = None, total_nodes: int = None) -> dict:
         """Generate {"map": MapRecord, "connections": [ConnectionRecord]} for
         one anchor node. Raises on LLM failure or a violated entrance
-        contract — nothing is persisted here."""
+        contract — nothing is persisted here.
+
+        ``level_type`` pins the child's level (a pregenerate plan or an
+        explicit caller choice); otherwise the LLM picks from the allowed
+        levels. ``total_nodes`` sizes procedurally generated children."""
         from wbworldgen.worldgen import mapspace as _ms
         max_locations = max(4, min(int(max_locations or 10), 16))
         parent_map = _ms.get_map(compiled, parent_map_id) or {}
         levels = allowed_child_levels(compiled, parent_map)
         if not levels:
             raise ValueError(f"No child levels available below map {parent_map_id}")
+        pinned = next((l for l in levels if level_type
+                       and l.get("level_type") == str(level_type).strip()), None)
+        if pinned is not None:
+            levels = [pinned]
 
         if not self._llm or self._llm.mode == "mock":
             parsed = self._mock_content(node, levels, max_locations)
@@ -139,20 +170,24 @@ class MapExpansionEngine:
             context = build_enrichment_context(node, all_nodes, compiled, include_descriptions=True)
             parsed = await self._live_expand(node, context, parent_map, levels,
                                              max_locations, template_vocab)
-        return self._build_map(compiled, parent_map_id, node, parsed, levels, max_locations)
+
+        chosen = next((l for l in levels
+                       if l.get("level_type") == str(parsed.get("level_type", "")).strip()),
+                      levels[0])
+        if _is_authored(chosen):
+            return self._build_map(compiled, parent_map_id, node, parsed, chosen, max_locations)
+        return self._build_procedural_map(compiled, parent_map_id, node, parsed,
+                                          chosen, total_nodes)
 
     # --- result shaping -----------------------------------------------------
 
     def _build_map(self, compiled: dict, parent_map_id: str, node: dict,
-                   parsed: dict, levels: list, max_locations: int) -> dict:
+                   parsed: dict, level: dict, max_locations: int) -> dict:
         node_id = node.get("id", "")
         map_id = child_map_id(parent_map_id, node_id)
         raw_locations = parsed.get("locations")
         if not isinstance(raw_locations, list) or not raw_locations:
             raise ValueError(f"Map expansion for {node_id} returned no locations")
-
-        level_type = str(parsed.get("level_type", "")).strip()
-        level = next((l for l in levels if l.get("level_type") == level_type), levels[0])
 
         # Ids are assigned server-side — never trust LLM ids. Names dedup.
         locations = []
@@ -266,10 +301,91 @@ class MapExpansionEngine:
 
         return {"map": record, "connections": connections}
 
+    def _build_procedural_map(self, compiled: dict, parent_map_id: str, node: dict,
+                              parsed: dict, level: dict, total_nodes: int = None) -> dict:
+        """Procedural child map (world_map/city_roadnet levels): the level's
+        generator builds the geography offline with a deterministic seed; the
+        play-time enrichment engine names and describes its nodes later,
+        closest-to-the-story first. The LLM authored only the map's identity
+        (label, description, entrance)."""
+        from wbworldgen.worldgen.generation.registry import get_generator
+        node_id = node.get("id", "")
+        map_id = child_map_id(parent_map_id, node_id)
+        # Child-scoped context: the world premise rides along for flavor; the
+        # parent's regions do not (a planet does not inherit the overworld's
+        # geography).
+        scoped = {
+            "generated_from": compiled.get("generated_from", ""),
+            "lore": compiled.get("lore", {}) or {},
+            "regions": {"regions": []},
+        }
+        seed = int(hashlib.sha1(map_id.encode("utf-8")).hexdigest()[:8], 16) or 1
+        generated = get_generator(level.get("generator_id", "world_map")).build({
+            "compiled_world": scoped,
+            "total_nodes": max(20, min(int(total_nodes or CHILD_MAP_TOTAL_NODES), 200)),
+            "seed": seed,
+            "id_prefix": f"{map_id}:",
+        })
+        if not generated.get("nodes"):
+            raise ValueError(f"Procedural expansion for {node_id} produced no nodes")
+
+        record = {
+            "map_id": map_id,
+            "label": str(parsed.get("label", "")).strip()
+                     or (node.get("name") or f"Inside {node_id}"),
+            "level_type": level.get("level_type", ""),
+            "description": str(parsed.get("description", "")).strip(),
+            "parent_map_id": parent_map_id,
+            "anchor_node_id": node_id,
+            "generator_id": level.get("generator_id", "world_map"),
+            "nodes": generated["nodes"],
+            "edges": generated.get("edges", []),
+            "config": generated.get("config", {}),
+            "schema": 2,
+        }
+        # Optional geometry extras — carried by reference when present.
+        for key in ("regions", "roads"):
+            if generated.get(key):
+                record[key] = generated[key]
+
+        # Arrival point: the map's most important node — its natural hub.
+        arrival = max(record["nodes"], key=lambda n: n.get("importance", 0) or 0)
+        digest = hashlib.sha1(f"{map_id}/entrance/{arrival['id']}".encode()).hexdigest()[:8]
+        connection = {
+            "id": f"c_{digest}",
+            "from": {"map_id": parent_map_id, "node_id": node_id},
+            "to": {"map_id": map_id, "node_id": arrival["id"]},
+            "kind": str(parsed.get("entrance_kind", "")).strip() or "entrance",
+            "name": str(parsed.get("entrance_name", "")).strip(),
+            "description": str(parsed.get("entrance_description", "")).strip(),
+            "travel": {"mode": "instant"},
+            "bidirectional": True,
+            "requirements": "",
+            "hidden": False,
+            "origin": "generated",
+        }
+        return {"map": record, "connections": [connection]}
+
     def _mock_content(self, node: dict, levels: list, max_locations: int) -> dict:
         """Deterministic offline content — expansion runs at play time, so it
-        must work without a live provider."""
+        must work without a live provider.
+
+        Level pick: a level_type matching the node's type, else the first
+        authored (interior-style) level — the pre-procedural default."""
         name = node.get("name", "") or node.get("id", "somewhere")
+        node_type = str(node.get("type", "")).strip().lower()
+        level = next((l for l in levels if l.get("level_type") == node_type), None)
+        if level is None:
+            level = next((l for l in levels if _is_authored(l)), levels[0])
+        if not _is_authored(level):
+            return {
+                "label": name,
+                "level_type": level.get("level_type", ""),
+                "description": f"Mock {level.get('level_type', 'map')} map of {name}.",
+                "locations": [],
+                "entrance_kind": "arrival",
+                "entrance_name": f"{name} Arrival",
+            }
         count = min(4, max_locations)
         locations = []
         for i in range(1, count + 1):
@@ -282,7 +398,7 @@ class MapExpansionEngine:
             })
         return {
             "label": f"Inside {name}",
-            "level_type": levels[0].get("level_type", "interior"),
+            "level_type": level.get("level_type", "interior"),
             "description": f"Mock interior of {name}: {count} connected areas.",
             "locations": locations,
             "entrance_kind": "gate",
@@ -313,7 +429,16 @@ class MapExpansionEngine:
 
         levels_block = "\n".join(
             f"- {l.get('level_type')}: {l.get('guidance', l.get('label', ''))}"
+            + ("" if _is_authored(l) else " [procedural — do not author locations]")
             for l in levels)
+        procedural_note = ""
+        if any(not _is_authored(l) for l in levels):
+            procedural_note = (
+                "\nIf you choose a level marked [procedural], the map itself is generated "
+                "procedurally afterwards: output \"locations\": [] and \"connections\": [] and "
+                "provide only label, level_type, a rich description, and the entrance fields — "
+                f"how one arrives there from {node_name}'s surroundings (a landing site, a "
+                "harbor, a city gate...).\n")
 
         system = host._get_prompt(
             "map_expand_system",
@@ -336,7 +461,7 @@ Description: {node.get('description', '') or node.get('label_description', '')}
 
 Choose the level_type for this new map from:
 {levels_block}
-
+{procedural_note}
 Design 6-{max_locations} distinct locations ({sub_noun}). Exactly ONE location must have
 "is_entrance": true — the way in from {node_name}'s surroundings (a gate, door, cave mouth,
 docking bay...). Each location gets a name, a short type, a 1-2 sentence description, and

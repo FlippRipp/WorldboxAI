@@ -45,6 +45,10 @@ class WorldPersistence:
         self._dir.mkdir(parents=True, exist_ok=True)
         self._enrichment_cache: dict[str, dict] = {}
         self._enrichment_cache_max: int = 4
+        #: node_id -> map_id over a world's child-map bundles, so play-time
+        #: enrichment of procedurally generated child maps persists into the
+        #: right maps/*.json file. Invalidated when a bundle is (re)saved.
+        self._child_node_index: dict[str, dict] = {}
         self._prompt_library_path = Path(prompt_library_path)
         self._enrichment_prompts: dict[str, str] = {}
         self.load_enrichment_prompts()
@@ -205,12 +209,15 @@ class WorldPersistence:
         return self._dir / safe_world_id(world_id) / "maps" / f"{safe_world_id(map_id)}.json"
 
     def save_child_map(self, world_id: str, bundle: dict):
-        """Write-once cache of an expanded child map ({"map", "connections"})."""
+        """Cache of an expanded child map ({"map", "connections"}). Content is
+        written once; enrichment later fills node names/descriptions in place
+        (``save_node_enrichment``)."""
         map_id = (bundle.get("map") or {}).get("map_id", "")
         path = self.child_map_path(world_id, map_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(bundle, f, indent=2)
+        self._child_node_index.pop(safe_world_id(world_id), None)
 
     def load_child_map(self, world_id: str, map_id: str) -> dict | None:
         path = self.child_map_path(world_id, map_id)
@@ -289,26 +296,57 @@ class WorldPersistence:
 
     def save_node_enrichment(self, world_id: str, node_id: str, field: str, value: str):
         step_path = self._dir / world_id / "step_map_generation.json"
-        if not step_path.exists():
+        if step_path.exists():
+            step_data = self._enrichment_cache.get(world_id)
+            if step_data is None:
+                if len(self._enrichment_cache) >= self._enrichment_cache_max:
+                    oldest = next(iter(self._enrichment_cache))
+                    self.write_enrichment_to_disk(oldest, evict=True)
+                with open(step_path, "r", encoding="utf-8") as f:
+                    step_data = json.load(f)
+                self._enrichment_cache[world_id] = step_data
+
+            node_index = step_data.get("_node_index")
+            if node_index is None:
+                node_index = self.build_enrichment_node_index(step_data.get("data", {}))
+                step_data["_node_index"] = node_index
+
+            entry = node_index.get(node_id)
+            if entry:
+                entry[field] = value
+                return
+
+        # Not a root/parallel-map node: the node may live in a lazily
+        # expanded child map (procedural children are born unnamed and get
+        # enriched during play) — update its bundle in place.
+        self._save_child_node_enrichment(world_id, node_id, field, value)
+
+    def _save_child_node_enrichment(self, world_id: str, node_id: str, field: str, value: str):
+        safe_id = safe_world_id(world_id)
+        index = self._child_node_index.get(safe_id)
+        if index is None:
+            index = {}
+            for bundle in self.load_child_maps(world_id):
+                mid = bundle["map"].get("map_id", "")
+                for n in bundle["map"].get("nodes", []):
+                    if n.get("id"):
+                        index[n["id"]] = mid
+            self._child_node_index[safe_id] = index
+        map_id = index.get(node_id)
+        if not map_id:
             return
-
-        step_data = self._enrichment_cache.get(world_id)
-        if step_data is None:
-            if len(self._enrichment_cache) >= self._enrichment_cache_max:
-                oldest = next(iter(self._enrichment_cache))
-                self.write_enrichment_to_disk(oldest, evict=True)
-            with open(step_path, "r", encoding="utf-8") as f:
-                step_data = json.load(f)
-            self._enrichment_cache[world_id] = step_data
-
-        node_index = step_data.get("_node_index")
-        if node_index is None:
-            node_index = self.build_enrichment_node_index(step_data.get("data", {}))
-            step_data["_node_index"] = node_index
-
-        entry = node_index.get(node_id)
-        if entry:
-            entry[field] = value
+        bundle = self.load_child_map(world_id, map_id)
+        if bundle is None:
+            return
+        for n in bundle["map"].get("nodes", []):
+            if n.get("id") == node_id:
+                n[field] = value
+                break
+        else:
+            return
+        path = self.child_map_path(world_id, map_id)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(bundle, f, indent=2)
 
     def flush_enrichment_cache(self, world_id: str = None):
         if world_id:

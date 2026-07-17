@@ -348,23 +348,10 @@ class WorldBuilder:
             return designed[0].get("generator_id") or "world_map"
         return _world_form.map_generator_override(world_state) or "world_map"
 
-    def resolved_levels_for(self, world_state: dict) -> list:
-        """A world's hierarchy levels: its own AI-designed structure when
-        present, else the default [world, interior] pair so old worlds
-        (including template-era worlds) behave exactly as the default
-        template did."""
-        designed = _hierarchy_design.designed_levels(world_state)
-        if designed:
-            return designed
-        from wbworldgen.worldgen.migrate import DEFAULT_LEVELS
-        return [dict(l) for l in DEFAULT_LEVELS]
-
     def compile_world(self, world_state: dict) -> dict:
-        # The world's hierarchy levels (free text) ride into the compiled
-        # world so play-time expansion knows which child levels may exist.
-        if not world_state.get("hierarchy_levels"):
-            world_state = dict(world_state)
-            world_state["hierarchy_levels"] = self.resolved_levels_for(world_state)
+        # Hierarchy levels resolve inside the pure compiler (the world's own
+        # AI-designed structure, default [world, interior] when absent) so
+        # the facade and the enrichment engine always agree.
         return compiler.compile_world(world_state, self._steps)
 
     # --- persistence (delegated) -------------------------------------------
@@ -540,12 +527,14 @@ class WorldBuilder:
             world_id, _maps_expand.child_map_id(parent_map_id, node_id))
 
     async def expand_node(self, world_id: str, map_id: str, node_id: str,
-                          force: bool = False) -> dict:
+                          force: bool = False, level_type: str = None) -> dict:
         """Generate (or return the cached) child map for one anchor node.
 
-        One full-attention LLM call, cached write-once under the world's
-        ``maps/`` directory — every save of the world inherits it. Returns
-        {"map": MapRecord, "connections": [ConnectionRecord]}.
+        One full-attention LLM call, cached under the world's ``maps/``
+        directory — every save of the world inherits it. Returns
+        {"map": MapRecord, "connections": [ConnectionRecord]}. ``level_type``
+        pins the child's level (pregenerate plans, explicit caller choice);
+        otherwise the LLM picks from the allowed levels.
         """
         if not force:
             existing = self.get_child_map(world_id, map_id, node_id)
@@ -556,9 +545,11 @@ class WorldBuilder:
         if node is None:
             raise ValueError(f"Unknown map node: {node_id}")
         max_locations = self._resolve_enrichment_setting("world.site_max_sublocations", 10, 4, 16)
+        child_nodes = self._resolve_enrichment_setting("world.child_map_nodes", 60, 20, 200)
         bundle = await self._maps_expand.expand(
             compiled, map_id, node, max_locations=max_locations,
-            template_vocab=compiled.get("template_vocab"))
+            template_vocab=compiled.get("template_vocab"),
+            level_type=level_type, total_nodes=child_nodes)
         self._persistence.save_child_map(world_id, bundle)
         # Keep the cached compiled world truthful without a full invalidation
         # (a reload would also re-read maps/ via load_world).
@@ -597,7 +588,9 @@ class WorldBuilder:
                 summary["skipped"].append(name)
                 continue
             try:
-                bundle = await self.expand_node(world_id, map_id, node.get("id"))
+                bundle = await self.expand_node(
+                    world_id, map_id, node.get("id"),
+                    level_type=str((entry or {}).get("level_type", "")).strip() or None)
             except Exception as e:
                 logger.warning("pregenerate failed for %r: %s", name, e)
                 summary["skipped"].append(name)
