@@ -22,7 +22,9 @@ import random
 from wbworldgen.world_map import bind_named_locations
 from wbworldgen.worldgen.generation.roadnet import (
     DEFAULT_LEVELS,
+    OUTWARD_GENERATIONS,
     generate_roadnet,
+    point_in_polygon,
     polygon_area,
     polygon_centroid,
 )
@@ -42,7 +44,7 @@ def _city_boundary(rng, width, height):
     pts = []
     for i in range(n):
         ang = 2.0 * math.pi * i / n + rng.uniform(-0.5, 0.5) * math.pi / n
-        r = rng.uniform(0.40, 0.48)
+        r = rng.uniform(0.34, 0.44)
         pts.append((cx + math.cos(ang) * r * width,
                     cy + math.sin(ang) * r * height))
     return pts
@@ -94,10 +96,14 @@ def _farthest_point_seeds(centroids, order_hint, count):
     return seeds
 
 
-def _assign_districts(faces, centroids, adj, count):
-    """Contiguous multi-source BFS over face adjacency. Returns face->district."""
-    by_area_hint = sorted(range(len(faces)),
-                          key=lambda fi: -abs(polygon_area_cached(fi)))
+def _assign_districts(faces, centroids, adj, count, eligible):
+    """Contiguous multi-source BFS over face adjacency. Returns face->district.
+
+    Districts grow over ``eligible`` (city-core) faces only; every other face
+    (outskirts sprawl) inherits the district of its nearest assigned face so
+    vertex lookups always resolve.
+    """
+    by_area_hint = sorted(eligible, key=lambda fi: -abs(polygon_area_cached(fi)))
     seeds = _farthest_point_seeds(centroids, by_area_hint, count)
     assignment = {}
     queue = []
@@ -109,10 +115,9 @@ def _assign_districts(faces, centroids, adj, count):
         fi = queue[head]
         head += 1
         for nb in sorted(adj[fi]):
-            if nb not in assignment:
+            if nb in eligible and nb not in assignment:
                 assignment[nb] = assignment[fi]
                 queue.append(nb)
-    # Faces in disconnected pockets: nearest assigned centroid.
     for fi in range(len(faces)):
         if fi not in assignment:
             nearest = min(assignment,
@@ -211,7 +216,8 @@ def build_city_map(spec: dict) -> dict:
     rng = random.Random(seed)
 
     boundary = _city_boundary(rng, width, height)
-    net = generate_roadnet(seed, width, height, DEFAULT_LEVELS, boundary)
+    net = generate_roadnet(seed, width, height, DEFAULT_LEVELS, boundary,
+                           outward_generations=OUTWARD_GENERATIONS)
     faces = net.faces
 
     _AREA_CACHE.clear()
@@ -220,15 +226,23 @@ def build_city_map(spec: dict) -> dict:
     centroids = [polygon_centroid([net.points[i] for i in face])
                  for face in faces]
 
+    # Blocks outside the city boundary belong to the outskirts: streets
+    # render there, but districts, plazas and venues stay in the core.
+    core_vertex = [point_in_polygon(p, boundary) for p in net.points]
+    core_faces = {fi for fi, face in enumerate(faces)
+                  if point_in_polygon(centroids[fi], boundary)}
+    if not core_faces:
+        core_faces = set(range(len(faces)))
+
     names, region_entries = _district_names(compiled, rng)
-    count = max(1, min(len(names), len(faces)))
+    count = max(1, min(len(names), len(core_faces)))
     names = names[:count]
     adj = _face_adjacency(faces)
-    face_district = _assign_districts(faces, centroids, adj, count)
+    face_district = _assign_districts(faces, centroids, adj, count, core_faces)
 
     district_faces = {di: [] for di in range(count)}
-    for fi, di in face_district.items():
-        district_faces[di].append(fi)
+    for fi in core_faces:
+        district_faces[face_district[fi]].append(fi)
     for di in district_faces:
         district_faces[di].sort(key=lambda fi: -abs(_AREA_CACHE[fi]))
     district_area = {di: sum(abs(_AREA_CACHE[fi]) for fi in fis)
@@ -308,7 +322,7 @@ def build_city_map(spec: dict) -> dict:
             avenue_deg[a] = avenue_deg.get(a, 0) + 1
             avenue_deg[b] = avenue_deg.get(b, 0) + 1
     candidates = sorted(v for v, d in avenue_deg.items()
-                        if d >= 2 and v not in net.anchors)
+                        if d >= 2 and v not in net.anchors and core_vertex[v])
     node_positions = [(n["x"], n["y"]) for n in nodes]
 
     def _spread_pick(cands, want, min_gap):
@@ -332,7 +346,8 @@ def build_city_map(spec: dict) -> dict:
     remaining = budget - len(nodes)
     if remaining > 0:
         corner_cands = sorted(v for v in range(len(net.points))
-                              if v not in vertex_used and v not in net.anchors)
+                              if v not in vertex_used and v not in net.anchors
+                              and core_vertex[v])
         node_positions = [(n["x"], n["y"]) for n in nodes]
         for v in _spread_pick(corner_cands, remaining,
                               DEFAULT_LEVELS[1].clearance * 1.5):

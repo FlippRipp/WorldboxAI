@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 
 MIN_ANGLE_DEG = 60.0
 MAX_DEGREE = 4
-_WALK_PASSES = 3
+_WALK_PASSES = 8  # saturation cap; passes stop early once nothing connects
 _SCATTER_TRIES = 12
 _SEED_TRIES = 40
 _EPS = 1e-9
@@ -38,12 +38,28 @@ class LevelParams:
     min_face_area: float    # only densify faces bigger than this
 
 
-# Ladder tuned for a 1000x1000 map: avenues, streets, lanes.
+# Ladder tuned for a 1000x1000 map: avenues, streets, lanes. Thresholds are
+# deliberately low so most blocks subdivide — the reference algorithm's look
+# is a dense fabric, not a sparse web.
 DEFAULT_LEVELS: tuple[LevelParams, ...] = (
-    LevelParams(90.0, 110.0, 170.0, 200.0, 140.0, 20000.0),
-    LevelParams(38.0, 45.0, 75.0, 90.0, 60.0, 4000.0),
-    LevelParams(18.0, 20.0, 34.0, 42.0, math.inf, 0.0),
+    LevelParams(80.0, 100.0, 155.0, 180.0, 130.0, 11000.0),
+    LevelParams(34.0, 40.0, 66.0, 80.0, 55.0, 2400.0),
+    LevelParams(15.0, 17.0, 29.0, 36.0, math.inf, 0.0),
 )
+
+#: How many child generations each level's outward growth may spawn beyond
+#: the network's edge (the article's split-number sprawl). Keeps branches
+#: tethered to the network instead of flooding the map.
+OUTWARD_GENERATIONS = 4
+
+#: Streets rarely dead-end in a real city: tips that cannot loop back into
+#: the fabric even at this relaxed junction angle get pruned instead.
+_JOIN_ANGLE_DEG = 48.0
+
+#: A street only continues through a candidate that keeps it reasonably
+#: straight (bend under ~50 degrees); sharper turns end the street and the
+#: node starts a fresh one later. Keeps the fabric grid-like, not maze-like.
+_CONTINUE_ALIGN = math.cos(math.radians(50.0))
 
 
 @dataclass
@@ -56,6 +72,7 @@ class RoadNetwork:
     outer_face: list = field(default_factory=list)
     relaxed_edges: set = field(default_factory=set)  # joins that bent the angle/triangle rules
     anchors: set = field(default_factory=set)        # points inserted by edge splitting
+    sprawl_points: set = field(default_factory=set)  # outskirts points beyond the boundary
 
     def degree(self, i: int) -> int:
         return sum(1 for a, b in self.edges if a == i or b == i)
@@ -222,6 +239,7 @@ class _NetState:
         self.removed: set = set()
         self.relaxed_edges: set = set()
         self.anchors: set = set()
+        self.sprawl_pts: set = set()
 
     def add_point(self, p, level) -> int:
         idx = len(self.points)
@@ -322,30 +340,45 @@ def _sample_in_polygon(rng, poly):
 
 
 def scatter_points(state: _NetState, rng: random.Random, level: int,
-                   params: LevelParams, polygon) -> list:
-    """Poisson-disc-like active-queue growth inside `polygon`.
+                   params: LevelParams, polygon, seeds=None,
+                   max_generations=None) -> list:
+    """Article's node scatter: FIFO open list, spawn-all-valid-candidates.
 
-    Existing points (including face boundary vertices) already in the state
-    count toward clearance but are not re-emitted. Returns new indices.
+    Each open node is processed once and emits 10-16 candidates evenly
+    around a circle at random distances in the extension range; EVERY
+    candidate that is inside ``polygon`` and clear of all existing points
+    is added and queued. Growth starts from one fresh sample inside the
+    polygon, or radiates from ``seeds`` (existing point indices — e.g. a
+    face's boundary vertices, which count for clearance but are not
+    re-emitted). ``max_generations`` is the article's split number: how
+    many child generations may spawn. Returns new indices.
     """
     new_pts = []
-    seed_pt = None
-    for _ in range(_SEED_TRIES):
-        p = _sample_in_polygon(rng, polygon)
-        if p is not None and state.clear_at(p, params.clearance):
-            seed_pt = p
-            break
-    if seed_pt is None:
-        return new_pts
-    idx = state.add_point(seed_pt, level)
-    new_pts.append(idx)
-    active = [idx]
-    while active:
-        pick = rng.randrange(len(active))
-        base = state.points[active[pick]]
-        placed = False
-        for _ in range(_SCATTER_TRIES):
-            ang = rng.uniform(0.0, 2.0 * math.pi)
+    if seeds is None:
+        seed_pt = None
+        for _ in range(_SEED_TRIES):
+            p = _sample_in_polygon(rng, polygon)
+            if p is not None and state.clear_at(p, params.clearance):
+                seed_pt = p
+                break
+        if seed_pt is None:
+            return new_pts
+        idx = state.add_point(seed_pt, level)
+        new_pts.append(idx)
+        open_list = [(idx, 0)]
+    else:
+        open_list = [(s, 0) for s in seeds if s not in state.removed]
+    head = 0
+    while head < len(open_list):
+        base_idx, gen = open_list[head]
+        head += 1
+        if max_generations is not None and gen >= max_generations:
+            continue
+        base = state.points[base_idx]
+        k = rng.randint(10, 16)
+        ang0 = rng.uniform(0.0, 2.0 * math.pi)
+        for i in range(k):
+            ang = ang0 + 2.0 * math.pi * i / k
             d = rng.uniform(params.extension_min, params.extension_max)
             p = (base[0] + d * math.cos(ang), base[1] + d * math.sin(ang))
             if not point_in_polygon(p, polygon):
@@ -354,11 +387,7 @@ def scatter_points(state: _NetState, rng: random.Random, level: int,
                 continue
             idx = state.add_point(p, level)
             new_pts.append(idx)
-            active.append(idx)
-            placed = True
-            break
-        if not placed:
-            active.pop(pick)
+            open_list.append((idx, gen + 1))
     return new_pts
 
 
@@ -366,9 +395,14 @@ def scatter_points(state: _NetState, rng: random.Random, level: int,
 # Part 1b: connect
 
 
-def connect_points(state: _NetState, candidates, params: LevelParams,
-                   level: int, min_deg=MIN_ANGLE_DEG) -> int:
-    """Greedy street-walking over `candidates`. Returns edges added."""
+def connect_points(state: _NetState, rng: random.Random, candidates,
+                   params: LevelParams, level: int,
+                   min_deg=MIN_ANGLE_DEG) -> int:
+    """Street creation per the article: from each unsaturated node, pick a
+    direction and grow a street by repeatedly linking the best-scoring valid
+    candidate (alignment with the previous edge + proximity), until no valid
+    node remains. Nodes are revisited (new random direction each pass) until
+    a full pass adds no edges — full saturation. Returns edges added."""
     cset = {c for c in candidates if c not in state.removed}
     added = 0
     for _ in range(_WALK_PASSES):
@@ -377,7 +411,9 @@ def connect_points(state: _NetState, candidates, params: LevelParams,
         for start in order:
             if state.degree(start) >= MAX_DEGREE:
                 continue
-            cur, prev_dir = start, None
+            ang = rng.uniform(0.0, 2.0 * math.pi)
+            cur, prev_dir = start, (math.cos(ang), math.sin(ang))
+            walking = False
             while state.degree(cur) < MAX_DEGREE:
                 pc = state.points[cur]
                 best, best_score = None, -math.inf
@@ -388,15 +424,14 @@ def connect_points(state: _NetState, candidates, params: LevelParams,
                     d = _dist(pc, pj)
                     if d < _EPS or d > params.connect_radius:
                         continue
+                    vd = ((pj[0] - pc[0]) / d, (pj[1] - pc[1]) / d)
+                    align = vd[0] * prev_dir[0] + vd[1] * prev_dir[1]
+                    if walking and align < _CONTINUE_ALIGN:
+                        continue  # would bend the street too sharply
                     if not state.edge_valid(cur, j, min_deg):
                         continue
                     prox = 1.0 - d / params.connect_radius
-                    if prev_dir is None:
-                        score = prox
-                    else:
-                        vd = ((pj[0] - pc[0]) / d, (pj[1] - pc[1]) / d)
-                        align = vd[0] * prev_dir[0] + vd[1] * prev_dir[1]
-                        score = 0.6 * align + 0.4 * prox
+                    score = 0.75 * align + 0.25 * prox
                     if score > best_score:
                         best_score, best = score, j
                 if best is None:
@@ -408,6 +443,7 @@ def connect_points(state: _NetState, candidates, params: LevelParams,
                 pass_added += 1
                 prev_dir = ((pb[0] - pc[0]) / d, (pb[1] - pc[1]) / d)
                 cur = best
+                walking = True
         if pass_added == 0:
             break
     return added
@@ -587,29 +623,119 @@ def _densify_faces(state: _NetState, rng: random.Random, params: LevelParams,
         poly = [live_points[i] for i in face]
         if abs(polygon_area(poly)) <= params.min_face_area:
             continue
-        new_pts = scatter_points(state, rng, next_level, next_params, poly)
+        boundary = set(face)
+        # Per the article, the boundary vertices themselves seed the fill.
+        new_pts = scatter_points(state, rng, next_level, next_params, poly,
+                                 seeds=sorted(boundary))
         if not new_pts:
             continue
-        boundary = set(face)
-        connect_points(state, boundary | set(new_pts), next_params, next_level)
+        connect_points(state, rng, boundary | set(new_pts), next_params,
+                       next_level)
         _join_components(state, boundary | set(new_pts), next_params,
                          next_level, anchors=boundary)
 
 
+def _grow_outward(state: _NetState, rng: random.Random, params: LevelParams,
+                  level: int, width: float, height: float, generations: int):
+    """Branch the next-level streets outward from the network's outer edge.
+
+    Seeds are the current outer-face vertices; growth is bounded to
+    ``generations`` child generations so each level's reach beyond the edge
+    is a few extension lengths — dense core fading into outskirts, level by
+    level, per the article's outer-face sprawl."""
+    margin = params.clearance / 3.0
+    rect = [(margin, margin), (width - margin, margin),
+            (width - margin, height - margin), (margin, height - margin)]
+    _faces, outer = extract_faces(
+        state.points, {e for e in state.edges if e[0] not in state.removed
+                       and e[1] not in state.removed})
+    anchors = {v for v in outer if v not in state.removed}
+    if not anchors:
+        return
+    new_pts = scatter_points(state, rng, level, params, rect,
+                             seeds=sorted(anchors),
+                             max_generations=generations)
+    if not new_pts:
+        return
+    state.sprawl_pts.update(new_pts)
+    members = set(new_pts) | anchors
+    connect_points(state, rng, members, params, level)
+    _join_components(state, members, params, level, anchors=anchors)
+
+
+def _close_dead_ends(state: _NetState, levels):
+    """Loop the network: join every degree-1 tip back into the fabric.
+
+    Real street grids are meshes, not trees — a dead end is the exception.
+    Each tip tries the nearest joinable street vertex under progressively
+    relaxed rules (strict; shallower junction angle; then also ignoring the
+    triangle rule — those joins are tagged relaxed). Tips that still cannot
+    loop back are pruned, cascading up their spur chain.
+    """
+    def try_join(v) -> bool:
+        level = state.point_levels[v]
+        params = levels[min(level, len(levels) - 1)]
+        radius = params.connect_radius * 1.5
+        pv = state.points[v]
+        cands = sorted(
+            (j for j in set(state.grid.near(pv, radius))
+             if j != v and j not in state.removed
+             and 0 < _dist(pv, state.points[j]) <= radius),
+            key=lambda j: (_dist(pv, state.points[j]), j))
+        for min_deg, relax in ((MIN_ANGLE_DEG, {}),
+                               (_JOIN_ANGLE_DEG, {}),
+                               (_JOIN_ANGLE_DEG, {"ignore_triangle": True})):
+            for j in cands:
+                if state.edge_valid(v, j, min_deg, **relax):
+                    state.add_edge(v, j, level)
+                    if min_deg < MIN_ANGLE_DEG:
+                        e = (v, j) if v < j else (j, v)
+                        state.relaxed_edges.add(e)
+                    return True
+        return False
+
+    for _ in range(50):
+        tips = [v for v in range(len(state.points))
+                if v not in state.removed and state.degree(v) == 1]
+        progress = False
+        for v in tips:
+            if v in state.removed or state.degree(v) != 1:
+                continue
+            if try_join(v):
+                progress = True
+            else:
+                state.remove_point(v)
+                progress = True
+        if not progress or not tips:
+            break
+
+
 def generate_roadnet(seed, width: float, height: float,
-                     levels=DEFAULT_LEVELS, boundary=None) -> RoadNetwork:
-    """Generate a planar street network; see module docstring."""
+                     levels=DEFAULT_LEVELS, boundary=None,
+                     outward_generations: int = 0) -> RoadNetwork:
+    """Generate a planar street network; see module docstring.
+
+    With ``outward_generations`` > 0 (requires a ``boundary``), each
+    recursion level also branches its streets outward from the network's
+    current outer edge — big roads first, then smaller roads growing both
+    inside the blocks and beyond the edge, recursively.
+    """
     rng = random.Random(seed)
     if boundary is None:
         boundary = [(0.0, 0.0), (width, 0.0), (width, height), (0.0, height)]
+        outward_generations = 0
     state = _NetState()
     scatter_points(state, rng, 0, levels[0], boundary)
     all_pts = set(range(len(state.points)))
-    connect_points(state, all_pts, levels[0], 0)
+    connect_points(state, rng, all_pts, levels[0], 0)
     _join_components(state, all_pts, levels[0], 0)
     for li in range(len(levels) - 1):
         split_long_edges(state, levels[li].edge_split_len)
         _densify_faces(state, rng, levels[li], levels[li + 1], li + 1)
+        if outward_generations > 0:
+            _grow_outward(state, rng, levels[li + 1], li + 1, width, height,
+                          outward_generations)
+    _close_dead_ends(state, levels)
 
     # Compact: drop removed and never-connected points, remap indices.
     alive = [i for i in range(len(state.points))
@@ -626,6 +752,7 @@ def generate_roadnet(seed, width: float, height: float,
     net = RoadNetwork(points=points, edges=edges, point_levels=point_levels,
                       edge_levels=edge_levels)
     net.anchors = {remap[i] for i in state.anchors if i in remap}
+    net.sprawl_points = {remap[i] for i in state.sprawl_pts if i in remap}
     net.relaxed_edges = {
         (remap[a], remap[b]) if remap[a] < remap[b] else (remap[b], remap[a])
         for a, b in state.relaxed_edges
