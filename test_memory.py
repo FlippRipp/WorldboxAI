@@ -281,6 +281,83 @@ def test_site_entry_formats_stay_in_lockstep(tmp_path):
     assert sorted(map(keyed, built)) == sorted(map(keyed, incremental))
 
 
+def test_build_world_entries_v2_maps_nodes_and_connections(tmp_path):
+    """world_format 2: per-map entries, node entries (root map keeps the exact
+    legacy flat format so migrated worlds' incremental entries still match),
+    and connection entries from the flat connections list."""
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    world = {
+        "world_format": 2,
+        "root_map_id": "root",
+        "maps": {
+            "root": {
+                "map_id": "root", "label": "Aldera", "level_type": "world",
+                "description": "The overworld.", "parent_map_id": None,
+                "anchor_node_id": None,
+                "nodes": [
+                    {"id": "n1", "name": "Emberhold", "type": "town",
+                     "description": "A soot-stained mining town."},
+                    {"id": "n2", "name": "Undetailed", "type": "ruin"},  # no description, skipped
+                ],
+                "edges": [],
+            },
+            "underdark": {
+                "map_id": "underdark", "label": "The Underdark",
+                "level_type": "underground", "description": "Endless caverns.",
+                "parent_map_id": "root", "anchor_node_id": None,
+                "nodes": [
+                    {"id": "u1", "name": "Gloomvault", "type": "city",
+                     "description": "A fungal city."},
+                ],
+                "edges": [],
+            },
+        },
+        "connections": [
+            {"id": "c1", "from": {"map_id": "root", "node_id": "n1"},
+             "to": {"map_id": "underdark", "node_id": "u1"}, "kind": "stair",
+             "name": "The Deep Stair", "description": "A spiral stair into the dark.",
+             "travel": {"mode": "instant"}, "bidirectional": True,
+             "requirements": "", "hidden": False, "origin": "migrated"},
+            {"id": "c2", "from": {"map_id": "underdark", "node_id": "u1"},
+             "to": {"map_id": "root", "node_id": "n1"}, "kind": "tunnel",
+             "name": "Smuggler's Crawl", "description": "A hidden crawlway.",
+             "travel": {"mode": "instant"}, "bidirectional": True,
+             "requirements": "", "hidden": True, "origin": "generated"},
+        ],
+    }
+
+    entries = manager._build_world_entries(world)
+    by_key = {(e["source_type"], e["source_id"]): e for e in entries}
+
+    root_map = by_key[("map", "root")]
+    assert root_map["text"] == "Map: Aldera (world). The overworld."
+    assert root_map["region"] == "Aldera"
+    assert by_key[("map", "underdark")]["text"] == "Map: The Underdark (underground). Endless caverns."
+
+    # Root-map nodes keep the flat format byte-for-byte (lockstep with the
+    # incremental entries backfill writes for migrated flat worlds).
+    root_node = by_key[("node", "n1")]
+    flat = manager._build_world_entries({"map": {"nodes": world["maps"]["root"]["nodes"]}})
+    flat_node = next(e for e in flat if e["source_type"] == "node")
+    assert root_node["text"] == flat_node["text"] == \
+        "Location: Emberhold (town). A soot-stained mining town."
+    assert root_node["region"] == flat_node["region"] == "Emberhold"
+
+    # Non-root maps use the bracketed map label, with the label as region.
+    sub_node = by_key[("node", "u1")]
+    assert sub_node["text"] == "Location [The Underdark]: Gloomvault (city). A fungal city."
+    assert sub_node["region"] == "The Underdark"
+
+    conn = by_key[("connection", "c1")]
+    assert conn["text"] == ("Connection: stair 'The Deep Stair' linking Aldera "
+                            "and The Underdark. A spiral stair into the dark.")
+    assert conn["region"] == "Aldera"
+
+    # Hidden connections and nodes without a description stay out of the index.
+    assert ("connection", "c2") not in by_key
+    assert ("node", "n2") not in by_key
+
+
 def test_embed_lorebooks_couples_each_text_with_its_vector(tmp_path):
     # Concurrent embedding must not scramble text/vector pairing.
     from backend.engine.memory import _serialize

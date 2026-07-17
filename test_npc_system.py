@@ -1011,6 +1011,112 @@ def test_generator_toggle_restores_pool_filling():
     assert [n["name"] for n in _bank_from_result(result).values()] == ["Ambient Anna"]
 
 
+# ── world_format 2: map ids and cross-map travel ─────────────────────────────
+
+def _v2_world_data():
+    return {
+        "world_format": 2,
+        "root_map_id": "root",
+        "maps": {
+            "root": {
+                "map_id": "root", "label": "Aldera", "level_type": "world",
+                "parent_map_id": None, "anchor_node_id": None,
+                "legacy_layer_id": "surface",
+                "nodes": [
+                    {"id": "node_market", "name": "Market", "x": 0, "y": 0},
+                    {"id": "n_gate", "name": "Gate", "x": 5, "y": 0},
+                ],
+                "edges": [{"from": "node_market", "to": "n_gate"}],
+            },
+            "underdark": {
+                "map_id": "underdark", "label": "The Underdark",
+                "level_type": "underground", "parent_map_id": "root",
+                "anchor_node_id": None, "legacy_layer_id": "underdark",
+                "nodes": [
+                    {"id": "u_hall", "name": "Hall", "x": 0, "y": 0},
+                    {"id": "u_stair", "name": "Stair", "x": 1, "y": 0},
+                ],
+                "edges": [{"from": "u_hall", "to": "u_stair"}],
+            },
+        },
+        "connections": [
+            {"id": "c1", "from": {"map_id": "root", "node_id": "n_gate"},
+             "to": {"map_id": "underdark", "node_id": "u_stair"}, "kind": "stair",
+             "name": "The Deep Stair", "description": "A spiral stair.",
+             "travel": {"mode": "journey", "turns": 3}, "bidirectional": True,
+             "requirements": "a lantern", "hidden": False, "origin": "generated"},
+        ],
+    }
+
+
+def test_get_bank_migrates_location_layer_id_to_map_id():
+    backend = _load_backend()
+
+    # v2 world: kept ids stay, vanished layer ids resolve via legacy_layer_id,
+    # unknown ids fall back to the root map, absent stays absent-but-tolerated.
+    state = _state({
+        "npc_a": _present_npc("npc_a", "Ana", location_layer_id="underdark"),
+        "npc_b": _present_npc("npc_b", "Bram"),  # fixture layer "surface" -> root
+        "npc_c": _present_npc("npc_c", "Cato", location_layer_id="ghost_layer"),
+        "npc_d": _present_npc("npc_d", "Dara", location_layer_id=None),
+    })
+    state["world_data"] = _v2_world_data()
+    bank = backend._get_bank(state)
+
+    assert bank["npc_a"]["location_map_id"] == "underdark"
+    assert bank["npc_b"]["location_map_id"] == "root"
+    assert bank["npc_c"]["location_map_id"] == "root"
+    assert bank["npc_d"]["location_map_id"] is None
+    assert all("location_layer_id" not in n for n in bank.values())
+
+    # Un-migrated world: old layer ids are still the live ids, kept verbatim.
+    state = _state({"npc_x": _present_npc("npc_x", "Xan", location_layer_id="underdark")})
+    npc = backend._get_bank(state)["npc_x"]
+    assert npc["location_map_id"] == "underdark"
+    assert "location_layer_id" not in npc
+
+
+def test_v2_npc_crosses_connection_to_players_map():
+    # A very-far NPC on a parallel map walks to the near end of a v2 connection
+    # and teleports through to the player's map, ignoring requirements and
+    # travel turns, exactly like the legacy layer crossing.
+    backend = _load_backend()
+    sdk, calls = _make_sdk()
+    bank = {
+        "npc_deep": _present_npc(
+            "npc_deep", "Vhal", role="antagonist",
+            location_layer_id="underdark", location_node_id="u_stair",
+            location_region=None, last_interaction_turn=0,
+            last_travel_check_minutes=0),
+        "npc_walker": _present_npc(
+            "npc_walker", "Skrit", role="antagonist",
+            location_layer_id="underdark", location_node_id="u_hall",
+            location_region=None, last_interaction_turn=0,
+            last_travel_check_minutes=0),
+    }
+    state = _state(bank)
+    state["turn"] = 20
+    state["world_data"] = _v2_world_data()
+    state["player_location_map_id"] = "root"
+    state["player_location_node_id"] = "node_market"
+    state["module_data"]["wb_time_tracker"] = {"clock": {"total_minutes_elapsed": 2000}}
+
+    changed = asyncio.run(
+        backend._independent_travel_pass(state, backend._get_bank(state), sdk))
+
+    assert changed is True
+    # Already at the connection's near node: crosses to the far side. The
+    # connection points root -> underdark, so the bidirectional reverse is used.
+    assert bank["npc_deep"]["location_map_id"] == "root"
+    assert bank["npc_deep"]["location_node_id"] == "n_gate"
+    assert bank["npc_deep"]["location_region"] is None
+    # One hop away from the exit: steps toward it along the map's own edges.
+    assert bank["npc_walker"]["location_map_id"] == "underdark"
+    assert bank["npc_walker"]["location_node_id"] == "u_stair"
+    # Heuristic motivation (default): no LLM call spent.
+    assert calls["generate_count"] == 0
+
+
 def test_introduction_pass_shows_creation_need():
     backend = _load_backend()
     bank = {"npc_1": {

@@ -108,7 +108,7 @@ async def _refresh_profile_embedding(npc: dict, changed_fields: list[str], state
 def _build_npc_record(npc_data: dict, turn: int, bank: dict, *, introduced: bool = False,
                       source: str = "generated", location: tuple = (None, None, None)) -> dict:
     """Build a bank record from raw generated/captured character fields, keeping
-    the schema in one place. ``location`` is (node_id, region, layer_id)."""
+    the schema in one place. ``location`` is (node_id, region, map_id)."""
     npc_id = f"npc_{uuid.uuid4().hex[:8]}"
 
     role = npc_data.get("role", "neutral")
@@ -129,7 +129,7 @@ def _build_npc_record(npc_data: dict, turn: int, bank: dict, *, introduced: bool
                     "description": str(r.get("description", "")),
                 })
 
-    node_id, region, layer_id = location
+    node_id, region, map_id = location
     return npc_id, {
         "id": npc_id,
         "name": npc_data.get("name", "Unknown"),
@@ -143,7 +143,8 @@ def _build_npc_record(npc_data: dict, turn: int, bank: dict, *, introduced: bool
         "encounter_type": "location_bound" if introduced else npc_data.get("encounter_type", "encounter"),
         "location_node_id": node_id if introduced else npc_data.get("location_node_id"),
         "location_region": region if introduced else npc_data.get("location_region"),
-        "location_layer_id": layer_id if introduced else npc_data.get("location_layer_id"),
+        "location_map_id": map_id if introduced
+        else npc_data.get("location_map_id") or npc_data.get("location_layer_id"),
         "introduced": introduced,
         "met_turn": turn if introduced else None,
         "status": "active" if introduced else "unintroduced",
@@ -160,15 +161,33 @@ def _build_npc_record(npc_data: dict, turn: int, bank: dict, *, introduced: bool
 
 def _get_bank(state: dict) -> dict[str, dict]:
     bank = state.get("module_data", {}).get("wb_npc_system", {}).get("characters", {})
+    world_data = state.get("world_data") or {}
+    maps = world_data.get("maps")
+    maps = maps if isinstance(maps, dict) else None
     # Reconcile records whose status was manually flipped to active before the
     # introduction sync existed: an active character is by definition known.
     # Healing here repairs every stale save the first time any hook or command
     # touches the bank, and the fix persists with the next state save.
     for npc in bank.values():
-        if isinstance(npc, dict) and npc.get("status") == "active" and not npc.get("introduced"):
+        if not isinstance(npc, dict):
+            continue
+        if npc.get("status") == "active" and not npc.get("introduced"):
             npc["introduced"] = True
             if npc.get("met_turn") is None:
                 npc["met_turn"] = state.get("turn", 0)
+        # world_format 2: NPCs live on maps, not layers. Lazily rename
+        # location_layer_id -> location_map_id. Migrated map ids equal the old
+        # layer ids, except layers that vanished in migration (e.g. the primary
+        # layer, which became the root map) -- resolve those via each map's
+        # legacy_layer_id, falling back to the root map.
+        if "location_layer_id" in npc:
+            old = npc.pop("location_layer_id")
+            if not npc.get("location_map_id"):
+                if maps is not None and old and old not in maps:
+                    old = next((mid for mid, m in maps.items()
+                                if m.get("legacy_layer_id") == old),
+                               world_data.get("root_map_id", "root"))
+                npc["location_map_id"] = old
     return bank
 
 
@@ -178,11 +197,17 @@ def _set_bank(overrides: dict, npcs: dict[str, dict]) -> dict:
     return {"module_data": {"wb_npc_system": payload}}
 
 
+def _player_map_id(state: dict) -> str | None:
+    """The map the player is on (world_format 2), falling back to the legacy
+    layer key for un-migrated sessions."""
+    return state.get("player_location_map_id") or state.get("player_location_layer_id")
+
+
 def _filter_candidates(state: dict) -> list[dict]:
     bank = _get_bank(state)
     node_id = state.get("player_location_node_id", "")
     region = state.get("player_location_region", "")
-    layer_id = state.get("player_location_layer_id", "")
+    map_id = _player_map_id(state)
 
     candidates = []
     for npc in bank.values():
@@ -193,8 +218,8 @@ def _filter_candidates(state: dict) -> list[dict]:
         if etype == "encounter":
             candidates.append(npc)
         elif etype == "location_bound":
-            npc_layer = npc.get("location_layer_id")
-            if npc_layer and layer_id and npc_layer != layer_id:
+            npc_map = npc.get("location_map_id")
+            if npc_map and map_id and npc_map != map_id:
                 continue
             if npc.get("location_node_id") == node_id or npc.get("location_region") == region:
                 candidates.append(npc)
@@ -518,7 +543,7 @@ async def _present_npcs(state: dict, sdk) -> list[dict]:
     from the story itself (name matching when disabled or on failure)."""
     p_node = state.get("player_location_node_id")
     p_region = state.get("player_location_region")
-    p_layer = state.get("player_location_layer_id")
+    p_map = _player_map_id(state)
     location_tracked = bool(p_node or p_region)
 
     present = []
@@ -532,9 +557,9 @@ async def _present_npcs(state: dict, sdk) -> list[dict]:
             present.append(npc)
             continue
         if location_tracked:
-            node, region, layer = _npc_effective_location(npc, state)
-            layer_ok = not (layer and p_layer and layer != p_layer)
-            located_here = layer_ok and (
+            node, region, npc_map = _npc_effective_location(npc, state)
+            map_ok = not (npc_map and p_map and npc_map != p_map)
+            located_here = map_ok and (
                 (node and node == p_node) or (region and region == p_region)
             )
             if located_here or _named_in_recent_story(npc, state):
@@ -732,9 +757,9 @@ def _npc_effective_location(npc: dict, state: dict) -> tuple:
         return (
             state.get("player_location_node_id"),
             state.get("player_location_region"),
-            state.get("player_location_layer_id"),
+            _player_map_id(state),
         )
-    return (npc.get("location_node_id"), npc.get("location_region"), npc.get("location_layer_id"))
+    return (npc.get("location_node_id"), npc.get("location_region"), npc.get("location_map_id"))
 
 
 def _player_name(state: dict) -> str:
@@ -819,7 +844,7 @@ async def _introduce_existing(npc: dict, state: dict, sdk, memory_text: str = ""
         npc["encounter_type"] = "location_bound"
         npc["location_node_id"] = state.get("player_location_node_id")
         npc["location_region"] = state.get("player_location_region")
-        npc["location_layer_id"] = state.get("player_location_layer_id")
+        npc["location_map_id"] = _player_map_id(state)
 
     npc["last_interaction_turn"] = turn
 
@@ -997,7 +1022,7 @@ Respond with ONLY valid JSON:
     location = (
         state.get("player_location_node_id"),
         state.get("player_location_region"),
-        state.get("player_location_layer_id"),
+        _player_map_id(state),
     )
 
     for npc_data in new_npcs:
@@ -1127,7 +1152,7 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict | None:
         if not joining:
             npc["location_node_id"] = state.get("player_location_node_id")
             npc["location_region"] = state.get("player_location_region")
-            npc["location_layer_id"] = state.get("player_location_layer_id")
+            npc["location_map_id"] = _player_map_id(state)
 
         updated = True
         print(f"[NPC System] {npc['name']} ({npc_id}) {'joins' if joining else 'leaves'} the party at turn {turn}")
@@ -1146,13 +1171,20 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict | None:
 
 
 def _build_layer_adjacency(world_data: dict, layer_id: str | None) -> dict[str, list[str]]:
-    """Node adjacency for one layer, built from the plain world_data dict a
-    module receives (mirrors the engine's internal graph builder, but modules
-    can't import engine code)."""
-    map_layers = world_data.get("map_layers", [])
-    if map_layers:
+    """Node adjacency for one map (world_format 2) or legacy layer, built from
+    the plain world_data dict a module receives (mirrors the engine's internal
+    graph builder, but modules can't import engine code). ``layer_id`` is a map
+    id on migrated data."""
+    maps = world_data.get("maps")
+    if isinstance(maps, dict):
         edges = []
-        for layer in map_layers:
+        for map_id, map_rec in maps.items():
+            if layer_id and map_id != layer_id:
+                continue
+            edges.extend(map_rec.get("edges", []))
+    elif world_data.get("map_layers"):
+        edges = []
+        for layer in world_data["map_layers"]:
             if layer_id and layer.get("layer_id") != layer_id:
                 continue
             edges.extend(layer.get("map", {}).get("edges", []))
@@ -1169,10 +1201,15 @@ def _build_layer_adjacency(world_data: dict, layer_id: str | None) -> dict[str, 
 
 
 def _build_node_lookup(world_data: dict, layer_id: str | None) -> dict[str, dict]:
-    map_layers = world_data.get("map_layers", [])
+    maps = world_data.get("maps")
     nodes = []
-    if map_layers:
-        for layer in map_layers:
+    if isinstance(maps, dict):
+        for map_id, map_rec in maps.items():
+            if layer_id and map_id != layer_id:
+                continue
+            nodes.extend(map_rec.get("nodes", []))
+    elif world_data.get("map_layers"):
+        for layer in world_data["map_layers"]:
             if layer_id and layer.get("layer_id") != layer_id:
                 continue
             nodes.extend(layer.get("map", {}).get("nodes", []))
@@ -1182,11 +1219,19 @@ def _build_node_lookup(world_data: dict, layer_id: str | None) -> dict[str, dict
 
 
 def _region_layer_id(world_data: dict, region_name: str | None) -> str | None:
+    """The map/layer a region's records claim to live on. world_format 2 keeps
+    no region->map mapping, so stale legacy layer ids resolve through each
+    map's legacy_layer_id (None when nothing matches, never a crash)."""
     if not region_name:
         return None
     for r in world_data.get("regions", {}).get("regions", []):
         if r.get("name") == region_name:
-            return r.get("layer_id")
+            lid = r.get("layer_id")
+            maps = world_data.get("maps")
+            if lid and isinstance(maps, dict) and lid not in maps:
+                return next((mid for mid, m in maps.items()
+                             if m.get("legacy_layer_id") == lid), None)
+            return lid
     return None
 
 
@@ -1194,11 +1239,11 @@ def _distance_tier(npc: dict, state: dict) -> str:
     world_data = state.get("world_data", {}) or {}
     p_node = state.get("player_location_node_id")
     p_region = state.get("player_location_region")
-    p_layer = state.get("player_location_layer_id")
+    p_map = _player_map_id(state)
 
-    npc_layer = npc.get("location_layer_id") or _region_layer_id(world_data, npc.get("location_region"))
+    npc_map = npc.get("location_map_id") or _region_layer_id(world_data, npc.get("location_region"))
 
-    if npc_layer and p_layer and npc_layer != p_layer:
+    if npc_map and p_map and npc_map != p_map:
         return "very_far"
     if npc.get("location_node_id") == p_node:
         return "near"
@@ -1341,7 +1386,7 @@ async def _independent_travel_pass(state: dict, bank: dict, sdk) -> bool:
     total_minutes = state.get("module_data", {}).get("wb_time_tracker", {}).get("clock", {}).get("total_minutes_elapsed", 0)
 
     p_node = state.get("player_location_node_id")
-    p_layer = state.get("player_location_layer_id")
+    p_map = _player_map_id(state)
 
     eligible = [
         npc for npc in bank.values()
@@ -1361,29 +1406,49 @@ async def _independent_travel_pass(state: dict, bank: dict, sdk) -> bool:
 
         npc["last_travel_check_minutes"] = total_minutes
         motivated = npc["id"] in motivated_ids
-        npc_layer = npc.get("location_layer_id") or _region_layer_id(world_data, npc.get("location_region"))
+        npc_map = npc.get("location_map_id") or _region_layer_id(world_data, npc.get("location_region"))
 
         if tier == "very_far":
-            if not motivated or not npc_layer or not p_layer:
+            if not motivated or not npc_map or not p_map:
                 continue
-            connections = [
-                c for c in world_data.get("map_connections", [])
-                if c.get("from_layer_id") == npc_layer
-            ]
-            if not connections:
-                continue
-            direct = [c for c in connections if c.get("to_layer_id") == p_layer]
-            connection = direct[0] if direct else connections[0]
-            exit_node = connection.get("from_node_id")
+            if isinstance(world_data.get("maps"), dict):
+                # world_format 2: pick a connection out of the NPC's map
+                # (either direction when bidirectional), preferring one whose
+                # far side is the player's map. NPCs ignore requirements and
+                # travel turns -- they teleport through, as before.
+                candidates = []
+                for c in world_data.get("connections", []):
+                    near, far = c.get("from") or {}, c.get("to") or {}
+                    if near.get("map_id") == npc_map:
+                        candidates.append((near, far))
+                    elif c.get("bidirectional") and far.get("map_id") == npc_map:
+                        candidates.append((far, near))
+                if not candidates:
+                    continue
+                direct = [pair for pair in candidates if pair[1].get("map_id") == p_map]
+                near, far = direct[0] if direct else candidates[0]
+                exit_node = near.get("node_id")
+                far_map, far_node = far.get("map_id"), far.get("node_id")
+            else:
+                connections = [
+                    c for c in world_data.get("map_connections", [])
+                    if c.get("from_layer_id") == npc_map
+                ]
+                if not connections:
+                    continue
+                direct = [c for c in connections if c.get("to_layer_id") == p_map]
+                connection = direct[0] if direct else connections[0]
+                exit_node = connection.get("from_node_id")
+                far_map, far_node = connection.get("to_layer_id"), connection.get("to_node_id")
             current_node = npc.get("location_node_id") or exit_node
             if current_node == exit_node:
-                npc["location_layer_id"] = connection.get("to_layer_id")
-                npc["location_node_id"] = connection.get("to_node_id")
+                npc["location_map_id"] = far_map
+                npc["location_node_id"] = far_node
                 npc["location_region"] = None
                 changed = True
-                print(f"[NPC System] {npc['name']} ({npc['id']}) crosses into layer {npc['location_layer_id']}")
+                print(f"[NPC System] {npc['name']} ({npc['id']}) crosses into map {far_map}")
             elif exit_node:
-                new_node = _step_toward(world_data, npc_layer, current_node, exit_node, hops=TRAVEL_HOP_BUDGET["very_far"])
+                new_node = _step_toward(world_data, npc_map, current_node, exit_node, hops=TRAVEL_HOP_BUDGET["very_far"])
                 if new_node != current_node:
                     npc["location_node_id"] = new_node
                     changed = True
@@ -1397,15 +1462,15 @@ async def _independent_travel_pass(state: dict, bank: dict, sdk) -> bool:
         if motivated and p_node:
             target_node = p_node
         else:
-            neighbors = _build_layer_adjacency(world_data, npc_layer).get(current_node, [])
+            neighbors = _build_layer_adjacency(world_data, npc_map).get(current_node, [])
             target_node = neighbors[0] if neighbors and turn % 3 == 0 else None
 
         if not target_node or target_node == current_node:
             continue
 
-        new_node = _step_toward(world_data, npc_layer, current_node, target_node, hops=TRAVEL_HOP_BUDGET[tier])
+        new_node = _step_toward(world_data, npc_map, current_node, target_node, hops=TRAVEL_HOP_BUDGET[tier])
         if new_node != current_node:
-            node_lookup = _build_node_lookup(world_data, npc_layer)
+            node_lookup = _build_node_lookup(world_data, npc_map)
             new_region = node_lookup.get(new_node, {}).get("region", npc.get("location_region"))
             npc["location_node_id"] = new_node
             npc["location_region"] = new_region
@@ -1667,7 +1732,7 @@ EXISTING CHARACTERS (DO NOT duplicate or create similar concepts):
 {rules}
 
 Respond with ONLY valid JSON:
-{{"npcs": [{{{need_field}"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description that always states hair color and eye color (or the being's closest equivalent)", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_layer_id": "layer_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}]}}"""
+{{"npcs": [{{{need_field}"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description that always states hair color and eye color (or the being's closest equivalent)", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_map_id": "map_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}]}}"""
 
     try:
         result = await sdk.llm.generate(prompt, model_preference="balanced")
@@ -1712,7 +1777,7 @@ async def on_command_npcs(args: list[str], state: dict, sdk) -> dict:
     nearby = [n for n in bank.values() if not n.get("introduced")]
     node_id = state.get("player_location_node_id", "")
     region = state.get("player_location_region", "")
-    layer_id = state.get("player_location_layer_id", "")
+    map_id = _player_map_id(state) or ""
 
     lines = ["[NPCs]"]
 
@@ -1721,7 +1786,7 @@ async def on_command_npcs(args: list[str], state: dict, sdk) -> dict:
         for npc in introduced:
             loc = ""
             if npc.get("encounter_type") == "location_bound":
-                loc = f" @ {npc.get('location_node_id', npc.get('location_region', '?'))} (layer={npc.get('location_layer_id', '-')})"
+                loc = f" @ {npc.get('location_node_id', npc.get('location_region', '?'))} (map={npc.get('location_map_id', '-')})"
             party = " [PARTY]" if npc.get("traveling_with_player") else ""
             lines.append(f"  {npc['name']} ({npc.get('archetype', '?')}) -- {npc.get('role', '?')} [{npc.get('status', '?')}]{loc}{party}")
 
@@ -1729,7 +1794,7 @@ async def on_command_npcs(args: list[str], state: dict, sdk) -> dict:
         location_bound_here = [
             n for n in nearby
             if n.get("encounter_type") == "location_bound"
-            and not (n.get("location_layer_id") and layer_id and n.get("location_layer_id") != layer_id)
+            and not (n.get("location_map_id") and map_id and n.get("location_map_id") != map_id)
             and (n.get("location_node_id") == node_id or n.get("location_region") == region)
         ]
         encounter = [n for n in nearby if n.get("encounter_type") == "encounter"]
@@ -1763,7 +1828,7 @@ async def on_command_npclist(args: list[str], state: dict, sdk) -> dict:
         intro = "[INTRO]" if npc.get("introduced") else "[pending]"
         loc = ""
         if npc.get("encounter_type") == "location_bound":
-            loc = f" bound@{npc.get('location_node_id', npc.get('location_region', '?'))} layer={npc.get('location_layer_id', '-')}"
+            loc = f" bound@{npc.get('location_node_id', npc.get('location_region', '?'))} map={npc.get('location_map_id', '-')}"
         party = " [PARTY]" if npc.get("traveling_with_player") else ""
         lines.append(f"  {intro} {npc['name']} ({npc.get('archetype', '?')}) [{npc.get('role', '?')}]{loc}{party} last_check={npc.get('last_travel_check_minutes', 0)}min")
         if npc.get("pitch"):
@@ -1929,7 +1994,7 @@ async def _activate_npc_manually(npc: dict, state: dict, sdk) -> None:
         npc["encounter_type"] = "location_bound"
         npc["location_node_id"] = state.get("player_location_node_id")
         npc["location_region"] = state.get("player_location_region")
-        npc["location_layer_id"] = state.get("player_location_layer_id")
+        npc["location_map_id"] = _player_map_id(state)
     if _config(state).get("embed_profiles", True):
         await _embed_profile(npc, turn, sdk)
     print(f"[NPC System] {npc.get('name')} manually activated at turn {turn}")
@@ -2011,7 +2076,7 @@ async def _apply_manual_add(payload: str, state: dict, sdk) -> dict:
     location = (
         (state.get("player_location_node_id"),
          state.get("player_location_region"),
-         state.get("player_location_layer_id"))
+         _player_map_id(state))
         if introduced else (None, None, None)
     )
 
@@ -2099,7 +2164,7 @@ INSTRUCTIONS:
 7. Optionally relate the character to an EXISTING character above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.{plot_rule}
 
 Respond with ONLY valid JSON:
-{{"npc": {{"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description that always states hair color and eye color (or the being's closest equivalent)", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_layer_id": "layer_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}}}"""
+{{"npc": {{"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description that always states hair color and eye color (or the being's closest equivalent)", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_map_id": "map_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}}}"""
 
     try:
         result = await sdk.llm.generate(prompt, model_preference="balanced")

@@ -558,27 +558,62 @@ class MemoryManager:
                         "source_id": faction,
                         "region": region_name,
                     })
-        for map_layer in world_data.get("map_layers", []):
-            layer_name = map_layer.get("name", "")
-            layer_map = map_layer.get("map", {})
-            for node in layer_map.get("nodes", []):
+        maps = world_data.get("maps")
+        maps = maps if isinstance(maps, dict) else None
+        if maps is not None:
+            # world_format 2: hierarchical maps. Root-map nodes keep the exact
+            # legacy flat-map format so incremental entries (backfill) written
+            # against migrated flat worlds match the compiled index verbatim.
+            root_map_id = world_data.get("root_map_id", "root")
+            for map_id, map_rec in maps.items():
+                label = map_rec.get("label", "")
+                description = map_rec.get("description", "")
+                if label or description:
+                    entries.append({
+                        "id": str(uuid.uuid4()),
+                        "text": f"Map: {label} ({map_rec.get('level_type', 'world')}). {description}",
+                        "source_type": "map",
+                        "source_id": map_id,
+                        "region": label,
+                    })
+                for node in map_rec.get("nodes", []):
+                    if not (node.get("name") and node.get("description")):
+                        continue
+                    if map_id == root_map_id:
+                        text = f"Location: {node['name']} ({node.get('type', 'location')}). {node['description']}"
+                        region = node.get("region") or node.get("name", "")
+                    else:
+                        text = f"Location [{label}]: {node['name']} ({node.get('type', 'location')}). {node['description']}"
+                        region = label
+                    entries.append({
+                        "id": str(uuid.uuid4()),
+                        "text": text,
+                        "source_type": "node",
+                        "source_id": node.get("id", ""),
+                        "region": region,
+                    })
+        else:
+            for map_layer in world_data.get("map_layers", []):
+                layer_name = map_layer.get("name", "")
+                layer_map = map_layer.get("map", {})
+                for node in layer_map.get("nodes", []):
+                    if node.get("name") and node.get("description"):
+                        entries.append({
+                            "id": str(uuid.uuid4()),
+                            "text": f"Location [{layer_name}]: {node['name']} ({node.get('type', 'location')}). {node['description']}",
+                            "source_type": "node",
+                            "source_id": node.get("id", ""),
+                            "region": layer_name,
+                        })
+            for node in world_map.get("nodes", []):
                 if node.get("name") and node.get("description"):
                     entries.append({
                         "id": str(uuid.uuid4()),
-                        "text": f"Location [{layer_name}]: {node['name']} ({node.get('type', 'location')}). {node['description']}",
+                        "text": f"Location: {node['name']} ({node.get('type', 'location')}). {node['description']}",
                         "source_type": "node",
                         "source_id": node.get("id", ""),
-                        "region": layer_name,
+                        "region": node.get("name", ""),
                     })
-        for node in world_map.get("nodes", []):
-            if node.get("name") and node.get("description"):
-                entries.append({
-                    "id": str(uuid.uuid4()),
-                    "text": f"Location: {node['name']} ({node.get('type', 'location')}). {node['description']}",
-                    "source_type": "node",
-                    "source_id": node.get("id", ""),
-                    "region": node.get("name", ""),
-                })
         # Lazily-expanded site interiors (districts/venues inside major
         # locations). Format must stay in lockstep with
         # wbworldgen.worldgen.enrichment.sites.site_world_entries, which emits
@@ -618,14 +653,31 @@ class MemoryManager:
                     "source_id": lid,
                     "region": lid,
                 })
-        for conn in world_data.get("map_connections", []):
-            entries.append({
-                "id": str(uuid.uuid4()),
-                "text": f"Layer Connection: {conn.get('connection_type', 'passage')} from {conn.get('from_layer_id', '?')} to {conn.get('to_layer_id', '?')}. {conn.get('description', '')}",
-                "source_type": "connection",
-                "source_id": conn.get("id", ""),
-                "region": "",
-            })
+        if maps is not None:
+            # world_format 2: connections are a flat top-level list keyed by map.
+            for conn in world_data.get("connections", []):
+                if conn.get("hidden"):
+                    continue
+                from_end = conn.get("from") or {}
+                to_end = conn.get("to") or {}
+                from_label = (maps.get(from_end.get("map_id")) or {}).get("label") or from_end.get("map_id") or "?"
+                to_label = (maps.get(to_end.get("map_id")) or {}).get("label") or to_end.get("map_id") or "?"
+                entries.append({
+                    "id": str(uuid.uuid4()),
+                    "text": f"Connection: {conn.get('kind', 'passage')} '{conn.get('name', '')}' linking {from_label} and {to_label}. {conn.get('description', '')}",
+                    "source_type": "connection",
+                    "source_id": conn.get("id", ""),
+                    "region": from_label,
+                })
+        else:
+            for conn in world_data.get("map_connections", []):
+                entries.append({
+                    "id": str(uuid.uuid4()),
+                    "text": f"Layer Connection: {conn.get('connection_type', 'passage')} from {conn.get('from_layer_id', '?')} to {conn.get('to_layer_id', '?')}. {conn.get('description', '')}",
+                    "source_type": "connection",
+                    "source_id": conn.get("id", ""),
+                    "region": "",
+                })
         return entries
 
     def search_world(self, query_vector: List[float], limit: int = 3,
