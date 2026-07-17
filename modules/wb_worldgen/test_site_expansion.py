@@ -1,5 +1,6 @@
-"""Lazy site expansion tests: id namespacing, write-once caching, compile
-fold-in, play-time prefetch + session sync, and location-context rendering.
+"""Child-map expansion tests: entrance contract, write-once caching, legacy
+site migration into interior maps, play-time prefetch + session sync, and
+the enter: passage flow.
 
 Run by explicit path (the root pytest.ini python_files whitelist does not
 include module tests): python -m pytest modules/wb_worldgen/test_site_expansion.py
@@ -17,7 +18,12 @@ from pathlib import Path
 import pytest
 
 from wbworldgen.worldgen import WorldBuilder
-from wbworldgen.worldgen.enrichment.sites import is_expandable, site_world_entries
+from wbworldgen.worldgen.enrichment.maps_expand import (
+    child_map_id,
+    is_expandable,
+    map_world_entries,
+)
+from wbworldgen.worldgen.migrate import migrate_world_data
 
 _MOD_DIR = os.path.abspath(os.path.dirname(__file__))
 _spec = importlib.util.spec_from_file_location(
@@ -35,9 +41,21 @@ class FakeSettings:
         return self.values.get(key)
 
 
+class FakeMemory:
+    def __init__(self):
+        self.entries = []
+
+    def has_world_index(self):
+        return True
+
+    async def embed_world_entries(self, entries, llm):
+        self.entries.extend(entries)
+        return len(entries)
+
+
 @pytest.fixture
 def tmpdir():
-    d = tempfile.mkdtemp(prefix="wb_sites_")
+    d = tempfile.mkdtemp(prefix="wb_maps_")
     yield d
     shutil.rmtree(d, ignore_errors=True)
 
@@ -50,7 +68,7 @@ def builder(tmpdir):
     return wb
 
 
-def _site_world(builder, world_id="site_world"):
+def _map_world(builder, world_id="map_world"):
     nodes = [
         {"id": "c1", "name": "Vessencia", "type": "city", "importance": 8,
          "x": 0.0, "y": 0.0, "description": "A terraced harbor city.", "region": "Coast"},
@@ -71,126 +89,15 @@ def _site_world(builder, world_id="site_world"):
     return world_id
 
 
-def test_is_expandable_rules():
-    assert is_expandable({"name": "V", "type": "city", "importance": 8})
-    assert is_expandable({"name": "V", "type": "settlement", "importance": 6})
-    assert not is_expandable({"name": "", "type": "city", "importance": 8})  # unnamed
-    assert not is_expandable({"name": "V", "type": "landmark", "importance": 8})  # wrong type
-    assert not is_expandable({"name": "V", "type": "city", "importance": 3})  # minor
-
-
-def test_expand_site_mock_mode_and_write_once_cache(builder):
-    wid = _site_world(builder)
-
-    site = asyncio.run(builder.expand_site(wid, "c1"))
-    assert site["parent_node_id"] == "c1"
-    assert site["name"] == "Vessencia"
-    assert site["sub_locations"]
-    assert all(s["id"].startswith("c1:s") for s in site["sub_locations"])
-    # Persisted write-once under the world's sites/ dir.
-    on_disk = builder._persistence.load_site(wid, "c1")
-    assert on_disk == site
-    # Second call returns the cache without regenerating.
-    calls = []
-    orig = builder._sites.expand
-
-    async def counting(*a, **kw):
-        calls.append(1)
-        return await orig(*a, **kw)
-
-    builder._sites.expand = counting
-    again = asyncio.run(builder.expand_site(wid, "c1"))
-    assert again == site
-    assert calls == []
-    # force=True regenerates.
-    asyncio.run(builder.expand_site(wid, "c1", force=True))
-    assert calls == [1]
-
-
-def test_expand_site_validates_and_namespaces_llm_output(builder):
-    wid = _site_world(builder)
-    builder._llm_service.mode = "live"
-
-    async def fake_live(node, context, max_subs, template_vocab=None):
-        return {
-            "layout_summary": "Three rings around the harbor.",
-            "sub_locations": [
-                {"id": "evil-id", "name": "Saltmarket Row", "type": "market",
-                 "description": "Fish and rope.", "adjacent": ["The Terraces"]},
-                {"name": "The Terraces", "type": "district",
-                 "description": "Stacked houses.", "adjacent": ["Saltmarket Row", "Nowhere"]},
-                {"name": "saltmarket row", "type": "dup"},  # duplicate name dropped
-                {"name": "", "type": "empty"},              # empty name dropped
-            ],
-        }
-
-    builder._sites._live_expand = fake_live
-    site = asyncio.run(builder.expand_site(wid, "c1"))
-
-    subs = site["sub_locations"]
-    assert [s["name"] for s in subs] == ["Saltmarket Row", "The Terraces"]
-    assert subs[0]["id"] == "c1:s1" and subs[1]["id"] == "c1:s2"  # server-side ids
-    # Adjacency resolved from names to assigned ids; unresolvable dropped.
-    assert subs[0]["adjacent"] == ["c1:s2"]
-    assert subs[1]["adjacent"] == ["c1:s1"]
-    assert site["layout_summary"] == "Three rings around the harbor."
-
-
-def test_sites_fold_into_compiled_world(builder):
-    wid = _site_world(builder)
-    asyncio.run(builder.expand_site(wid, "c1"))
-
-    world_state = builder.load_world(wid)
-    assert "c1" in world_state["sites"]
-    compiled = builder.compile_world(world_state)
-    assert compiled["site_maps"]["c1"]["name"] == "Vessencia"
-    # Worlds without sites simply lack the key.
-    other = _site_world(builder, world_id="bare_world")
-    bare = builder.compile_world(builder.load_world(other))
-    assert "site_maps" not in bare
-
-
-def test_site_world_entries_format():
-    site = {
-        "parent_node_id": "c1",
-        "name": "Vessencia",
-        "layout_summary": "Rings around the harbor.",
-        "sub_locations": [
-            {"id": "c1:s1", "name": "Saltmarket Row", "type": "market", "description": "Fish."},
-            {"id": "c1:s2", "name": "", "type": "x"},  # unnamed skipped
-        ],
-    }
-    entries = site_world_entries("c1", site)
-    assert entries[0]["source_type"] == "site" and entries[0]["source_id"] == "c1"
-    assert "Layout of Vessencia" in entries[0]["text"]
-    assert entries[1]["source_type"] == "site_node" and entries[1]["source_id"] == "c1:s1"
-    assert entries[1]["text"] == "Place in Vessencia: Saltmarket Row (market). Fish."
-    assert len(entries) == 2
-
-
-# ---------------------------------------------------------------------------
-# Play-time prefetch + session sync (module backend)
-# ---------------------------------------------------------------------------
-
-class FakeMemory:
-    def __init__(self):
-        self.entries = []
-
-    def has_world_index(self):
-        return True
-
-    async def embed_world_entries(self, entries, llm):
-        self.entries.extend(entries)
-        return len(entries)
-
-
 def _play_session(builder, tmpdir, wid):
+    """Wire the module backend to a fake live session for world `wid`."""
     compiled = builder.compile_world(builder.load_world(wid))
     data_dir = Path(tmpdir) / "data"
     save_world_dir = data_dir / "saves" / "save1" / "World"
     save_world_dir.mkdir(parents=True)
     with open(save_world_dir / "world_data.json", "w", encoding="utf-8") as f:
         json.dump(compiled, f)
+
     sm = types.SimpleNamespace(
         data_dir=data_dir,
         state={"world_id": wid, "active_save_id": "save1", "world_data": compiled},
@@ -198,6 +105,7 @@ def _play_session(builder, tmpdir, wid):
     engine = types.SimpleNamespace(
         llm=types.SimpleNamespace(mode="live"), memory=FakeMemory())
     wbg.world_builder = builder
+    wbg._backfill_reset()
     wbg._services = {
         "engine": engine,
         "session_manager": sm,
@@ -210,56 +118,214 @@ def _play_session(builder, tmpdir, wid):
     state = {
         "world_id": wid,
         "world_data": compiled,
-        "player_location_node_id": "w1",
+        "player_location_node_id": "c1",
+        "player_location_map_id": "root",
         "player_location_region": "Coast",
-        "player_location_layer_id": None,
-        "revealed_node_ids": ["c1", "w1", "w2"],
+        "revealed_node_ids": ["c1", "w1"],
         "module_data": {},
     }
     return sm, engine, state
 
 
-@pytest.fixture(autouse=True)
-def clean_backfill():
-    wbg._backfill_reset()
-    yield
-    wbg._backfill_reset()
-    wbg.world_builder = None
-    wbg._services = None
+# --- expandability ---------------------------------------------------------
+
+def test_is_expandable_rules(builder):
+    wid = _map_world(builder)
+    compiled = builder.compile_world(builder.load_world(wid))
+    nodes = {n["id"]: n for n in compiled["maps"]["root"]["nodes"]}
+    # Named nodes qualify regardless of importance (the AI decides depth).
+    assert is_expandable(compiled, "root", nodes["c1"])
+    assert is_expandable(compiled, "root", nodes["w1"])
+    # Unnamed nodes never do.
+    assert not is_expandable(compiled, "root", nodes["w2"])
 
 
-def test_travel_start_prefetches_destination_site(builder, tmpdir):
-    wid = _site_world(builder)
+# --- expansion + cache -----------------------------------------------------
+
+def test_expand_node_mock_mode_and_write_once_cache(builder):
+    wid = _map_world(builder)
+
+    bundle = asyncio.run(builder.expand_node(wid, "root", "c1"))
+    record = bundle["map"]
+    assert record["map_id"] == child_map_id("root", "c1")
+    assert record["parent_map_id"] == "root"
+    assert record["anchor_node_id"] == "c1"
+    assert record["level_type"] == "interior"
+    assert record["nodes"] and record["config"]["instant_travel"]
+    assert all(n["id"].startswith(record["map_id"] + ":") for n in record["nodes"])
+    # Entrance contract: at least one connection anchors the child to c1.
+    assert any(c["from"]["node_id"] == "c1" and c["to"]["map_id"] == record["map_id"]
+               for c in bundle["connections"])
+    # Persisted write-once under the world's maps/ dir.
+    on_disk = builder._persistence.load_child_map(wid, record["map_id"])
+    assert on_disk == bundle
+    # Second call returns the cache without regenerating.
+    calls = []
+    orig = builder._maps_expand.expand
+
+    async def counting(*a, **kw):
+        calls.append(1)
+        return await orig(*a, **kw)
+
+    builder._maps_expand.expand = counting
+    again = asyncio.run(builder.expand_node(wid, "root", "c1"))
+    assert again == bundle
+    assert calls == []
+    asyncio.run(builder.expand_node(wid, "root", "c1", force=True))
+    assert calls == [1]
+
+
+def test_expand_node_validates_llm_output_and_entrance(builder):
+    wid = _map_world(builder)
+    builder._llm_service.mode = "live"
+
+    async def fake_live(node, context, parent_map, levels, max_locations, template_vocab=None):
+        return {
+            "label": "The Harbor Rings",
+            "level_type": "bogus-level",  # falls back to the first allowed level
+            "description": "Three rings around the harbor.",
+            "locations": [
+                {"id": "evil-id", "name": "Saltmarket Row", "type": "market",
+                 "description": "Fish and rope.", "adjacent": ["The Terraces"]},
+                {"name": "The Terraces", "type": "district",
+                 "description": "Stacked houses.", "adjacent": ["Saltmarket Row", "Nowhere"]},
+                {"name": "saltmarket row", "type": "dup"},  # duplicate dropped
+                {"name": "", "type": "empty"},              # empty dropped
+            ],
+            "entrance_kind": "harbor gate",
+            "connections": [],
+        }
+
+    builder._maps_expand._live_expand = fake_live
+    bundle = asyncio.run(builder.expand_node(wid, "root", "c1"))
+    record = bundle["map"]
+    assert record["label"] == "The Harbor Rings"
+    assert record["level_type"] == "interior"
+    names = [n["name"] for n in record["nodes"]]
+    assert names == ["Saltmarket Row", "The Terraces"]
+    # Server-assigned ids; LLM ids ignored.
+    assert all(n["id"].startswith(record["map_id"] + ":n") for n in record["nodes"])
+    # Adjacency resolved by name into one edge (unresolvable refs dropped).
+    assert len(record["edges"]) == 1
+    # No entrance flag in the payload -> first location became the entrance,
+    # and the mandatory entrance connection uses the parsed kind.
+    (entry,) = bundle["connections"]
+    assert entry["kind"] == "harbor gate"
+    assert entry["from"] == {"map_id": "root", "node_id": "c1"}
+
+
+def test_expansion_without_locations_raises(builder):
+    wid = _map_world(builder)
+    builder._llm_service.mode = "live"
+
+    async def fake_live(*a, **kw):
+        return {"label": "Empty", "locations": []}
+
+    builder._maps_expand._live_expand = fake_live
+    with pytest.raises(ValueError):
+        asyncio.run(builder.expand_node(wid, "root", "c1"))
+
+
+def test_child_maps_fold_into_compiled_world(builder):
+    wid = _map_world(builder)
+    bundle = asyncio.run(builder.expand_node(wid, "root", "c1"))
+    builder.invalidate_compiled(wid) if hasattr(builder, "invalidate_compiled") else None
+    compiled = builder.compile_world(builder.load_world(wid))
+    record = bundle["map"]
+    assert record["map_id"] in compiled["maps"]
+    assert any(c["to"]["map_id"] == record["map_id"] for c in compiled["connections"])
+
+
+# --- legacy site migration -------------------------------------------------
+
+def _legacy_site_world():
+    return {
+        "map": {"nodes": [{"id": "c1", "name": "Vessencia", "type": "city",
+                           "importance": 8, "x": 0, "y": 0}],
+                "edges": [], "config": {}},
+        "site_maps": {"c1": {
+            "parent_node_id": "c1", "name": "Vessencia",
+            "layout_summary": "Rings around the harbor.",
+            "sub_locations": [
+                {"id": "c1:s1", "name": "Saltmarket Row", "type": "market",
+                 "description": "Fish and rope.", "adjacent": ["c1:s2"]},
+                {"id": "c1:s2", "name": "The Terraces", "type": "district",
+                 "description": "Stacked houses.", "adjacent": ["c1:s1"]},
+            ],
+            "schema": 1,
+        }},
+    }
+
+
+def test_legacy_sites_migrate_to_interior_maps():
+    wd = migrate_world_data(_legacy_site_world())
+    assert "site_maps" not in wd
+    interior = wd["maps"]["site_c1"]
+    assert interior["anchor_node_id"] == "c1" and interior["parent_map_id"] == "root"
+    assert interior["generator_id"] == "interior"
+    # Sub-location ids preserved verbatim (saves + RAG source_ids stay valid).
+    assert {n["id"] for n in interior["nodes"]} == {"c1:s1", "c1:s2"}
+    assert interior["edges"] and interior["config"]["instant_travel"]
+    entry = next(c for c in wd["connections"] if c["to"]["map_id"] == "site_c1")
+    assert entry["from"]["node_id"] == "c1" and entry["origin"] == "migrated"
+
+
+def test_legacy_site_position_migrates_to_interior_map():
+    from wbworldgen.worldgen.migrate import migrate_session_state
+    wd = migrate_world_data(_legacy_site_world())
+    state = {"world_data": wd, "player_location_node_id": "c1",
+             "module_data": {"wb_worldgen": {"site_position": {
+                 "parent_node_id": "c1", "sub_location_id": "c1:s2"}}}}
+    migrate_session_state(state)
+    assert state["player_location_map_id"] == "site_c1"
+    assert state["player_location_node_id"] == "c1:s2"
+    assert state["module_data"]["wb_worldgen"]["site_position"] is None
+
+
+# --- play-time triggers ----------------------------------------------------
+
+def test_travel_start_prefetches_destination_child_map(builder, tmpdir):
+    wid = _map_world(builder)
     sm, engine, state = _play_session(builder, tmpdir, wid)
 
     async def main():
-        # Reader declares the city as destination — journey starts and the
-        # site expansion kicks off in the background.
-        result = await wbg.on_mutate_state({"player_location_node_id": "c1"}, state, None)
-        assert result["module_data"]["wb_worldgen"]["travel"]["destination_node_id"] == "c1"
-        task = wbg._site_tasks.get("c1")
+        # Setting out toward the landmark starts its expansion in the background.
+        await wbg.on_mutate_state({"player_location_node_id": "w1"}, state, None)
+        task = wbg._site_tasks.get("w1")
         assert task is not None
         await task
 
     asyncio.run(main())
-
-    # Synced into the live session and the save's world_data.json.
-    assert "c1" in sm.state["world_data"]["site_maps"]
+    interior_id = child_map_id("root", "w1")
+    assert interior_id in sm.state["world_data"]["maps"]
+    # Synced to the save file too.
     with open(sm.data_dir / "saves" / "save1" / "World" / "world_data.json", encoding="utf-8") as f:
         on_disk = json.load(f)
-    assert on_disk["site_maps"]["c1"]["name"] == "Vessencia"
-    # Embedded into the RAG world index (layout + sub-locations).
-    assert any(e["source_type"] == "site" for e in engine.memory.entries)
-    assert any(e["source_type"] == "site_node" for e in engine.memory.entries)
-    # Cached in the world dir: a fresh compile carries it too.
-    compiled = builder.compile_world(builder.load_world(wid))
-    assert "c1" in compiled["site_maps"]
+    assert interior_id in on_disk["maps"]
+    # And embedded in the expected lockstep format.
+    assert any(e["source_type"] == "map" and e["source_id"] == interior_id
+               for e in engine.memory.entries)
+
+
+def test_enter_passage_creates_and_enters_child_map(builder, tmpdir):
+    wid = _map_world(builder)
+    sm, engine, state = _play_session(builder, tmpdir, wid)
+
+    schema = asyncio.run(wbg.on_mutation_schema(state, None))
+    enter_options = [o for o in schema["player_passage"]["options"] if o.startswith("enter:c1")]
+    assert enter_options, "expandable current node should offer an enter: token"
+
+    result = asyncio.run(wbg.on_mutate_state({"player_passage": enter_options[0]}, state, None))
+    interior_id = child_map_id("root", "c1")
+    assert result["player_location_map_id"] == interior_id
+    assert result["player_location_node_id"].startswith(interior_id + ":")
+    assert result["player_location_node_id"] in set(result["revealed_node_ids"])
 
 
 def test_arrival_triggers_expansion_when_prefetch_missed(builder, tmpdir):
-    wid = _site_world(builder)
+    wid = _map_world(builder)
     sm, engine, state = _play_session(builder, tmpdir, wid)
-    state["player_location_node_id"] = "c1"
+    wbg._services["settings"].values["world.site_expansion_mode"] = "on_arrival"
 
     async def main():
         await wbg.on_gather_context(state, None)
@@ -268,110 +334,61 @@ def test_arrival_triggers_expansion_when_prefetch_missed(builder, tmpdir):
         await task
 
     asyncio.run(main())
-    assert "c1" in sm.state["world_data"]["site_maps"]
+    assert child_map_id("root", "c1") in sm.state["world_data"]["maps"]
 
 
-def test_site_mode_off_never_expands(builder, tmpdir):
-    wid = _site_world(builder)
+def test_expansion_modes_off_and_manual_do_not_autofire(builder, tmpdir):
+    wid = _map_world(builder)
+    for mode in ("off", "manual"):
+        sm, engine, state = _play_session(builder, tmpdir + mode, wid)
+        wbg._services["settings"].values["world.site_expansion_mode"] = mode
+        asyncio.run(wbg.on_gather_context(state, None))
+        assert wbg._site_tasks.get("c1") is None
+
+
+def test_prefetch_skips_minor_nodes_but_enter_never_refuses(builder, tmpdir):
+    wid = _map_world(builder)
     sm, engine, state = _play_session(builder, tmpdir, wid)
-    wbg._services["settings"].values["world.site_expansion_mode"] = "off"
-    state["player_location_node_id"] = "c1"
+    # w1 has importance 6 -> prefetch fires; drop it below the floor.
+    node = next(n for n in sm.state["world_data"]["maps"]["root"]["nodes"] if n["id"] == "w1")
+    node["importance"] = 2
 
-    asyncio.run(wbg.on_gather_context(state, None))
-    assert not wbg._site_tasks
-    assert "site_maps" not in sm.state["world_data"]
+    async def main():
+        wbg._maybe_expand_node(state, "w1")
+        assert wbg._site_tasks.get("w1") is None  # below the prefetch floor
+        wbg._maybe_expand_node(state, "w1", on_request=True)
+        task = wbg._site_tasks.get("w1")
+        assert task is not None  # explicit requests always run
+        await task
 
-
-def test_non_expandable_nodes_are_ignored(builder, tmpdir):
-    wid = _site_world(builder)
-    sm, engine, state = _play_session(builder, tmpdir, wid)
-    state["player_location_node_id"] = "w1"  # landmark: not expandable
-
-    asyncio.run(wbg.on_gather_context(state, None))
-    assert not wbg._site_tasks
+    asyncio.run(main())
 
 
-def test_location_context_includes_site_interior(builder, tmpdir):
-    wid = _site_world(builder)
-    site = asyncio.run(builder.expand_site(wid, "c1"))
-    compiled = builder.compile_world(builder.load_world(wid))
-    state = {
-        "player_location_node_id": "c1",
-        "player_location_region": "Coast",
-        "module_data": {},
+# --- RAG entry format ------------------------------------------------------
+
+def test_map_world_entries_format():
+    record = {
+        "map_id": "m_ab", "label": "The Keep", "level_type": "interior",
+        "description": "A drum keep.",
+        "nodes": [
+            {"id": "m_ab:n1", "name": "Gate", "type": "gate", "description": "Iron-bound."},
+            {"id": "m_ab:n2", "name": "Hall", "type": "hall", "description": ""},  # skipped
+        ],
     }
-    ctx = wbg._build_location_context(state, compiled)
-    assert "<location_interior>" in ctx
-    assert site["sub_locations"][0]["name"] in ctx
-    assert "Layout:" in ctx
-
-
-# ---------------------------------------------------------------------------
-# Intra-site movement (player position inside an expanded interior)
-# ---------------------------------------------------------------------------
-
-def _sited_play_state(builder, tmpdir, wid):
-    site = asyncio.run(builder.expand_site(wid, "c1"))
-    sm, engine, state = _play_session(builder, tmpdir, wid)
-    state["player_location_node_id"] = "c1"
-    return site, sm, state
-
-
-def test_mutation_schema_offers_sub_locations_when_inside_a_site(builder, tmpdir):
-    site, sm, state = _sited_play_state(builder, tmpdir, wid := _site_world(builder))
-    schema = wbg._build_location_mutation_schema(state["world_data"], state)
-    options = schema["player_sub_location"]["options"]
-    first = site["sub_locations"][0]
-    assert f"{first['id']} ({first['name']})" in options
-    assert any(o.startswith("leave_site") for o in options)
-    # Away from the site there is no sub-location field.
-    state["player_location_node_id"] = "w1"
-    schema = wbg._build_location_mutation_schema(state["world_data"], state)
-    assert "player_sub_location" not in schema
-
-
-def test_sub_location_move_sets_and_clears_position(builder, tmpdir):
-    site, sm, state = _sited_play_state(builder, tmpdir, _site_world(builder))
-    sub_id = site["sub_locations"][0]["id"]
-
-    result = asyncio.run(wbg.on_mutate_state(
-        {"player_sub_location": f"{sub_id} (X)"}, state, None))
-    assert result["module_data"]["wb_worldgen"]["site_position"] == {
-        "parent_node_id": "c1", "sub_location_id": sub_id}
-
-    # Apply and step back out.
-    state["module_data"] = {"wb_worldgen": {"site_position":
-        result["module_data"]["wb_worldgen"]["site_position"]}}
-    result = asyncio.run(wbg.on_mutate_state(
-        {"player_sub_location": "leave_site (step back out)"}, state, None))
-    assert result["module_data"]["wb_worldgen"]["site_position"] is None
-
-    # Invalid sub ids are ignored.
-    result = asyncio.run(wbg.on_mutate_state(
-        {"player_sub_location": "c1:s999 (Nowhere)"}, state, None))
-    assert result == {}
-
-
-def test_node_move_clears_site_position(builder, tmpdir):
-    site, sm, state = _sited_play_state(builder, tmpdir, _site_world(builder))
-    sub_id = site["sub_locations"][0]["id"]
-    state["module_data"] = {"wb_worldgen": {"site_position": {
-        "parent_node_id": "c1", "sub_location_id": sub_id}}}
-    wbg._services["settings"].values["world.travel_turns_per_edge"] = 0  # instant
-
-    result = asyncio.run(wbg.on_mutate_state({"player_location_node_id": "w1"}, state, None))
-    assert result["player_location_node_id"] == "w1"
-    assert result["module_data"]["wb_worldgen"]["site_position"] is None
-
-
-def test_location_context_leads_with_current_sub_location(builder, tmpdir):
-    site, sm, state = _sited_play_state(builder, tmpdir, _site_world(builder))
-    first = site["sub_locations"][0]
-    second = site["sub_locations"][1]
-    state["module_data"] = {"wb_worldgen": {"site_position": {
-        "parent_node_id": "c1", "sub_location_id": second["id"]}}}
-
-    ctx = wbg._build_location_context(state, state["world_data"])
-    assert f"The player is currently at: {second['name']}" in ctx
-    # Mock site adjacency links each district to the previous one.
-    assert f"Directly adjoining: {first['name']}" in ctx
+    connections = [
+        {"id": "c_1", "kind": "door", "name": "The Gate",
+         "from": {"map_id": "root", "node_id": "n1"},
+         "to": {"map_id": "m_ab", "node_id": "m_ab:n1"},
+         "description": "Oak.", "hidden": False},
+        {"id": "c_2", "kind": "tunnel", "name": "Secret",
+         "from": {"map_id": "root", "node_id": "n1"},
+         "to": {"map_id": "m_ab", "node_id": "m_ab:n1"},
+         "description": "", "hidden": True},  # hidden -> skipped
+    ]
+    entries = map_world_entries(record, connections,
+                                maps_by_id={"root": {"label": "World"}, "m_ab": record})
+    texts = [e["text"] for e in entries]
+    assert any(t.startswith("Map: The Keep (interior).") for t in texts)
+    assert any(t.startswith("Location [The Keep]: Gate (gate).") for t in texts)
+    assert any(t.startswith("Connection: door 'The Gate' linking World and The Keep.") for t in texts)
+    assert not any("Secret" in t for t in texts)

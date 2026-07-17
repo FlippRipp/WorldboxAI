@@ -157,6 +157,9 @@ class WorldPersistence:
         sites = self.load_sites(world_id)
         if sites:
             world_state["sites"] = sites
+        child_maps = self.load_child_maps(world_id)
+        if child_maps:
+            world_state["child_maps"] = child_maps
         return world_state
 
     def save_step(self, world_id: str, step_id: str, step_data: dict):
@@ -176,6 +179,44 @@ class WorldPersistence:
         self.invalidate_enrichment_cache(world_id)
 
     # --- site bundles (lazy interior detail) --------------------------------
+
+    def child_map_path(self, world_id: str, map_id: str) -> Path:
+        return self._dir / safe_world_id(world_id) / "maps" / f"{safe_world_id(map_id)}.json"
+
+    def save_child_map(self, world_id: str, bundle: dict):
+        """Write-once cache of an expanded child map ({"map", "connections"})."""
+        map_id = (bundle.get("map") or {}).get("map_id", "")
+        path = self.child_map_path(world_id, map_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(bundle, f, indent=2)
+
+    def load_child_map(self, world_id: str, map_id: str) -> dict | None:
+        path = self.child_map_path(world_id, map_id)
+        if not path.is_file():
+            return None
+        try:
+            with open(path, encoding="utf-8") as f:
+                bundle = json.load(f)
+            return bundle if isinstance(bundle, dict) and bundle.get("map") else None
+        except Exception:
+            return None
+
+    def load_child_maps(self, world_id: str) -> list[dict]:
+        """All persisted child-map bundles for a world."""
+        maps_dir = self._dir / safe_world_id(world_id) / "maps"
+        if not maps_dir.is_dir():
+            return []
+        bundles = []
+        for path in sorted(maps_dir.glob("*.json")):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    bundle = json.load(f)
+                if isinstance(bundle, dict) and bundle.get("map"):
+                    bundles.append(bundle)
+            except Exception:
+                continue
+        return bundles
 
     def site_path(self, world_id: str, node_id: str) -> Path:
         return self._dir / safe_world_id(world_id) / "sites" / f"{safe_world_id(node_id)}.json"

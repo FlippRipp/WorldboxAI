@@ -146,7 +146,7 @@ def kick_background_detail(host, state: dict):
             queue_backfill(host, state, needs, front=True)
         if _expansion.site_mode(host) == "prefetch" and dest:
             # Start the destination's interior while the journey plays out.
-            _expansion.maybe_expand_site(host, state, dest)
+            _expansion.maybe_expand_node(host, state, dest)
 
     # Idle trickle: keep quietly finishing the world, visited areas first.
     per_turn = backfill_per_turn(host)

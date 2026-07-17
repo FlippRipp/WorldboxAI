@@ -546,12 +546,16 @@ class ExpandSiteRequest(BaseModel):
 
 @router.post("/api/world/{world_id}/site/{node_id}/expand")
 async def expand_world_site(world_id: str, node_id: str, request: ExpandSiteRequest = None):
-    """Generate (or return the cached) interior detail for a major location.
-    World-scoped: used at authoring time to pre-bake key cities."""
+    """Generate (or return the cached) child map for a location. World-scoped:
+    used at authoring time to pre-bake key cities. (Path kept for the old
+    site-era clients; the payload now carries the map bundle.)"""
     try:
         force = request.force if request else False
-        site = await world_builder.expand_site(world_id, node_id, force=force)
-        return {"world_id": world_id, "node_id": node_id, "site": site}
+        compiled = world_builder.compile_world(world_builder.load_world(world_id))
+        from wbworldgen.worldgen import mapspace as _ms
+        map_id = _ms.map_of_node(compiled, node_id) or compiled.get("root_map_id", "root")
+        bundle = await world_builder.expand_node(world_id, map_id, node_id, force=force)
+        return {"world_id": world_id, "node_id": node_id, **bundle}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
@@ -560,7 +564,10 @@ async def expand_world_site(world_id: str, node_id: str, request: ExpandSiteRequ
 
 @router.get("/api/world/{world_id}/sites")
 async def get_world_sites(world_id: str):
-    return {"world_id": world_id, "sites": world_builder._persistence.load_sites(world_id)}
+    """Expanded child maps for a world (path kept for old clients)."""
+    bundles = world_builder._persistence.load_child_maps(world_id)
+    return {"world_id": world_id, "maps": bundles,
+            "sites": world_builder._persistence.load_sites(world_id)}
 
 
 class SessionExpandSiteRequest(BaseModel):
@@ -575,16 +582,22 @@ async def expand_site_in_session(request: SessionExpandSiteRequest):
     world_id = session_manager.state.get("world_id")
     if not world_id:
         raise HTTPException(status_code=400, detail="No world-backed save is active.")
+    wd = session_manager.state.get("world_data")
     try:
-        site = await world_builder.expand_site(world_id, request.node_id)
+        from wbworldgen.worldgen import mapspace as _ms
+        map_id = (_ms.map_of_node(wd, request.node_id) if wd else None) or "root"
+        bundle = await world_builder.expand_node(world_id, map_id, request.node_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    wd = session_manager.state.get("world_data")
-    if wd is not None:
-        wd.setdefault("site_maps", {})[request.node_id] = site
+    record = bundle.get("map") or {}
+    if wd is not None and record.get("map_id"):
+        wd.setdefault("maps", {})[record["map_id"]] = record
+        existing_ids = {c.get("id") for c in wd.setdefault("connections", [])}
+        wd["connections"].extend(
+            c for c in bundle.get("connections", []) if c.get("id") not in existing_ids)
         try:
             save_id = session_manager.state.get("active_save_id")
             if save_id:
@@ -593,16 +606,17 @@ async def expand_site_in_session(request: SessionExpandSiteRequest):
                     with open(world_dir / "world_data.json", "w", encoding="utf-8") as f:
                         json.dump(wd, f, indent=2)
         except Exception:
-            logger.exception("failed to persist world_data after site expansion")
+            logger.exception("failed to persist world_data after map expansion")
     if engine is not None and engine.memory is not None and engine.memory.has_world_index():
-        from wbworldgen.worldgen.enrichment import site_world_entries
-        entries = site_world_entries(request.node_id, site)
+        from wbworldgen.worldgen.enrichment.maps_expand import map_world_entries
+        entries = map_world_entries(record, bundle.get("connections"),
+                                    maps_by_id=(wd or {}).get("maps") or {})
         if entries:
             try:
                 await engine.memory.embed_world_entries(entries, engine.llm)
             except Exception:
-                logger.exception("failed to embed site entries")
-    return {"world_id": world_id, "node_id": request.node_id, "site": site}
+                logger.exception("failed to embed child map entries")
+    return {"world_id": world_id, "node_id": request.node_id, **bundle}
 
 
 class PickStartRequest(BaseModel):

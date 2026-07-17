@@ -225,7 +225,7 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
         """Arrive somewhere — possibly on another map — instantly."""
         reveal_around(node_id, map_id)
         queue_revealed_backfill()
-        _expansion.maybe_expand_site(host, state, node_id)
+        _expansion.maybe_expand_node(host, state, node_id)
         return {
             "player_location_node_id": node_id,
             "player_location_map_id": map_id,
@@ -250,6 +250,21 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
             return land_at(far.get("map_id"), far.get("node_id"))
         queue_revealed_backfill()
         return {"module_data": {"wb_worldgen": {"travel": transit, "site_position": None}}}
+
+    # --- Entering an unmapped place: its child map is created on demand ----
+    if passage_id and passage_id.startswith("enter:"):
+        target = passage_id.split(":", 1)[1]
+        if target and target == current_node:
+            child = await _expansion.ensure_child_map(host, state, target)
+            if child is not None:
+                entry_views = [v for v in connections_from(world_data, current_map, target)
+                               if v["far"].get("map_id") == child.get("map_id")]
+                if entry_views:
+                    return begin_transit(entry_views[0]["connection"], entry_views[0]["far"])
+                nodes = child.get("nodes") or []
+                if nodes:
+                    return land_at(child.get("map_id"), nodes[0]["id"])
+        passage_id = None
 
     # --- A passage through a connection to another map --------------------
     if passage_id:
@@ -314,7 +329,7 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
             if _expansion.site_mode(host) == "prefetch":
                 # Start the destination's interior now — the journey's turns
                 # hide the generation latency.
-                _expansion.maybe_expand_site(host, state, new_node_id)
+                _expansion.maybe_expand_node(host, state, new_node_id)
 
     if not travel:
         if site_position_update:

@@ -152,7 +152,70 @@ def migrate_world_data(wd: dict) -> dict:
     # The legacy views are replaced, not kept: layers are gone as a concept.
     for legacy_key in ("map", "map_layers", "map_connections", "layers", "layer_rules"):
         wd.pop(legacy_key, None)
+
+    _migrate_sites(wd)
     return wd
+
+
+def site_map_id(parent_node_id: str) -> str:
+    """Child map id for a migrated legacy site bundle."""
+    return f"site_{parent_node_id}"
+
+
+def _migrate_sites(wd: dict):
+    """Legacy one-level ``site_maps`` bundles become real interior child maps
+    (deterministic layout, no LLM), anchored to their parent node with a
+    migrated entrance connection. Sub-location ids (``n17:s3``) are kept
+    verbatim so saves and RAG source_ids stay valid."""
+    site_maps = wd.pop("site_maps", None)
+    if not isinstance(site_maps, dict) or not site_maps:
+        return
+    from .mapspace import map_of_node
+    from wbworldgen.worldgen.generation.interior_layout import layout_interior
+    for parent_node_id, site in site_maps.items():
+        subs = site.get("sub_locations") or []
+        if not subs:
+            continue
+        map_id = site_map_id(parent_node_id)
+        if map_id in wd["maps"]:
+            continue
+        parent_map_id = map_of_node(wd, parent_node_id) or wd.get("root_map_id", ROOT_MAP_ID)
+        locations = [{
+            "id": sub.get("id"),
+            "name": sub.get("name", ""),
+            "type": sub.get("type", "district"),
+            "description": sub.get("description", ""),
+            "adjacent": sub.get("adjacent", []),
+            "is_entrance": i == 0,
+        } for i, sub in enumerate(subs)]
+        generated = layout_interior(map_id, locations)
+        entrance = generated.pop("entrance_node_id", None) or subs[0].get("id")
+        wd["maps"][map_id] = {
+            "map_id": map_id,
+            "label": site.get("name") or f"Inside {parent_node_id}",
+            "level_type": "interior",
+            "description": site.get("layout_summary", ""),
+            "parent_map_id": parent_map_id,
+            "anchor_node_id": parent_node_id,
+            "generator_id": "interior",
+            "nodes": generated["nodes"],
+            "edges": generated["edges"],
+            "config": generated["config"],
+            "schema": 2,
+        }
+        wd.setdefault("connections", []).append({
+            "id": f"c_{map_id}_entry",
+            "from": {"map_id": parent_map_id, "node_id": parent_node_id},
+            "to": {"map_id": map_id, "node_id": entrance},
+            "kind": "entrance",
+            "name": f"Into {site.get('name') or parent_node_id}",
+            "description": "",
+            "travel": {"mode": "instant"},
+            "bidirectional": True,
+            "requirements": "",
+            "hidden": False,
+            "origin": "migrated",
+        })
 
 
 def migrate_session_state(state: dict) -> bool:
@@ -184,5 +247,20 @@ def migrate_session_state(state: dict) -> bool:
         changed = True
     if "player_location_layer_id" in state:
         state.pop("player_location_layer_id", None)
+        changed = True
+
+    # Legacy intra-site position becomes a real position on the migrated
+    # interior map.
+    module_data = (state.get("module_data") or {}).get("wb_worldgen") or {}
+    site_position = module_data.get("site_position")
+    if site_position:
+        parent = site_position.get("parent_node_id", "")
+        sub = site_position.get("sub_location_id", "")
+        interior_id = site_map_id(parent)
+        interior = wd["maps"].get(interior_id)
+        if interior and any(n.get("id") == sub for n in interior.get("nodes", [])):
+            state["player_location_map_id"] = interior_id
+            state["player_location_node_id"] = sub
+        module_data["site_position"] = None
         changed = True
     return changed

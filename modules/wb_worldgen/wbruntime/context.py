@@ -268,7 +268,7 @@ async def on_gather_context(host, state: dict, sdk) -> dict:
     if not get_travel(state):
         # Arrived (or standing) somewhere expandable whose interior is still
         # missing (prefetch missed / on_arrival mode) — start it now.
-        _expansion.maybe_expand_site(host, state, state.get("player_location_node_id"))
+        _expansion.maybe_expand_node(host, state, state.get("player_location_node_id"))
     location_context = build_location_context(host, state, world_data)
     if not location_context:
         return {}

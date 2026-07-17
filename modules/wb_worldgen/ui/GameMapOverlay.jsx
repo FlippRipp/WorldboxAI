@@ -3,10 +3,6 @@ import { api } from 'api';
 import MapRenderer from './WorldBuilder/MapRenderer';
 import { normalizeWorldData, breadcrumb } from './lib/mapspace';
 
-// Node types whose interiors can be expanded into districts/venues (mirrors
-// the backend's expandable set).
-const EXPANDABLE_TYPES = new Set(['city', 'settlement', 'port', 'stronghold']);
-
 // Rendered generically by the host's in-game overlay slot, which passes the
 // whole game `state`. We derive the world props from it and render nothing when
 // there is no world loaded (so a world-less scenario shows no map).
@@ -51,6 +47,8 @@ export default function GameMapOverlay({ state = {} }) {
     return nodes.find((n) => n.id === playerNodeId) || null;
   }, [hasMaps, mapsById, playerNodeId]);
 
+  // Legacy site bundle (pre-migration payloads only; migrated worlds carry
+  // real interior maps instead).
   const site = localSite?.parent_node_id === playerNodeId
     ? localSite
     : worldData?.site_maps?.[playerNodeId] || null;
@@ -58,17 +56,28 @@ export default function GameMapOverlay({ state = {} }) {
   const currentSubId = sitePosition?.parent_node_id === playerNodeId
     ? sitePosition.sub_location_id
     : null;
-  const canExplore = !site && playerNode && playerNode.name
-    && EXPANDABLE_TYPES.has(playerNode.type) && (playerNode.importance ?? 0) >= 6;
+  // A child map anchored at the player's node (world_format 2 interiors).
+  const playerChildMapId = useMemo(() => {
+    if (!playerNodeId) return null;
+    const entry = Object.values(mapsById).find((m) => m.anchor_node_id === playerNodeId);
+    return entry ? entry.map_id : null;
+  }, [mapsById, playerNodeId]);
+  // Any NAMED node can be explored in depth — the player decides what
+  // deserves a map of its own; nothing is refused on request.
+  const canExplore = !site && !playerChildMapId && playerNode && playerNode.name;
 
   const exploreInterior = async () => {
     if (!playerNodeId || expanding) return;
     setExpanding(true);
     try {
       const res = await api.expandSessionSite(playerNodeId);
-      setLocalSite(res.site);
+      if (res.site) setLocalSite(res.site); // legacy payload
+      if (res.map?.map_id) {
+        // The world gained a real interior map — jump the view into it.
+        setActiveMapId(res.map.map_id);
+      }
     } catch (e) {
-      console.error('Site expansion failed:', e);
+      console.error('Map expansion failed:', e);
     } finally {
       setExpanding(false);
     }

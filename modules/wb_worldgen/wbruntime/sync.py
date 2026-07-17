@@ -106,21 +106,27 @@ async def embed_backfilled_nodes(host, world_id: str, node_ids: list):
         _logger.exception("failed to embed backfilled world entries")
 
 
-def sync_site(host, world_id: str, node_id: str, site: dict):
-    """Merge a freshly expanded site into the live session and its save."""
+def sync_child_map(host, world_id: str, bundle: dict):
+    """Merge a freshly expanded child map into the live session and its save."""
     sm = host._services.get("session_manager") if host._services else None
     if sm is None or sm.state.get("world_id") != world_id:
         return
     wd = sm.state.get("world_data")
     if not wd:
         return
-    wd.setdefault("site_maps", {})[node_id] = site
+    record = bundle.get("map") or {}
+    if not record.get("map_id"):
+        return
+    wd.setdefault("maps", {})[record["map_id"]] = record
+    existing_ids = {c.get("id") for c in wd.setdefault("connections", [])}
+    wd["connections"].extend(
+        c for c in bundle.get("connections", []) if c.get("id") not in existing_ids)
     write_session_world_data(sm)
 
 
-async def embed_site(host, world_id: str, site: dict):
-    """Add a freshly expanded site's entries to the save's RAG world index."""
-    from wbworldgen.worldgen.enrichment import site_world_entries
+async def embed_child_map(host, world_id: str, bundle: dict):
+    """Add a freshly expanded child map's entries to the save's RAG index."""
+    from wbworldgen.worldgen.enrichment.maps_expand import map_world_entries
     sm = host._services.get("session_manager") if host._services else None
     engine = host._services.get("engine") if host._services else None
     if sm is None or engine is None or sm.state.get("world_id") != world_id:
@@ -128,10 +134,12 @@ async def embed_site(host, world_id: str, site: dict):
     memory = getattr(engine, "memory", None)
     if memory is None or not memory.has_world_index():
         return
-    entries = site_world_entries(site.get("parent_node_id", ""), site)
+    wd = sm.state.get("world_data") or {}
+    entries = map_world_entries(bundle.get("map") or {}, bundle.get("connections"),
+                                maps_by_id=wd.get("maps") or {})
     if not entries:
         return
     try:
         await memory.embed_world_entries(entries, engine.llm)
     except Exception:
-        _logger.exception("failed to embed site entries")
+        _logger.exception("failed to embed child map entries")

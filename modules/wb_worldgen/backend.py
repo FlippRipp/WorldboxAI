@@ -359,20 +359,24 @@ def _site_mode() -> str:
     return _rt_expansion.site_mode(_HOST)
 
 
-def _maybe_expand_site(state: dict, node_id: str):
-    _rt_expansion.maybe_expand_site(_HOST, state, node_id)
+def _maybe_expand_node(state: dict, node_id: str, on_request: bool = False):
+    _rt_expansion.maybe_expand_node(_HOST, state, node_id, on_request=on_request)
 
 
-async def _expand_site_task(world_id: str, node_id: str):
-    await _rt_expansion.expand_site_task(_HOST, world_id, node_id)
+async def _expand_node_task(world_id: str, map_id: str, node_id: str):
+    await _rt_expansion.expand_node_task(_HOST, world_id, map_id, node_id)
 
 
-def _sync_site(world_id: str, node_id: str, site: dict):
-    _rt_sync.sync_site(_HOST, world_id, node_id, site)
+async def _ensure_child_map(state: dict, node_id: str):
+    return await _rt_expansion.ensure_child_map(_HOST, state, node_id)
 
 
-async def _embed_site(world_id: str, site: dict):
-    await _rt_sync.embed_site(_HOST, world_id, site)
+def _sync_child_map(world_id: str, bundle: dict):
+    _rt_sync.sync_child_map(_HOST, world_id, bundle)
+
+
+async def _embed_child_map(world_id: str, bundle: dict):
+    await _rt_sync.embed_child_map(_HOST, world_id, bundle)
 
 
 async def _ensure_current_node_detailed(state: dict):

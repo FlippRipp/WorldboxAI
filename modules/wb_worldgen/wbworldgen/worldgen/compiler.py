@@ -176,4 +176,14 @@ def compile_world(world_state: dict, steps: Optional[dict] = None) -> dict:
     # (from old step data) is migrated into the hierarchical maps+connections
     # shape here, so every downstream reader sees one format only.
     from .migrate import migrate_world_data
-    return migrate_world_data(compiled)
+    compiled = migrate_world_data(compiled)
+
+    # Fold in lazily-expanded child maps (write-once cache under maps/).
+    for bundle in world_state.get("child_maps", []) or []:
+        record = bundle.get("map") or {}
+        if record.get("map_id") and record["map_id"] not in compiled.get("maps", {}):
+            compiled.setdefault("maps", {})[record["map_id"]] = record
+            existing_ids = {c.get("id") for c in compiled.setdefault("connections", [])}
+            compiled["connections"].extend(
+                c for c in bundle.get("connections", []) if c.get("id") not in existing_ids)
+    return compiled
