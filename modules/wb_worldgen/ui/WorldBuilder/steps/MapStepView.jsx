@@ -1,30 +1,38 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import MapRenderer from '../MapRenderer';
 import SchemaForm from './SchemaForm';
+import { normalizeWorldData } from '../../lib/mapspace';
 
 /**
  * MapStepView — body for procedural map steps.
  * Renders the step's schema fields (e.g. total_nodes) followed by the
  * interactive map for whatever map data currently lives in editedData.
- * Owns its own active-layer / focus-node UI state.
+ * Step data may be legacy (layers/connections) or world_format 2 (maps);
+ * the shared normalizer handles both. Owns its own active-map / focus-node
+ * UI state.
  */
 export default function MapStepView({ step, editedData, onFieldChange, disabled, worldId }) {
-  const [activeLayerId, setActiveLayerId] = useState(null);
+  const [activeMapId, setActiveMapId] = useState(null);
   const [focusNodeId, setFocusNodeId] = useState(null);
 
-  useEffect(() => {
-    if (editedData?.layers?.length > 0 && !activeLayerId) {
-      setActiveLayerId(editedData.layers[0].layer_id);
-    }
-  }, [editedData, activeLayerId]);
+  const normalized = useMemo(() => normalizeWorldData(editedData), [editedData]);
+  const hasMaps = Object.keys(normalized.mapsById).length > 0;
 
-  const navigateToLayer = (targetLayerId, nodeId) => {
-    setActiveLayerId(targetLayerId);
-    setFocusNodeId(nodeId);
-    setTimeout(() => setFocusNodeId(null), 4000);
+  useEffect(() => {
+    if (hasMaps && !activeMapId) {
+      setActiveMapId(normalized.rootMapId);
+    }
+  }, [hasMaps, normalized, activeMapId]);
+
+  const handleMapChange = (targetMapId, nodeId) => {
+    setActiveMapId(targetMapId);
+    if (nodeId) {
+      setFocusNodeId(nodeId);
+      setTimeout(() => setFocusNodeId(null), 4000);
+    }
   };
 
-  const hasMap = editedData && (editedData.nodes || editedData.layers);
+  const hasMap = editedData && (editedData.nodes || hasMaps);
 
   return (
     <div className="space-y-4">
@@ -37,14 +45,13 @@ export default function MapStepView({ step, editedData, onFieldChange, disabled,
 
       {hasMap && (
         <div className="pt-2">
-          {editedData.layers ? (
+          {hasMaps ? (
             <MapRenderer
-              layers={editedData.layers}
-              connections={editedData.connections}
-              activeLayerId={activeLayerId}
-              onLayerChange={setActiveLayerId}
-              config={editedData.config}
-              navigateToLayer={navigateToLayer}
+              mapsById={normalized.mapsById}
+              connections={normalized.connections}
+              rootMapId={normalized.rootMapId}
+              activeMapId={activeMapId}
+              onMapChange={handleMapChange}
               focusNodeId={focusNodeId}
               worldId={worldId}
             />
@@ -55,7 +62,7 @@ export default function MapStepView({ step, editedData, onFieldChange, disabled,
               regions={editedData.regions}
               roads={editedData.roads}
               config={editedData.config}
-              navigateToLayer={navigateToLayer}
+              onMapChange={handleMapChange}
               focusNodeId={focusNodeId}
               worldId={worldId}
             />

@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { Delaunay } from 'd3-delaunay';
+import { normalizeWorldData, connectionsByNode, breadcrumb } from '../lib/mapspace';
 
 const TYPE_COLORS = {
   settlement: '#f59e0b',
@@ -97,7 +98,7 @@ const INTERLAYER_TYPES = new Set([
   'cave_mouth', 'rift', 'staircase', 'bridge',
 ]);
 
-export default function MapRenderer({ nodes, edges, regions, config, layers, connections, activeLayerId, onLayerChange, fogOfWar, navigateToLayer, focusNodeId, worldId, roads, playerTravel }) {
+export default function MapRenderer({ nodes, edges, regions, config, layers, connections, activeLayerId, onLayerChange, mapsById, activeMapId, onMapChange, rootMapId, playerMapId, fogOfWar, navigateToLayer, focusNodeId, worldId, roads, playerTravel }) {
   const [hoveredNode, setHoveredNode] = useState(null);
   const [hoveredRegion, setHoveredRegion] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null);
@@ -110,45 +111,68 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
   // Active touch gesture: {mode:'pan', lastX, lastY} or {mode:'pinch', lastDist}.
   const touchStateRef = useRef(null);
 
-  const hasLayers = layers && layers.length > 0;
-  const activeLayer = hasLayers
-    ? layers.find((l) => l.layer_id === activeLayerId) || layers[0]
+  // Normalize the map inputs: new-style callers pass `mapsById` (v2 MapRecords
+  // keyed by map_id) + v2 `connections`; legacy callers pass `layers` (array of
+  // {layer_id, name, layer_type, map}) + map_connections-shaped `connections`,
+  // adapted through the shared normalizer. Null when called flat (bare
+  // nodes/edges props), which keeps working exactly as before.
+  const normalized = useMemo(() => {
+    if (mapsById && Object.keys(mapsById).length) {
+      return {
+        mapsById,
+        rootMapId: rootMapId
+          || Object.values(mapsById).find((m) => m.parent_map_id == null)?.map_id
+          || Object.keys(mapsById)[0],
+        connections: connections || [],
+      };
+    }
+    if (layers && layers.length) {
+      return normalizeWorldData({ map_layers: layers, map_connections: connections });
+    }
+    return null;
+  }, [mapsById, rootMapId, layers, connections]);
+
+  const hasMaps = !!normalized;
+  const currentMapId = activeMapId || activeLayerId || normalized?.rootMapId || null;
+  const activeMap = hasMaps
+    ? normalized.mapsById[currentMapId] || normalized.mapsById[normalized.rootMapId]
     : null;
 
   const activeNodes = useMemo(() => {
-    if (!hasLayers) return nodes || [];
-    if (!activeLayer) return [];
-    const map = activeLayer.map || {};
-    return map.nodes || [];
-  }, [hasLayers, activeLayer, nodes]);
+    if (!hasMaps) return nodes || [];
+    return activeMap?.nodes || [];
+  }, [hasMaps, activeMap, nodes]);
 
   const activeEdges = useMemo(() => {
-    if (!hasLayers) return edges || [];
-    if (!activeLayer) return [];
-    const map = activeLayer.map || {};
-    return map.edges || [];
-  }, [hasLayers, activeLayer, edges]);
+    if (!hasMaps) return edges || [];
+    return activeMap?.edges || [];
+  }, [hasMaps, activeMap, edges]);
 
   const activeRegions = useMemo(() => {
-    if (!hasLayers) return regions || [];
-    if (!activeLayer) return [];
-    const map = activeLayer.map || {};
-    return map.regions || [];
-  }, [hasLayers, activeLayer, regions]);
+    if (!hasMaps) return regions || [];
+    return activeMap?.regions || [];
+  }, [hasMaps, activeMap, regions]);
 
   const activeRoads = useMemo(() => {
-    if (!hasLayers) return roads || [];
-    if (!activeLayer) return [];
-    return (activeLayer.map || {}).roads || [];
-  }, [hasLayers, activeLayer, roads]);
+    if (!hasMaps) return roads || [];
+    return activeMap?.roads || [];
+  }, [hasMaps, activeMap, roads]);
 
-  // Terrain background image. Every layer is its own area with its own raster,
-  // so each gets a biome background keyed by layer id.
+  const effectiveConfig = (hasMaps ? activeMap?.config : config) || config;
+
+  // Terrain background image. Only world-surface maps have a raster: maps
+  // produced by other generators (site interiors etc.) skip the fetch. The
+  // raster is keyed by the legacy layer id when the map was migrated.
   const terrainImageUrl = useMemo(() => {
     if (!worldId) return null;
-    const layerId = hasLayers ? (activeLayer?.layer_id || 'main') : 'main';
-    return `/api/world/${encodeURIComponent(worldId)}/terrain/${encodeURIComponent(layerId)}/biome`;
-  }, [worldId, hasLayers, activeLayer]);
+    if (hasMaps) {
+      if (!activeMap) return null;
+      if (activeMap.generator_id !== undefined && activeMap.generator_id !== 'world_map') return null;
+      const layerId = activeMap.legacy_layer_id || activeMap.map_id || 'main';
+      return `/api/world/${encodeURIComponent(worldId)}/terrain/${encodeURIComponent(layerId)}/biome`;
+    }
+    return `/api/world/${encodeURIComponent(worldId)}/terrain/main/biome`;
+  }, [worldId, hasMaps, activeMap]);
 
   const nodeAssignments = useMemo(() => {
     if (!activeRegions || !activeRegions.length) return {};
@@ -166,11 +190,11 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
     const pad = 45;
     const viewW = 800;
     const viewH = 500;
-    const mw = config?.map_width || 1000;
-    const mh = config?.map_height || 1000;
+    const mw = effectiveConfig?.map_width || 1000;
+    const mh = effectiveConfig?.map_height || 1000;
     const s = Math.min((viewW - pad * 2) / mw, (viewH - pad * 2) / mh);
     return { pad, viewW, viewH, scale: s, mapW: mw, mapH: mh };
-  }, [config]);
+  }, [effectiveConfig]);
 
   const sx = useCallback((x) => mapLayout.pad + x * mapLayout.scale, [mapLayout]);
   const sy = useCallback((y) => mapLayout.pad + y * mapLayout.scale, [mapLayout]);
@@ -184,8 +208,11 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
 
   // Player marker: at the current node, or interpolated along the current
   // travel leg while a gradual journey is underway. Null when the player (or
-  // their layer) isn't on this map.
+  // their map) isn't the one being displayed.
   const playerMarker = useMemo(() => {
+    if (playerMapId != null && hasMaps && activeMap && playerMapId !== activeMap.map_id) {
+      return null;
+    }
     const byId = {};
     activeNodes.forEach((n) => { byId[n.id] = n; });
     if (playerTravel) {
@@ -199,7 +226,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
     const here = fogOfWar?.playerNodeId ? byId[fogOfWar.playerNodeId] : null;
     if (here) return { x: here.x, y: here.y, traveling: false };
     return null;
-  }, [activeNodes, playerTravel, fogOfWar]);
+  }, [activeNodes, playerTravel, fogOfWar, playerMapId, hasMaps, activeMap]);
 
   // Voronoi region polygons (fill all cells, stroke only outer boundary)
   const voronoiRegions = useMemo(() => {
@@ -289,25 +316,90 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
     }).filter(Boolean);
   }, [activeNodes, activeRegions, mapLayout, nodeIndex, sx, sy]);
 
-  const isInterlayerNode = (node) =>
-    INTERLAYER_TYPES.has(node.type) || !!node.interlayer_connection_id;
+  // v2 connection views keyed by endpoint node id.
+  const connViewsByNode = useMemo(
+    () => connectionsByNode(normalized?.connections),
+    [normalized],
+  );
 
-  // Connection lookup for inter-layer navigation
-  const connectionById = useMemo(() => {
-    if (!connections || !connections.length) return {};
+  // Legacy map_connections passed directly as the `connections` prop (only
+  // entries in the old flat shape) — fallback for nodes that still carry
+  // interlayer_connection_id when no v2 connections exist.
+  const legacyConnById = useMemo(() => {
     const map = {};
-    connections.forEach((c) => { map[c.id] = c; });
+    (connections || []).forEach((c) => {
+      if (c && c.from_node_id) map[c.id] = c;
+    });
     return map;
   }, [connections]);
 
-  const getPairedConnection = useCallback((node) => {
-    if (!node.interlayer_connection_id) return null;
-    const lc = connectionById[node.interlayer_connection_id];
-    if (!lc) return null;
-    const pairedId = node.id === lc.from_node_id ? lc.to_node_id : lc.from_node_id;
-    const targetLayerId = node.id === lc.from_node_id ? lc.to_layer_id : lc.from_layer_id;
-    return { connection: lc, pairedNodeId: pairedId, targetLayerId };
-  }, [connectionById]);
+  const isConnectionNode = useCallback((node) =>
+    !!connViewsByNode[node.id]?.length
+    || INTERLAYER_TYPES.has(node.type)
+    || !!node.interlayer_connection_id,
+  [connViewsByNode]);
+
+  // Cross-map affordance for a node: prefer the v2 connections array; fall
+  // back to the legacy interlayer_connection_id lookup.
+  const getNodeConnection = useCallback((node) => {
+    const views = connViewsByNode[node.id];
+    if (views && views.length) {
+      const v = views[0];
+      return {
+        connection: v.connection,
+        pairedNodeId: v.far.node_id,
+        targetMapId: v.far.map_id,
+        kind: v.connection.kind,
+        name: v.connection.name,
+      };
+    }
+    if (node.interlayer_connection_id) {
+      const lc = legacyConnById[node.interlayer_connection_id];
+      if (lc) {
+        const pairedId = node.id === lc.from_node_id ? lc.to_node_id : lc.from_node_id;
+        const targetMapId = node.id === lc.from_node_id ? lc.to_layer_id : lc.from_layer_id;
+        return {
+          connection: lc,
+          pairedNodeId: pairedId,
+          targetMapId,
+          kind: lc.connection_type,
+          name: lc.name,
+        };
+      }
+    }
+    return null;
+  }, [connViewsByNode, legacyConnById]);
+
+  // Map switching: new-style onMapChange(mapId, nodeId?) wins; the old
+  // navigateToLayer / onLayerChange props keep working as aliases.
+  const canNavigate = !!(onMapChange || navigateToLayer || onLayerChange);
+  const changeMap = useCallback((mapId, nodeId) => {
+    if (onMapChange) {
+      onMapChange(mapId, nodeId);
+      return;
+    }
+    if (nodeId != null && navigateToLayer) {
+      navigateToLayer(mapId, nodeId);
+      return;
+    }
+    onLayerChange?.(mapId);
+  }, [onMapChange, navigateToLayer, onLayerChange]);
+
+  // Tab strip: the current map's "family" — root + parallel siblings (maps
+  // not anchored to a node), plus the active map when it's a child.
+  const tabMaps = useMemo(() => {
+    if (!normalized) return [];
+    const tops = Object.values(normalized.mapsById).filter((m) => m.anchor_node_id == null);
+    const root = normalized.mapsById[normalized.rootMapId];
+    if (root && !tops.some((m) => m.map_id === root.map_id)) tops.unshift(root);
+    if (activeMap && !tops.some((m) => m.map_id === activeMap.map_id)) tops.push(activeMap);
+    return tops;
+  }, [normalized, activeMap]);
+
+  const crumbs = useMemo(
+    () => (normalized && activeMap ? breadcrumb(normalized.mapsById, activeMap.map_id) : []),
+    [normalized, activeMap],
+  );
 
   // Reset viewBox when map data changes
   const defaultVB = useMemo(() => ({ x: 0, y: 0, w: mapLayout.viewW, h: mapLayout.viewH }), [mapLayout]);
@@ -330,7 +422,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
   // This must run (and be declared) before the focus-node effect below so a
   // simultaneous layer-change + focus-node jump doesn't get clobbered back
   // to the default view after the zoom is applied.
-  const mapIdentityKey = `${activeLayer?.layer_id || 'single'}:${activeNodes.length}`;
+  const mapIdentityKey = `${activeMap?.map_id || 'single'}:${activeNodes.length}`;
   const prevMapIdentityRef = useRef(null);
   useEffect(() => {
     if (prevMapIdentityRef.current !== mapIdentityKey) {
@@ -534,19 +626,19 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
   }, []);
 
   const handleDoubleClick = useCallback(() => {
-    if (hoveredNode && isInterlayerNode(hoveredNode) && navigateToLayer) {
-      const paired = getPairedConnection(hoveredNode);
-      if (paired) {
-        if (fogEnabled && !isNodeRevealed(paired.pairedNodeId)) {
+    if (hoveredNode && canNavigate) {
+      const conn = getNodeConnection(hoveredNode);
+      if (conn && conn.targetMapId) {
+        if (fogEnabled && !isNodeRevealed(conn.pairedNodeId)) {
           // Don't navigate if paired node is unrevealed
           return;
         }
-        navigateToLayer(paired.targetLayerId, paired.pairedNodeId);
+        changeMap(conn.targetMapId, conn.pairedNodeId);
         return;
       }
     }
     setViewBox(defaultVB);
-  }, [defaultVB, hoveredNode, navigateToLayer, getPairedConnection, fogEnabled, isNodeRevealed]);
+  }, [defaultVB, hoveredNode, canNavigate, changeMap, getNodeConnection, fogEnabled, isNodeRevealed]);
 
   const handleZoomButton = useCallback((dir) => {
     setViewBox((prev) => {
@@ -661,15 +753,35 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
         </div>
       </div>
 
-      {hasLayers && (
+      {hasMaps && crumbs.length > 1 && (
+        <div className="flex items-center gap-1 px-3 py-1 border-b border-gray-700 bg-gray-900/70 text-[10px] text-gray-500 whitespace-nowrap overflow-x-auto">
+          {crumbs.map((m, i) => (
+            <span key={m.map_id} className="flex items-center gap-1">
+              {i > 0 && <span className="text-gray-600">{'\u203A'}</span>}
+              {m.map_id === activeMap?.map_id ? (
+                <span className="text-purple-300">{m.label || m.map_id}</span>
+              ) : (
+                <button
+                  onClick={() => changeMap(m.map_id)}
+                  className="hover:text-gray-300 underline decoration-dotted"
+                >
+                  {m.label || m.map_id}
+                </button>
+              )}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {hasMaps && (
         <div className="flex gap-1 px-3 py-2 border-b border-gray-700 bg-gray-850 overflow-x-auto">
-          {layers.map((layer) => {
-            const isActive = layer.layer_id === (activeLayerId || layers[0]?.layer_id);
-            const icon = LAYER_ICONS[layer.layer_type] || '\u25CB';
+          {tabMaps.map((m) => {
+            const isActive = m.map_id === activeMap?.map_id;
+            const icon = LAYER_ICONS[m.level_type] || '\u25CB';
             return (
               <button
-                key={layer.layer_id}
-                onClick={() => onLayerChange?.(layer.layer_id)}
+                key={m.map_id}
+                onClick={() => changeMap(m.map_id)}
                 className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs whitespace-nowrap transition-colors ${
                   isActive
                     ? 'bg-purple-600/40 text-purple-200 border border-purple-500/50'
@@ -677,10 +789,10 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
                 }`}
               >
                 <span className="text-sm">{icon}</span>
-                {layer.name}
-                {layer.description && (
-                  <span className="text-gray-500 ml-1 hidden sm:inline truncate max-w-[120px]" title={layer.description}>
-                    &mdash; {layer.description.slice(0, 30)}
+                {m.label || m.map_id}
+                {m.description && (
+                  <span className="text-gray-500 ml-1 hidden sm:inline truncate max-w-[120px]" title={m.description}>
+                    &mdash; {m.description.slice(0, 30)}
                   </span>
                 )}
               </button>
@@ -850,7 +962,8 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
             const color = TYPE_COLORS[node.type] || '#6b7280';
             const isHovered = hoveredNode?.id === node.id;
             const isPopulated = !!node.name;
-            const isConn = isInterlayerNode(node);
+            const isConn = isConnectionNode(node);
+            const nodeConn = isConn ? getNodeConnection(node) : null;
             const revealed = isNodeRevealed(node.id);
 
             return (
@@ -858,9 +971,27 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
                 key={node.id}
                 onMouseEnter={() => { if (revealed) setHoveredNode(node); }}
                 onMouseLeave={() => setHoveredNode(null)}
-                onClick={() => { if (revealed) setSelectedNode(node); }}
+                onClick={() => {
+                  if (!revealed) return;
+                  // Clicking a connection glyph travels to the far map.
+                  if (nodeConn && nodeConn.targetMapId && nodeConn.targetMapId !== activeMap?.map_id
+                      && canNavigate && !(fogEnabled && !isNodeRevealed(nodeConn.pairedNodeId))) {
+                    changeMap(nodeConn.targetMapId, nodeConn.pairedNodeId);
+                    return;
+                  }
+                  setSelectedNode(node);
+                }}
                 style={{ cursor: revealed ? 'pointer' : 'default', opacity: revealed ? 1 : 0.08, transition: 'opacity 0.3s' }}
               >
+                {nodeConn && revealed && (
+                  <title>
+                    {`${nodeConn.name || node.name || 'Connection'} (${nodeConn.kind || 'link'})${
+                      nodeConn.targetMapId
+                        ? ` → ${normalized?.mapsById?.[nodeConn.targetMapId]?.label || nodeConn.targetMapId}`
+                        : ''
+                    }`}
+                  </title>
+                )}
                 {isPopulated && revealed && (
                   <circle
                     cx={sx(node.x)}
@@ -984,8 +1115,8 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
             <>
               <div className="flex items-center gap-2">
                 <span
-                  className={`inline-block flex-shrink-0 ${isInterlayerNode(selectedNode) ? 'rotate-45 w-2.5 h-2.5' : 'rounded-full w-2.5 h-2.5'}`}
-                  style={{ backgroundColor: isInterlayerNode(selectedNode) ? (CONNECTION_COLORS[selectedNode.type] || '#8b5cf6') : (TYPE_COLORS[selectedNode.type] || '#6b7280') }}
+                  className={`inline-block flex-shrink-0 ${isConnectionNode(selectedNode) ? 'rotate-45 w-2.5 h-2.5' : 'rounded-full w-2.5 h-2.5'}`}
+                  style={{ backgroundColor: isConnectionNode(selectedNode) ? (CONNECTION_COLORS[selectedNode.type] || '#8b5cf6') : (TYPE_COLORS[selectedNode.type] || '#6b7280') }}
                 />
                 <span className="text-sm font-medium text-gray-200">
                   {selectedNode.name || `Waypoint ${selectedNode.id}`}
@@ -1008,28 +1139,29 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
                 </p>
               )}
               {/* Connection link info */}
-              {isInterlayerNode(selectedNode) && (() => {
-                const paired = getPairedConnection(selectedNode);
-                if (!paired) return null;
-                const pairedNode = (Array.isArray(activeNodes) ? activeNodes : []).find((n) => n.id === paired.pairedNodeId);
-                const pairedName = pairedNode?.name || paired.pairedNodeId;
-                const isPairedRevealed = fogEnabled ? isNodeRevealed(paired.pairedNodeId) : true;
+              {isConnectionNode(selectedNode) && (() => {
+                const conn = getNodeConnection(selectedNode);
+                if (!conn) return null;
+                const pairedNode = (Array.isArray(activeNodes) ? activeNodes : []).find((n) => n.id === conn.pairedNodeId);
+                const pairedName = pairedNode?.name || conn.name || conn.pairedNodeId;
+                const targetLabel = normalized?.mapsById?.[conn.targetMapId]?.label || conn.targetMapId;
+                const isPairedRevealed = fogEnabled ? isNodeRevealed(conn.pairedNodeId) : true;
                 return (
                   <div className="flex items-center gap-2 mt-1 pt-1 border-t border-gray-700/50">
                     <span className="text-[10px] text-purple-400 font-medium">
-                      Connects to: {paired.targetLayerId}
+                      Connects to: {targetLabel}
                     </span>
                     <span className="text-xs text-gray-500">
-                      — {pairedName} ({paired.connection.connection_type})
+                      — {pairedName} ({conn.kind})
                     </span>
                     {!isPairedRevealed && (
                       <span className="text-[10px] text-gray-600 italic">unrevealed</span>
                     )}
-                    {navigateToLayer && isPairedRevealed && (
+                    {canNavigate && isPairedRevealed && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          navigateToLayer(paired.targetLayerId, paired.pairedNodeId);
+                          changeMap(conn.targetMapId, conn.pairedNodeId);
                         }}
                         className="text-[9px] text-purple-400 hover:text-purple-300 underline ml-1"
                       >

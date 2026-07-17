@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { api } from 'api';
 import MapRenderer from './WorldBuilder/MapRenderer';
+import { normalizeWorldData, breadcrumb } from './lib/mapspace';
 
 // Node types whose interiors can be expanded into districts/venues (mirrors
 // the backend's expandable set).
@@ -12,7 +13,9 @@ const EXPANDABLE_TYPES = new Set(['city', 'settlement', 'port', 'stronghold']);
 export default function GameMapOverlay({ state = {} }) {
   const worldData = state.world_data;
   const playerNodeId = state.player_location_node_id;
-  const playerLayerId = state.player_location_layer_id;
+  // v2 sessions track the player's map id; older saves still carry a layer id
+  // (map ids are layer ids for migrated worlds, so the fallback is lossless).
+  const playerMapId = state.player_location_map_id || state.player_location_layer_id;
   const revealedNodeIds = state.revealed_node_ids || [];
   // Gradual travel: while the player is between nodes, wb_worldgen keeps a
   // journey record in its module_data; the renderer shows the marker mid-edge.
@@ -27,19 +30,26 @@ export default function GameMapOverlay({ state = {} }) {
   }, [travel]);
 
   const [open, setOpen] = useState(false);
-  const [activeLayerId, setActiveLayerId] = useState(null);
+  const [activeMapId, setActiveMapId] = useState(null);
   const [focusNodeId, setFocusNodeId] = useState(null);
   const [expanding, setExpanding] = useState(false);
   const [localSite, setLocalSite] = useState(null); // freshly expanded, pre-refresh
 
-  // The player's current node + its interior (if expanded).
+  // One shared normalizer handles both world_format 2 (`maps`/`connections`)
+  // and legacy (`map_layers`/`map`) payloads.
+  const { mapsById, rootMapId, connections } = useMemo(
+    () => normalizeWorldData(worldData),
+    [worldData],
+  );
+  const hasMaps = Object.keys(mapsById).length > 0;
+
+  // The player's current node + its interior (if expanded). Node ids are
+  // globally unique, so search every map's nodes.
   const playerNode = useMemo(() => {
-    if (!worldData) return null;
-    const nodes = worldData.map_layers
-      ? worldData.map_layers.flatMap((l) => l.map?.nodes || [])
-      : worldData.map?.nodes || [];
+    if (!hasMaps) return null;
+    const nodes = Object.values(mapsById).flatMap((m) => m.nodes || []);
     return nodes.find((n) => n.id === playerNodeId) || null;
-  }, [worldData, playerNodeId]);
+  }, [hasMaps, mapsById, playerNodeId]);
 
   const site = localSite?.parent_node_id === playerNodeId
     ? localSite
@@ -64,36 +74,25 @@ export default function GameMapOverlay({ state = {} }) {
     }
   };
 
-  // Set initial layer from player or first layer
+  // Seed the visible map from the player's map, falling back to the root.
   useEffect(() => {
-    if (worldData?.map_layers && !activeLayerId) {
-      setActiveLayerId(playerLayerId || worldData.map_layers[0]?.layer_id);
+    if (hasMaps && !activeMapId) {
+      setActiveMapId((playerMapId && mapsById[playerMapId] && playerMapId) || rootMapId);
     }
-  }, [worldData, playerLayerId]);
+  }, [hasMaps, mapsById, playerMapId, rootMapId, activeMapId]);
 
-  const navigateToLayer = (targetLayerId, nodeId) => {
-    setActiveLayerId(targetLayerId);
-    setFocusNodeId(nodeId);
-    setTimeout(() => setFocusNodeId(null), 4000);
+  const handleMapChange = (targetMapId, nodeId) => {
+    setActiveMapId(targetMapId);
+    if (nodeId) {
+      setFocusNodeId(nodeId);
+      setTimeout(() => setFocusNodeId(null), 4000);
+    }
   };
 
-  const mapData = useMemo(() => {
-    if (!worldData) return null;
-    if (worldData.map_layers) {
-      return {
-        layers: worldData.map_layers,
-        connections: worldData.map_connections,
-        config: worldData.map_layers[0]?.map?.config || {},
-      };
-    }
-    return {
-      nodes: worldData.map?.nodes,
-      edges: worldData.map?.edges,
-      regions: worldData.map?.regions,
-      roads: worldData.map?.roads,
-      config: worldData.map?.config,
-    };
-  }, [worldData]);
+  const crumbs = useMemo(
+    () => (activeMapId ? breadcrumb(mapsById, activeMapId) : []),
+    [mapsById, activeMapId],
+  );
 
   const worldId = worldData?.world_id || worldData?.id || null;
 
@@ -115,7 +114,14 @@ export default function GameMapOverlay({ state = {} }) {
       ) : (
         <div className="bg-gray-900/95 border border-gray-700 rounded-xl shadow-2xl overflow-hidden" style={{ width: 360 }}>
           <div className="flex items-center justify-between px-3 py-2 bg-gray-800/80 border-b border-gray-700">
-            <span className="text-xs text-gray-400 font-medium">World Map</span>
+            <span className="text-xs text-gray-400 font-medium">
+              World Map
+              {crumbs.length > 1 && (
+                <span className="text-gray-500 font-normal ml-2">
+                  {crumbs.map((m) => m.label || m.map_id).join(' › ')}
+                </span>
+              )}
+            </span>
             <button
               onClick={() => setOpen(false)}
               className="text-gray-500 hover:text-gray-300 text-sm"
@@ -124,13 +130,15 @@ export default function GameMapOverlay({ state = {} }) {
             </button>
           </div>
           <div className="h-[268px] w-full">
-            {mapData && (
+            {hasMaps && (
               <MapRenderer
-                {...mapData}
+                mapsById={mapsById}
+                connections={connections}
+                rootMapId={rootMapId}
                 worldId={worldId}
-                activeLayerId={activeLayerId}
-                onLayerChange={setActiveLayerId}
-                navigateToLayer={navigateToLayer}
+                activeMapId={activeMapId}
+                onMapChange={handleMapChange}
+                playerMapId={playerMapId}
                 focusNodeId={focusNodeId}
                 playerTravel={playerTravel}
                 fogOfWar={{

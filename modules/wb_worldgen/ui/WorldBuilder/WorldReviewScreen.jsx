@@ -1,12 +1,17 @@
 import { useState, useEffect } from 'react';
 import { api } from 'api';
 import StepCard from './StepCard';
+import { normalizeWorldData } from '../lib/mapspace';
 
 const EXPANDABLE_TYPES = new Set(['city', 'settlement', 'port', 'stronghold']);
 
 function _mapNodes(mapData) {
   if (!mapData) return [];
-  if (mapData.layers) return mapData.layers.flatMap((l) => l.map?.nodes || []);
+  // Layered/v2 shapes go through the shared normalizer; a flat step payload
+  // just exposes its nodes directly.
+  const { mapsById } = normalizeWorldData(mapData);
+  const maps = Object.values(mapsById);
+  if (maps.length) return maps.flatMap((m) => m.nodes || []);
   return mapData.nodes || [];
 }
 

@@ -133,6 +133,7 @@ function AppContent() {
       turn: state.turn,
       world_data: state.world_data,
       player_location_node_id: state.player_location_node_id ?? prev.player_location_node_id,
+      player_location_map_id: state.player_location_map_id ?? prev.player_location_map_id,
       player_location_layer_id: state.player_location_layer_id ?? prev.player_location_layer_id,
       revealed_node_ids: state.revealed_node_ids ?? prev.revealed_node_ids ?? [],
     }));

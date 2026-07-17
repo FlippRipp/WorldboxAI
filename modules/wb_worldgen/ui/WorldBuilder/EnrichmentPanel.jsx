@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { api } from 'api';
+import { normalizeWorldData } from '../lib/mapspace';
 
 function ProgressBar({ filled, total, label }) {
   const pct = total > 0 ? Math.round((filled / total) * 100) : 0;
@@ -57,7 +58,20 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldI
   const totalLabeled = progress?.total_labeled || progress?.total_described || 0;
   const remaining = totalNodes - totalLabeled;
 
-  const layers = data?.layers || [];
+  // Map/layer list for the filter dropdown and progress labels. `per_layer`
+  // keys are map ids in world_format 2 (e.g. "root") and layer ids in legacy
+  // data, so everything below iterates keys generically and only uses this
+  // list for human-readable labels.
+  const normalizedMaps = useMemo(() => normalizeWorldData(data), [data]);
+  const mapList = useMemo(() => {
+    const fromMaps = Object.values(normalizedMaps.mapsById)
+      .map((m) => ({ id: m.map_id, label: m.label || m.map_id }));
+    if (fromMaps.length) return fromMaps;
+    // Legacy layer metadata without embedded maps.
+    return (Array.isArray(data?.layers) ? data.layers : [])
+      .map((l) => ({ id: l.layer_id, label: l.name || l.layer_id }));
+  }, [normalizedMaps, data]);
+  const labelFor = (id) => mapList.find((m) => m.id === id)?.label || id;
   const isComplete = !reworkMode && remaining <= 0 && totalNodes > 0;
   const reworkAvailable = totalLabeled > 0;
   const genCap = reworkMode ? (totalLabeled || 1) : (remaining || 1);
@@ -183,25 +197,16 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldI
           );
         })()}
 
-        {layers.length > 0 && layers.map((layer) => {
-          const lp = perLayer[layer.layer_id] || { done: 0, total: 0 };
-          return (
-            <ProgressBar
-              key={layer.layer_id}
-              filled={lp.done || 0}
-              total={lp.total || 0}
-              label={layer.name}
-            />
-          );
-        })}
+        {Object.entries(perLayer).map(([mid, lp]) => (
+          <ProgressBar
+            key={mid}
+            filled={lp.done || 0}
+            total={lp.total || 0}
+            label={labelFor(mid)}
+          />
+        ))}
 
-        {!layers.length && Object.entries(perLayer).length > 0 &&
-          Object.entries(perLayer).map(([lid, lp]) => (
-            <ProgressBar key={lid} filled={lp.done || 0} total={lp.total || 0} label={lid} />
-          ))
-        }
-
-        {!layers.length && Object.keys(perLayer).length === 0 && totalNodes > 0 && (
+        {Object.keys(perLayer).length === 0 && totalNodes > 0 && (
           <ProgressBar filled={totalLabeled} total={totalNodes} label="Total" />
         )}
       </div>
@@ -250,9 +255,9 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldI
             />
           </div>
 
-          {layers.length > 0 && (
+          {mapList.length > 0 && (
             <div className="flex items-center gap-2">
-              <label className="text-xs text-gray-400">Layer:</label>
+              <label className="text-xs text-gray-400">Map:</label>
               <select
                 value={layerFilter}
                 onChange={(e) => {
@@ -264,9 +269,9 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldI
                 disabled={enriching || parentLoading}
                 className="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200"
               >
-                <option value="">All layers</option>
-                {layers.map((l) => (
-                  <option key={l.layer_id} value={l.layer_id}>{l.name}</option>
+                <option value="">All maps</option>
+                {mapList.map((m) => (
+                  <option key={m.id} value={m.id}>{m.label}</option>
                 ))}
               </select>
             </div>

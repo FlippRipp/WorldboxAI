@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import MapRenderer from '../MapRenderer';
 import EnrichmentPanel from '../EnrichmentPanel';
+import { normalizeWorldData } from '../../lib/mapspace';
 
 /**
  * EnrichmentStepView — body for incremental node enrichment steps
@@ -21,13 +22,17 @@ export default function EnrichmentStepView({
   onEnrich,
   onEnrichCommit,
 }) {
-  const [activeLayerId, setActiveLayerId] = useState(null);
+  const [activeMapId, setActiveMapId] = useState(null);
   const [focusNodeId, setFocusNodeId] = useState(null);
   const [liveLabels, setLiveLabels] = useState({});
   const [liveDescriptions, setLiveDescriptions] = useState({});
   const [liveLabelDescs, setLiveLabelDescs] = useState({});
 
+  // Legacy (layers/nodes) or world_format 2 (maps) — the normalizer handles
+  // both, since step data stays legacy-shaped during world building.
   const mapSourceData = worldState?.steps?.map_generation?.data;
+  const normalized = useMemo(() => normalizeWorldData(mapSourceData), [mapSourceData]);
+  const hasMaps = Object.keys(normalized.mapsById).length > 0;
 
   useEffect(() => {
     setLiveLabels({});
@@ -37,10 +42,10 @@ export default function EnrichmentStepView({
   }, [state?.data]);
 
   useEffect(() => {
-    if (mapSourceData?.layers?.length > 0 && !activeLayerId) {
-      setActiveLayerId(mapSourceData.layers[0].layer_id);
+    if (hasMaps && !activeMapId) {
+      setActiveMapId(normalized.rootMapId);
     }
-  }, [mapSourceData, activeLayerId]);
+  }, [hasMaps, normalized, activeMapId]);
 
   const handleEnrichResult = (result) => {
     if (result.node_id && result.label) {
@@ -54,71 +59,59 @@ export default function EnrichmentStepView({
     }
   };
 
-  const navigateToLayer = (targetLayerId, nodeId) => {
-    setActiveLayerId(targetLayerId);
-    setFocusNodeId(nodeId);
-    setTimeout(() => setFocusNodeId(null), 4000);
+  const handleMapChange = (targetMapId, nodeId) => {
+    setActiveMapId(targetMapId);
+    if (nodeId) {
+      setFocusNodeId(nodeId);
+      setTimeout(() => setFocusNodeId(null), 4000);
+    }
   };
 
-  const getEnrichedMapData = () => {
-    const source = mapSourceData;
-    if (!source) return null;
-    const hasLiveL = Object.keys(liveLabels).length > 0;
-    const hasLiveD = Object.keys(liveDescriptions).length > 0;
-    if (!hasLiveL && !hasLiveD) return source;
+  // Live-merge in-progress enrichment results into the normalized maps.
+  const mergeInto = (nodes) =>
+    (nodes || []).map((n) => ({
+      ...n,
+      name: liveLabels[n.id] || n.name,
+      label_description: liveLabelDescs[n.id] || n.label_description,
+      description: liveDescriptions[n.id] || n.description,
+    }));
 
-    const mergeInto = (nodes) =>
-      nodes.map((n) => ({
-        ...n,
-        name: liveLabels[n.id] || n.name,
-        label_description: liveLabelDescs[n.id] || n.label_description,
-        description: liveDescriptions[n.id] || n.description,
-      }));
-
-    if (source.layers) {
-      return {
-        ...source,
-        layers: source.layers.map((layer) => ({
-          ...layer,
-          map: {
-            ...layer.map,
-            nodes: mergeInto(layer.map?.nodes || []),
-          },
-        })),
-      };
-    }
-    if (source.nodes) {
-      return { ...source, nodes: mergeInto(source.nodes) };
-    }
-    return source;
+  const getEnrichedMapsById = () => {
+    const hasLive = Object.keys(liveLabels).length > 0
+      || Object.keys(liveDescriptions).length > 0
+      || Object.keys(liveLabelDescs).length > 0;
+    if (!hasLive) return normalized.mapsById;
+    const out = {};
+    Object.entries(normalized.mapsById).forEach(([id, m]) => {
+      out[id] = { ...m, nodes: mergeInto(m.nodes) };
+    });
+    return out;
   };
 
-  const enriched = getEnrichedMapData();
-  const hasMapData = mapSourceData && (mapSourceData.nodes || mapSourceData.layers);
+  const hasMapData = mapSourceData && (mapSourceData.nodes || hasMaps);
 
   return (
     <div className="space-y-4">
       {hasMapData && (
         <div className="pt-2">
-          {enriched.layers ? (
+          {hasMaps ? (
             <MapRenderer
-              layers={enriched.layers}
-              connections={enriched.connections}
-              activeLayerId={activeLayerId}
-              onLayerChange={setActiveLayerId}
-              config={enriched.config}
-              navigateToLayer={navigateToLayer}
+              mapsById={getEnrichedMapsById()}
+              connections={normalized.connections}
+              rootMapId={normalized.rootMapId}
+              activeMapId={activeMapId}
+              onMapChange={handleMapChange}
               focusNodeId={focusNodeId}
               worldId={worldId}
             />
           ) : (
             <MapRenderer
-              nodes={enriched.nodes}
-              edges={enriched.edges}
-              regions={enriched.regions}
-              roads={enriched.roads}
-              config={enriched.config}
-              navigateToLayer={navigateToLayer}
+              nodes={mergeInto(mapSourceData.nodes)}
+              edges={mapSourceData.edges}
+              regions={mapSourceData.regions}
+              roads={mapSourceData.roads}
+              config={mapSourceData.config}
+              onMapChange={handleMapChange}
               focusNodeId={focusNodeId}
               worldId={worldId}
             />
