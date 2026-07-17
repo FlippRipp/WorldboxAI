@@ -35,6 +35,33 @@ def test_list_saves_includes_display_metadata(session):
     assert autosave["last_played"]
 
 
+def test_create_save_with_spaces(session):
+    # Spaces in the typed name become underscores in the id (and thus on
+    # disk), while the display name keeps the spaces.
+    state = session.create_save("The Sunken City")
+    assert state["active_save_id"] == "The_Sunken_City"
+    assert state["active_display_name"] == "The Sunken City"
+    assert (session.data_dir / "saves" / "The_Sunken_City").exists()
+
+    saves = session.list_saves()
+    entry = next(s for s in saves if s["id"] == "The_Sunken_City")
+    assert entry["display_name"] == "The Sunken City"
+
+    # Truly invalid characters are still rejected.
+    with pytest.raises(ValueError):
+        session.create_save("bad/name")
+
+
+def test_display_name_falls_back_to_spaced_id(session):
+    # A save without display metadata (e.g. created before display names
+    # existed) is shown with its underscores as spaces.
+    session.create_save("old_style_save")
+    session.save_manager.update_metadata("old_style_save", {"display_name": None})
+    saves = session.list_saves()
+    entry = next(s for s in saves if s["id"] == "old_style_save")
+    assert entry["display_name"] == "old style save"
+
+
 def test_rename_save(session):
     result = session.rename_save("autosave", "  The Sunken City  ")
     assert result["display_name"] == "The Sunken City"

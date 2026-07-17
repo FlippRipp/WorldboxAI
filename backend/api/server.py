@@ -1114,6 +1114,10 @@ def _refuse_session_switch_mid_turn():
 async def create_save(request: CreateSaveRequest):
     _refuse_session_switch_mid_turn()
     try:
+        # The typed story name may contain spaces; everything below (save
+        # creation, scenario copy, lorebook links, world provider) must use
+        # the underscored filesystem id.
+        request.save_id = session_manager.derive_save_id(request.save_id)
         player_location_node_id = None
         player_location_region = None
         player_location_layer_id = None

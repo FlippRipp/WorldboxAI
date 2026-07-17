@@ -439,6 +439,7 @@ async def compile_world(body: dict = None, session_id: str = "default"):
     compiled = world_builder.compile_world(state)
 
     if save_id:
+        save_id = session_manager.derive_save_id(save_id)
         session_manager.create_save(save_id)
         save_workspace = session_manager.data_dir / "saves" / save_id
         world_dir = save_workspace / "World"

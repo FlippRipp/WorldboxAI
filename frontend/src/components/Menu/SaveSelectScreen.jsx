@@ -144,6 +144,9 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
     });
   };
 
+  const saveLabel = (saveId) =>
+    saves.find((s) => s.id === saveId)?.display_name || saveId;
+
   const handleLoad = async (saveId) => {
     setLoadingSave(saveId);
     setListError(null);
@@ -153,19 +156,19 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
       const data = await api.loadSave(saveId);
       onLoad(saveId, data?.state);
     } catch (e) {
-      setListError(`Failed to load "${saveId}": ${e.message}`);
+      setListError(`Failed to load "${saveLabel(saveId)}": ${e.message}`);
     }
     setLoadingSave(null);
   };
 
   const handleDelete = async (saveId) => {
-    if (!window.confirm(`Delete "${saveId}"? This cannot be undone.`)) return;
+    if (!window.confirm(`Delete "${saveLabel(saveId)}"? This cannot be undone.`)) return;
     setListError(null);
     try {
       await api.deleteSave(saveId);
       setSaves(prev => prev.filter(s => s.id !== saveId));
     } catch (e) {
-      setListError(`Failed to delete "${saveId}": ${e.message}`);
+      setListError(`Failed to delete "${saveLabel(saveId)}": ${e.message}`);
     }
   };
 
@@ -276,7 +279,9 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
         plotLikes: enabledModules.has('wb_plot_director') ? (plotLikes.trim() || null) : null,
         plotDislikes: enabledModules.has('wb_plot_director') ? (plotDislikes.trim() || null) : null,
       });
-      onLoad(name);
+      // The backend turns spaces into underscores for the save id; mirror
+      // that here so the id we hand over matches the created save.
+      onLoad(name.replace(/\s+/g, '_'));
     } catch (e) {
       setCreateError(`Failed to create save: ${e.message}`);
       creatingRef.current = false;
@@ -407,7 +412,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                 <input
                   value={newName}
                   onChange={e => setNewName(e.target.value)}
-                  placeholder="my_story"
+                  placeholder="My Story"
                   onKeyDown={e => { if (e.key === 'Enter') handleCreate(); }}
                   className="flex-1 min-h-[44px] bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500"
                   aria-label="New save name"

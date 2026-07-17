@@ -17,9 +17,13 @@ export default function Sidebar({
       </div>
 
       <div className="p-3 bg-gray-900/70 rounded-md border border-gray-700 text-xs space-y-2">
-        <div className="flex justify-between">
-          <span className="text-gray-500">Save</span>
-          <span className="text-gray-200 font-mono">{session.sessionState?.active_save_id || 'unknown'}</span>
+        <div className="flex justify-between gap-2">
+          <span className="text-gray-500">Story</span>
+          <span className="text-gray-200 truncate">
+            {session.sessionState?.active_display_name
+              || session.sessionState?.active_save_id?.replace(/_/g, ' ')
+              || 'unknown'}
+          </span>
         </div>
         <div className="flex justify-between">
           <span className="text-gray-500">Turn</span>

@@ -56,6 +56,7 @@ class GameSessionManager:
         Prompt Studio and previews work outside a story."""
         return {
             "active_save_id": None,
+            "active_display_name": None,
             "input_text": "",
             "module_data": {},
             "module_configs": {},
@@ -103,6 +104,19 @@ class GameSessionManager:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", save_id):
             raise ValueError("Save id may only contain letters, numbers, underscores, and hyphens.")
 
+    def derive_save_id(self, name: str) -> str:
+        """Turn a human story name into a filesystem-safe save id: runs of
+        whitespace become single underscores. Already-normalized ids pass
+        through unchanged, so this is safe to apply at every entry point."""
+        save_id = re.sub(r"\s+", "_", (name or "").strip())
+        self._validate_save_id(save_id)
+        return save_id
+
+    def _display_name_for(self, save_id: str) -> str:
+        """Fallback display name when metadata has none: the id with the
+        underscores shown as spaces again."""
+        return (save_id or "").replace("_", " ")
+
     def list_saves(self) -> list[dict[str, Any]]:
         saves_dir = self.data_dir / "saves"
         saves_dir.mkdir(parents=True, exist_ok=True)
@@ -126,7 +140,7 @@ class GameSessionManager:
                 "active": save_id == self.active_save_id,
                 "workspace_exists": workspace.exists(),
                 "archive_exists": archive.exists(),
-                "display_name": metadata.get("display_name") or save_id,
+                "display_name": metadata.get("display_name") or self._display_name_for(save_id),
                 "turn": metadata.get("turn", 0),
                 "last_played": metadata.get("last_played"),
             })
@@ -136,7 +150,9 @@ class GameSessionManager:
         return saves
 
     def create_save(self, save_id: str, world_id: str = None, player_location_node_id: str = None, player_location_region: str = None, player_location_layer_id: str = None, revealed_node_ids: list = None, character_module_data: dict = None, character_data: dict = None) -> dict[str, Any]:
-        self._validate_save_id(save_id)
+        # The name the player typed may contain spaces; the id (and thus all
+        # paths) uses underscores, while the display name keeps the spaces.
+        save_id = self.derive_save_id(save_id)
         saves_dir = self.data_dir / "saves"
         save_workspace = saves_dir / save_id
         save_archive = saves_dir / f"{save_id}.wbx"
@@ -145,6 +161,7 @@ class GameSessionManager:
 
         metadata = {
             "turn": 0,
+            "display_name": self._display_name_for(save_id),
         }
         if world_id:
             metadata["world_id"] = world_id
@@ -216,6 +233,7 @@ class GameSessionManager:
 
         state = {
             "active_save_id": self.active_save_id,
+            "active_display_name": metadata.get("display_name") or self._display_name_for(self.active_save_id),
             "input_text": "",
             "module_data": saved_state.get("module_data", {}),
             "module_configs": saved_state.get("module_configs", {}),
@@ -614,7 +632,7 @@ class GameSessionManager:
         source_path = self.save_manager._ensure_workspace(source_save_id)
 
         if new_save_id:
-            self._validate_save_id(new_save_id)
+            new_save_id = self.derive_save_id(new_save_id)
         else:
             new_save_id = self._next_branch_id(source_save_id)
         saves_dir = self.data_dir / "saves"
@@ -722,6 +740,7 @@ class GameSessionManager:
         if not self.active_save_id:
             return {
                 "active_save_id": None,
+                "active_display_name": None,
                 "state_backend": "save_backed_session",
                 "turn": 0,
                 "history_length": 0,
@@ -732,8 +751,10 @@ class GameSessionManager:
             }
         save_workspace = self.data_dir / "saves" / self.active_save_id
         save_archive = self.data_dir / "saves" / f"{self.active_save_id}.wbx"
+        metadata = self.save_manager.read_core_json(self.active_save_id, "metadata.json", {}) or {}
         return {
             "active_save_id": self.active_save_id,
+            "active_display_name": metadata.get("display_name") or self._display_name_for(self.active_save_id),
             "state_backend": "save_backed_session",
             "turn": self.state.get("turn", 0),
             "history_length": len(self.state.get("history", [])),
