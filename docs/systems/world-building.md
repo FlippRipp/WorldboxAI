@@ -1,5 +1,21 @@
 # WorldBox World Building System — Design Document
 
+> **Implementation note (kept current).** The shipped pipeline differs from
+> this original design in two ways. (1) The step list is now: `world_form`
+> (World Design) → `world_rules` → `lore` → `hierarchy_design` →
+> `terrain_generation` → `natural_landmarks` → `society_factions` →
+> `map_generation` → enrichment (`node_labeling`, `node_descriptions`); there
+> is no Key Characters stage, and regions were deprecated
+> (`docs/systems/DEPRECATED_regions.md`). (2) The pipeline is **AI-shaped**:
+> the first step, `world_form`, reads the seed prompt and decides per world
+> whether procedural terrain runs at all (`map_style` terrain/abstract),
+> which optional steps to skip, and what every generic step should cover for
+> THIS world (a modern city's "Origins" is its founding, not a creation myth;
+> its "Groups" are workplaces and circles, not armies). Templates are
+> optional hints (`ai_default`, the empty default, defers everything to the
+> AI). See `wbworldgen/worldgen/steps/world_form.py` and
+> `docs/systems/hierarchy.md`.
+
 ## Overview
 
 A core world building system that takes a user prompt and generates a complete roleplay world through an expanding cascade of AI-generated stages. Each stage inherits from the previous, and the user can stop, edit, re-roll, or approve at every level. The system is module-extendable — modules register new world aspects, generation logic, and gameplay context hooks.

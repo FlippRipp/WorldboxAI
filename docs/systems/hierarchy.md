@@ -90,6 +90,7 @@ A compiled world dict (`world_data`) carries:
 | Background backfill + expansion triggers | `wbruntime/backfill.py`, `wbruntime/expansion.py` |
 | Session/save/RAG sync | `wbruntime/sync.py` |
 | Pipeline step for structure | `wbworldgen/worldgen/steps/hierarchy_design.py` |
+| World design (AI-shaped pipeline: map_style, skips, per-step directives) | `wbworldgen/worldgen/steps/world_form.py` |
 | Scope-attached landmarks/factions | `compiler.collect_scope_content` / `attach_scope_content` |
 | Frontend normalizer | `modules/wb_worldgen/ui/lib/mapspace.jsx` |
 
@@ -99,8 +100,10 @@ A compiled world dict (`world_data`) carries:
   `MapGeneratorSpec` in `generation/registry.py`; add it to a template
   level's `generator_id`. To make it usable for *child* expansion, widen the
   filter in `maps_expand.allowed_child_levels`.
-- **New genre/scale**: one JSON file in `data/world_templates/` (levels,
-  framing, vocabulary, overrides). No code.
+- **New genre/scale**: usually nothing — the `world_form` step reads the seed
+  prompt and shapes the pipeline per world (terrain vs abstract map, optional
+  steps, per-step coverage directives). For a reusable preset, one JSON file
+  in `data/world_templates/` (levels, framing, vocabulary, overrides). No code.
 - **New level type**: template text only.
 - **New connection kind**: data only — write it into a connection record or a
   template's `connection_looks` vocabulary.
