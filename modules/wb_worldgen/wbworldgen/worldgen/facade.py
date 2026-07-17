@@ -60,6 +60,53 @@ def scenario_grounding_text(scenario: dict) -> str:
     return "\n\n".join(parts)
 
 
+def build_world_prompt_messages(instruction: str, current_text: str = "",
+                                scenario: dict | None = None) -> list[dict]:
+    """LLM messages for writing a world SEED PROMPT from the player's notes.
+
+    The player types free-form direction (the enrich field) and optionally has
+    a draft prompt and/or a linked scenario; the model turns them into a
+    concise seed prompt — the creative direction the generator expands into
+    rules, lore and a map, NOT the world itself and NOT in-fiction narration.
+    Pure (no I/O) so it is unit-testable; the route feeds the result to the
+    LLM. Mirrors the scenario editor's prompt-rewrite framing.
+    """
+    system = (
+        "You are a world-building assistant that writes the SEED PROMPT for an AI "
+        "world generator. A seed prompt is a short, vivid paragraph of creative "
+        "direction — premise, setting, tone, and any defining features — that the "
+        "generator expands into a full world (rules, lore, regions, a map). It is "
+        "NOT the world itself and NOT in-fiction narration: write it as direction "
+        "for the generator, in plain descriptive prose, a few sentences long. "
+        'Return only valid JSON: {"text": "..."}.'
+    )
+    parts = []
+    grounding = scenario_grounding_text(scenario) if scenario else ""
+    if grounding:
+        parts.append(
+            "The world must fit this scenario the player has chosen — honor its "
+            "setting, situation, names and tone:\n"
+            f"<scenario>\n{grounding}\n</scenario>")
+    current_text = (current_text or "").strip()
+    if current_text:
+        parts.append(f"<current_world_prompt>\n{current_text}\n</current_world_prompt>")
+    else:
+        parts.append("<current_world_prompt>\n(empty — write a new seed prompt from scratch)\n</current_world_prompt>")
+    instr = (instruction or "").strip()
+    parts.append(
+        "<direction>\n"
+        + (instr or "Write a fitting world seed prompt from the scenario above.")
+        + "\n</direction>")
+    parts.append(
+        "Write or revise the world seed prompt to follow the direction, building on "
+        "the current prompt when present and grounding everything in the scenario "
+        "when one is given. Return only the seed prompt text.")
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": "\n\n".join(parts)},
+    ]
+
+
 def seed_with_scenario(world_state: dict, user_prompt: str) -> str:
     """The effective seed text for generation: the user's prompt, plus the
     optional scenario document supplied at world creation.

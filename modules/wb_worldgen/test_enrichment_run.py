@@ -469,3 +469,38 @@ def test_generating_flag_visible_to_polling_clients():
         world_routes.world_builder = old_builder
         world_routes.world_gen_sessions.pop("gen_flag", None)
         world_routes.world_gen_sessions.pop("gen_flag_all", None)
+
+
+# ---------------------------------------------------------------------------
+# Route: LLM-as-author world prompt rewrite
+# ---------------------------------------------------------------------------
+
+def test_rewrite_world_prompt_route():
+    import routes as world_routes
+
+    captured = {}
+
+    async def fake_completion(messages, model=None, response_format=None, inspector_ctx=None):
+        captured["messages"] = messages
+        captured["model"] = model
+        return json.dumps({"text": "A drowned city of rival guilds."})
+
+    fake_engine = types.SimpleNamespace(
+        llm=types.SimpleNamespace(storyteller_model="fake/model",
+                                  simple_completion=fake_completion))
+    old_engine = world_routes.engine
+    world_routes.engine = fake_engine
+    try:
+        resp = asyncio.run(world_routes.rewrite_world_prompt(
+            world_routes.RewriteWorldPromptRequest(instruction="a drowned city")))
+        assert resp["text"] == "A drowned city of rival guilds."
+        assert captured["model"] == "fake/model"
+        assert "a drowned city" in captured["messages"][1]["content"]
+
+        # Nothing to work from → 400, no LLM call.
+        with pytest.raises(Exception) as exc:
+            asyncio.run(world_routes.rewrite_world_prompt(
+                world_routes.RewriteWorldPromptRequest()))
+        assert getattr(exc.value, "status_code", None) == 400
+    finally:
+        world_routes.engine = old_engine

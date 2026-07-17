@@ -217,6 +217,59 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
     return {"state": state, "current_step": first_step}
 
 
+class RewriteWorldPromptRequest(BaseModel):
+    #: The player's free-form direction typed into the enrich field.
+    instruction: str = ""
+    #: The current World Prompt draft, if any (built on when present).
+    current_text: Optional[str] = None
+    #: Optional linked scenario for grounding (same store as world creation).
+    scenario_id: Optional[str] = None
+
+
+@router.post("/api/world/rewrite-prompt")
+async def rewrite_world_prompt(request: RewriteWorldPromptRequest):
+    """LLM-as-author for the World Prompt: turns the player's notes (the enrich
+    field), the current draft, and an optional linked scenario into a world
+    seed prompt. Mirrors the scenario editor's prompt rewrite."""
+    from wbworldgen.worldgen.facade import build_world_prompt_messages
+    try:
+        from backend.engine.llm import LLMProviderError
+    except ImportError:  # isolated module-test context: core pkg not on path
+        LLMProviderError = RuntimeError
+
+    instruction = (request.instruction or "").strip()
+    current_text = (request.current_text or "").strip()
+
+    scenario = None
+    if request.scenario_id:
+        from backend.engine.scenario import ScenarioStore
+        try:
+            scenario = ScenarioStore(session_manager.data_dir).load_scenario(request.scenario_id)
+        except (FileNotFoundError, ValueError):
+            raise HTTPException(status_code=404, detail=f"Scenario '{request.scenario_id}' not found.")
+
+    if not instruction and not current_text and scenario is None:
+        raise HTTPException(status_code=400,
+                            detail="Enter some direction or link a scenario to write a world prompt.")
+
+    messages = build_world_prompt_messages(instruction, current_text, scenario)
+    try:
+        content = await engine.llm.simple_completion(
+            messages,
+            model=engine.llm.storyteller_model,
+            response_format={"type": "json_object"},
+            inspector_ctx={"call_type": "world_prompt_rewrite", "step": "world_build:seed_prompt"},
+        )
+        text = str(json.loads(content).get("text") or "").strip()
+    except LLMProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=502, detail=f"World prompt rewrite returned unusable output: {exc}")
+    if not text:
+        raise HTTPException(status_code=502, detail="World prompt rewrite returned no text.")
+    return {"text": text}
+
+
 @router.post("/api/world/generate-step/{step_id}")
 async def generate_world_step(step_id: str, body: dict = None, session_id: str = "default"):
     state = _get_world_state(session_id)

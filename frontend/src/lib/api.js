@@ -167,6 +167,9 @@ export const api = {
   // World Builder
   getWorldPipeline:       (templateId = null) => request(`/api/world/pipeline${templateId ? `?template_id=${encodeURIComponent(templateId)}` : ''}`),
   generateWorld:          (seedPrompt, skipReview = false, templateId = null, scenarioId = null) => request('/api/world/generate', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, skip_review: skipReview, ...(templateId ? { template_id: templateId } : {}), ...(scenarioId ? { scenario_id: scenarioId } : {}) }) }),
+  // LLM-as-author: write/rewrite the World Prompt from the player's notes
+  // (instruction), the current draft, and an optional linked scenario.
+  rewriteWorldPrompt:     ({ instruction = '', currentText = null, scenarioId = null }) => request('/api/world/rewrite-prompt', { method: 'POST', body: JSON.stringify({ instruction, current_text: currentText, scenario_id: scenarioId }) }),
   getWorldTemplates:      () => request('/api/world/templates'),
   generateWorldStep:      (stepId, note = '', data = null) => {
     const body = { note };

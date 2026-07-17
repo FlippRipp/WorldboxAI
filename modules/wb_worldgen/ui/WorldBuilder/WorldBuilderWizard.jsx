@@ -28,6 +28,97 @@ function AutoTextarea({ value, onChange, disabled, minRows = 3, placeholder }) {
   );
 }
 
+// The World Prompt textarea plus an "AI write" button that turns the player's
+// notes (and the linked scenario, if any) into a full seed prompt — the same
+// LLM-as-author pattern as the scenario editor's prompt rewrite. `onChange`
+// takes the new string directly.
+function WorldPromptField({ value, onChange, disabled, scenarioId }) {
+  const [open, setOpen] = useState(false);
+  const [instruction, setInstruction] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const runEnrich = async () => {
+    if (busy) return;
+    const instr = instruction.trim();
+    const hasDraft = !!(value || '').trim();
+    if (!instr && !hasDraft && !scenarioId) {
+      setError('Jot down some direction, or link a scenario first.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const res = await api.rewriteWorldPrompt({
+        instruction: instr,
+        currentText: (value || '').trim() || null,
+        scenarioId: scenarioId || null,
+      });
+      onChange(res.text);
+      setInstruction('');
+      setOpen(false);
+    } catch (e) {
+      setError(e.message || 'AI write failed.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-2 mb-2">
+        <label className="block text-sm font-medium text-gray-400">World Prompt</label>
+        <button
+          type="button"
+          onClick={() => { setOpen((v) => !v); setError(''); }}
+          disabled={disabled}
+          title="Let the AI write a world prompt from your notes and the linked scenario"
+          className={`shrink-0 px-2 py-1 rounded text-xs border transition-colors disabled:opacity-50 ${
+            open
+              ? 'border-purple-500 text-purple-300 bg-purple-900/30'
+              : 'border-gray-700 text-gray-400 hover:bg-gray-700'
+          }`}
+        >
+          ✨ AI write
+        </button>
+      </div>
+      <AutoTextarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="e.g. A post-apocalyptic Earth where fungi have evolved sentience and built civilizations beneath the surface..."
+        disabled={disabled}
+      />
+      {open && (
+        <div className="mt-2 rounded-lg border border-purple-800/50 bg-purple-950/20 p-3 space-y-2">
+          <p className="text-xs text-gray-400">
+            Jot down your ideas and the AI turns them — together with the linked scenario, if any —
+            into a full world prompt above. Leave blank to draft purely from the scenario.
+          </p>
+          <div className="flex items-center gap-2">
+            <input
+              value={instruction}
+              onChange={(e) => setInstruction(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); runEnrich(); } }}
+              disabled={disabled || busy}
+              placeholder='e.g. "a drowned city ruled by three rival guilds"'
+              className="flex-1 px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-purple-500"
+            />
+            <button
+              type="button"
+              onClick={runEnrich}
+              disabled={disabled || busy}
+              className="shrink-0 px-3 py-1.5 rounded-lg text-xs bg-purple-700 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed text-white transition-colors"
+            >
+              {busy ? 'Writing…' : 'Write'}
+            </button>
+          </div>
+          {error && <p className="text-xs text-red-400">{error}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
   const [pipeline, setPipeline] = useState([]);
   const [worldState, setWorldState] = useState(null);
@@ -334,15 +425,12 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
               </div>
             )}
 
-            <div>
-              <label className="block text-sm font-medium text-gray-400 mb-2">World Prompt</label>
-              <AutoTextarea
-                value={seedPrompt}
-                onChange={(e) => setSeedPrompt(e.target.value)}
-                placeholder="e.g. A post-apocalyptic Earth where fungi have evolved sentience and built civilizations beneath the surface..."
-                disabled={loading}
-              />
-            </div>
+            <WorldPromptField
+              value={seedPrompt}
+              onChange={setSeedPrompt}
+              disabled={loading}
+              scenarioId={scenarioId}
+            />
 
             <div className="flex items-center gap-3">
               <label className="flex items-center gap-2 cursor-pointer">

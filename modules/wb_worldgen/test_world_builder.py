@@ -341,6 +341,32 @@ def test_generate_step_composes_scenario(builder):
     assert "Kharn-3" in captured["prompt"]
 
 
+def test_build_world_prompt_messages():
+    from wbworldgen.worldgen.facade import build_world_prompt_messages
+    # Direction + scenario: both appear; system frames a seed prompt.
+    msgs = build_world_prompt_messages(
+        "a drowned city ruled by rival guilds",
+        current_text="",
+        scenario={"name": "The Sunken Court", "scenario_description": "Water rising."},
+    )
+    assert msgs[0]["role"] == "system"
+    assert "SEED PROMPT" in msgs[0]["content"]
+    user = msgs[1]["content"]
+    assert "a drowned city ruled by rival guilds" in user
+    assert "The Sunken Court" in user
+    assert "Water rising." in user
+    assert "write a new seed prompt from scratch" in user
+
+    # Current draft is surfaced and the from-scratch note drops.
+    msgs2 = build_world_prompt_messages("darker", current_text="A bright kingdom.")
+    assert "A bright kingdom." in msgs2[1]["content"]
+    assert "from scratch" not in msgs2[1]["content"]
+
+    # Empty instruction with a scenario still yields a usable directive.
+    msgs3 = build_world_prompt_messages("", scenario={"name": "X"})
+    assert "seed prompt from the scenario" in msgs3[1]["content"]
+
+
 def test_compile_world_carries_scenario(builder_with_steps):
     wb = builder_with_steps
     with_scn = wb.compile_world({"steps": {}, "seed_prompt": "p", "scenario": "src material"})
