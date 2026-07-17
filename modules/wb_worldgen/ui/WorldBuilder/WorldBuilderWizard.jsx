@@ -58,24 +58,55 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
   }, [templateId]);
 
   useEffect(() => {
-    // Check for existing draft to resume
+    // Check for an existing draft (or a generation still running server-side)
+    // to resume. A relaunch while the very first step was generating has no
+    // steps yet — state._generating is what says there's something to return
+    // to; the poll effect below then follows the run to completion.
     api.getWorldState().then((data) => {
-      if (data.state?.steps && Object.keys(data.state.steps).length > 0) {
-        setWorldState(data.state);
+      const st = data.state;
+      if (st?.steps && (Object.keys(st.steps).length > 0 || st._generating)) {
+        setWorldState(st);
         setStarted(true);
-        if (data.state.template_id) {
-          setTemplateId(data.state.template_id);
+        setSkipReview(!!st.skip_review);
+        if (st.template_id) {
+          setTemplateId(st.template_id);
         }
-        if (data.state.steps?.lore?.data?.world_name) {
-          setSeedPrompt(data.state.seed_prompt || '');
+        if (st.steps?.lore?.data?.world_name) {
+          setSeedPrompt(st.seed_prompt || '');
         }
-        setScenarioId(data.state.scenario_id || null);
-        if (!data.state.complete) {
-          setCurrentStepId(data.state.current_step);
+        setScenarioId(st.scenario_id || null);
+        if (!st.complete) {
+          setCurrentStepId(st.current_step);
         }
       }
     }).catch(() => {});
   }, []);
+
+  // While the server reports a generation in flight (state._generating), poll
+  // the session state. This is what lets a relaunched client — Android kills
+  // the backgrounded PWA, losing the original request's response — pick the
+  // run back up: the server keeps generating regardless, and each poll paints
+  // the steps finished so far. Harmless alongside the original request's own
+  // await (same data lands twice).
+  const serverBusy = !!worldState?._generating;
+  useEffect(() => {
+    if (!started || !serverBusy) return undefined;
+    let alive = true;
+    const t = setInterval(async () => {
+      try {
+        const data = await api.getWorldState();
+        if (!alive || !data.state?.steps) return;
+        setWorldState(data.state);
+        // Only move the step pointer once the run has finished — mid-flight
+        // current_step still names the previous step.
+        if (!data.state._generating) {
+          if (data.state.complete) setCurrentStepId(null);
+          else if (data.state.current_step) setCurrentStepId(data.state.current_step);
+        }
+      } catch { /* transient — keep polling */ }
+    }, 2500);
+    return () => { alive = false; clearInterval(t); };
+  }, [started, serverBusy]);
 
   const handleStart = async () => {
     if (!seedPrompt.trim()) return;
@@ -376,7 +407,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
             onAddNote={(note) => handleAddNote(step.id, note)}
             onRerollItem={handleRerollItem}
             onEnrichCommit={(stepId) => handleEnrichCommit(stepId)}
-            loading={loading}
+            loading={loading || serverBusy}
             worldId={worldState?._draft_id}
             worldState={worldState}
           />
@@ -405,7 +436,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
             <div className="inline-block w-8 h-8 border-2 border-purple-400/30 border-t-purple-400 rounded-full animate-spin" />
             <p className="text-gray-400">Generating all world stages...</p>
           </div>
-        ) : currentStep ? (
+        ) : currentStep && !worldState?.steps?.[currentStepId]?.approved ? (
           <StepCard
             step={currentStep}
             state={worldState?.steps?.[currentStepId]}
@@ -414,10 +445,18 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
             onAddNote={(note) => handleAddNote(currentStepId, note)}
             onRerollItem={handleRerollItem}
             onEnrichCommit={(stepId) => handleEnrichCommit(stepId)}
-            loading={loading}
+            loading={loading || serverBusy}
             worldId={worldState?._draft_id}
             worldState={worldState}
           />
+        ) : serverBusy ? (
+          // Relaunched while a step was still generating (the reviewable card
+          // for it doesn't exist yet) — the poll effect swaps this for the
+          // finished step when the server is done.
+          <div className="bg-gray-800/80 border border-purple-700 rounded-xl p-6 text-center space-y-4">
+            <div className="inline-block w-8 h-8 border-2 border-purple-400/30 border-t-purple-400 rounded-full animate-spin" />
+            <p className="text-gray-400">Generating the next stage...</p>
+          </div>
         ) : null}
       </div>
     </div>

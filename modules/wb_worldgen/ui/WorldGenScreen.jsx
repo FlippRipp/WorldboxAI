@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { api } from 'api';
 import WorldListScreen from './WorldBuilder/WorldListScreen';
 import WorldBuilderWizard from './WorldBuilder/WorldBuilderWizard';
@@ -10,6 +10,16 @@ export default function WorldGenScreen({ onBack }) {
   const [view, setView] = useState('list'); // 'list' | 'create' | 'review'
   const [reviewWorldId, setReviewWorldId] = useState(null);
   const [wizardKey, setWizardKey] = useState(0);
+
+  // A generation still running server-side means the app was relaunched while
+  // the wizard was working (Android kills the backgrounded PWA): drop straight
+  // back into the wizard, which restores the session and follows the run via
+  // polling. Idle drafts stay on the list — its Resume button covers those.
+  useEffect(() => {
+    api.getWorldState().then((d) => {
+      if (d.state?._generating) setView((v) => (v === 'list' ? 'create' : v));
+    }).catch(() => {});
+  }, []);
 
   if (view === 'create') {
     return (

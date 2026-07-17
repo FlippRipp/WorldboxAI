@@ -415,3 +415,57 @@ def test_skip_review_prewarms_terrain_during_layer_rules():
     assert fake.timeline["terrain_generation"]["start"] < fake.timeline["layer_rules"]["end"]
     # And downstream steps only started after terrain completed.
     assert fake.timeline["terrain_regions"]["start"] >= fake.timeline["terrain_generation"]["end"]
+
+
+def test_generating_flag_visible_to_polling_clients():
+    """While a step generates, /api/world/state (the same session dict) carries
+    ``_generating`` + ``skip_review`` so a relaunched client (Android killed
+    the PWA mid-run) can restore the wizard and poll; both the review and
+    one-shot paths clear the flag when the run ends."""
+    import routes as world_routes
+
+    class FakeBuilder:
+        def __init__(self):
+            self._ordered_ids = ["world_rules", "lore"]
+            self._steps = {sid: object() for sid in self._ordered_ids}
+            self.mid_generation = {}
+
+        async def generate_step(self, step_id, state, prompt, user_note="", config=None):
+            # Snapshot what a concurrent poll of the session state would see.
+            self.mid_generation[step_id] = dict(state)
+            await asyncio.sleep(0)
+            return {"step": step_id}
+
+    fake = FakeBuilder()
+    old_builder = world_routes.world_builder
+    world_routes.world_builder = fake
+    try:
+        resp = asyncio.run(world_routes.generate_world(
+            world_routes.WorldGenerateRequest(seed_prompt="p"), session_id="gen_flag"))
+        assert fake.mid_generation["world_rules"]["_generating"] == "world_rules"
+        assert fake.mid_generation["world_rules"]["skip_review"] is False
+        assert "_generating" not in resp["state"]
+
+        # Reroll route flags the step it is regenerating.
+        resp2 = asyncio.run(world_routes.generate_world_step("lore", session_id="gen_flag"))
+        assert fake.mid_generation["lore"]["_generating"] == "lore"
+        assert "_generating" not in resp2["state"]
+
+        # Approve flags the NEXT step while it generates.
+        fake.mid_generation.clear()
+        resp3 = asyncio.run(world_routes.approve_world_step("world_rules", session_id="gen_flag"))
+        assert fake.mid_generation["lore"]["_generating"] == "lore"
+        assert "_generating" not in resp3["state"]
+
+        # One-shot mode flags "all" for the whole run.
+        resp4 = asyncio.run(world_routes.generate_world(
+            world_routes.WorldGenerateRequest(seed_prompt="p", skip_review=True),
+            session_id="gen_flag_all"))
+        assert fake.mid_generation["world_rules"]["_generating"] == "all"
+        assert fake.mid_generation["world_rules"]["skip_review"] is True
+        assert resp4["complete"] is True
+        assert "_generating" not in resp4["state"]
+    finally:
+        world_routes.world_builder = old_builder
+        world_routes.world_gen_sessions.pop("gen_flag", None)
+        world_routes.world_gen_sessions.pop("gen_flag_all", None)

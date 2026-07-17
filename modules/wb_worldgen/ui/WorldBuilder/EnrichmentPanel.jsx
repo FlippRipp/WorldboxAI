@@ -20,6 +20,14 @@ function ProgressBar({ filled, total, label }) {
   );
 }
 
+// The active run's intent, mirrored to localStorage so it survives Android
+// killing the backgrounded PWA (which severs the SSE stream and cancels the
+// run server-side; finished nodes are cached). On the next mount the run is
+// restarted automatically and continues where it stopped — already-enriched
+// nodes are skipped. Cleared whenever a run ends while the page is alive
+// (done, stop, error, navigation), so only a hard kill triggers auto-resume.
+const RUN_INTENT_KEY = 'wb_worldgen_enrich_run_intent';
+
 export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldId, onEnrich, loading: parentLoading, enriching, onEnrichingChange, onResult }) {
   const [targetCount, setTargetCount] = useState(30);
   const [enrichResults, setEnrichResults] = useState([]);
@@ -30,6 +38,7 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldI
   const [descSessionIds, setDescSessionIds] = useState([]);
   const [reworkMode, setReworkMode] = useState(false);
   const abortRef = useRef(null); // in-flight run's AbortController
+  const resumedRef = useRef(false);
 
   const isLabeling = stepId === 'node_labeling';
 
@@ -82,13 +91,24 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldI
 
   // mode 'all' = one server run that labels then describes every node.
   // Otherwise runs just this step's phase, honoring the target count.
-  const startEnriching = async (mode) => {
+  // `overrides` lets the auto-resume path apply restored settings without
+  // waiting a render for the state setters.
+  const startEnriching = async (mode, overrides = {}) => {
     const everything = mode === 'all';
-    if (!worldId || (!everything && (targetCount <= 0 || isComplete))) return;
+    const count = overrides.count ?? targetCount;
+    const layer = overrides.layerId !== undefined ? overrides.layerId : (layerFilter || null);
+    const rework = overrides.rework ?? reworkMode;
+    if (!worldId || (!everything && (count <= 0 || (isComplete && !overrides.resumed)))) return;
     const controller = new AbortController();
     abortRef.current = controller;
     onEnrichingChange(true);
     setEnrichResults([]);
+    try {
+      localStorage.setItem(RUN_INTENT_KEY, JSON.stringify({
+        worldId, stepId, mode: everything ? 'all' : 'step',
+        count, layerId: layer, rework,
+      }));
+    } catch { /* private mode — resume just won't survive a kill */ }
 
     const newResults = [];
     const newLabeled = [...labelSessionIds];
@@ -146,10 +166,10 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldI
         worldId,
         {
           phase: everything ? 'all' : (isLabeling ? 'label' : 'describe'),
-          count: everything ? null : targetCount,
-          layerId: layerFilter || null,
-          rework: !everything && reworkMode,
-          excludeNodeIds: !everything && reworkMode
+          count: everything ? null : count,
+          layerId: layer,
+          rework: !everything && rework,
+          excludeNodeIds: !everything && rework
             ? (isLabeling ? newLabeled : newDescribed)
             : null,
         },
@@ -159,6 +179,7 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldI
     } catch (e) {
       if (e.name !== 'AbortError') console.error('Enrichment run failed:', e);
     } finally {
+      try { localStorage.removeItem(RUN_INTENT_KEY); } catch { /* ignore */ }
       abortRef.current = null;
       onEnrichingChange(false);
       fetchProgress();
@@ -167,11 +188,36 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldI
 
   const stopEnriching = () => {
     // Tell the server to stop (it flushes finished nodes), then drop the stream.
+    try { localStorage.removeItem(RUN_INTENT_KEY); } catch { /* ignore */ }
     api.enrichCancel(worldId).catch(() => {});
     abortRef.current?.abort();
     abortRef.current = null;
     onEnrichingChange(false);
   };
+
+  // Auto-resume a run that a process kill cut short (the intent key survives
+  // only a hard kill — see RUN_INTENT_KEY). Rework runs are excluded: their
+  // per-session exclude lists died with the process, so restarting one would
+  // regenerate nodes the player already reworked.
+  useEffect(() => {
+    if (resumedRef.current || !worldId || enriching) return;
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(RUN_INTENT_KEY) || 'null'); } catch { /* ignore */ }
+    if (!saved || saved.worldId !== worldId || saved.stepId !== stepId) return;
+    resumedRef.current = true;
+    if (saved.rework) {
+      try { localStorage.removeItem(RUN_INTENT_KEY); } catch { /* ignore */ }
+      return;
+    }
+    if (saved.mode === 'step') {
+      if (saved.count) setTargetCount(saved.count);
+      if (saved.layerId) setLayerFilter(saved.layerId);
+    }
+    startEnriching(saved.mode === 'all' ? 'all' : undefined, {
+      count: saved.count, layerId: saved.layerId ?? null, rework: false, resumed: true,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [worldId, stepId, enriching]);
 
   return (
     <div className="space-y-4 pt-2">

@@ -148,12 +148,20 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
         if template.vocabulary:
             # Snapshot: a later template edit never changes this world.
             state["template_vocab"] = template.vocabulary
+    # Persisted so a relaunched client (Android kills the backgrounded PWA)
+    # can restore the right screen and keep polling for progress. While a
+    # generation is in flight, state["_generating"] names the running step
+    # ("all" for one-shot mode) — the request handler keeps running server-side
+    # even if the client that started it is gone, so polling /api/world/state
+    # picks up the finished result.
+    state["skip_review"] = request.skip_review
     world_gen_sessions[session_id] = state
 
     if request.skip_review:
         enrichment_steps = {"node_labeling", "node_descriptions"}
         terrain_task = None
         done_steps: set = set()
+        state["_generating"] = "all"
         try:
             for step_id in _ordered_ids_for(state):
                 if step_id in enrichment_steps or step_id in done_steps:
@@ -189,6 +197,8 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
             if terrain_task is not None and not terrain_task.done():
                 terrain_task.cancel()
             raise
+        finally:
+            state.pop("_generating", None)
         state["complete"] = True
         return {"state": state, "complete": True}
 
@@ -197,7 +207,11 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
     if not first_step:
         raise HTTPException(status_code=500, detail="No world building steps registered.")
 
-    data = await world_builder.generate_step(first_step, state, request.seed_prompt)
+    state["_generating"] = first_step
+    try:
+        data = await world_builder.generate_step(first_step, state, request.seed_prompt)
+    finally:
+        state.pop("_generating", None)
     state["steps"][first_step] = {"data": data, "approved": False}
     state["current_step"] = first_step
     return {"state": state, "current_step": first_step}
@@ -213,12 +227,16 @@ async def generate_world_step(step_id: str, body: dict = None, session_id: str =
     note = body.get("note", "") if body else ""
     config = body.get("data", None) if body else None
 
-    data = await world_builder.generate_step(
-        step_id, state,
-        state.get("seed_prompt", ""),
-        user_note=note,
-        config=config,
-    )
+    state["_generating"] = step_id
+    try:
+        data = await world_builder.generate_step(
+            step_id, state,
+            state.get("seed_prompt", ""),
+            user_note=note,
+            config=config,
+        )
+    finally:
+        state.pop("_generating", None)
     state["steps"][step_id] = {"data": data, "approved": False, "note": note}
 
     ordered = _ordered_ids_for(state)
@@ -326,12 +344,15 @@ async def approve_world_step(step_id: str, body: dict = None, session_id: str = 
             _auto_save_draft(session_id)
             return {"state": state, "current_step": next_step, "data": default_data}
 
+        state["_generating"] = next_step
         try:
             data = await world_builder.generate_step(next_step, state, state.get("seed_prompt", ""))
         except Exception as e:
             import traceback
             logger.error(f"Map generation failed for step {next_step}: {traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=f"Failed to generate step '{next_step}': {str(e)}")
+        finally:
+            state.pop("_generating", None)
         state["steps"][next_step] = {"data": data, "approved": False}
         state["current_step"] = next_step
         _auto_save_draft(session_id)
