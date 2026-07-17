@@ -12,6 +12,10 @@
 - Running the test suite mutates fixtures under `test_data/` (`save1.wbx`,
   snapshot zips). Restore them with `git checkout -- test_data` instead of
   committing them.
+- Treat pushed history as immutable: never force-push or rewrite commits that
+  are already on the remote (including to fix commit signatures or
+  "Unverified" badges), even if a hook or tool suggests it. If a check flags
+  already-pushed commits, leave them alone and report it to the user instead.
 
 ## LLM prompt context
 
