@@ -146,6 +146,75 @@ async def get_world_pipeline(template_id: Optional[str] = None):
     return {"pipeline": world_builder.get_pipeline(template_id)}
 
 
+async def _run_one_shot_generation(state: dict, session_id: str):
+    """Generate every remaining step of a one-shot (skip_review) session.
+
+    Steps that already hold data are skipped, so the same loop powers the
+    initial "skip review" run and continues one that was interrupted — on
+    Android the whole backend process can be killed while the app is
+    backgrounded, and /api/world/continue re-enters here after the draft is
+    resumed from disk. Every finished step is auto-saved to the on-disk draft,
+    so an interruption loses at most the step that was in flight.
+    """
+    seed_prompt = state.get("seed_prompt", "")
+    state.setdefault("steps", {})
+    enrichment_steps = {"node_labeling", "node_descriptions"}
+    terrain_task = None
+    done_steps: set = set()
+    state["_generating"] = "all"
+    try:
+        # Iterate the full registry and re-check the effective list per
+        # step: world_form (the first step) may turn steps off mid-run,
+        # and a snapshot taken before it ran would not see those skips.
+        for step_id in list(world_builder._ordered_ids):
+            if step_id not in _ordered_ids_for(state):
+                continue
+            if step_id in enrichment_steps or step_id in done_steps:
+                continue
+            if step_id == "terrain_generation" and terrain_task is not None:
+                data = await terrain_task
+                terrain_task = None
+            elif state.get("steps", {}).get(step_id, {}).get("data"):
+                # Generated before an interruption — keep it.
+                continue
+            elif (step_id == "natural_landmarks"
+                    and "society_factions" in _ordered_ids_for(state)
+                    and not state["steps"].get("society_factions", {}).get("data")):
+                # Independent full-attention calls (both depend only on
+                # terrain_regions) — run them concurrently in one-shot mode.
+                landmarks_data, factions_data = await asyncio.gather(
+                    world_builder.generate_step(step_id, state, seed_prompt),
+                    world_builder.generate_step("society_factions", state, seed_prompt),
+                )
+                state["steps"]["society_factions"] = {"data": factions_data, "approved": True}
+                done_steps.add("society_factions")
+                data = landmarks_data
+            else:
+                data = await world_builder.generate_step(step_id, state, seed_prompt)
+            state["steps"][step_id] = {"data": data, "approved": True}
+            _auto_save_draft(session_id)
+            if (step_id == "layer_design" and "terrain_generation" in world_builder._steps
+                    and not state["steps"].get("terrain_generation", {}).get("data")):
+                # Terrain generation only reads layer_design data, so start
+                # it now and let it overlap the layer_rules LLM call. Pin
+                # the draft id first: the step assigns it, and it must not
+                # race the concurrently-running step's own resolution.
+                from wbworldgen.worldgen.persistence import resolve_world_id
+                state["_draft_id"] = resolve_world_id(state)
+                terrain_task = asyncio.create_task(
+                    world_builder.generate_step("terrain_generation", state, seed_prompt))
+    except Exception:
+        if terrain_task is not None and not terrain_task.done():
+            terrain_task.cancel()
+        raise
+    finally:
+        state.pop("_generating", None)
+    state["complete"] = True
+    # Final draft save records draft_complete, so even a backend restart
+    # before the player hits "Save World" keeps the finished result resumable.
+    _auto_save_draft(session_id)
+
+
 @router.post("/api/world/generate")
 async def generate_world(request: WorldGenerateRequest, session_id: str = "default"):
     state = {"seed_prompt": request.seed_prompt, "steps": {}}
@@ -178,53 +247,7 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
     world_gen_sessions[session_id] = state
 
     if request.skip_review:
-        enrichment_steps = {"node_labeling", "node_descriptions"}
-        terrain_task = None
-        done_steps: set = set()
-        state["_generating"] = "all"
-        try:
-            # Iterate the full registry and re-check the effective list per
-            # step: world_form (the first step) may turn steps off mid-run,
-            # and a snapshot taken before it ran would not see those skips.
-            for step_id in list(world_builder._ordered_ids):
-                if step_id not in _ordered_ids_for(state):
-                    continue
-                if step_id in enrichment_steps or step_id in done_steps:
-                    continue
-                if step_id == "terrain_generation" and terrain_task is not None:
-                    data = await terrain_task
-                    terrain_task = None
-                elif (step_id == "natural_landmarks"
-                        and "society_factions" in _ordered_ids_for(state)
-                        and "society_factions" not in state["steps"]):
-                    # Independent full-attention calls (both depend only on
-                    # terrain_regions) — run them concurrently in one-shot mode.
-                    landmarks_data, factions_data = await asyncio.gather(
-                        world_builder.generate_step(step_id, state, request.seed_prompt),
-                        world_builder.generate_step("society_factions", state, request.seed_prompt),
-                    )
-                    state["steps"]["society_factions"] = {"data": factions_data, "approved": True}
-                    done_steps.add("society_factions")
-                    data = landmarks_data
-                else:
-                    data = await world_builder.generate_step(step_id, state, request.seed_prompt)
-                state["steps"][step_id] = {"data": data, "approved": True}
-                if step_id == "layer_design" and "terrain_generation" in world_builder._steps:
-                    # Terrain generation only reads layer_design data, so start
-                    # it now and let it overlap the layer_rules LLM call. Pin
-                    # the draft id first: the step assigns it, and it must not
-                    # race the concurrently-running step's own resolution.
-                    from wbworldgen.worldgen.persistence import resolve_world_id
-                    state["_draft_id"] = resolve_world_id(state)
-                    terrain_task = asyncio.create_task(
-                        world_builder.generate_step("terrain_generation", state, request.seed_prompt))
-        except Exception:
-            if terrain_task is not None and not terrain_task.done():
-                terrain_task.cancel()
-            raise
-        finally:
-            state.pop("_generating", None)
-        state["complete"] = True
+        await _run_one_shot_generation(state, session_id)
         return _state_response(state, complete=True)
 
     ordered = _ordered_ids_for(state)
@@ -239,7 +262,27 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
         state.pop("_generating", None)
     state["steps"][first_step] = {"data": data, "approved": False}
     state["current_step"] = first_step
+    _auto_save_draft(session_id)
     return _state_response(state, current_step=first_step)
+
+
+@router.post("/api/world/continue")
+async def continue_world_generation(session_id: str = "default"):
+    """Pick an interrupted one-shot generation back up.
+
+    The relaunched client calls this after restoring a session whose
+    ``skip_review`` run stopped without completing (the backend process was
+    killed mid-run and the draft was resumed from disk). Idempotent while a
+    run is already in flight, and a no-op for complete or review-mode
+    sessions — those continue through approve-step instead.
+    """
+    state = _get_world_state(session_id)
+    if not state.get("steps") and not state.get("seed_prompt"):
+        raise HTTPException(status_code=404, detail="No world generation session to continue.")
+    if state.get("_generating") or state.get("complete") or not state.get("skip_review"):
+        return _state_response(state)
+    await _run_one_shot_generation(state, session_id)
+    return _state_response(state, complete=True)
 
 
 class RewriteWorldPromptRequest(BaseModel):
@@ -592,8 +635,18 @@ class SaveWorldRequest(BaseModel):
 @router.post("/api/world/save")
 async def save_world(request: SaveWorldRequest, session_id: str = "default"):
     state = _get_world_state(session_id)
+    draft_id = _get_world_draft_id(session_id)
     try:
         world_id = world_builder.save_world(request.world_id, state)
+        if draft_id and draft_id != world_id:
+            # The auto-saved draft can live under a different id than the
+            # final world (drafts started before lore names the world get a
+            # random id) — drop it so the list doesn't keep a phantom
+            # "In Progress" copy of a world that was just saved.
+            try:
+                world_builder.delete_world(draft_id)
+            except FileNotFoundError:
+                pass
         world_gen_sessions.pop(session_id, None)
         world_draft_ids.pop(session_id, None)
         return {"world_id": world_id}

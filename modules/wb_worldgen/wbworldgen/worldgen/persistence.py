@@ -124,9 +124,17 @@ class WorldPersistence:
             # edit never silently changes an existing world.
             if isinstance(world_state.get("template_vocab"), dict):
                 metadata["template_vocab"] = world_state["template_vocab"]
+        if world_state.get("skip_review"):
+            # One-shot generations must resume as one-shot: /api/world/continue
+            # keys off this after a backend restart mid-run.
+            metadata["skip_review"] = True
         if in_progress:
             metadata["in_progress"] = True
             metadata["current_step"] = world_state.get("current_step")
+            if world_state.get("complete"):
+                # Generation finished but the player hasn't hit "Save World"
+                # yet — restore straight to the finished review, not mid-run.
+                metadata["draft_complete"] = True
 
         with open(world_dir / "metadata.json", "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, default=str)
@@ -153,9 +161,12 @@ class WorldPersistence:
         world_state = {
             "seed_prompt": metadata.get("seed_prompt", ""),
             "steps": steps,
-            "complete": not metadata.get("in_progress", False),
+            "complete": (not metadata.get("in_progress", False)
+                         or bool(metadata.get("draft_complete"))),
             "current_step": metadata.get("current_step") if metadata.get("in_progress") else None,
         }
+        if metadata.get("skip_review"):
+            world_state["skip_review"] = True
         if metadata.get("scenario"):
             world_state["scenario"] = metadata["scenario"]
         if metadata.get("scenario_id"):

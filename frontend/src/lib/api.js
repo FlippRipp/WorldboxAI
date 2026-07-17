@@ -179,6 +179,9 @@ export const api = {
   approveWorldStep:       (stepId, data = null) => request(`/api/world/approve-step/${stepId}`, { method: 'POST', body: JSON.stringify(data ? { data } : {}) }),
   regenerateWorldItem:    (stepId, field, index, items, note = '', subfield = null) => request(`/api/world/regenerate-item/${stepId}`, { method: 'POST', body: JSON.stringify({ field, index, items, note, subfield }) }),
   getWorldState:          () => request('/api/world/state'),
+  // Re-enter an interrupted one-shot generation (backend was killed mid-run
+  // while the app was minimized); no-op if it's running, complete, or review-mode.
+  continueWorldGeneration: () => request('/api/world/continue', { method: 'POST' }),
   compileWorld:           (saveId = null) => request('/api/world/compile', { method: 'POST', body: JSON.stringify(saveId ? { save_id: saveId } : {}) }),
   saveWorld:              (worldId) => request('/api/world/save', { method: 'POST', body: JSON.stringify({ world_id: worldId }) }),
   discardWorld:           () => request('/api/world/discard', { method: 'POST' }),

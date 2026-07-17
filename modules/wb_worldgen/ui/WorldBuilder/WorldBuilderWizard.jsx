@@ -174,6 +174,17 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
         if (!st.complete) {
           setCurrentStepId(st.current_step);
         }
+        if (st.skip_review && !st.complete && !st._generating) {
+          // A one-shot run that stopped without finishing: the backend
+          // process itself was killed mid-run (Android reclaims Termux under
+          // memory pressure) and the draft was resumed from disk. Kick the
+          // remaining steps off again; the poll effect paints progress.
+          api.continueWorldGeneration().then((cont) => {
+            setWorldState(cont.state);
+            if (cont.effective_steps) setEffectiveSteps(cont.effective_steps);
+            if (cont.state?.complete) setCurrentStepId(null);
+          }).catch(() => {});
+        }
       }
     }).catch(() => {});
   }, []);
@@ -183,10 +194,13 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
   // the backgrounded PWA, losing the original request's response — pick the
   // run back up: the server keeps generating regardless, and each poll paints
   // the steps finished so far. Harmless alongside the original request's own
-  // await (same data lands twice).
+  // await (same data lands twice). One-shot sessions poll until complete even
+  // without the flag: the mount effect's continue call may not have reached
+  // the server yet, and a poll response from that gap must not stop the loop.
   const serverBusy = !!worldState?._generating;
+  const polling = serverBusy || (!!worldState?.skip_review && !worldState?.complete);
   useEffect(() => {
-    if (!started || !serverBusy) return undefined;
+    if (!started || !polling) return undefined;
     let alive = true;
     const t = setInterval(async () => {
       try {
@@ -203,7 +217,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
       } catch { /* transient — keep polling */ }
     }, 2500);
     return () => { alive = false; clearInterval(t); };
-  }, [started, serverBusy]);
+  }, [started, polling]);
 
   const handleStart = async () => {
     if (!seedPrompt.trim()) return;

@@ -11,13 +11,18 @@ export default function WorldGenScreen({ onBack }) {
   const [reviewWorldId, setReviewWorldId] = useState(null);
   const [wizardKey, setWizardKey] = useState(0);
 
-  // A generation still running server-side means the app was relaunched while
-  // the wizard was working (Android kills the backgrounded PWA): drop straight
-  // back into the wizard, which restores the session and follows the run via
-  // polling. Idle drafts stay on the list — its Resume button covers those.
+  // Any live session — a generation still running server-side, or unsaved
+  // work sitting in memory (it may have finished while the app was minimized;
+  // Android kills the backgrounded PWA) — drops straight back into the
+  // wizard, which restores the session, shows every step generated so far,
+  // and follows a still-running run via polling. The list stays one "Exit"
+  // tap away; only sessions with no work at all land on it directly.
   useEffect(() => {
     api.getWorldState().then((d) => {
-      if (d.state?._generating) setView((v) => (v === 'list' ? 'create' : v));
+      const st = d.state;
+      if (st?._generating || Object.keys(st?.steps || {}).length > 0) {
+        setView((v) => (v === 'list' ? 'create' : v));
+      }
     }).catch(() => {});
   }, []);
 
