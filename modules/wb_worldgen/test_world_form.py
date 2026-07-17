@@ -204,3 +204,43 @@ def test_prune_dynamic_skips_removes_stale_step_data():
     assert "terrain_generation" not in state["steps"]
     assert "lore" in state["steps"]           # never dynamically skippable
     assert "world_form" in state["steps"]
+
+
+# ---------------------------------------------------------------------------
+# "city" map style -> street-network generator
+# ---------------------------------------------------------------------------
+
+def test_city_map_style_normalizes_and_skips_terrain():
+    known = ["lore", "terrain_generation"]
+    data = wf.normalize_world_form({"map_style": "city"}, known)
+    assert data["map_style"] == "city"
+    state = _state_with_form({"map_style": "city"})
+    assert "terrain_generation" in wf.dynamic_skips(state)
+    assert wf.map_generator_override(state) == "city_roadnet"
+    assert wf.map_generator_override(_state_with_form({"map_style": "terrain"})) == ""
+    assert wf.map_generator_override({"seed_prompt": "s", "steps": {}}) == ""
+
+
+def test_city_map_style_routes_map_generation_to_roadnet(builder):
+    captured = {}
+
+    def fake_map_generate(world_state, config=None, generator_id="world_map"):
+        captured["generator_id"] = generator_id
+        return {"nodes": [], "edges": []}
+
+    builder._map_gen.generate = fake_map_generate
+    # No template (ai_default-style world): the design's city style wins.
+    state = _state_with_form({"map_style": "city"})
+    asyncio.run(builder.generate_step("map_generation", state, "seed"))
+    assert captured["generator_id"] == "city_roadnet"
+    # Terrain style leaves the template default in charge.
+    state = _state_with_form({"map_style": "terrain"})
+    asyncio.run(builder.generate_step("map_generation", state, "seed"))
+    assert captured["generator_id"] == "world_map"
+
+
+def test_mock_world_form_picks_city_for_city_prompts(builder):
+    data = asyncio.run(builder.generate_step(
+        "world_form", {"seed_prompt": "a neon city of rain", "steps": {}},
+        "a neon city of rain"))
+    assert data["map_style"] == "city"

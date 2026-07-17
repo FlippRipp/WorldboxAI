@@ -260,8 +260,12 @@ class WorldBuilder:
                     config = {"total_nodes": default_nodes}
             # The template's root level picks the map generator (world_map,
             # city_roadnet, ...); non-root levels are generated on expansion.
+            # The world's own design (world_form map_style "city") overrides
+            # the template default, so "let the AI decide" worlds that read
+            # as a city get a real street network.
             levels = template.resolved_levels() or [{}]
-            root_gen = levels[0].get("generator_id") or "world_map"
+            root_gen = (_world_form.map_generator_override(world_state)
+                        or levels[0].get("generator_id") or "world_map")
             # Delaunay + road pathfinding are CPU-bound; keep the event loop free.
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(

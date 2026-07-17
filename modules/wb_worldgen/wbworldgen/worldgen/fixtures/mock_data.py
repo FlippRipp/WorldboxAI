@@ -209,7 +209,19 @@ def mock_layer_rules(prompt: str, note: str = "") -> dict:
 
 def mock_world_form(prompt: str, note: str = "") -> dict:
     # Terrain style + no skips: seeded/offline worlds behave exactly like
-    # worlds generated before the world_form step existed.
+    # worlds generated before the world_form step existed. City-flavored
+    # prompts pick the street-network map so offline runs exercise it.
+    text = (prompt or "").lower()
+    if any(w in text for w in ("city", "metropolis", "urban", "town")):
+        return {
+            "world_kind": "A single modern city of districts and streets (mock).",
+            "map_style": "city",
+            "skip_steps": [],
+            "step_directives": [
+                {"step_id": "lore", "directive": "Name the city and sketch its history."},
+                {"step_id": "society_factions", "directive": "Author the city's powers."},
+            ],
+        }
     return {
         "world_kind": "A dark fantasy overworld of ancient powers (mock).",
         "map_style": "terrain",

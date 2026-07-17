@@ -36,9 +36,11 @@ ask for? A mythic fantasy overworld, a single modern city, a space station, a
 quiet neighborhood? Then:
 
 - map_style: pick "terrain" only when the world genuinely spans natural
-  geography (continents, wilderness, biomes). Pick "abstract" for cities,
-  interiors, stations, and intimate real-world settings — the map becomes a
-  clean graph of places with no procedural landscape.
+  geography (continents, wilderness, biomes). Pick "city" when the whole
+  playable world is ONE city, town or urban district — the map becomes a
+  real street network: avenues, blocks, districts, venues. Pick "abstract"
+  for stations, interiors, ships and other intimate non-urban settings —
+  the map becomes a clean graph of places with no procedural landscape.
 - skip_steps: rarely needed. Prefer a "keep this minimal" directive over
   skipping — even a slice-of-life story benefits from a few notable places and
   social circles.
@@ -65,9 +67,18 @@ def dynamic_skips(world_state: dict) -> set:
     if not data:
         return set()
     skips = {s for s in (data.get("skip_steps") or []) if s in AI_SKIPPABLE}
-    if data.get("map_style") == "abstract":
+    if data.get("map_style") in ("abstract", "city"):
         skips.add("terrain_generation")
     return skips
+
+
+def map_generator_override(world_state: dict) -> str:
+    """Generator id the world's own design imposes on the root map ("" when
+    the template's level default should stand). A "city" map style routes
+    map generation to the street-network generator."""
+    if _step_data(world_state).get("map_style") == "city":
+        return "city_roadnet"
+    return ""
 
 
 def coverage_directive(world_state: dict, step_id: str) -> str:
@@ -86,7 +97,7 @@ def normalize_world_form(data, known_step_ids) -> dict:
         data = {}
     known = set(known_step_ids or [])
     map_style = data.get("map_style")
-    if map_style not in ("terrain", "abstract"):
+    if map_style not in ("terrain", "abstract", "city"):
         map_style = "terrain"
     skip_steps = []
     for sid in data.get("skip_steps") or []:
@@ -125,11 +136,12 @@ class WorldFormStep(Step):
             "description": "One or two sentences: what kind of world this is — genre, era, scale, tone.",
         },
         "map_style": {
-            "type": "select", "label": "Map Style", "options": ["terrain", "abstract"],
+            "type": "select", "label": "Map Style", "options": ["terrain", "abstract", "city"],
             "description": ("terrain = generate physical geography (continents, biomes, rivers) and "
-                            "place locations on it — for overworlds and wilderness. abstract = no "
-                            "procedural terrain; the map is a clean graph of places — for cities, "
-                            "stations, interiors, intimate settings."),
+                            "place locations on it — for overworlds and wilderness. city = the world "
+                            "is one city: a generated street network of avenues, blocks, districts "
+                            "and venues. abstract = no procedural terrain; the map is a clean graph "
+                            "of places — for stations, interiors, intimate settings."),
         },
         "skip_steps": {
             "type": "list", "label": "Steps to Skip", "item_type": "string",
