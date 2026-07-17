@@ -204,6 +204,40 @@ def test_root_map_enrichment_path_unchanged(solar):
     assert node["name"] == "Beacon Reach"
 
 
+def test_authored_root_for_interior_root_level(builder):
+    # Root-as-first-expansion (M3b): a world whose designed root level uses
+    # the authored interior generator gets an authored root map — the whole
+    # playable world is one place.
+    state = {"seed_prompt": "a haunted mansion the guests cannot leave", "steps": {
+        "hierarchy_design": {"data": {"levels": [
+            {"level_type": "interior", "label": "The House", "generator_id": "interior",
+             "nestable": True, "guidance": "Wings, halls and cellars of one manor."}]},
+            "approved": True},
+        "lore": {"data": {"world_name": "Blackwood Manor"}, "approved": True}}}
+    data = asyncio.run(builder.generate_step("map_generation", state, state["seed_prompt"]))
+    assert data["generator_id"] == "interior"
+    assert data["nodes"] and all(n.get("name") for n in data["nodes"])
+    state["steps"]["map_generation"] = {"data": data, "approved": True}
+    builder.save_world("manor", state)
+    compiled = builder.compile_world(builder.load_world("manor"))
+    root = compiled["maps"][compiled["root_map_id"]]
+    assert root["level_type"] == "interior"
+    assert root["generator_id"] == "interior"
+    # The nestable root still opens further interiors (a vault in the manor).
+    assert [l["level_type"] for l in allowed_child_levels(compiled, root)] == ["interior"]
+    assert is_expandable(compiled, compiled["root_map_id"], root["nodes"][1])
+
+
+def test_procedural_roots_keep_the_procedural_path(builder):
+    # A terrain/abstract/city root never routes through the authored flow.
+    assert builder._authored_root_level({"seed_prompt": "s", "steps": {}}, "world_map") is None
+    assert builder._authored_root_level({"seed_prompt": "s", "steps": {}}, "city_roadnet") is None
+    state = {"seed_prompt": "s", "steps": {"hierarchy_design": {"data": {"levels": [
+        {"level_type": "interior", "generator_id": "interior"}]}}}}
+    level = builder._authored_root_level(state, "interior")
+    assert level and level["level_type"] == "interior"
+
+
 def test_enrichment_engine_sees_child_map_nodes(solar):
     compiled, root_id, root = _root(solar)
     anchor = _node_named(root, "Planet Kestrel")

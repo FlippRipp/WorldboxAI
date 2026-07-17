@@ -43,6 +43,34 @@ def child_map_id(parent_map_id: str, node_id: str) -> str:
     return f"m_{digest[:8]}"
 
 
+def _normalize_locations(raw_locations, map_id: str, max_locations: int) -> list:
+    """Authored locations clamped to the layout contract: ids are assigned
+    server-side (never trust LLM ids), names dedup, exactly one entrance."""
+    locations = []
+    seen = set()
+    entrance_seen = False
+    for raw in (raw_locations or [])[:max_locations]:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name", "")).strip()
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        is_entrance = bool(raw.get("is_entrance")) and not entrance_seen
+        entrance_seen = entrance_seen or is_entrance
+        locations.append({
+            "id": f"{map_id}:n{len(locations) + 1}",
+            "name": name,
+            "type": str(raw.get("type", "room")).strip() or "room",
+            "description": str(raw.get("description", "")).strip(),
+            "adjacent": raw.get("adjacent") if isinstance(raw.get("adjacent"), list) else [],
+            "is_entrance": is_entrance,
+        })
+    if locations and not entrance_seen:
+        locations[0]["is_entrance"] = True
+    return locations
+
+
 def _generator_spec(level: dict):
     from wbworldgen.worldgen.generation.registry import GENERATOR_REGISTRY
     return GENERATOR_REGISTRY.get(level.get("generator_id", "interior"))
@@ -179,6 +207,98 @@ class MapExpansionEngine:
         return self._build_procedural_map(compiled, parent_map_id, node, parsed,
                                           chosen, total_nodes)
 
+    # --- authored root map (root-as-first-expansion) ------------------------
+
+    def mock_root_map(self, world_state: dict, level: dict,
+                      max_locations: int = 10) -> dict:
+        """Deterministic offline authored root — the sync core the mock/seed
+        paths share."""
+        from wbworldgen.worldgen.compiler import build_compiled_for_map
+        compiled = build_compiled_for_map(world_state)
+        name = (compiled.get("lore", {}) or {}).get("world_name") or "The World"
+        parsed = self._mock_content({"name": name, "type": level.get("level_type", "")},
+                                    [level], min(6, max_locations))
+        return self._layout_root(parsed, level, max_locations)
+
+    async def expand_root(self, world_state: dict, user_prompt: str, level: dict,
+                          max_locations: int = 12) -> dict:
+        """Author the ROOT map for a world whose root level uses an authored
+        (needs_llm_content) generator — the whole playable world is one
+        interior-style place (a mansion, a generation ship, a single keep).
+        One full-attention call authors the locations; the level's generator
+        lays them out. Returns a map_generation step-data dict
+        ({nodes, edges, config, generator_id}) — no parent, no entrance
+        connection, exactly like the procedural root path's output."""
+        if not self._llm or self._llm.mode == "mock":
+            return self.mock_root_map(world_state, level, max_locations)
+        from wbworldgen.worldgen.compiler import build_compiled_for_map
+        compiled = build_compiled_for_map(world_state)
+        parsed = await self._live_expand_root(compiled, user_prompt, level, max_locations)
+        return self._layout_root(parsed, level, max_locations)
+
+    def _layout_root(self, parsed: dict, level: dict, max_locations: int) -> dict:
+        from wbworldgen.worldgen.generation.registry import get_generator
+        locations = _normalize_locations(parsed.get("locations"), "root", max_locations)
+        if not locations:
+            raise ValueError("Authored root map produced no valid locations")
+        generated = get_generator(level.get("generator_id", "interior")).build(
+            {"map_id": "root", "locations": locations})
+        generated.pop("entrance_node_id", None)
+        return {
+            "nodes": generated["nodes"],
+            "edges": generated["edges"],
+            "config": generated["config"],
+            "generator_id": level.get("generator_id", "interior"),
+            "description": str(parsed.get("description", "")).strip(),
+        }
+
+    async def _live_expand_root(self, compiled: dict, user_prompt: str,
+                                level: dict, max_locations: int) -> dict:
+        host = self._host
+        lore = compiled.get("lore", {}) or {}
+        name = lore.get("world_name") or "the world"
+        system = host._get_prompt(
+            "map_root_system",
+            "You are a world-building AI designing the single playable map an entire "
+            "interactive story takes place on: one contained place — a building, complex, "
+            "vessel or compound — whose rooms and areas ARE the whole world. Ground "
+            "everything in the provided world context. Output ONLY valid JSON.",
+        )
+        user_msg = host._get_prompt(
+            "map_root_user",
+            f"""World: {name} ({lore.get('genre', '')}, {lore.get('tone', '')})
+World premise: {user_prompt}
+
+This world's whole playable space is ONE map at the "{level.get('level_type', 'interior')}" level:
+{level.get('guidance', level.get('label', ''))}
+
+Design 8-{max_locations} distinct locations (rooms, halls, decks, courts...). Exactly ONE
+location must have "is_entrance": true — the main way in from the outside world. Each
+location gets a name, a short type, a 1-2 sentence description, and which other locations
+it directly adjoins (by name). Make the geography coherent: wings, floors and passages
+that read like one real place.
+
+Output ONLY valid JSON:
+{{"label": "...", "description": "2-3 sentences on how this place is laid out",
+"locations": [{{"name": "...", "type": "...", "description": "...", "adjacent": ["..."], "is_entrance": false}}, ...]}}""",
+            world_name=name,
+            world_premise=user_prompt,
+            max_locations=str(max_locations),
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ]
+        return await json_retry_completion(
+            self._llm,
+            messages=messages,
+            model=self._llm.reader_model,
+            temperature=host._world_builder_temperature or 0.9,
+            inspector_ctx={"call_type": "world_build", "step": "map:root"},
+            step_label="map:root",
+            retry_attempts=host._json_retry_attempts,
+        )
+
     # --- result shaping -----------------------------------------------------
 
     def _build_map(self, compiled: dict, parent_map_id: str, node: dict,
@@ -189,31 +309,9 @@ class MapExpansionEngine:
         if not isinstance(raw_locations, list) or not raw_locations:
             raise ValueError(f"Map expansion for {node_id} returned no locations")
 
-        # Ids are assigned server-side — never trust LLM ids. Names dedup.
-        locations = []
-        seen = set()
-        entrance_seen = False
-        for raw in raw_locations[:max_locations]:
-            if not isinstance(raw, dict):
-                continue
-            name = str(raw.get("name", "")).strip()
-            if not name or name.lower() in seen:
-                continue
-            seen.add(name.lower())
-            is_entrance = bool(raw.get("is_entrance")) and not entrance_seen
-            entrance_seen = entrance_seen or is_entrance
-            locations.append({
-                "id": f"{map_id}:n{len(locations) + 1}",
-                "name": name,
-                "type": str(raw.get("type", "room")).strip() or "room",
-                "description": str(raw.get("description", "")).strip(),
-                "adjacent": raw.get("adjacent") if isinstance(raw.get("adjacent"), list) else [],
-                "is_entrance": is_entrance,
-            })
+        locations = _normalize_locations(raw_locations, map_id, max_locations)
         if not locations:
             raise ValueError(f"Map expansion for {node_id} produced no valid locations")
-        if not entrance_seen:
-            locations[0]["is_entrance"] = True
 
         from wbworldgen.worldgen.generation.registry import get_generator
         generated = get_generator(level.get("generator_id", "interior")).build(

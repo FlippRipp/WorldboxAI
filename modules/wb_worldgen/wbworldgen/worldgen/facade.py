@@ -240,6 +240,16 @@ class WorldBuilder:
         uses = getattr(step, "uses", "llm")
         if step_id == "map_generation" or uses == USES_MAP:
             root_gen = self._root_generator_for(world_state)
+            level = self._authored_root_level(world_state, root_gen)
+            if level is not None:
+                # Root-as-first-expansion: the whole world is one authored
+                # place (an interior-style root level) — the same authored
+                # flow expansion uses, minus a parent to anchor to.
+                max_locations = self._resolve_enrichment_setting(
+                    "world.site_max_sublocations", 10, 4, 16)
+                return await self._maps_expand.expand_root(
+                    world_state, user_prompt, level,
+                    max_locations=max(8, max_locations))
             # Delaunay + road pathfinding are CPU-bound; keep the event loop free.
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
@@ -337,6 +347,19 @@ class WorldBuilder:
     def _merge_geography_steps(self, steps_data: dict) -> dict:
         return compiler.merge_geography_steps(steps_data)
 
+    def _authored_root_level(self, world_state: dict, root_gen: str) -> dict | None:
+        """The designed root level when its generator needs authored (LLM)
+        content — a world whose whole playable space is one interior-style
+        map. None for procedural roots (terrain, abstract, city)."""
+        from wbworldgen.worldgen.generation.registry import GENERATOR_REGISTRY
+        spec = GENERATOR_REGISTRY.get(root_gen)
+        if spec is None or not spec.needs_llm_content:
+            return None
+        designed = _hierarchy_design.designed_levels(world_state)
+        if designed:
+            return designed[0]
+        return {"level_type": "interior", "label": "Interior", "generator_id": root_gen}
+
     def _root_generator_for(self, world_state: dict) -> str:
         """The generator that draws a world's root map. The world's own
         designed structure (hierarchy_design levels) is authoritative when
@@ -393,8 +416,13 @@ class WorldBuilder:
         note_for_layer = ""
         for step_id in self._ordered_ids:
             if step_id == "map_generation":
-                data = self._map_gen.generate(world_state, {"total_nodes": total_nodes},
-                                              self._root_generator_for(world_state))
+                root_gen = self._root_generator_for(world_state)
+                level = self._authored_root_level(world_state, root_gen)
+                if level is not None:
+                    data = self._maps_expand.mock_root_map(world_state, level)
+                else:
+                    data = self._map_gen.generate(world_state, {"total_nodes": total_nodes},
+                                                  root_gen)
             else:
                 handler = MOCK_GENERATORS.get(step_id)
                 if handler:
