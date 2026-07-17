@@ -53,8 +53,10 @@ def test_one_shot_auto_saves_draft_after_every_step(fake_builder):
         session_id="resume_test_saves"))
 
     assert resp["complete"] is True
-    # One save per generated step, plus the final complete-marking save.
+    # One eager save before the run, one per generated step, plus the final
+    # complete-marking save.
     assert [s["steps"] for s in fake_builder.draft_saves] == [
+        [],
         ["world_rules"],
         ["lore", "world_rules"],
         ["lore", "map_generation", "world_rules"],
@@ -113,11 +115,67 @@ def test_continue_404s_without_a_session(fake_builder):
     assert exc.value.status_code == 404
 
 
-def test_review_mode_first_step_is_draft_saved(fake_builder):
+def test_review_mode_drafts_eagerly_and_after_first_step(fake_builder):
     asyncio.run(world_routes.generate_world(
         world_routes.WorldGenerateRequest(seed_prompt="p"),
         session_id="resume_test_first"))
-    assert [s["steps"] for s in fake_builder.draft_saves] == [["world_rules"]]
+    assert [s["steps"] for s in fake_builder.draft_saves] == [[], ["world_rules"]]
+
+
+def test_continue_regenerates_interrupted_review_step(fake_builder):
+    # Killed while generating "lore" (world_rules already approved): nothing
+    # awaits review, so continue regenerates the first data-less step.
+    world_routes.world_gen_sessions["resume_test_review"] = {
+        "seed_prompt": "p",
+        "current_step": "world_rules",
+        "steps": {"world_rules": {"data": {"x": 1}, "approved": True}},
+    }
+    resp = asyncio.run(world_routes.continue_world_generation(session_id="resume_test_review"))
+    assert fake_builder.generated == ["lore"]
+    assert resp["current_step"] == "lore"
+    assert resp["state"]["steps"]["lore"] == {"data": {"step": "lore"}, "approved": False}
+    assert "complete" not in resp["state"] or not resp["state"]["complete"]
+
+
+def test_continue_restarts_review_session_with_zero_steps(fake_builder):
+    # Killed during the very first step: only the eagerly-drafted prompt
+    # survived. Continue regenerates the first step from it.
+    world_routes.world_gen_sessions["resume_test_zero"] = {"seed_prompt": "p", "steps": {}}
+    resp = asyncio.run(world_routes.continue_world_generation(session_id="resume_test_zero"))
+    assert fake_builder.generated == ["world_rules"]
+    assert resp["current_step"] == "world_rules"
+
+
+def test_discard_deletes_only_step_less_drafts(fake_builder):
+    class DiscardBuilder(FakeBuilder):
+        def __init__(self, steps):
+            super().__init__()
+            self.stored_steps = steps
+            self.deleted = []
+
+        def load_world(self, world_id):
+            return {"steps": self.stored_steps}
+
+        def delete_world(self, world_id):
+            self.deleted.append(world_id)
+
+    # Empty eager draft: deleted on discard.
+    empty = DiscardBuilder({})
+    world_routes.world_builder = empty
+    world_routes.world_gen_sessions["resume_test_disc"] = {"seed_prompt": "p", "steps": {}}
+    world_routes.world_draft_ids["resume_test_disc"] = "empty_draft"
+    asyncio.run(world_routes.discard_world(session_id="resume_test_disc"))
+    assert empty.deleted == ["empty_draft"]
+    assert "resume_test_disc" not in world_routes.world_gen_sessions
+
+    # Draft with generated steps: kept resumable.
+    kept = DiscardBuilder({"world_rules": {"data": {"x": 1}}})
+    world_routes.world_builder = kept
+    world_routes.world_gen_sessions["resume_test_disc"] = {
+        "seed_prompt": "p", "steps": {"world_rules": {"data": {"x": 1}, "approved": True}}}
+    world_routes.world_draft_ids["resume_test_disc"] = "real_draft"
+    asyncio.run(world_routes.discard_world(session_id="resume_test_disc"))
+    assert kept.deleted == []
 
 
 def test_draft_round_trips_skip_review_and_completion(tmp_path):

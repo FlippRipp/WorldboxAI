@@ -56,7 +56,10 @@ def _auto_save_draft(session_id: str = "default"):
     state = _get_world_state(session_id)
     draft_id = _get_world_draft_id(session_id)
     try:
-        if state.get("steps"):
+        # A seed prompt alone is enough to draft: generation starts by saving
+        # the session before the first step runs, so even a backend kill
+        # mid-first-step leaves something to resume from.
+        if state.get("steps") or state.get("seed_prompt"):
             draft_id = world_builder.save_draft(draft_id or "", state)
             world_draft_ids[session_id] = draft_id
             state["_draft_id"] = draft_id
@@ -245,6 +248,11 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
     # picks up the finished result.
     state["skip_review"] = request.skip_review
     world_gen_sessions[session_id] = state
+    # Draft the session before any step runs: if the whole backend process is
+    # killed during the first step (Android reaping Termux right after the
+    # player submits and minimizes), the prompt + settings are already on disk
+    # and /api/world/continue can regenerate from them.
+    _auto_save_draft(session_id)
 
     if request.skip_review:
         await _run_one_shot_generation(state, session_id)
@@ -268,21 +276,68 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
 
 @router.post("/api/world/continue")
 async def continue_world_generation(session_id: str = "default"):
-    """Pick an interrupted one-shot generation back up.
+    """Pick an interrupted generation back up.
 
-    The relaunched client calls this after restoring a session whose
-    ``skip_review`` run stopped without completing (the backend process was
-    killed mid-run and the draft was resumed from disk). Idempotent while a
-    run is already in flight, and a no-op for complete or review-mode
-    sessions — those continue through approve-step instead.
+    The relaunched client calls this after restoring a session that stopped
+    without completing — the backend process was killed mid-run (Android
+    reaping Termux while the app was minimized) and the draft was resumed
+    from disk, possibly with zero finished steps. One-shot sessions rerun the
+    remaining pipeline; review-mode sessions regenerate the step that was in
+    flight so there is something to review again. Idempotent while a run is
+    already in flight, and a no-op when a step is already awaiting review.
     """
     state = _get_world_state(session_id)
     if not state.get("steps") and not state.get("seed_prompt"):
         raise HTTPException(status_code=404, detail="No world generation session to continue.")
-    if state.get("_generating") or state.get("complete") or not state.get("skip_review"):
+    if state.get("_generating") or state.get("complete"):
         return _state_response(state)
-    await _run_one_shot_generation(state, session_id)
-    return _state_response(state, complete=True)
+
+    if state.get("skip_review"):
+        await _run_one_shot_generation(state, session_id)
+        return _state_response(state, complete=True)
+
+    state.setdefault("steps", {})
+    ordered = _ordered_ids_for(state)
+
+    # A step already awaiting the player's review means nothing was lost —
+    # just make sure the pointer names it and hand the session back.
+    reviewable = [sid for sid in ordered
+                  if state["steps"].get(sid, {}).get("data")
+                  and not state["steps"][sid].get("approved")]
+    if reviewable:
+        if state.get("current_step") not in reviewable:
+            state["current_step"] = reviewable[0]
+        return _state_response(state, current_step=state["current_step"])
+
+    target = next((sid for sid in ordered
+                   if not state["steps"].get(sid, {}).get("data")), None)
+    if target is None:
+        # Every step generated and approved: the interruption hit right at
+        # the finish line — just mark the session complete.
+        state["current_step"] = None
+        state["complete"] = True
+        _auto_save_draft(session_id)
+        return _state_response(state, complete=True)
+
+    if target in ("node_labeling", "node_descriptions"):
+        # Mirror approve-step: enrichment steps start from defaults, no LLM.
+        step = world_builder._steps[target]
+        default_data = {k: v.get("default", 0) for k, v in step.schema.items()}
+        default_data["results"] = []
+        state["steps"][target] = {"data": default_data, "approved": False}
+        state["current_step"] = target
+        _auto_save_draft(session_id)
+        return _state_response(state, current_step=target)
+
+    state["_generating"] = target
+    try:
+        data = await world_builder.generate_step(target, state, state.get("seed_prompt", ""))
+    finally:
+        state.pop("_generating", None)
+    state["steps"][target] = {"data": data, "approved": False}
+    state["current_step"] = target
+    _auto_save_draft(session_id)
+    return _state_response(state, current_step=target)
 
 
 class RewriteWorldPromptRequest(BaseModel):
@@ -655,6 +710,16 @@ async def save_world(request: SaveWorldRequest, session_id: str = "default"):
 
 @router.post("/api/world/discard")
 async def discard_world(session_id: str = "default"):
+    draft_id = world_draft_ids.get(session_id)
+    if draft_id:
+        # Drafts are created eagerly when generation starts, so one that never
+        # produced a step is pure clutter — remove it. Drafts with real steps
+        # stay on disk: the list's Resume button keeps them recoverable.
+        try:
+            if not world_builder.load_world(draft_id).get("steps"):
+                world_builder.delete_world(draft_id)
+        except Exception:
+            pass
     world_gen_sessions.pop(session_id, None)
     world_draft_ids.pop(session_id, None)
     return {"discarded": True}

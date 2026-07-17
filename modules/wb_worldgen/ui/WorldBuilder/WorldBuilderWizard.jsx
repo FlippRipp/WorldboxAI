@@ -32,11 +32,24 @@ function AutoTextarea({ value, onChange, disabled, minRows = 3, placeholder }) {
 // notes (and the linked scenario, if any) into a full seed prompt — the same
 // LLM-as-author pattern as the scenario editor's prompt rewrite. `onChange`
 // takes the new string directly.
+// The AI-write notes survive a relaunch too (Android kills the backgrounded
+// PWA); cleared when the AI successfully writes the prompt from them.
+const AI_NOTES_KEY = 'wb_worldgen_ai_notes';
+
 function WorldPromptField({ value, onChange, disabled, scenarioId }) {
   const [open, setOpen] = useState(false);
-  const [instruction, setInstruction] = useState('');
+  const [instruction, setInstruction] = useState(() => {
+    try { return localStorage.getItem(AI_NOTES_KEY) || ''; } catch { return ''; }
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    try {
+      if (instruction) localStorage.setItem(AI_NOTES_KEY, instruction);
+      else localStorage.removeItem(AI_NOTES_KEY);
+    } catch { /* storage unavailable */ }
+  }, [instruction]);
 
   const runEnrich = async () => {
     if (busy) return;
@@ -119,18 +132,32 @@ function WorldPromptField({ value, onChange, disabled, scenarioId }) {
   );
 }
 
+// The pre-generation form (prompt, template, scenario, skip-review) mirrored
+// to localStorage on every change: Android kills the backgrounded PWA, and a
+// prompt that was typed (or AI-written) but not yet generated exists nowhere
+// else. Cleared when the world is saved.
+const FORM_KEY = 'wb_worldgen_wizard_form';
+
+function readSavedForm() {
+  try {
+    return JSON.parse(localStorage.getItem(FORM_KEY) || 'null') || {};
+  } catch {
+    return {};
+  }
+}
+
 export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
   const [pipeline, setPipeline] = useState([]);
   const [worldState, setWorldState] = useState(null);
   const [currentStepId, setCurrentStepId] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [skipReview, setSkipReview] = useState(false);
-  const [seedPrompt, setSeedPrompt] = useState('');
+  const [skipReview, setSkipReview] = useState(() => !!readSavedForm().skipReview);
+  const [seedPrompt, setSeedPrompt] = useState(() => readSavedForm().seedPrompt || '');
   const [scenarios, setScenarios] = useState([]);
-  const [scenarioId, setScenarioId] = useState(null);
+  const [scenarioId, setScenarioId] = useState(() => readSavedForm().scenarioId || null);
   const [started, setStarted] = useState(false);
   const [templates, setTemplates] = useState([]);
-  const [templateId, setTemplateId] = useState('ai_default');
+  const [templateId, setTemplateId] = useState(() => readSavedForm().templateId || 'ai_default');
   // The effective (post-skip) step order for the running session: the world's
   // own World Design step can turn steps off, which the statically-fetched
   // pipeline can't know. null until the server has told us.
@@ -138,12 +165,28 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
 
   useEffect(() => {
     api.getWorldTemplates()
-      .then((data) => setTemplates(data.templates || []))
+      .then((data) => {
+        const list = data.templates || [];
+        setTemplates(list);
+        // A template restored from localStorage may no longer exist.
+        setTemplateId((cur) => (list.length && !list.some((t) => t.id === cur) ? 'ai_default' : cur));
+      })
       .catch(() => {});
     api.listScenarios()
-      .then((data) => setScenarios(data.scenarios || []))
+      .then((data) => {
+        const list = data.scenarios || [];
+        setScenarios(list);
+        setScenarioId((cur) => (cur && !list.some((s) => s.id === cur) ? null : cur));
+      })
       .catch(() => {});
   }, []);
+
+  // Mirror the form so a relaunch before generation starts loses nothing.
+  useEffect(() => {
+    try {
+      localStorage.setItem(FORM_KEY, JSON.stringify({ seedPrompt, templateId, scenarioId, skipReview }));
+    } catch { /* storage unavailable — the server draft still covers started runs */ }
+  }, [seedPrompt, templateId, scenarioId, skipReview]);
 
   // The pipeline (steps + schemas) depends on the chosen template.
   useEffect(() => {
@@ -159,7 +202,9 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
     // to; the poll effect below then follows the run to completion.
     api.getWorldState().then((data) => {
       const st = data.state;
-      if (st?.steps && (Object.keys(st.steps).length > 0 || st._generating)) {
+      const hasSession = !!st && (st._generating || !!st.seed_prompt
+        || Object.keys(st.steps || {}).length > 0);
+      if (hasSession) {
         setWorldState(st);
         if (data.effective_steps) setEffectiveSteps(data.effective_steps);
         setStarted(true);
@@ -174,15 +219,19 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
         if (!st.complete) {
           setCurrentStepId(st.current_step);
         }
-        if (st.skip_review && !st.complete && !st._generating) {
-          // A one-shot run that stopped without finishing: the backend
-          // process itself was killed mid-run (Android reclaims Termux under
-          // memory pressure) and the draft was resumed from disk. Kick the
-          // remaining steps off again; the poll effect paints progress.
+        // A run that stopped without finishing and left nothing awaiting
+        // review: the generating request (or the whole backend process) was
+        // killed while the app was minimized. Kick it back off — one-shot
+        // sessions rerun the remaining pipeline, review-mode sessions
+        // regenerate the step that was in flight; the poll paints progress.
+        const reviewable = Object.values(st.steps || {}).some((s) => s?.data && !s?.approved);
+        if (!st.complete && !st._generating && (st.skip_review || !reviewable)) {
+          setWorldState({ ...st, _generating: st.skip_review ? 'all' : (st.current_step || 'next') });
           api.continueWorldGeneration().then((cont) => {
             setWorldState(cont.state);
             if (cont.effective_steps) setEffectiveSteps(cont.effective_steps);
             if (cont.state?.complete) setCurrentStepId(null);
+            else if (cont.state?.current_step) setCurrentStepId(cont.state.current_step);
           }).catch(() => {});
         }
       }
@@ -349,6 +398,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
     try {
       const worldId = worldState?.steps?.lore?.data?.world_name || 'world_gen';
       await api.saveWorld(worldId);
+      try { localStorage.removeItem(FORM_KEY); } catch { /* ignore */ }
       setWorldState(null);
       setStarted(false);
       setCurrentStepId(null);

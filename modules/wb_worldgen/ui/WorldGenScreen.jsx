@@ -20,7 +20,9 @@ export default function WorldGenScreen({ onBack }) {
   useEffect(() => {
     api.getWorldState().then((d) => {
       const st = d.state;
-      if (st?._generating || Object.keys(st?.steps || {}).length > 0) {
+      // seed_prompt alone counts: a run interrupted during its very first
+      // step has a session (and an eager draft) but no finished steps yet.
+      if (st?._generating || st?.seed_prompt || Object.keys(st?.steps || {}).length > 0) {
         setView((v) => (v === 'list' ? 'create' : v));
       }
     }).catch(() => {});
