@@ -56,6 +56,16 @@ class WorldTemplate:
     vocabulary: dict = field(default_factory=dict)
     #: Map-generation defaults: {"default_total_nodes": int}
     map: dict = field(default_factory=dict)
+    #: Ordered hierarchy levels (free text) top to bottom:
+    #: [{level_type, label, generator_id, guidance, nestable?}]. Empty = the
+    #: default [world, interior] pair.
+    levels: list = field(default_factory=list)
+
+    def resolved_levels(self) -> list:
+        if self.levels:
+            return [dict(l) for l in self.levels]
+        from wbworldgen.worldgen.migrate import DEFAULT_LEVELS
+        return [dict(l) for l in DEFAULT_LEVELS]
 
     def resolved_system_framing(self) -> str:
         return self.system_framing or DEFAULT_SYSTEM_FRAMING
@@ -117,6 +127,7 @@ def _template_from_dict(raw: dict) -> WorldTemplate:
         pinned_values=dict(raw.get("pinned_values") or {}),
         vocabulary=dict(raw.get("vocabulary") or {}),
         map=dict(raw.get("map") or {}),
+        levels=list(raw.get("levels") or []),
     )
 
 

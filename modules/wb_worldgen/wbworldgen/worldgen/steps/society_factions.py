@@ -9,8 +9,11 @@ class SocietyFactionsStep(Step):
     after = "natural_landmarks"
     schema = {
         "factions": {"type": "list", "label": "Factions", "rerollable": True, "item_schema": {
-            "layer_id": {"type": "string", "label": "Layer ID"},
-            "region": {"type": "string", "label": "Region"},
+            "scope": {
+                "type": "string",
+                "label": "Map Scope",
+                "description": "Which map this faction calls home: empty for the main world map, or a parallel map's name from hierarchy_design.",
+            },
             "name": {"type": "string", "label": "Faction Name"},
             "type": {"type": "string", "label": "Faction Type"},
             "description": {"type": "text", "label": "Description"},

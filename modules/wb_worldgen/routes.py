@@ -400,7 +400,7 @@ async def debug_skip_to(step_id: str, request: SkipToRequest):
     for i in range(target_idx):
         sid = ordered[i]
         sd = steps.get(sid, {}).get("data", {})
-        if sid == "layer_design" and isinstance(sd, dict) and sd.get("layers"):
+        if sid == "hierarchy_design" and isinstance(sd, dict) and sd.get("parallel_maps"):
             note_for_layer = "multi-layer world"
 
     step_config = {"total_nodes": request.total_nodes} if step_id == "map_generation" else None
@@ -823,6 +823,18 @@ async def enrich_commit(world_id: str, request: EnrichCommitRequest, session_id:
             raise HTTPException(status_code=400, detail=f"Unknown enrichment step: {step_id}")
 
         world_builder._flush_enrichment_cache(world_id)
+
+        if step_id == "node_descriptions":
+            # Names exist now — build the child maps hierarchy_design planned
+            # for upfront creation (seed-central locations). Best-effort: an
+            # unmatched or failed entry simply expands lazily during play.
+            try:
+                summary = await world_builder.pregenerate_planned_maps(world_id)
+                if summary.get("built"):
+                    logger.info("pregenerated %d planned child maps for %s",
+                                len(summary["built"]), world_id)
+            except Exception:
+                logger.exception("pregeneration of planned child maps failed")
 
         state = _get_world_state(session_id)
         if world_id == _get_world_draft_id(session_id) and step_id in state.get("steps", {}):

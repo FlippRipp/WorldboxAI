@@ -148,3 +148,62 @@ def test_hooks_migrate_session_worlds_in_place():
     # ...and the cave mouth is offered as a passage.
     passages = schema["player_passage"]["options"]
     assert any(p.startswith("lc_0001") for p in passages)
+
+
+def test_hierarchy_parallel_maps_flow_into_v2(tmp_path):
+    """hierarchy_design parallel maps generate as sibling maps with scoped
+    landmark/faction attachment (the Phase-3 pipeline rework end to end)."""
+    from wbworldgen.worldgen import WorldBuilder, register_default_steps
+
+    wb = WorldBuilder(worlds_dir=str(tmp_path))
+    register_default_steps(wb)
+    state = {
+        "seed_prompt": "duallands",
+        "steps": {
+            "lore": {"data": {"world_name": "Duallands"}, "approved": True},
+            "hierarchy_design": {"data": {
+                "notes": "A surface world over an endless underworld.",
+                "parallel_maps": [{
+                    "label": "The Deep Roads", "level_type": "underground",
+                    "description": "Endless tunnels.",
+                    "connection_kind": "cave_mouth", "connection_count": 2,
+                }],
+                "pregenerate": [],
+            }, "approved": True},
+            "natural_landmarks": {"data": {"landmarks": [
+                {"scope": "", "name": "The Shard", "type": "monolith",
+                 "environment": "rocky_summit", "description": "A black spike."},
+                {"scope": "The Deep Roads", "name": "The Sunless Sea", "type": "lake",
+                 "environment": "lake_shore", "description": "Still black water."},
+            ]}, "approved": True},
+            "society_factions": {"data": {"factions": [
+                {"scope": "", "name": "The Wardens", "type": "order",
+                 "description": "Keepers of the gates.", "settlements": ["Gatewatch"],
+                 "significant_landmarks": []},
+            ]}, "approved": True},
+        },
+    }
+    map_data = wb._map_gen.generate(state, config={"total_nodes": 40})
+    assert "layers" in map_data  # legacy multilayer shape, migrated at compile
+    state["steps"]["map_generation"] = {"data": map_data, "approved": True}
+
+    compiled = wb.compile_world(state)
+    assert set(compiled["maps"]) == {"root", "the_deep_roads"}
+    deep = compiled["maps"]["the_deep_roads"]
+    assert deep["level_type"] == "underground"
+    assert deep["parent_map_id"] == "root" and deep["anchor_node_id"] is None
+    # The cave mouths became connections.
+    cave = [c for c in compiled["connections"] if c["kind"] == "cave_mouth"]
+    assert cave and all(c["to"]["map_id"] == "the_deep_roads" or
+                        c["from"]["map_id"] == "the_deep_roads" for c in cave)
+    # Authored content bound onto the right maps.
+    root_names = {n.get("name") for n in compiled["maps"]["root"]["nodes"]}
+    deep_names = {n.get("name") for n in deep["nodes"]}
+    assert {"The Shard", "Gatewatch"} <= root_names
+    assert "The Sunless Sea" in deep_names
+    # Scope landmarks/factions attached to their MapRecords.
+    assert any(l["name"] == "The Shard" for l in compiled["maps"]["root"]["landmarks"])
+    assert any(f["name"] == "The Wardens" for f in compiled["maps"]["root"]["factions"])
+    assert any(l["name"] == "The Sunless Sea" for l in deep["landmarks"])
+    # Template levels ride into the hierarchy block.
+    assert compiled["hierarchy"]["levels"][0]["level_type"] == "world"

@@ -2,9 +2,12 @@
 
 import logging
 
+import re as _re
+
+from wbworldgen.world_map import bind_named_locations as _bind_named_locations
 from wbworldgen.world_map import generate_map as _generate_map_static
 from wbworldgen.world_map import generate_multilayer_map as _generate_multilayer_map
-from wbworldgen.worldgen.compiler import build_compiled_for_map
+from wbworldgen.worldgen.compiler import build_compiled_for_map, collect_scope_content
 from wbworldgen.worldgen import terrain_store as _ts
 from wbworldgen.worldgen.persistence import WorldPersistence
 
@@ -39,7 +42,59 @@ class MapStepGenerator:
             total_nodes = world_state["steps"]["map_generation"]["data"]["total_nodes"]
         total_nodes = max(30, min(500, int(total_nodes)))
 
-        layer_design_data = world_state.get("steps", {}).get("layer_design", {}).get("data", {})
+        steps_data = world_state.get("steps", {})
+        scope_content = collect_scope_content(steps_data)
+
+        def _bind_scope(nodes, scope_label):
+            content = scope_content.get(scope_label)
+            if content and content.get("named_locations"):
+                _bind_named_locations(nodes, content["named_locations"])
+
+        # hierarchy_design parallel maps become sibling maps of the root; the
+        # output keeps the legacy multilayer shape, which compile_world
+        # migrates into world_format 2 (maps + connections).
+        hierarchy_data = steps_data.get("hierarchy_design", {}).get("data", {})
+        parallel_maps = [p for p in (hierarchy_data.get("parallel_maps") or [])
+                         if isinstance(p, dict) and p.get("label")]
+        if parallel_maps:
+            layer_specs = [{"layer_id": "root", "name": "", "layer_type": "world", "index": 0}]
+            connections_spec = []
+            for i, pm in enumerate(parallel_maps):
+                lid = _re.sub(r"[^a-z0-9]+", "_", str(pm["label"]).lower()).strip("_") or f"parallel_{i + 1}"
+                layer_specs.append({
+                    "layer_id": lid,
+                    "name": pm.get("label", lid),
+                    "layer_type": pm.get("level_type", "world") or "world",
+                    "description": pm.get("description", ""),
+                    "index": i + 1,
+                })
+                try:
+                    count = max(1, min(6, int(pm.get("connection_count") or 2)))
+                except (TypeError, ValueError):
+                    count = 2
+                connections_spec.append({
+                    "from_layer": "root",
+                    "to_layer": lid,
+                    "connection_type": pm.get("connection_kind", "passage") or "passage",
+                    "description": pm.get("description", ""),
+                    "count_hint": count,
+                })
+            terrain_by_layer = {"root": self._load_terrain(world_id, "main")}
+            result = _generate_multilayer_map(
+                compiled,
+                layer_specs=layer_specs,
+                connections_spec=connections_spec,
+                total_nodes=total_nodes,
+                connection_placement="edges",
+                terrain_by_layer=terrain_by_layer,
+            )
+            for layer in result.get("layers", []):
+                label = layer.get("name", "")
+                scope_label = "" if layer.get("layer_id") == "root" else label
+                _bind_scope(layer.get("map", {}).get("nodes", []), scope_label)
+            return result
+
+        layer_design_data = steps_data.get("layer_design", {}).get("data", {})
         if (
             isinstance(layer_design_data, dict)
             and layer_design_data.get("has_multiple_layers")
@@ -73,5 +128,7 @@ class MapStepGenerator:
             )
 
         terrain = self._load_terrain(world_id, "main")
-        return _generate_map_static(compiled, total_nodes=total_nodes,
-                                    terrain=terrain).to_dict()
+        result = _generate_map_static(compiled, total_nodes=total_nodes,
+                                      terrain=terrain).to_dict()
+        _bind_scope(result.get("nodes", []), "")
+        return result

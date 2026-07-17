@@ -1,6 +1,6 @@
 """Terrain generation step — builds raster terrain for surface-like layers.
 
-Runs right after ``layer_design`` (and before ``terrain_regions``) so the AI can
+Runs right after ``hierarchy_design`` so later authoring steps can
 author regions/landmarks that fit the actual generated geography. Every layer is
 a separate area, so each one gets its own heightmap/biome raster (reusing
 ``wbworldgen.terrain``) seeded distinctly; the arrays + rendered images are
@@ -43,7 +43,7 @@ class TerrainGenerationStep(Step):
         "Generate the physical terrain (elevation, biomes, rivers) for each "
         "surface layer. Drives where settlements, landmarks and roads are placed."
     )
-    after = "layer_rules"
+    after = "hierarchy_design"
     uses = USES_MAP  # no LLM; bespoke generate below
     schema = {
         "layers": {"type": "list", "label": "Terrain Layers", "item_schema": {

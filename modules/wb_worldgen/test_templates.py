@@ -157,10 +157,10 @@ def test_get_pipeline_applies_template_view(builder):
     assert "magic_level" not in scifi["world_rules"]["schema"]
     assert "ftl_travel" in scifi["world_rules"]["schema"]
     assert "terrain_generation" not in city
-    assert city["terrain_regions"]["label"] == "Districts"
+    assert scifi["hierarchy_design"]["label"] == "Worlds & Stations"
     # The registered steps themselves are never mutated.
     assert "magic_level" in builder._steps["world_rules"].schema
-    assert builder._steps["terrain_regions"].label == "Terrain & Regions"
+    assert builder._steps["hierarchy_design"].label == "World Structure"
 
 
 def test_template_map_default_flows_into_map_config(builder):

@@ -787,10 +787,8 @@ def test_register_default_steps_produces_known_pipeline(builder):
     assert ids == [
         "world_rules",
         "lore",
-        "layer_design",
-        "layer_rules",
+        "hierarchy_design",
         "terrain_generation",
-        "terrain_regions",
         "natural_landmarks",
         "society_factions",
         "map_generation",

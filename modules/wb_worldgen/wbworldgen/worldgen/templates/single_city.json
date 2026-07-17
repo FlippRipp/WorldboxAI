@@ -3,7 +3,9 @@
   "label": "Single City",
   "description": "The whole story happens inside one city: the map IS the city, regions are districts, and locations are venues, streets and landmarks within it.",
   "system_framing": "You are a world building AI for a city-scale interactive story. The entire playable world is ONE city — every map element is a place inside or immediately around that city.",
-  "skip_steps": ["terrain_generation"],
+  "skip_steps": [
+    "terrain_generation"
+  ],
   "overrides": {
     "world_rules": {
       "description": "Define the genre, tone, technology and the practical rules of life in this city.",
@@ -13,22 +15,10 @@
       "description": "The city's founding, its history, what it is called and the central conflict simmering in it.",
       "guidance": "world_name is the CITY's name. premise describes the city and the story unfolding in it. creation_myth is the city's founding story (mythical or historical). historical_eras are eras of the city's own history."
     },
-    "layer_design": {
-      "description": "Decide whether the city has distinct vertical strata (streets, rooftops, undercity, sewers) that play like separate maps.",
-      "guidance": "\nLayers here are VERTICAL STRATA of one city — e.g. the street level, the rooftop ways, the undercity/sewers, a buried old town. Most city stories are best served by a single layer: set has_multiple_layers to false unless the fiction genuinely needs separately-mapped strata.\n\ncount_hint is a small integer (1-5) for how many physical access points connect two strata (stairwells, shafts, grates). Use small numbers.\n\nconnection_placement controls where those access points sit on the map: \"edges\", \"central\", \"random\" or \"scattered\"."
-    },
-    "layer_rules": {
-      "guidance": "\nReview world_rules.custom_rules. Rules that apply city-wide stay in world_rules; rules that only hold in one stratum (e.g. only in the undercity) move to that layer's rules. Then add new practical rules unique to each stratum."
-    },
-    "terrain_regions": {
-      "label": "Districts",
-      "description": "Carve the city into districts/quarters, each with its own streetscape, atmosphere and character.",
-      "guidance": "Regions are DISTRICTS or quarters of the city (e.g. the docks, the old town, the garment quarter). For each district: 'terrain' describes its streetscape and architecture (alley mazes, grand boulevards, stilt-houses over the canal), 'climate' describes its atmosphere and character (soot and noise, perfumed and patrolled, lantern-lit and quiet). Cover the whole city with 4-8 contiguous districts."
-    },
     "natural_landmarks": {
       "label": "Notable Places",
       "description": "Place the city's notable public places: squares, markets, parks, ruins, waterfronts.",
-      "guidance": "\nLandmarks are notable PLACES in the city: squares, grand markets, parks, canals, ruins, cemeteries, waterfronts. Author places that fit each district's character. For 'environment', pick the closest matching tag — without generated terrain it only loosely guides placement, so favor tags like grassy_plain (open squares/parks), river_bend or lake_shore (waterfronts), rocky_summit (high ground), deep_forest (overgrown grounds)."
+      "guidance": "\nLandmarks are notable PLACES in the city: squares, grand markets, parks, canals, ruins, cemeteries, waterfronts. Author places that fit the city's character; leave scope empty unless a place belongs to a parallel stratum from hierarchy_design. For 'environment', pick the closest matching tag — without generated terrain it only loosely guides placement, so favor tags like grassy_plain (open squares/parks), river_bend or lake_shore (waterfronts), rocky_summit (high ground), deep_forest (overgrown grounds)."
     },
     "society_factions": {
       "description": "Define the city's powers: guilds, gangs, noble houses, temples, companies — and the venues they hold.",
@@ -39,9 +29,16 @@
       "description": "Generate the city's map: faction seats, notable places and the streets connecting them.",
       "schema_patch": {
         "modify": {
-          "total_nodes": {"label": "Location Density", "default": 60}
+          "total_nodes": {
+            "label": "Location Density",
+            "default": 60
+          }
         }
       }
+    },
+    "hierarchy_design": {
+      "description": "Decide whether the city has parallel strata (undercity, rooftop ways) and which places deserve pre-built interiors.",
+      "guidance": "\nparallel_maps here are VERTICAL STRATA of one city that play like separate maps — the undercity/sewers, the rooftop ways, a buried old town. Most city stories are best served by none: leave the list empty unless the fiction genuinely needs separately-mapped strata. connection_kind for a stratum is how it is physically entered (sewer_grate, stairwell, shaft, rooftop_bridge).\n\npregenerate the one or two venues central to the seed premise (the guild hall the story opens in); everything else is mapped during play."
     }
   },
   "pinned_values": {},
@@ -55,5 +52,22 @@
       "rooftop_bridge": "a plank bridge linking the rooftop ways"
     }
   },
-  "map": {"default_total_nodes": 60}
+  "map": {
+    "default_total_nodes": 60
+  },
+  "levels": [
+    {
+      "level_type": "city",
+      "label": "The City",
+      "generator_id": "world_map",
+      "guidance": "The whole playable world: one city of districts, streets and venues."
+    },
+    {
+      "level_type": "interior",
+      "label": "Interior",
+      "generator_id": "interior",
+      "nestable": true,
+      "guidance": "The rooms, floors and courts of one building or compound."
+    }
+  ]
 }

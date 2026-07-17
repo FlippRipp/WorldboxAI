@@ -208,12 +208,23 @@ def mock_layer_rules(prompt: str, note: str = "") -> dict:
 
 
 #: Maps step id -> fixture function. Used by the mock generator.
+def mock_hierarchy_design(prompt: str, note: str = "") -> dict:
+    return {
+        "notes": "A single overworld map; key locations open into their own "
+                 "interior maps during play.",
+        "parallel_maps": [],
+        "pregenerate": [],
+    }
+
+
 MOCK_GENERATORS = {
     "world_rules": mock_rules,
     "lore": mock_lore,
+    "hierarchy_design": mock_hierarchy_design,
+    "natural_landmarks": mock_natural_landmarks,
+    "society_factions": mock_society_factions,
+    # Deprecated steps (not registered by default; kept for legacy worlds/tests).
     "layer_design": mock_layer_design,
     "layer_rules": mock_layer_rules,
     "terrain_regions": mock_terrain_regions,
-    "natural_landmarks": mock_natural_landmarks,
-    "society_factions": mock_society_factions,
 }

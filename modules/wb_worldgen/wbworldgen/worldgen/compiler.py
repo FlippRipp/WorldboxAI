@@ -95,6 +95,92 @@ def merge_geography_steps(steps_data: dict) -> dict:
     return {"regions": merged_regions}
 
 
+def collect_scope_content(steps_data: dict) -> dict:
+    """Landmarks/factions attached to hierarchy scopes (world_format 2).
+
+    Returns {scope_label: {"landmarks": [...], "factions": [...],
+    "named_locations": [...]}} where scope_label "" is the root/world map.
+    Same dedup and no-placeholder-description rules as the legacy region
+    merge (a non-empty settlement description would make node_descriptions
+    treat the node as already described)."""
+    landmarks_data = steps_data.get("natural_landmarks", {}).get("data", {})
+    society_data = steps_data.get("society_factions", {}).get("data", {})
+
+    scopes: dict[str, dict] = {}
+
+    def _scope(label: str) -> dict:
+        key = (label or "").strip()
+        if key not in scopes:
+            scopes[key] = {"landmarks": [], "factions": [],
+                           "named_locations": [], "_seen": set()}
+        return scopes[key]
+
+    def _add_location(scope: dict, name: str, category: str,
+                      description: str = "", environment: str = ""):
+        name = (name or "").strip()
+        if not name or name.lower() in scope["_seen"]:
+            return
+        scope["_seen"].add(name.lower())
+        loc = {"name": name, "category": category, "description": description or ""}
+        if environment:
+            loc["environment"] = environment
+        scope["named_locations"].append(loc)
+
+    for lm in landmarks_data.get("landmarks", []) or []:
+        scope = _scope(lm.get("scope", ""))
+        scope["landmarks"].append({
+            "name": lm.get("name", ""),
+            "type": lm.get("type", ""),
+            "description": lm.get("description", ""),
+            "environment": lm.get("environment", ""),
+        })
+        _add_location(scope, lm.get("name", ""), "landmark",
+                      lm.get("description", ""), lm.get("environment", ""))
+
+    for faction in society_data.get("factions", []) or []:
+        scope = _scope(faction.get("scope", ""))
+        scope["factions"].append({
+            "name": faction.get("name", ""),
+            "type": faction.get("type", ""),
+            "description": faction.get("description", ""),
+            "settlements": faction.get("settlements", []),
+        })
+        for settlement in faction.get("settlements", []) or []:
+            _add_location(scope, settlement, "settlement", "")
+        for slm in faction.get("significant_landmarks", []) or []:
+            scope["landmarks"].append({"name": slm, "type": "landmark",
+                                       "description": "", "environment": ""})
+            _add_location(scope, slm, "landmark", "")
+
+    for scope in scopes.values():
+        scope.pop("_seen", None)
+    return scopes
+
+
+def attach_scope_content(compiled: dict, steps_data: dict):
+    """Attach scope landmarks/factions onto the compiled MapRecords by label
+    (empty/unmatched scopes go to the root map). No-op when the steps carry
+    legacy region-keyed data (merge_geography_steps handles those)."""
+    maps = compiled.get("maps")
+    if not isinstance(maps, dict) or not maps:
+        return
+    scopes = collect_scope_content(steps_data)
+    if not scopes:
+        return
+    root_id = compiled.get("root_map_id", "root")
+    by_label = {str(m.get("label", "")).strip().lower(): mid
+                for mid, m in maps.items()}
+    for label, content in scopes.items():
+        map_id = by_label.get(label.strip().lower()) if label else root_id
+        record = maps.get(map_id) or maps.get(root_id)
+        if record is None:
+            continue
+        if content["landmarks"]:
+            record.setdefault("landmarks", []).extend(content["landmarks"])
+        if content["factions"]:
+            record.setdefault("factions", []).extend(content["factions"])
+
+
 def build_compiled_for_map(world_state: dict) -> dict:
     """Lightweight compile used as input to procedural map generation."""
     steps = world_state.get("steps", {})
@@ -175,8 +261,17 @@ def compile_world(world_state: dict, steps: Optional[dict] = None) -> dict:
     # Compiled worlds are always world_format 2: legacy flat/layered map data
     # (from old step data) is migrated into the hierarchical maps+connections
     # shape here, so every downstream reader sees one format only.
+    # Template-declared hierarchy levels (free text) ride into the compiled
+    # world; migrate fills the default [world, interior] when absent.
+    if world_state.get("hierarchy_levels"):
+        compiled["hierarchy"] = {
+            "levels": world_state["hierarchy_levels"],
+            "notes": steps_data.get("hierarchy_design", {}).get("data", {}).get("notes", ""),
+        }
+
     from .migrate import migrate_world_data
     compiled = migrate_world_data(compiled)
+    attach_scope_content(compiled, steps_data)
 
     # Fold in lazily-expanded child maps (write-once cache under maps/).
     for bundle in world_state.get("child_maps", []) or []:

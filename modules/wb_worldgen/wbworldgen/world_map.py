@@ -1366,3 +1366,32 @@ def compass_direction(from_x: float, from_y: float, to_x: float, to_y: float) ->
         angle += 360
     idx = round(angle / 45) % 8
     return COMPASS_DIRECTIONS[idx]
+
+
+def bind_named_locations(nodes: list, named_locations: list) -> int:
+    """Stamp authored named locations onto the most important unnamed nodes.
+
+    world_format 2 path (no regions): settlements bind as type=settlement with
+    importance floored to 8, landmarks as type=landmark floored to 6 — the
+    same floors the region-based ``_bind`` used. ``nodes`` are plain dicts
+    (post-``to_dict``). Returns how many locations were bound."""
+    if not named_locations:
+        return 0
+    free = sorted((n for n in nodes if not n.get("name")),
+                  key=lambda n: -n.get("importance", 0))
+    bound = 0
+    settlements = [l for l in named_locations if l.get("category") == "settlement"]
+    landmarks = [l for l in named_locations if l.get("category") != "settlement"]
+    for group, node_type, floor in ((settlements, "settlement", 8),
+                                    (landmarks, "landmark", 6)):
+        for loc in group:
+            if not free:
+                return bound
+            node = free.pop(0)
+            node["name"] = loc.get("name", "")
+            node["type"] = node_type
+            if loc.get("description"):
+                node["description"] = loc["description"]
+            node["importance"] = max(node.get("importance", 0), floor)
+            bound += 1
+    return bound

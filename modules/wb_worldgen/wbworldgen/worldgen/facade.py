@@ -24,8 +24,9 @@ from wbworldgen.worldgen.hooks import HookRegistry
 from wbworldgen.worldgen.persistence import WorldPersistence
 from wbworldgen.worldgen.base import USES_MAP
 from wbworldgen.worldgen.fixtures.mock_data import (
-    mock_layer_design, mock_layer_rules, mock_lore, mock_natural_landmarks,
-    mock_rules, mock_society_factions, mock_terrain_regions,
+    mock_hierarchy_design, mock_layer_design, mock_layer_rules, mock_lore,
+    mock_natural_landmarks, mock_rules, mock_society_factions,
+    mock_terrain_regions,
 )
 from wbworldgen.worldgen.types import StepContext
 
@@ -255,6 +256,11 @@ class WorldBuilder:
         return compiler.merge_geography_steps(steps_data)
 
     def compile_world(self, world_state: dict) -> dict:
+        # The template's hierarchy levels (free text) ride into the compiled
+        # world so play-time expansion knows which child levels may exist.
+        if not world_state.get("hierarchy_levels"):
+            world_state = dict(world_state)
+            world_state["hierarchy_levels"] = self.template_for(world_state).resolved_levels()
         return compiler.compile_world(world_state, self._steps)
 
     # --- persistence (delegated) -------------------------------------------
@@ -304,8 +310,8 @@ class WorldBuilder:
                 else:
                     data = {}
             world_state["steps"][step_id] = {"data": data, "approved": True}
-            if step_id == "layer_design" and isinstance(data, dict) and data.get("layers"):
-                note_for_layer = "multi-layer world"
+            if step_id == "hierarchy_design" and isinstance(data, dict) and data.get("parallel_maps"):
+                note_for_layer = "world with parallel maps"
 
         world_id = self.save_world(safe_id, world_state)
         compiled = self.compile_world(world_state)
@@ -457,6 +463,46 @@ class WorldBuilder:
         compiled.pop("_node_by_id", None)
         return bundle
 
+    async def pregenerate_planned_maps(self, world_id: str, on_event=None) -> dict:
+        """Build the child maps hierarchy_design planned for upfront creation
+        (seed-central locations). One full-attention call per map, serialized.
+        Unmatched names are skipped with a warning — they expand lazily later."""
+        world_state = self.load_world(world_id)
+        planned = (world_state.get("steps", {}).get("hierarchy_design", {})
+                   .get("data", {}) or {}).get("pregenerate") or []
+        summary = {"built": [], "skipped": []}
+        if not planned:
+            return summary
+        compiled = self._enrichment._load_compiled(world_id)
+        from wbworldgen.worldgen import mapspace as _ms
+        by_name = {}
+        for mid, m in _ms.maps_by_id(compiled).items():
+            for n in m.get("nodes", []):
+                if n.get("name"):
+                    by_name.setdefault(n["name"].strip().lower(), (mid, n))
+        for entry in planned:
+            name = str((entry or {}).get("location_name", "")).strip()
+            hit = by_name.get(name.lower()) if name else None
+            if hit is None:
+                logger.warning("pregenerate: no named node matches %r; it will expand lazily", name)
+                summary["skipped"].append(name)
+                continue
+            map_id, node = hit
+            if not _maps_expand.is_expandable(compiled, map_id, node):
+                summary["skipped"].append(name)
+                continue
+            try:
+                bundle = await self.expand_node(world_id, map_id, node.get("id"))
+            except Exception as e:
+                logger.warning("pregenerate failed for %r: %s", name, e)
+                summary["skipped"].append(name)
+                continue
+            summary["built"].append(bundle["map"]["map_id"])
+            if on_event is not None:
+                await on_event({"type": "pregenerated", "name": name,
+                                "map_id": bundle["map"]["map_id"]})
+        return summary
+
     # --- deprecated site bundles (superseded by expand_node; kept for the
     # migration read path and old callers) ----------------------------------
 
@@ -526,6 +572,9 @@ class WorldBuilder:
 
     def _mock_lore(self, prompt: str, note: str = "") -> dict:
         return mock_lore(prompt, note)
+
+    def _mock_hierarchy_design(self, prompt: str, note: str = "") -> dict:
+        return mock_hierarchy_design(prompt, note)
 
     def _mock_layer_design(self, prompt: str, note: str = "") -> dict:
         return mock_layer_design(prompt, note)

@@ -4,8 +4,10 @@ from wbworldgen.worldgen.terrain_placement import ENVIRONMENT_TAGS, tag_descript
 _GUIDANCE = """
 The terrain_generation step output describes the ACTUAL generated geography for
 each surface layer (biome mix, coastline/rivers/lakes, elevation). Author
-landmarks that fit that terrain — do not invent a glacier on a layer that is all
-desert, or a coral reef on a landlocked layer.
+landmarks that fit that terrain — do not invent a glacier on a map that is all
+desert, or a coral reef on a landlocked map. Set ``scope`` to the parallel
+map's name (from hierarchy_design) a landmark belongs to, or leave it empty
+for the main world map.
 
 For every landmark set ``environment`` to ONE of these tags so the engine can
 place it on a fitting cell of the map:
@@ -20,12 +22,15 @@ class NaturalLandmarksStep(Step):
     id = "natural_landmarks"
     label = "Natural Landmarks"
     description = "Place notable natural features: mountains, forests, rivers, caverns, and other landmarks per region."
-    after = "terrain_regions"
+    after = "terrain_generation"
     guidance = _GUIDANCE
     schema = {
         "landmarks": {"type": "list", "label": "Landmarks", "rerollable": True, "item_schema": {
-            "layer_id": {"type": "string", "label": "Layer ID"},
-            "region": {"type": "string", "label": "Region"},
+            "scope": {
+                "type": "string",
+                "label": "Map Scope",
+                "description": "Which map this belongs to: empty for the main world map, or a parallel map's name from hierarchy_design.",
+            },
             "name": {"type": "string", "label": "Name"},
             "type": {"type": "string", "label": "Landmark Type"},
             "environment": {
