@@ -2,26 +2,28 @@ from wbworldgen.worldgen.base import Step, register
 from wbworldgen.worldgen.terrain_placement import ENVIRONMENT_TAGS, tag_descriptions
 
 _GUIDANCE = """
-The terrain_generation step output describes the ACTUAL generated geography for
-each surface layer (biome mix, coastline/rivers/lakes, elevation). Author
-landmarks that fit that terrain — do not invent a glacier on a map that is all
-desert, or a coral reef on a landlocked map. Set ``scope`` to the parallel
-map's name (from hierarchy_design) a landmark belongs to, or leave it empty
-for the main world map.
+When a terrain_generation step ran, its output describes the ACTUAL generated
+geography for each surface layer (biome mix, coastline/rivers/lakes,
+elevation). Author features that fit that terrain — do not invent a glacier on
+a map that is all desert, or a coral reef on a landlocked map. On worlds
+without generated terrain the environment tag only loosely guides placement —
+pick the nearest match. Set ``scope`` to the parallel map's name (from
+hierarchy_design) a feature belongs to, or leave it empty for the main map.
 
-For every landmark set ``environment`` to ONE of these tags so the engine can
+For every feature set ``environment`` to ONE of these tags so the engine can
 place it on a fitting cell of the map:
 {tags}
 
-Pick the tag whose terrain matches the landmark you are describing.
+Pick the tag whose terrain matches the feature you are describing.
 """.format(tags=tag_descriptions())
 
 
 @register
 class NaturalLandmarksStep(Step):
     id = "natural_landmarks"
-    label = "Natural Landmarks"
-    description = "Place notable natural features: mountains, forests, rivers, caverns, and other landmarks per region."
+    label = "Notable Features"
+    description = ("Place the world's notable physical features and places: natural landmarks, "
+                   "districts, waterfronts, striking locations — whatever fits this world.")
     after = "terrain_generation"
     guidance = _GUIDANCE
     schema = {

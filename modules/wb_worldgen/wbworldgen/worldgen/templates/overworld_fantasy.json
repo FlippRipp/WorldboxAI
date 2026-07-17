@@ -1,10 +1,28 @@
 {
   "id": "overworld_fantasy",
   "label": "Fantasy Overworld",
-  "description": "A classic top-down fantasy world: kingdoms, wilderness, landmarks and settlements across generated terrain. This is the default and matches the original behavior exactly.",
+  "description": "A classic top-down fantasy world: kingdoms, wilderness, landmarks and settlements across generated terrain.",
   "system_framing": null,
   "skip_steps": [],
-  "overrides": {},
+  "overrides": {
+    "world_rules": {
+      "guidance": "\nEach custom_rule is a practical statement about how the world and its inhabitants operate day-to-day.\nThink: what would an inhabitant of this world take for granted as \"just the way things are\"?\n\nGood examples:\n- \"Monsters aggressively hunt humans and will track them for miles\"\n- \"The roads between cities are stalked by shadow-beasts that hunt at dusk and dawn\"\n- \"No merchant will trade with strangers without a blood-sealed contract\"\n- \"People in this world don't trust each other — betrayal and backstabbing are the norm\"\n- \"Every settlement must pay the harvest tithe to the forest spirits, or the land turns barren\"\n\nAvoid vague philosophy: \"Magic is dangerous\", \"Nature is hostile\", \"Society is oppressive\".\nAvoid game mechanics: \"Players get +1\", \"Damage is doubled at night\"."
+    },
+    "lore": {
+      "label": "Overarching Lore",
+      "description": "Build the world's creation myth, history, central conflict, and key eras.",
+      "guidance": "This is a mythic fantasy world: give it a proper creation myth, deep historical eras, and a central conflict worthy of legend."
+    },
+    "natural_landmarks": {
+      "label": "Natural Landmarks",
+      "description": "Place notable natural features: mountains, forests, rivers, caverns, and other landmarks per region."
+    },
+    "society_factions": {
+      "label": "Society & Factions",
+      "description": "Define the people: factions, settlements, and significant man-made landmarks for each region.",
+      "guidance": "Author the great powers of the world — kingdoms, guilds, cults, tribes — and the settlements and strongholds they hold."
+    }
+  },
   "pinned_values": {},
   "vocabulary": {},
   "map": {}

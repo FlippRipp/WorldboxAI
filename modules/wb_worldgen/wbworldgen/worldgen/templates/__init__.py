@@ -13,9 +13,10 @@ seeing the full ``rules``/``lore`` contract.
 
 Shipped templates live in this package as JSON; user templates go in
 ``data/world_templates/*.json`` (same shape, user wins on id collision). The
-``overworld_fantasy`` template is the implicit default and deliberately empty —
-the step classes' own guidance/schema ARE today's fantasy behavior, so a world
-without a template_id generates byte-identically to before templates existed.
+``ai_default`` template is the implicit default and deliberately empty — the
+step classes' own guidance/schema are genre-neutral, and the ``world_form``
+step's per-world directives (not the template) decide what each step covers.
+Genre presets like ``overworld_fantasy`` are optional hints layered on top.
 """
 
 import copy
@@ -26,7 +27,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TEMPLATE_ID = "overworld_fantasy"
+DEFAULT_TEMPLATE_ID = "ai_default"
 
 #: The system-prompt framing used when a template doesn't override it — must
 #: stay byte-identical to the historical hardcoded line.
@@ -152,8 +153,8 @@ def load_templates() -> dict:
             templates[template.id] = template
     if DEFAULT_TEMPLATE_ID not in templates:
         templates[DEFAULT_TEMPLATE_ID] = WorldTemplate(
-            id=DEFAULT_TEMPLATE_ID, label="Fantasy Overworld",
-            description="The classic overworld fantasy world (default).")
+            id=DEFAULT_TEMPLATE_ID, label="Let the AI decide",
+            description="The AI reads your prompt and shapes the world to fit (default).")
     return templates
 
 

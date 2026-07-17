@@ -56,9 +56,9 @@ def builder(tmpdir):
 
 def test_shipped_templates_load_and_unknown_falls_back(builder):
     ids = {t["id"] for t in builder.list_templates()}
-    assert {"overworld_fantasy", "single_city", "interplanetary_scifi"} <= ids
-    assert builder.get_template(None).id == "overworld_fantasy"
-    assert builder.get_template("nonsense").id == "overworld_fantasy"
+    assert {"ai_default", "overworld_fantasy", "single_city", "interplanetary_scifi"} <= ids
+    assert builder.get_template(None).id == "ai_default"
+    assert builder.get_template("nonsense").id == "ai_default"
     assert builder.get_template("single_city").id == "single_city"
 
 
@@ -96,8 +96,11 @@ def test_apply_schema_patch():
 # ---------------------------------------------------------------------------
 
 def test_default_template_prompts_are_identical_to_untemplated(builder):
+    # Golden regenerated deliberately when the default template became the
+    # empty, genre-neutral ``ai_default`` (fantasy flavor moved into the
+    # explicit ``overworld_fantasy`` overrides).
     state_plain = {"seed_prompt": "seed", "steps": {}}
-    state_default = {"seed_prompt": "seed", "steps": {}, "template_id": "overworld_fantasy"}
+    state_default = {"seed_prompt": "seed", "steps": {}, "template_id": "ai_default"}
 
     asyncio.run(builder.generate_step("world_rules", state_plain, "seed"))
     asyncio.run(builder.generate_step("world_rules", state_default, "seed"))
@@ -106,10 +109,23 @@ def test_default_template_prompts_are_identical_to_untemplated(builder):
     assert plain_msgs == default_msgs
     system = plain_msgs[0]["content"]
     assert system.startswith("You are a world building AI for a tabletop roleplaying game.\n")
-    # The step's own guidance and schema drive the prompt, unpatched.
+    # The step's own genre-neutral guidance and schema drive the prompt, unpatched.
     user = plain_msgs[1]["content"]
-    assert "Monsters aggressively hunt humans" in user
+    assert "last train home" in user            # modern example sits beside the fantasy one
     assert '"magic_level"' in user
+
+
+def test_fantasy_template_carries_fantasy_guidance(builder):
+    state = {"seed_prompt": "seed", "steps": {}, "template_id": "overworld_fantasy"}
+    asyncio.run(builder.generate_step("world_rules", state, "seed"))
+    user = builder._llm_service.calls[0][1]["content"]
+    assert "shadow-beasts" in user              # fantasy-only example, template override
+    assert "last train home" not in user        # neutral guidance fully replaced
+
+    fantasy = {s["id"]: s for s in builder.get_pipeline("overworld_fantasy")}
+    default = {s["id"]: s for s in builder.get_pipeline()}
+    assert fantasy["lore"]["label"] == "Overarching Lore"
+    assert default["lore"]["label"] == "Background & History"
 
 
 def test_template_swaps_framing_guidance_and_schema(builder):

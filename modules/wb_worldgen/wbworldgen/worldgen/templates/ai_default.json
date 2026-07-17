@@ -1,0 +1,11 @@
+{
+  "id": "ai_default",
+  "label": "Let the AI decide",
+  "description": "The AI reads your prompt and shapes the world to fit — any genre, any scale, from a fantasy overworld to a single modern city block. This is the default.",
+  "system_framing": null,
+  "skip_steps": [],
+  "overrides": {},
+  "pinned_values": {},
+  "vocabulary": {},
+  "map": {}
+}
