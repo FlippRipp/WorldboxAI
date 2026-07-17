@@ -888,6 +888,7 @@ def test_register_default_steps_produces_known_pipeline(builder):
     register_default_steps(builder)
     ids = [s["id"] for s in builder.get_pipeline()]
     assert ids == [
+        "world_form",
         "world_rules",
         "lore",
         "hierarchy_design",

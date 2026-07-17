@@ -62,6 +62,19 @@ async def json_retry_completion(
     )
 
 
+def _directive_block(coverage_directive: str) -> str:
+    """The world_form directive for this step, rendered for prompt injection.
+    Empty directive -> empty string, keeping prompts byte-identical for worlds
+    without a world design (old worlds, mock worlds)."""
+    if not coverage_directive:
+        return ""
+    return (
+        f"For THIS world, this step should cover: {coverage_directive}\n"
+        "(This directive comes from the world-design pass for this specific world; "
+        "where it conflicts with the generic guidance below, the directive wins.)\n\n"
+    )
+
+
 class LLMStepGenerator:
     """Generates a step's output dict via the LLM."""
 
@@ -77,7 +90,7 @@ class LLMStepGenerator:
         return self._llm
 
     async def generate(self, step, context: dict, user_prompt: str, user_note: str = "",
-                       system_framing: str = None) -> dict:
+                       system_framing: str = None, coverage_directive: str = "") -> dict:
         model = self._model or self._llm.reader_model
         temperature = self._temperature or 1.0
 
@@ -99,7 +112,7 @@ class LLMStepGenerator:
 
 Step: {step.label} — {step.description}
 
-{("Guidance: " + guidance) if guidance else ""}
+{_directive_block(coverage_directive)}{("Guidance: " + guidance) if guidance else ""}
 
 {"Chain context from previous steps:" + json.dumps(context, indent=2) if context else "This is the first step. No prior context."}
 
@@ -132,7 +145,7 @@ and values appropriate to the world seed prompt above. Never output the schema's
     async def generate_list_item(
         self, step, field_key: str, field_schema: dict, items: list,
         index: int, context: dict, user_prompt: str, user_note: str = "",
-        system_framing: str = None,
+        system_framing: str = None, coverage_directive: str = "",
     ) -> str:
         """Regenerate a single entry of a list field, distinct from the others."""
         model = self._model or self._llm.reader_model
@@ -157,7 +170,7 @@ and values appropriate to the world seed prompt above. Never output the schema's
 Step: {step.label} — {step.description}
 Field: {field_label}{(" — " + field_desc) if field_desc else ""}
 
-{("Guidance: " + guidance) if guidance else ""}
+{_directive_block(coverage_directive)}{("Guidance: " + guidance) if guidance else ""}
 
 {"Context from previous steps:" + json.dumps(context, indent=2) if context else ""}
 
@@ -193,7 +206,7 @@ Respond with a single new '{field_label}' entry as JSON: {{"item": "..."}}"""
     async def generate_structured_item(
         self, step, field_key: str, field_schema: dict, items: list,
         index: int, context: dict, user_prompt: str, user_note: str = "",
-        subfield: str = None, system_framing: str = None,
+        subfield: str = None, system_framing: str = None, coverage_directive: str = "",
     ):
         """Regenerate one structured (object) entry of a list field, or a single
         sub-field of that entry when ``subfield`` is given.
@@ -249,7 +262,7 @@ Respond with the new entry as JSON: {{"item": {{ ... }}}}"""
 Step: {step.label} — {step.description}
 Field: {field_label}
 
-{("Guidance: " + guidance) if guidance else ""}
+{_directive_block(coverage_directive)}{("Guidance: " + guidance) if guidance else ""}
 
 {"Context from previous steps:" + json.dumps(context, indent=2) if context else ""}
 

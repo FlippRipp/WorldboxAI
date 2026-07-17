@@ -1,0 +1,194 @@
+"""World Design step — the AI's reading of what this world is.
+
+The first pipeline step. One single-purpose, full-attention LLM call reads the
+seed prompt (plus any scenario grounding) and decides the shape of the whole
+generation run: what kind of world this is, whether it needs procedural
+terrain at all (``map_style``), which optional steps add nothing here
+(``skip_steps``), and — for every step that does run — a per-world directive
+for what it should cover (``step_directives``). A modern Tokyo slice-of-life
+world gets an abstract city map and "clubs and workplaces" instead of a
+fantasy overworld with kingdoms; the AI, not the template, makes that call.
+
+Downstream, ``dynamic_skips``/``coverage_directive`` are the pure read seams:
+the facade merges the skips into the effective step order and injects each
+directive into that step's prompt. Worlds with no world_form data (old worlds,
+seeded worlds) get an empty skip set and empty directives — full back-compat.
+"""
+
+import copy
+
+from wbworldgen.worldgen.base import Step, register
+
+#: Steps the AI may skip outright. Everything else is structural: world_rules /
+#: lore / hierarchy_design / map_generation feed the compiled contract (world
+#: ids, hierarchy, the map itself) and enrichment steps are engine-driven.
+#: terrain_generation is controlled by ``map_style``, not listed here.
+AI_SKIPPABLE = {"natural_landmarks", "society_factions"}
+
+#: Never presented in the step catalog: the step itself, and the engine-driven
+#: enrichment passes the AI has no say over.
+_CATALOG_EXCLUDED = {"world_form", "node_labeling", "node_descriptions"}
+
+_GUIDANCE = """
+You are shaping the generation pipeline itself, not writing world content yet.
+Read the seed prompt closely and answer: what kind of world does it actually
+ask for? A mythic fantasy overworld, a single modern city, a space station, a
+quiet neighborhood? Then:
+
+- map_style: pick "terrain" only when the world genuinely spans natural
+  geography (continents, wilderness, biomes). Pick "abstract" for cities,
+  interiors, stations, and intimate real-world settings — the map becomes a
+  clean graph of places with no procedural landscape.
+- skip_steps: rarely needed. Prefer a "keep this minimal" directive over
+  skipping — even a slice-of-life story benefits from a few notable places and
+  social circles.
+- step_directives: write one directive for EVERY step in the catalog below.
+  Phrase each in this world's own terms: a modern city's "Origins" is its
+  founding and recent history, not a creation myth; its "Groups" are
+  workplaces, clubs and friend circles, not armies; its "Notable Features"
+  are stations, parks and landmark buildings, not enchanted forests. For a
+  mythic world, lean the other way. The directives you write here steer every
+  later generation call.
+"""
+
+
+def _step_data(world_state: dict) -> dict:
+    data = ((world_state or {}).get("steps", {}).get("world_form", {}) or {}).get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def dynamic_skips(world_state: dict) -> set:
+    """Step ids the world's own design turns off. Empty when no world_form
+    data exists (old worlds, seeded worlds) so everything else behaves exactly
+    as before this step existed."""
+    data = _step_data(world_state)
+    if not data:
+        return set()
+    skips = {s for s in (data.get("skip_steps") or []) if s in AI_SKIPPABLE}
+    if data.get("map_style") == "abstract":
+        skips.add("terrain_generation")
+    return skips
+
+
+def coverage_directive(world_state: dict, step_id: str) -> str:
+    """The world-design directive for one step ("" when none)."""
+    for entry in _step_data(world_state).get("step_directives") or []:
+        if isinstance(entry, dict) and entry.get("step_id") == step_id:
+            return str(entry.get("directive") or "").strip()
+    return ""
+
+
+def normalize_world_form(data, known_step_ids) -> dict:
+    """Clamp LLM output to the engine contract: a valid map_style, skips from
+    the allowlist only, directives only for known steps. Worst case (junk
+    output) degrades to today's behavior: terrain, nothing skipped."""
+    if not isinstance(data, dict):
+        data = {}
+    known = set(known_step_ids or [])
+    map_style = data.get("map_style")
+    if map_style not in ("terrain", "abstract"):
+        map_style = "terrain"
+    skip_steps = []
+    for sid in data.get("skip_steps") or []:
+        if sid in AI_SKIPPABLE and sid not in skip_steps:
+            skip_steps.append(sid)
+    directives = []
+    for entry in data.get("step_directives") or []:
+        if not isinstance(entry, dict):
+            continue
+        sid = entry.get("step_id")
+        text = str(entry.get("directive") or "").strip()
+        if sid in known and sid not in _CATALOG_EXCLUDED and text:
+            directives.append({"step_id": sid, "directive": text})
+    return {
+        "world_kind": str(data.get("world_kind") or "").strip(),
+        "map_style": map_style,
+        "skip_steps": skip_steps,
+        "step_directives": directives,
+    }
+
+
+@register
+class WorldFormStep(Step):
+    id = "world_form"
+    label = "World Design"
+    description = (
+        "Read the seed prompt and decide the shape of this world: what kind of "
+        "world it is, whether it needs physical terrain, and what each later "
+        "step should cover for THIS specific world."
+    )
+    after = None
+    guidance = _GUIDANCE
+    schema = {
+        "world_kind": {
+            "type": "text", "label": "World Kind",
+            "description": "One or two sentences: what kind of world this is — genre, era, scale, tone.",
+        },
+        "map_style": {
+            "type": "select", "label": "Map Style", "options": ["terrain", "abstract"],
+            "description": ("terrain = generate physical geography (continents, biomes, rivers) and "
+                            "place locations on it — for overworlds and wilderness. abstract = no "
+                            "procedural terrain; the map is a clean graph of places — for cities, "
+                            "stations, interiors, intimate settings."),
+        },
+        "skip_steps": {
+            "type": "list", "label": "Steps to Skip", "item_type": "string",
+            "description": ("Ids of optional steps that add nothing for this world (rarely needed — "
+                            "prefer a 'keep this minimal' directive). Only natural_landmarks and "
+                            "society_factions may be listed; terrain is controlled by map_style."),
+        },
+        "step_directives": {
+            "type": "list", "label": "Step Directives", "rerollable": True,
+            "item_schema": {
+                "step_id": {"type": "string", "label": "Step"},
+                "directive": {"type": "text", "label": "What this step should cover for this world"},
+            },
+        },
+    }
+
+    def _catalog(self, services, world_state, template) -> tuple[str, list]:
+        """Readable catalog of the steps this design pass governs, in the
+        template-effective view, plus their ids for output normalization."""
+        lines, ids = [], []
+        for sid in services.ordered_ids_for(world_state):
+            if sid in _CATALOG_EXCLUDED:
+                continue
+            effective = template.apply_to_step(services._steps[sid])
+            note = ""
+            if sid == "terrain_generation":
+                note = " [runs only when map_style is terrain]"
+            elif sid in AI_SKIPPABLE:
+                note = " [skippable]"
+            lines.append(f"- {sid}: {effective.label} — {effective.description}{note}")
+            ids.append(sid)
+        return "\n".join(lines), ids
+
+    async def generate(self, ctx) -> dict:
+        services = ctx.services
+        template = services.template_for(ctx.world_state)
+        catalog, known_ids = self._catalog(services, ctx.world_state, template)
+
+        # Custom-generate steps bypass the facade's mock branch, so handle
+        # mock mode here (precedent: terrain_generation does its own work).
+        llm = services._llm_service
+        if llm is None or getattr(llm, "mode", "mock") == "mock":
+            from wbworldgen.worldgen.fixtures.mock_data import mock_world_form
+            return normalize_world_form(mock_world_form(ctx.user_prompt, ctx.user_note), known_ids)
+
+        effective = copy.copy(template.apply_to_step(self))
+        effective.guidance = (
+            f"{effective.guidance}\n\nStep catalog (write one directive per step, "
+            f"keyed by the id before the colon):\n{catalog}"
+        )
+        data = await services._llm_gen.generate(
+            effective, {}, ctx.user_prompt, ctx.user_note,
+            system_framing=template.resolved_system_framing())
+        return normalize_world_form(data, known_ids)
+
+    def contribute_to_compiled(self, steps_data: dict, compiled: dict):
+        data = (steps_data.get("world_form") or {}).get("data")
+        if isinstance(data, dict) and data:
+            compiled["world_design"] = {
+                "world_kind": data.get("world_kind", ""),
+                "map_style": data.get("map_style", "terrain"),
+            }

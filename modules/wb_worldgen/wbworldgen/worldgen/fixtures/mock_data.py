@@ -207,6 +207,20 @@ def mock_layer_rules(prompt: str, note: str = "") -> dict:
     }
 
 
+def mock_world_form(prompt: str, note: str = "") -> dict:
+    # Terrain style + no skips: seeded/offline worlds behave exactly like
+    # worlds generated before the world_form step existed.
+    return {
+        "world_kind": "A dark fantasy overworld of ancient powers (mock).",
+        "map_style": "terrain",
+        "skip_steps": [],
+        "step_directives": [
+            {"step_id": "lore", "directive": "Name the world and give it a mythic deep history."},
+            {"step_id": "society_factions", "directive": "Author the great powers of the world."},
+        ],
+    }
+
+
 #: Maps step id -> fixture function. Used by the mock generator.
 def mock_hierarchy_design(prompt: str, note: str = "") -> dict:
     return {
@@ -218,6 +232,7 @@ def mock_hierarchy_design(prompt: str, note: str = "") -> dict:
 
 
 MOCK_GENERATORS = {
+    "world_form": mock_world_form,
     "world_rules": mock_rules,
     "lore": mock_lore,
     "hierarchy_design": mock_hierarchy_design,

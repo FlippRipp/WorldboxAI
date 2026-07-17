@@ -10,6 +10,7 @@ Deprecated (kept on disk, no longer registered): layer_design + layer_rules
 terrain_regions (see docs/systems/DEPRECATED_regions.md).
 """
 
+from wbworldgen.worldgen.steps.world_form import WorldFormStep
 from wbworldgen.worldgen.steps.world_rules import WorldRulesStep
 from wbworldgen.worldgen.steps.lore import LoreStep
 from wbworldgen.worldgen.steps.hierarchy_design import HierarchyDesignStep
@@ -21,6 +22,7 @@ from wbworldgen.worldgen.steps.node_labeling import NodeLabelingStep
 from wbworldgen.worldgen.steps.node_descriptions import NodeDescriptionsStep
 
 __all__ = [
+    "WorldFormStep",
     "WorldRulesStep",
     "LoreStep",
     "HierarchyDesignStep",

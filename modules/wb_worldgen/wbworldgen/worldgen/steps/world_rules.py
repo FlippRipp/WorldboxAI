@@ -21,7 +21,7 @@ class WorldRulesStep(Step):
     id = "world_rules"
     label = "World Rules"
     description = "Define the genre, tone, era, and practical world constraints that shape daily life."
-    after = None
+    after = "world_form"
     guidance = _GUIDANCE
     schema = {
         "genre": {"type": "string", "label": "Genre"},

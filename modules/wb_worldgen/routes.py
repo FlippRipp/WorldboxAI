@@ -108,12 +108,32 @@ class WorldGenerateRequest(BaseModel):
 
 
 def _ordered_ids_for(state: dict) -> list[str]:
-    """Effective step order for a generation session (template skip filter);
-    tolerates fakes/legacy builders without template support."""
+    """Effective step order for a generation session (template + world_form
+    skip filters); tolerates fakes/legacy builders without template support."""
     resolver = getattr(world_builder, "ordered_ids_for", None)
     if callable(resolver):
         return resolver(state)
     return world_builder._ordered_ids
+
+
+def _prune_dynamic_skips(state: dict):
+    """Drop generated data for steps the (re-rolled) world design now skips —
+    otherwise stale entries would still compile into the world and the step
+    cards would linger in the UI."""
+    try:
+        from wbworldgen.worldgen.steps.world_form import dynamic_skips
+    except ImportError:  # fakes/legacy builders in tests
+        return
+    for sid in dynamic_skips(state):
+        state.get("steps", {}).pop(sid, None)
+
+
+def _state_response(state: dict, **extra) -> dict:
+    """A session-state payload plus the effective (post-skip) step order the
+    client should render. Recomputed per response, never persisted — the
+    wizard fetches the full pipeline once per template, so this is how it
+    learns which steps the world's own design turned off."""
+    return {"state": state, "effective_steps": _ordered_ids_for(state), **extra}
 
 
 @router.get("/api/world/templates")
@@ -163,7 +183,12 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
         done_steps: set = set()
         state["_generating"] = "all"
         try:
-            for step_id in _ordered_ids_for(state):
+            # Iterate the full registry and re-check the effective list per
+            # step: world_form (the first step) may turn steps off mid-run,
+            # and a snapshot taken before it ran would not see those skips.
+            for step_id in list(world_builder._ordered_ids):
+                if step_id not in _ordered_ids_for(state):
+                    continue
                 if step_id in enrichment_steps or step_id in done_steps:
                     continue
                 if step_id == "terrain_generation" and terrain_task is not None:
@@ -200,7 +225,7 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
         finally:
             state.pop("_generating", None)
         state["complete"] = True
-        return {"state": state, "complete": True}
+        return _state_response(state, complete=True)
 
     ordered = _ordered_ids_for(state)
     first_step = ordered[0] if ordered else None
@@ -214,7 +239,7 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
         state.pop("_generating", None)
     state["steps"][first_step] = {"data": data, "approved": False}
     state["current_step"] = first_step
-    return {"state": state, "current_step": first_step}
+    return _state_response(state, current_step=first_step)
 
 
 class RewriteWorldPromptRequest(BaseModel):
@@ -291,8 +316,14 @@ async def generate_world_step(step_id: str, body: dict = None, session_id: str =
     finally:
         state.pop("_generating", None)
     state["steps"][step_id] = {"data": data, "approved": False, "note": note}
+    if step_id == "world_form":
+        _prune_dynamic_skips(state)
 
     ordered = _ordered_ids_for(state)
+    if step_id not in ordered:
+        raise HTTPException(status_code=409,
+                            detail="This step was skipped by the world design — "
+                                   "re-roll World Design to bring it back.")
     current_idx = ordered.index(step_id)
     for idx in range(current_idx + 1, len(ordered)):
         downstream_id = ordered[idx]
@@ -302,7 +333,7 @@ async def generate_world_step(step_id: str, body: dict = None, session_id: str =
     state["current_step"] = step_id
     state["complete"] = False
     _auto_save_draft(session_id)
-    return {"state": state, "step": step_id, "data": data}
+    return _state_response(state, step=step_id, data=data)
 
 
 @router.post("/api/world/regenerate-item/{step_id}")
@@ -356,8 +387,14 @@ async def approve_world_step(step_id: str, body: dict = None, session_id: str = 
         step_entry = state.get("steps", {}).get(step_id, {})
         step_entry["approved"] = True
         state["steps"][step_id] = step_entry
+    if step_id == "world_form":
+        _prune_dynamic_skips(state)
 
     ordered = _ordered_ids_for(state)
+    if step_id not in ordered:
+        raise HTTPException(status_code=409,
+                            detail="This step was skipped by the world design — "
+                                   "re-roll World Design to bring it back.")
     current_idx = ordered.index(step_id)
 
     if was_already_approved:
@@ -378,12 +415,12 @@ async def approve_world_step(step_id: str, body: dict = None, session_id: str = 
             state["current_step"] = next_unapproved
             state["complete"] = False
             _auto_save_draft(session_id)
-            return {"state": state, "current_step": next_unapproved}
+            return _state_response(state, current_step=next_unapproved)
         else:
             state["current_step"] = None
             state["complete"] = True
             _auto_save_draft(session_id)
-            return {"state": state, "complete": True}
+            return _state_response(state, complete=True)
 
     next_step = ordered[current_idx + 1] if current_idx + 1 < len(ordered) else None
 
@@ -395,7 +432,7 @@ async def approve_world_step(step_id: str, body: dict = None, session_id: str = 
             state["steps"][next_step] = {"data": default_data, "approved": False}
             state["current_step"] = next_step
             _auto_save_draft(session_id)
-            return {"state": state, "current_step": next_step, "data": default_data}
+            return _state_response(state, current_step=next_step, data=default_data)
 
         state["_generating"] = next_step
         try:
@@ -409,17 +446,17 @@ async def approve_world_step(step_id: str, body: dict = None, session_id: str = 
         state["steps"][next_step] = {"data": data, "approved": False}
         state["current_step"] = next_step
         _auto_save_draft(session_id)
-        return {"state": state, "current_step": next_step, "data": data}
+        return _state_response(state, current_step=next_step, data=data)
 
     state["current_step"] = None
     state["complete"] = True
     _auto_save_draft(session_id)
-    return {"state": state, "complete": True}
+    return _state_response(state, complete=True)
 
 
 @router.get("/api/world/state")
 async def get_world_state(session_id: str = "default"):
-    return {"state": _get_world_state(session_id), "world_id": _get_world_draft_id(session_id)}
+    return _state_response(_get_world_state(session_id), world_id=_get_world_draft_id(session_id))
 
 
 # === Debug / seed endpoints ===
@@ -518,6 +555,7 @@ async def debug_skip_to(step_id: str, request: SkipToRequest):
         "current_step": step_id,
         "pipeline_position": f"{target_idx + 1}/{len(ordered)}",
         "state": state,
+        "effective_steps": _ordered_ids_for(state),
     }
 
 
@@ -576,7 +614,7 @@ async def list_worlds():
 async def load_world(world_id: str, session_id: str = "default"):
     try:
         world_gen_sessions[session_id] = world_builder.load_world(world_id)
-        return {"state": _get_world_state(session_id)}
+        return _state_response(_get_world_state(session_id))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -592,7 +630,7 @@ async def resume_world(request: ResumeRequest, session_id: str = "default"):
         world_gen_sessions[session_id] = state
         world_draft_ids[session_id] = request.world_id
         state["_draft_id"] = request.world_id
-        return {"state": state}
+        return _state_response(state)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 

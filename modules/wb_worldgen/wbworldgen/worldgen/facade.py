@@ -23,6 +23,7 @@ from wbworldgen.worldgen.generation import LLMStepGenerator, MapStepGenerator, M
 from wbworldgen.worldgen.hooks import HookRegistry
 from wbworldgen.worldgen.persistence import WorldPersistence
 from wbworldgen.worldgen.base import USES_MAP
+from wbworldgen.worldgen.steps import world_form as _world_form
 from wbworldgen.worldgen.fixtures.mock_data import (
     mock_hierarchy_design, mock_layer_design, mock_layer_rules, mock_lore,
     mock_natural_landmarks, mock_rules, mock_society_factions,
@@ -221,9 +222,12 @@ class WorldBuilder:
 
     def ordered_ids_for(self, world_state: dict) -> list[str]:
         """The effective step order for a world: the registered order minus the
-        world's template skip_steps. `resolve_order` itself stays untouched, so
-        `after` chains keep resolving against the full registry."""
+        world's template skip_steps and the skips its own world_form design
+        decided (abstract map style, AI-skipped optional steps). `resolve_order`
+        itself stays untouched, so `after` chains keep resolving against the
+        full registry."""
         skip = set(self.template_for(world_state).skip_steps)
+        skip |= _world_form.dynamic_skips(world_state)
         return [sid for sid in self._ordered_ids if sid not in skip]
 
     # --- generation ---------------------------------------------------------
@@ -263,7 +267,8 @@ class WorldBuilder:
             effective = template.apply_to_step(step)
             data = await self._llm_gen.generate(
                 effective, context, user_prompt, user_note,
-                system_framing=template.resolved_system_framing())
+                system_framing=template.resolved_system_framing(),
+                coverage_directive=_world_form.coverage_directive(world_state, step_id))
         else:
             data = self._mock_gen.generate(step, world_state, user_prompt, user_note)
 
@@ -304,14 +309,16 @@ class WorldBuilder:
         if self._llm_service and self._llm_service.mode != "mock":
             context = self._build_chain_context(world_state, step_id)
             framing = template.resolved_system_framing()
+            directive = _world_form.coverage_directive(world_state, step_id)
             if is_structured:
                 return await self._llm_gen.generate_structured_item(
                     step, field, field_schema, items, index, context, user_prompt,
                     user_note, subfield=subfield, system_framing=framing,
+                    coverage_directive=directive,
                 )
             return await self._llm_gen.generate_list_item(
                 step, field, field_schema, items, index, context, user_prompt, user_note,
-                system_framing=framing,
+                system_framing=framing, coverage_directive=directive,
             )
 
         # Mock fallback: deterministic, distinct from existing entries.
