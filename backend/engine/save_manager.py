@@ -222,7 +222,7 @@ class SaveManager:
                     metadata = {}
         metadata["turn"] = turn_number
         metadata["last_played"] = datetime.now(timezone.utc).isoformat()
-        for key in ("world_id", "player_location_node_id", "player_location_region", "player_location_layer_id", "revealed_node_ids", "sticky_world_entries"):
+        for key in ("world_id", "player_location_node_id", "player_location_region", "player_location_map_id", "revealed_node_ids", "sticky_world_entries"):
             if key in state and state[key] not in (None, ""):
                 metadata[key] = state[key]
         with open(metadata_path, "w", encoding="utf-8") as f:

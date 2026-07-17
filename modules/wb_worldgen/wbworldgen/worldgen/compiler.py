@@ -172,4 +172,8 @@ def compile_world(world_state: dict, steps: Optional[dict] = None) -> dict:
             except Exception:
                 pass
 
-    return compiled
+    # Compiled worlds are always world_format 2: legacy flat/layered map data
+    # (from old step data) is migrated into the hierarchical maps+connections
+    # shape here, so every downstream reader sees one format only.
+    from .migrate import migrate_world_data
+    return migrate_world_data(compiled)

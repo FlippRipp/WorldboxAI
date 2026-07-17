@@ -56,20 +56,24 @@ def sync_enriched_nodes(host, world_id: str, node_ids: list):
 
 def node_world_entry(wd: dict, node: dict) -> dict | None:
     """RAG world-index entry for a backfilled node, matching the format
-    memory._build_world_entries uses for map nodes."""
+    memory._build_world_entries uses for map nodes (format lockstep: root-map
+    nodes keep the flat legacy text, other maps are labeled with the map)."""
     if not node.get("name") or not node.get("description"):
         return None
     nid = node.get("id", "")
-    for map_layer in wd.get("map_layers", []):
-        if any(n.get("id") == nid for n in map_layer.get("map", {}).get("nodes", [])):
-            layer_name = map_layer.get("name", "")
-            return {
-                "text": f"Location [{layer_name}]: {node['name']} ({node.get('type', 'location')}). {node['description']}",
-                "source_type": "node", "source_id": nid, "region": layer_name,
-            }
+    from wbworldgen.worldgen import mapspace as _ms
+    map_id = _ms.map_of_node(wd, nid)
+    root_id = wd.get("root_map_id", "root")
+    if map_id is not None and map_id != root_id:
+        m = _ms.get_map(wd, map_id) or {}
+        label = m.get("label", map_id)
+        return {
+            "text": f"Location [{label}]: {node['name']} ({node.get('type', 'location')}). {node['description']}",
+            "source_type": "node", "source_id": nid, "region": label,
+        }
     return {
         "text": f"Location: {node['name']} ({node.get('type', 'location')}). {node['description']}",
-        "source_type": "node", "source_id": nid, "region": node.get("name", ""),
+        "source_type": "node", "source_id": nid, "region": node.get("region") or node.get("name", ""),
     }
 
 

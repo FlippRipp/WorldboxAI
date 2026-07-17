@@ -58,7 +58,6 @@ def make_state(world):
     return {
         "player_location_node_id": "n_a",
         "player_location_region": "West",
-        "player_location_layer_id": None,
         "revealed_node_ids": ["n_a", "n_b"],
         "world_data": world,
         "module_data": {},
@@ -82,7 +81,7 @@ def run_turn(state, mutation):
         own.update(md["wb_worldgen"])
     if result.get("player_location_node_id"):
         for key in ("player_location_node_id", "player_location_region",
-                    "player_location_layer_id", "revealed_node_ids"):
+                    "player_location_map_id", "revealed_node_ids"):
             if key in result:
                 state[key] = result[key]
     return result
@@ -171,14 +170,81 @@ def test_unreachable_destination_falls_back_to_teleport():
     assert state["module_data"]["wb_worldgen"]["travel"] is None
 
 
-def test_layer_change_teleports():
-    state = make_state(make_world())
-    state["player_location_layer_id"] = "surface"
-    result = run_turn(state, {"player_location_node_id": "n_d",
-                              "player_location_layer_id": "underground"})
+def make_two_map_world():
+    """The line world plus a parallel 'undercroft' map joined by a cave mouth
+    at Bryn (world_format 2 comes from the in-place migration on first turn)."""
+    world = make_world()
+    world["maps"] = None  # force migration path from legacy 'map' key
+    world.pop("maps")
+    return world
 
-    assert result["player_location_node_id"] == "n_d"
-    assert state["player_location_layer_id"] == "underground"
+
+def test_instant_passage_lands_on_the_far_map():
+    state = make_state(make_world())
+    # Migrate by running a no-op turn, then bolt on a second map + connection.
+    run_turn(state, {})
+    wd = state["world_data"]
+    wd["maps"]["undercroft"] = {
+        "map_id": "undercroft", "label": "The Undercroft", "level_type": "underground",
+        "description": "", "parent_map_id": "root", "anchor_node_id": None,
+        "generator_id": "world_map", "schema": 2,
+        "nodes": [{"id": "u_1", "name": "Cave Landing", "type": "cavern", "x": 0, "y": 0}],
+        "edges": [], "config": {},
+    }
+    wd["connections"] = [{
+        "id": "c_cave", "from": {"map_id": "root", "node_id": "n_b"},
+        "to": {"map_id": "undercroft", "node_id": "u_1"},
+        "kind": "cave_mouth", "name": "The Sinkhole", "description": "",
+        "travel": {"mode": "instant"}, "bidirectional": True,
+        "requirements": "", "hidden": False, "origin": "generated",
+    }]
+
+    # The player is at n_a; the passage is at n_b — approach starts first.
+    result = run_turn(state, {"player_passage": "c_cave (cave_mouth: The Sinkhole -> The Undercroft: Cave Landing)"})
+    travel = state["module_data"]["wb_worldgen"]["travel"]
+    assert travel["pending_connection_id"] == "c_cave"
+    assert travel["destination_node_id"] == "n_b"
+
+    # Second turn completes the leg to n_b and rolls straight into the hop.
+    result = run_turn(state, {})
+    assert result["player_location_node_id"] == "u_1"
+    assert result["player_location_map_id"] == "undercroft"
+    assert state["module_data"]["wb_worldgen"]["travel"] is None
+    assert "u_1" in state["revealed_node_ids"]
+
+
+def test_journey_passage_transits_over_turns():
+    state = make_state(make_world())
+    run_turn(state, {})
+    wd = state["world_data"]
+    wd["maps"]["kepler"] = {
+        "map_id": "kepler", "label": "Kepler-3", "level_type": "planet",
+        "description": "", "parent_map_id": "root", "anchor_node_id": None,
+        "generator_id": "world_map", "schema": 2,
+        "nodes": [{"id": "k_port", "name": "Landing Field", "type": "port", "x": 0, "y": 0}],
+        "edges": [], "config": {},
+    }
+    wd["connections"] = [{
+        "id": "c_shuttle", "from": {"map_id": "root", "node_id": "n_a"},
+        "to": {"map_id": "kepler", "node_id": "k_port"},
+        "kind": "shuttle", "name": "Dawnrunner", "description": "",
+        "travel": {"mode": "journey", "turns": 3}, "bidirectional": True,
+        "requirements": "", "hidden": False, "origin": "generated",
+    }]
+
+    # Standing at the shuttle: the transit starts (turn 1 of 3).
+    run_turn(state, {"player_passage": "c_shuttle"})
+    travel = state["module_data"]["wb_worldgen"]["travel"]
+    assert travel["phase"] == "transit"
+    assert travel["transit_turns_left"] == 2
+    context = wbg._build_location_context(state, wd)
+    assert "IN TRANSIT" in context and "Dawnrunner" in context
+
+    run_turn(state, {})  # turn 2
+    assert state["module_data"]["wb_worldgen"]["travel"]["transit_turns_left"] == 1
+    result = run_turn(state, {})  # turn 3 — arrival
+    assert result["player_location_node_id"] == "k_port"
+    assert result["player_location_map_id"] == "kepler"
     assert state["module_data"]["wb_worldgen"]["travel"] is None
 
 

@@ -7,59 +7,38 @@ from wbworldgen.world_map import compass_direction as _compass_direction
 
 def collect_nodes_by_layer(compiled: dict, layer_filter: str = None) -> tuple:
     """Return (all_nodes, layer_map). Each node is a copy tagged with its
-    layer_id/layer_name. layer_map maps layer id -> {done, total}."""
+    map_id/layer_id/layer_name. layer_map maps map id -> {done, total}.
+
+    ``layer_filter`` (and the layer_map keys) are map ids in world_format 2;
+    the ``layer_id`` tag carries the map's legacy layer id (terrain rasters
+    are stored under it), falling back to the map id."""
+    from wbworldgen.worldgen import mapspace as _ms
+
     all_nodes = []
     layer_map = {}
-    map_layers = compiled.get("map_layers", [])
-    layers_info = compiled.get("layers", [])
-
-    if map_layers:
-        for ml in map_layers:
-            lid = ml.get("layer_id", "")
-            if layer_filter and lid != layer_filter:
-                continue
-            layer_nodes = ml.get("map", {}).get("nodes", [])
-            layer_map[lid] = {"done": 0, "total": len(layer_nodes)}
-            for n in layer_nodes:
-                nc = dict(n)
-                nc["layer_id"] = lid
-                nc["layer_name"] = ml.get("name", lid)
-                all_nodes.append(nc)
-    else:
-        flat_nodes = compiled.get("map", {}).get("nodes", [])
-        layer_map["main"] = {"done": 0, "total": len(flat_nodes)}
-        for n in flat_nodes:
+    for mid, m in _ms.maps_by_id(compiled).items():
+        if layer_filter and mid != layer_filter:
+            continue
+        map_nodes = m.get("nodes", [])
+        layer_map[mid] = {"done": 0, "total": len(map_nodes)}
+        for n in map_nodes:
             nc = dict(n)
-            nc["layer_id"] = ""
+            nc["map_id"] = mid
+            nc["layer_id"] = m.get("legacy_layer_id") or mid
+            nc["layer_name"] = m.get("label", mid)
             all_nodes.append(nc)
-
-    layers_by_id = {l.get("layer_id", ""): l for l in layers_info}
-    for n in all_nodes:
-        lid = n.get("layer_id", "")
-        if lid and lid in layers_by_id:
-            n["layer_name"] = layers_by_id[lid].get("name", lid)
-
     return all_nodes, layer_map
 
 
 def get_neighbor_context(node: dict, all_nodes: list, compiled: dict, include_descriptions: bool) -> list:
-    map_layers = compiled.get("map_layers", [])
-    flat_edges = compiled.get("map", {}).get("edges", [])
+    from wbworldgen.worldgen import mapspace as _ms
 
     node_id = node.get("id", "")
     node_x = node.get("x", 0)
     node_y = node.get("y", 0)
 
-    edges = []
-    if map_layers:
-        for ml in map_layers:
-            for e in ml.get("map", {}).get("edges", []):
-                if e.get("from") == node_id or e.get("to") == node_id:
-                    edges.append(e)
-    else:
-        for e in flat_edges:
-            if e.get("from") == node_id or e.get("to") == node_id:
-                edges.append(e)
+    edges = [e for e in _ms.all_edges(compiled)
+             if e.get("from") == node_id or e.get("to") == node_id]
 
     neighbor_ids = set()
     for e in edges:
@@ -87,8 +66,28 @@ def get_neighbor_context(node: dict, all_nodes: list, compiled: dict, include_de
 
 
 def get_connection_context(node: dict, compiled: dict) -> dict:
-    """When the node is an inter-layer connection, return its connection_type,
-    authored name/description and the layer it links to. Empty otherwise."""
+    """When the node is a connection endpoint (a way to another map), return
+    its kind, authored name/description and the map it links to. Empty
+    otherwise."""
+    node_id = node.get("id")
+    # world_format 2: connections are a flat top-level list.
+    for c in compiled.get("connections") or []:
+        frm, to = c.get("from") or {}, c.get("to") or {}
+        if frm.get("node_id") == node_id:
+            far = to
+        elif c.get("bidirectional", True) and to.get("node_id") == node_id:
+            far = frm
+        else:
+            continue
+        from wbworldgen.worldgen import mapspace as _ms
+        far_map = _ms.get_map(compiled, far.get("map_id", "")) or {}
+        return {
+            "type": c.get("kind", "passage"),
+            "name": c.get("name", ""),
+            "description": c.get("description", ""),
+            "target_layer_id": far_map.get("label") or far.get("map_id", ""),
+        }
+    # Legacy inter-layer connection (un-migrated inputs, e.g. tests).
     conn_id = node.get("interlayer_connection_id")
     if not conn_id:
         return {}
@@ -109,16 +108,28 @@ def get_connection_context(node: dict, compiled: dict) -> dict:
 
 
 def build_enrichment_context(node: dict, all_nodes: list, compiled: dict, include_descriptions: bool = False) -> dict:
+    from wbworldgen.worldgen import mapspace as _ms
+
     world_rules = compiled.get("rules", {})
     lore = compiled.get("lore", {})
-    layers_info = compiled.get("layers", [])
 
-    node_layer_id = node.get("layer_id", "")
+    # The node's map scope (labels/description come from the MapRecord).
+    node_map = _ms.get_map(compiled, node.get("map_id", "")) if node.get("map_id") else None
     node_layer = None
-    for layer in layers_info:
-        if layer.get("layer_id") == node_layer_id:
-            node_layer = layer
-            break
+    if node_map is not None:
+        node_layer = {
+            "layer_id": node_map.get("map_id", ""),
+            "name": node_map.get("label", ""),
+            "description": node_map.get("description", ""),
+            "layer_type": node_map.get("level_type", "surface") or "surface",
+        }
+    else:
+        # Legacy inputs: resolve against the old layers catalog.
+        node_layer_id = node.get("layer_id", "")
+        for layer in compiled.get("layers", []):
+            if layer.get("layer_id") == node_layer_id:
+                node_layer = layer
+                break
 
     node_region_name = node.get("region", "")
     region_data = {}
@@ -140,7 +151,7 @@ def build_enrichment_context(node: dict, all_nodes: list, compiled: dict, includ
             "tone": world_rules.get("tone", ""),
         },
         "layer": {
-            "name": node_layer.get("name", node_layer_id) if node_layer else node.get("layer_name", ""),
+            "name": node_layer.get("name", "") if node_layer else node.get("layer_name", ""),
             "description": node_layer.get("description", "") if node_layer else "",
             "type": node_layer.get("layer_type", "surface") if node_layer else "surface",
         },
@@ -178,8 +189,10 @@ def _terrain_for_node(node: dict, compiled: dict) -> dict:
         layers = next(iter(terrain_layers.values()))
     if not layers:
         return {}
+    from wbworldgen.worldgen import mapspace as _ms
     from wbworldgen.worldgen import terrain_store as _ts
-    cfg = compiled.get("map", {}).get("config", {})
+    node_map = _ms.get_map(compiled, node.get("map_id", "")) if node.get("map_id") else None
+    cfg = (node_map or {}).get("config") or compiled.get("map", {}).get("config", {})
     mw = cfg.get("map_width", 1000.0)
     mh = cfg.get("map_height", 1000.0)
     return _ts.sample_terrain(layers, node.get("x", 0), node.get("y", 0), mw, mh)

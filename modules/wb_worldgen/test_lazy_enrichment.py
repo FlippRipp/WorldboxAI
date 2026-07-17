@@ -110,7 +110,7 @@ def test_run_importance_floor_details_only_majors(builder):
     assert phases[0]["total_nodes"] == 2
     last_node_evt = [e for e in events if e["type"] == "node"][-1]
     assert last_node_evt["total_nodes"] == 2
-    assert last_node_evt["per_layer"]["main"]["total"] == 2
+    assert last_node_evt["per_layer"]["root"]["total"] == 2
 
 
 def test_run_node_ids_targets_specific_nodes(builder):
@@ -225,11 +225,11 @@ def test_arrival_at_undetailed_node_waits_and_syncs(builder, tmpdir):
     assert "Name n2" in result["context_string"]
     assert "Flavor text for n2" in result["context_string"]
     # Synced into the live session world_data and the save's world_data.json.
-    node = next(n for n in sm.state["world_data"]["map"]["nodes"] if n["id"] == "n2")
+    node = next(n for n in sm.state["world_data"]["maps"]["root"]["nodes"] if n["id"] == "n2")
     assert node["name"] == "Name n2"
     with open(sm.data_dir / "saves" / "save1" / "World" / "world_data.json", encoding="utf-8") as f:
         on_disk = json.load(f)
-    disk_node = next(n for n in on_disk["map"]["nodes"] if n["id"] == "n2")
+    disk_node = next(n for n in on_disk["maps"]["root"]["nodes"] if n["id"] == "n2")
     assert disk_node["description"] == "Flavor text for n2"
     # And embedded into the RAG world index.
     assert any(e["source_id"] == "n2" and "Name n2" in e["text"]
@@ -250,7 +250,7 @@ def test_idle_trickle_details_pending_nodes(builder, tmpdir):
 
     asyncio.run(main())
 
-    detailed = [n["id"] for n in sm.state["world_data"]["map"]["nodes"] if n["description"]]
+    detailed = [n["id"] for n in sm.state["world_data"]["maps"]["root"]["nodes"] if n["description"]]
     # Two more nodes per turn (backfill_per_turn=2) on top of the majors.
     assert len(detailed) == 4
 
@@ -273,7 +273,7 @@ def test_reveal_queues_backfill_on_teleport(builder, tmpdir):
     asyncio.run(main())
 
     # The teleport revealed n2/n4 around n3; revealed nodes got detailed.
-    described = {n["id"] for n in sm.state["world_data"]["map"]["nodes"] if n["description"]}
+    described = {n["id"] for n in sm.state["world_data"]["maps"]["root"]["nodes"] if n["description"]}
     assert {"n2", "n4"} <= described
 
 

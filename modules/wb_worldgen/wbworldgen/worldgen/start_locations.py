@@ -9,10 +9,12 @@ logger = logging.getLogger(__name__)
 
 
 def _find_node_region(node_id: str, compiled: dict) -> str:
-    for region in compiled.get("map", {}).get("regions", []):
-        if node_id in region.get("node_ids", []):
-            return region.get("region_name", "")
-    for node in compiled.get("map", {}).get("nodes", []):
+    from wbworldgen.worldgen import mapspace as _ms
+    for m in _ms.maps_by_id(compiled).values():
+        for region in m.get("regions", []) or []:
+            if node_id in region.get("node_ids", []):
+                return region.get("region_name", "")
+    for node in _ms.all_nodes(compiled):
         if node.get("id") == node_id:
             desc = node.get("description", "")
             for region_data in compiled.get("regions", {}).get("regions", []):
@@ -23,38 +25,32 @@ def _find_node_region(node_id: str, compiled: dict) -> str:
 
 
 def get_start_locations(compiled: dict) -> list[dict]:
-    map_layers = compiled.get("map_layers", [])
-    if map_layers:
-        nodes = []
-        for layer in map_layers:
-            layer_map = layer.get("map", {})
-            for node in layer_map.get("nodes", []):
-                node["layer_id"] = layer.get("layer_id", "")
-                node["layer_name"] = layer.get("name", "")
-            nodes.extend(layer_map.get("nodes", []))
-    else:
-        nodes = compiled.get("map", {}).get("nodes", [])
+    from wbworldgen.worldgen import mapspace as _ms
+    nodes = []
+    for mid, m in _ms.maps_by_id(compiled).items():
+        for node in m.get("nodes", []):
+            nodes.append((node, mid, m.get("label", mid)))
 
-    def build(node, default_type):
+    def build(entry, default_type):
+        node, map_id, map_label = entry
         c = {
             "node_id": node.get("id"),
             "name": node.get("name"),
             "type": node.get("type", default_type),
             "description": node.get("description", "")[:300],
             "region": _find_node_region(node.get("id"), compiled),
+            "map_id": map_id,
+            "map_label": map_label,
         }
-        if node.get("layer_id"):
-            c["layer_id"] = node.get("layer_id")
-            c["layer_name"] = node.get("layer_name", "")
         return c
 
     candidates = [
-        build(n, n.get("type"))
-        for n in nodes
-        if n.get("type") in ("settlement", "landmark") and n.get("name")
+        build(entry, entry[0].get("type"))
+        for entry in nodes
+        if entry[0].get("type") in ("settlement", "landmark") and entry[0].get("name")
     ]
     if not candidates:
-        candidates = [build(n, "location") for n in nodes if n.get("name")]
+        candidates = [build(entry, "location") for entry in nodes if entry[0].get("name")]
     return candidates
 
 
@@ -125,18 +121,12 @@ Pick the single best matching location. Return JSON: {{"node_id": "...", "name":
 def _unnamed_slots(compiled: dict, limit: int = 60) -> list[dict]:
     """Unnamed map nodes that a brand-new start location could be founded on,
     tagged with their layer id. Most important (best-connected) first."""
+    from wbworldgen.worldgen import mapspace as _ms
     slots = []
-    map_layers = compiled.get("map_layers", [])
-    if map_layers:
-        for ml in map_layers:
-            lid = ml.get("layer_id", "")
-            for n in ml.get("map", {}).get("nodes", []):
-                if not n.get("name"):
-                    slots.append({**n, "layer_id": lid})
-    else:
-        for n in compiled.get("map", {}).get("nodes", []):
+    for mid, m in _ms.maps_by_id(compiled).items():
+        for n in m.get("nodes", []):
             if not n.get("name"):
-                slots.append(dict(n))
+                slots.append({**n, "map_id": mid, "map_label": m.get("label", mid)})
     slots.sort(key=lambda n: -n.get("importance", 0))
     return slots[:limit]
 
@@ -156,24 +146,25 @@ async def generate_start_location(compiled: dict, preference: str, wanted: str, 
     lore = compiled.get("lore", {})
     rules = compiled.get("rules", {})
     regions = compiled.get("regions", {}).get("regions", [])
-    layers = compiled.get("layers", [])
+    from wbworldgen.worldgen import mapspace as _ms
+    world_maps = _ms.maps_by_id(compiled)
 
     regions_block = "\n".join(
         f"- {r.get('name', '')}: terrain {r.get('terrain', 'unknown')[:150]}; climate {r.get('climate', 'unknown')[:100]}"
         for r in regions if r.get("name")
     ) or "- (no region details)"
     layers_block = "\n".join(
-        f"- {l.get('layer_id', '')}: {l.get('name', '')} ({l.get('layer_type', 'surface')}) — {l.get('description', '')[:150]}"
-        for l in layers if l.get("layer_id")
-    )
-    layers_section = f"\nWorld layers:\n{layers_block}\n" if layers_block else ""
+        f"- {mid}: {m.get('label', '')} ({m.get('level_type', 'surface')}) — {m.get('description', '')[:150]}"
+        for mid, m in world_maps.items()
+    ) if len(world_maps) > 1 else ""
+    layers_section = f"\nWorld maps:\n{layers_block}\n" if layers_block else ""
 
     def _slot_line(n):
         parts = [f"- {n.get('id')}: type {n.get('type', 'waypoint')}"]
         if n.get("region"):
             parts.append(f"region {n['region']}")
-        if n.get("layer_id"):
-            parts.append(f"layer {n['layer_id']}")
+        if n.get("map_id") and n.get("map_id") != "root":
+            parts.append(f"map {n['map_id']}")
         return ", ".join(parts)
 
     slots_block = "\n".join(_slot_line(n) for n in slots)

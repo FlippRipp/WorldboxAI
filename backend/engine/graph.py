@@ -653,7 +653,7 @@ class EngineGraph:
                 # still surface entries relevant to the player's current position.
                 location_hints = " ".join(filter(None, [
                     state.get("player_location_region", ""),
-                    state.get("player_location_layer_id", ""),
+                    state.get("player_location_map_id", ""),
                 ]))
 
                 embed_calls = [self.llm.get_embedding(input_text,
@@ -992,7 +992,7 @@ class EngineGraph:
 
         def collect_location(mod_id, mod_data, result, produces):
             for key in ("player_location_node_id", "player_location_region",
-                        "player_location_layer_id", "revealed_node_ids"):
+                        "player_location_map_id", "revealed_node_ids"):
                 if key in result:
                     location_update[key] = result[key]
 
@@ -1010,7 +1010,7 @@ class EngineGraph:
             state_update.update(location_update)
             print(f"[Node: Reader] Player moved to node={location_update.get('player_location_node_id')}, "
                   f"region={location_update.get('player_location_region')}, "
-                  f"layer={location_update.get('player_location_layer_id')}")
+                  f"map={location_update.get('player_location_map_id')}")
 
         turn = state.get("turn", 0) + 1
         

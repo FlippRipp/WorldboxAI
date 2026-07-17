@@ -1,40 +1,70 @@
-"""Map-space accessors over the compiled world_data plus small state readers.
+"""Map-space accessors over the world_data dict plus small state readers.
 
-These are the only functions that know how nodes/edges are laid out inside
-world_data (flat ``map`` vs ``map_layers``); everything else in the runtime
-goes through them.
+The heavy lifting lives in ``wbworldgen.worldgen.mapspace`` (shared with the
+generation side); this module re-exports it for the runtime and adds the
+session-state readers. All accessors tolerate legacy (flat ``map`` /
+``map_layers``) inputs, but at hook time ``ensure_v2`` migrates the session's
+world_data to world_format 2 first.
 """
+
+from wbworldgen.worldgen import mapspace as _ms
+from wbworldgen.worldgen.mapspace import (  # noqa: F401  (re-exports)
+    ROOT_MAP_ID,
+    breadcrumb,
+    children_by_anchor,
+    connection_between,
+    connections_from,
+    find_connection,
+    get_map,
+    map_edges,
+    map_nodes,
+    map_of_node,
+    maps_by_id,
+    node_index,
+    parallel_siblings,
+)
 
 
 def all_map_nodes(world_data: dict) -> list[dict]:
-    map_layers = world_data.get("map_layers", [])
-    if map_layers:
-        nodes = []
-        for layer in map_layers:
-            nodes.extend(layer.get("map", {}).get("nodes", []))
-        return nodes
-    return world_data.get("map", {}).get("nodes", [])
+    return _ms.all_nodes(world_data)
 
 
 def all_map_edges(world_data: dict) -> list[dict]:
-    map_layers = world_data.get("map_layers", [])
-    if map_layers:
-        edges = []
-        for layer in map_layers:
-            edges.extend(layer.get("map", {}).get("edges", []))
-        return edges
-    return world_data.get("map", {}).get("edges", [])
+    return _ms.all_edges(world_data)
 
 
-def build_graph_adjacency(world_data: dict) -> dict:
-    """Undirected {node_id: [neighbor_id, ...]} across all layers."""
+def build_graph_adjacency(world_data: dict, map_id: str = None) -> dict:
+    """Undirected {node_id: [neighbor_id, ...]}; one map or all of them."""
+    edges = _ms.map_edges(world_data, map_id) if map_id else _ms.all_edges(world_data)
     adj: dict[str, list[str]] = {}
-    for e in all_map_edges(world_data):
+    for e in edges:
         fr, to = e.get("from"), e.get("to")
         if fr and to:
             adj.setdefault(fr, []).append(to)
             adj.setdefault(to, []).append(fr)
     return adj
+
+
+def player_map_id(state: dict) -> str:
+    """The map the player is on (root when unset)."""
+    wd = state.get("world_data") or {}
+    return state.get("player_location_map_id") or wd.get("root_map_id") or ROOT_MAP_ID
+
+
+def ensure_v2(state: dict) -> bool:
+    """Migrate the session's world_data + state keys to world_format 2 in
+    place. Returns True when anything changed (caller persists lazily via the
+    normal write path)."""
+    wd = state.get("world_data")
+    if not isinstance(wd, dict):
+        return False
+    from wbworldgen.worldgen.migrate import migrate_session_state, migrate_world_data
+    was_v2 = wd.get("world_format", 0) >= 2 and isinstance(wd.get("maps"), dict)
+    migrate_world_data(wd)
+    changed = not was_v2
+    if migrate_session_state(state):
+        changed = True
+    return changed
 
 
 def reveal_bfs(start_id: str, adjacency: dict, radius: int) -> set:

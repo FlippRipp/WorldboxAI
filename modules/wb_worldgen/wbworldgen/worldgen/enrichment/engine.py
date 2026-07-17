@@ -146,14 +146,8 @@ class EnrichmentEngine:
         node dicts (not the per-call copies handed to prompts)."""
         index = compiled.get("_node_by_id")
         if index is None:
-            index = {}
-            if compiled.get("map_layers"):
-                for ml in compiled["map_layers"]:
-                    for n in ml.get("map", {}).get("nodes", []):
-                        index[n.get("id")] = n
-            else:
-                for n in compiled.get("map", {}).get("nodes", []):
-                    index[n.get("id")] = n
+            from wbworldgen.worldgen import mapspace as _ms
+            index = {n.get("id"): n for n in _ms.all_nodes(compiled)}
             compiled["_node_by_id"] = index
         return index
 
@@ -187,9 +181,10 @@ class EnrichmentEngine:
                 out_dir = persistence.terrain_dir(world_id, lid)
                 layers = _ts.load_terrain(str(out_dir))
                 if layers:
-                    # Single-layer maps tag nodes with layer_id "" — mirror that.
-                    key = "" if lid == "main" and not compiled.get("map_layers") else lid
-                    terrain_by_layer[key] = layers
+                    # Keyed by the terrain step's layer id; nodes are tagged
+                    # with their map's legacy_layer_id, and the single-entry
+                    # fallback in _terrain_for_node covers any mismatch.
+                    terrain_by_layer[lid] = layers
             if terrain_by_layer:
                 compiled["_terrain_layers"] = terrain_by_layer
         except Exception as e:
@@ -228,7 +223,7 @@ class EnrichmentEngine:
         for lid, info in layer_map_full.items():
             lid_labeled = sum(
                 1 for nid in done_ids
-                if any(n.get("id") == nid and n.get("layer_id", "") == lid for n in all_nodes_full)
+                if any(n.get("id") == nid and n.get("map_id", n.get("layer_id", "")) == lid for n in all_nodes_full)
             )
             per_layer[lid] = {"done": lid_labeled, "total": info["total"]}
 
@@ -243,13 +238,13 @@ class EnrichmentEngine:
 
         if name is None:
             return {"node_id": node.get("id"), "label": None, "label_description": None,
-                    "layer_id": node.get("layer_id", ""),
+                    "layer_id": node.get("map_id", node.get("layer_id", "")),
                     "per_layer": per_layer, "total_labeled": total_labeled,
                     "total_nodes": total_nodes, "complete": False,
                     "failed_node_ids": [node.get("id")]}
 
         node_id = node.get("id")
-        lid = node.get("layer_id", "")
+        lid = node.get("map_id", node.get("layer_id", ""))
         self._host._save_node_enrichment(world_id, node_id, "name", name)
         self._update_cached_node(compiled, node_id, "name", name)
         if snippet:
@@ -303,7 +298,7 @@ class EnrichmentEngine:
 
         per_layer = {}
         for lid, info in layer_map_full.items():
-            lid_done = sum(1 for n in all_nodes_full if n.get("id") in done_ids and n.get("layer_id", "") == lid)
+            lid_done = sum(1 for n in all_nodes_full if n.get("id") in done_ids and n.get("map_id", n.get("layer_id", "")) == lid)
             per_layer[lid] = {"done": lid_done, "total": info["total"]}
 
         if not undescribed:
@@ -318,14 +313,14 @@ class EnrichmentEngine:
 
         if desc_with_links is None:
             return {"node_id": node.get("id"), "description": None,
-                    "layer_id": node.get("layer_id", ""),
+                    "layer_id": node.get("map_id", node.get("layer_id", "")),
                     "per_layer": per_layer, "total_labeled": total_described,
                     "total_nodes": total_labeled_nodes, "complete": False,
                     "failed_node_ids": [node.get("id")]}
 
         desc = postprocess_links(desc_with_links, node, all_nodes)
         node_id = node.get("id")
-        lid = node.get("layer_id", "")
+        lid = node.get("map_id", node.get("layer_id", ""))
         self._host._save_node_enrichment(world_id, node_id, "description", desc)
         self._update_cached_node(compiled, node_id, "description", desc)
         self._host._flush_enrichment_cache(world_id)
@@ -526,7 +521,9 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
         (importance >= floor). When either is set, done/total and the per-layer
         counters are scoped to the targeted nodes so progress reads as complete
         when the targeted work is done."""
-        in_scope = [n for n in all_nodes if not layer_filter or n.get("layer_id", "") == layer_filter]
+        in_scope = [n for n in all_nodes
+                    if not layer_filter
+                    or n.get("map_id", n.get("layer_id", "")) == layer_filter]
         scoped = node_ids is not None or importance_floor is not None
         if node_ids is not None:
             wanted = {str(nid) for nid in node_ids}
@@ -565,16 +562,17 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
 
         count_pool = in_scope if scoped else all_nodes
         per_layer = {}
+
+        def _map_key(n):
+            return n.get("map_id", n.get("layer_id", "")) or "main"
+
         for lid, info in layer_map.items():
-            # Flat (single-layer) maps tag nodes with layer_id "" but the layer
-            # map keys them "main" — count both under the map key.
             lid_done = 0 if rework else sum(
                 1 for n in count_pool
-                if (n.get("layer_id", "") or "main") == (lid or "main") and n.get(done_field)
+                if _map_key(n) == (lid or "main") and n.get(done_field)
             )
             lid_total = info["total"] if not scoped else sum(
-                1 for n in in_scope
-                if (n.get("layer_id", "") or "main") == (lid or "main")
+                1 for n in in_scope if _map_key(n) == (lid or "main")
             )
             per_layer[lid] = {"done": lid_done, "total": lid_total}
 
@@ -662,7 +660,7 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
                 async def record_result(node, event_fields: dict):
                     nonlocal done, flush_pending
                     done += 1
-                    lid = node.get("layer_id", "")
+                    lid = node.get("map_id", node.get("layer_id", ""))
                     layer_key = lid if lid in per_layer else "main"
                     if layer_key in per_layer:
                         per_layer[layer_key]["done"] += 1

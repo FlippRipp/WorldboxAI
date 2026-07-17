@@ -149,7 +149,7 @@ class GameSessionManager:
         saves.sort(key=lambda s: s["last_played"] or "", reverse=True)
         return saves
 
-    def create_save(self, save_id: str, world_id: str = None, player_location_node_id: str = None, player_location_region: str = None, player_location_layer_id: str = None, revealed_node_ids: list = None, character_module_data: dict = None, character_data: dict = None) -> dict[str, Any]:
+    def create_save(self, save_id: str, world_id: str = None, player_location_node_id: str = None, player_location_region: str = None, player_location_map_id: str = None, revealed_node_ids: list = None, character_module_data: dict = None, character_data: dict = None) -> dict[str, Any]:
         # The name the player typed may contain spaces; the id (and thus all
         # paths) uses underscores, while the display name keeps the spaces.
         save_id = self.derive_save_id(save_id)
@@ -167,7 +167,7 @@ class GameSessionManager:
             metadata["world_id"] = world_id
             metadata["player_location_node_id"] = player_location_node_id or ""
             metadata["player_location_region"] = player_location_region or ""
-            metadata["player_location_layer_id"] = player_location_layer_id or ""
+            metadata["player_location_map_id"] = player_location_map_id or ""
             metadata["revealed_node_ids"] = revealed_node_ids or []
 
         module_data = character_module_data if character_module_data else {"wb_core_rpg": {"hp": 85, "max_hp": 85}}
@@ -248,7 +248,8 @@ class GameSessionManager:
             "world_id": metadata.get("world_id"),
             "player_location_node_id": metadata.get("player_location_node_id"),
             "player_location_region": metadata.get("player_location_region"),
-            "player_location_layer_id": metadata.get("player_location_layer_id"),
+            # Old saves stored a layer id; the module migrates it on first turn.
+            "player_location_map_id": metadata.get("player_location_map_id") or metadata.get("player_location_layer_id"),
             "revealed_node_ids": metadata.get("revealed_node_ids", []),
             "sticky_world_entries": metadata.get("sticky_world_entries", {}),
             "story_style": metadata.get("story_style") or {},
@@ -332,7 +333,7 @@ class GameSessionManager:
             "world_data": final_state.get("world_data", self.state.get("world_data")),
             "player_location_node_id": final_state.get("player_location_node_id", self.state.get("player_location_node_id")),
             "player_location_region": final_state.get("player_location_region", self.state.get("player_location_region")),
-            "player_location_layer_id": final_state.get("player_location_layer_id", self.state.get("player_location_layer_id")),
+            "player_location_map_id": final_state.get("player_location_map_id", self.state.get("player_location_map_id")),
             "revealed_node_ids": final_state.get("revealed_node_ids", self.state.get("revealed_node_ids", [])),
             "sticky_world_entries": final_state.get("sticky_world_entries", self.state.get("sticky_world_entries", {})),
         }

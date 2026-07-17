@@ -138,12 +138,12 @@ async def create_world_story_source(*, save_id, source_id, start_preference, ses
 
     player_location_node_id = None
     player_location_region = None
-    player_location_layer_id = None
+    player_location_map_id = None
     revealed_node_ids: list[str] = []
     if start_location:
         player_location_node_id = start_location.get("node_id")
         player_location_region = start_location.get("region")
-        player_location_layer_id = start_location.get("layer_id")
+        player_location_map_id = start_location.get("map_id") or compiled.get("root_map_id", "root")
         adjacency = _rt_worldspace.build_graph_adjacency(compiled)
         revealed_node_ids = list(
             _rt_worldspace.reveal_bfs(player_location_node_id, adjacency, radius=1))
@@ -153,7 +153,7 @@ async def create_world_story_source(*, save_id, source_id, start_preference, ses
         world_id=world_id,
         player_location_node_id=player_location_node_id,
         player_location_region=player_location_region,
-        player_location_layer_id=player_location_layer_id,
+        player_location_map_id=player_location_map_id,
         revealed_node_ids=revealed_node_ids,
         character_module_data=character_module_data,
         character_data=character_data,
@@ -175,6 +175,7 @@ async def create_world_story_source(*, save_id, source_id, start_preference, ses
     session_manager.state["world_data"] = compiled
     session_manager.state["world_id"] = world_id
     session_manager.state["player_location_node_id"] = player_location_node_id
+    session_manager.state["player_location_map_id"] = player_location_map_id
     session_manager.state["player_location_region"] = player_location_region
     session_manager.state["start_preference"] = start_preference
 

@@ -12,6 +12,7 @@ import asyncio
 import logging
 
 from wbworldgen.worldgen import compiler
+from wbworldgen.worldgen import mapspace as _mapspace
 from wbworldgen.worldgen import pipeline as _pipeline
 from wbworldgen.worldgen import start_locations as _start
 from wbworldgen.worldgen import templates as _templates
@@ -311,9 +312,7 @@ class WorldBuilder:
             "seed_prompt": seed_prompt,
             "step_count": len(world_state["steps"]),
             "compiled_keys": list(compiled.keys()),
-            "total_map_nodes": sum(
-                len(ml.get("map", {}).get("nodes", [])) for ml in compiled.get("map_layers", [])
-            ) if compiled.get("map_layers") else len(compiled.get("map", {}).get("nodes", [])),
+            "total_map_nodes": len(_mapspace.all_nodes(compiled)),
         }
 
     # --- enrichment cache (delegated) --------------------------------------

@@ -250,24 +250,28 @@ class PromptCompiler:
         return re.sub(r"\$\{[a-z_]+\}", replacer, text)
 
     def _get_layer_name(self, state: dict[str, Any]) -> str:
-        layer_id = state.get("player_location_layer_id", "")
-        if not layer_id:
+        map_id = state.get("player_location_map_id") or state.get("player_location_layer_id", "")
+        if not map_id:
             return "Unknown"
         world_data = state.get("world_data") or {}
-        layers = world_data.get("layers", [])
-        for layer in layers:
-            if layer.get("layer_id") == layer_id:
-                return layer.get("name", layer_id)
-        return layer_id.replace("_", " ").title()
+        record = (world_data.get("maps") or {}).get(map_id)
+        if record is not None:
+            return record.get("label", map_id)
+        for layer in world_data.get("layers", []):
+            if layer.get("layer_id") == map_id:
+                return layer.get("name", map_id)
+        return map_id.replace("_", " ").title()
 
     def _get_layer_desc(self, state: dict[str, Any]) -> str:
-        layer_id = state.get("player_location_layer_id", "")
-        if not layer_id:
+        map_id = state.get("player_location_map_id") or state.get("player_location_layer_id", "")
+        if not map_id:
             return ""
         world_data = state.get("world_data") or {}
-        layers = world_data.get("layers", [])
-        for layer in layers:
-            if layer.get("layer_id") == layer_id:
+        record = (world_data.get("maps") or {}).get(map_id)
+        if record is not None:
+            return record.get("description", "")
+        for layer in world_data.get("layers", []):
+            if layer.get("layer_id") == map_id:
                 return layer.get("description", "")
         return ""
 
