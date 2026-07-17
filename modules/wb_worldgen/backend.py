@@ -411,10 +411,24 @@ def _build_location_context(state: dict, world_data: dict) -> str:
                     break
         site = (world_data.get("site_maps") or {}).get(node_id)
         if site:
+            subs = site.get("sub_locations", [])
+            site_position = _get_site_position(state)
+            current_sub = None
+            if site_position and site_position.get("parent_node_id") == node_id:
+                current_sub = next(
+                    (s for s in subs if s.get("id") == site_position.get("sub_location_id")), None)
             parts.append("<location_interior>")
+            if current_sub:
+                parts.append(
+                    f"The player is currently at: {current_sub.get('name', '')} "
+                    f"({current_sub.get('type', 'place')}) — {current_sub.get('description', '')[:300]}")
+                adjacent_ids = set(current_sub.get("adjacent", []))
+                adjacent_names = [s.get("name", "") for s in subs
+                                  if s.get("id") in adjacent_ids and s.get("name")]
+                if adjacent_names:
+                    parts.append(f"Directly adjoining: {', '.join(adjacent_names)}")
             if site.get("layout_summary"):
                 parts.append(f"Layout: {site['layout_summary']}")
-            subs = site.get("sub_locations", [])
             if subs:
                 parts.append("Places within this location:")
                 for sub in subs[:12]:
@@ -469,7 +483,7 @@ def _build_location_mutation_schema(world_data: dict, state: dict = None) -> dic
     layer_options = [f"{l.get('layer_id', '')} ({l.get('name', '')})" for l in layers_list if l.get("layer_id")]
     if not layer_options:
         layer_options = ["surface"]
-    return {
+    schema = {
         "player_location_changed": {"type": "boolean", "label": "Did the player move toward or arrive at a new location?"},
         "player_location_node_id": {
             "type": "select",
@@ -494,6 +508,24 @@ def _build_location_mutation_schema(world_data: dict, state: dict = None) -> dic
             "description": "The layer_id the player moved to (e.g., overworld, underground). Set only if the layer changed."
         },
     }
+
+    # Intra-site movement: when the player's current location has an expanded
+    # interior, offer its sub-locations as instant moves within the place.
+    if state is not None:
+        site = (world_data.get("site_maps") or {}).get(state.get("player_location_node_id"))
+        if site and site.get("sub_locations"):
+            sub_options = [
+                f"{sub['id']} ({sub.get('name', '')})"
+                for sub in site["sub_locations"][:16] if sub.get("id")
+            ]
+            sub_options.append("leave_site (step back out to the location as a whole)")
+            schema["player_sub_location"] = {
+                "type": "select",
+                "label": f"Where inside {site.get('name', 'this location')} is the player now?",
+                "options": sub_options,
+                "description": "The specific place within the current location the player moved to. Moving between these is instant (no travel). Set only when the player moves within the location; use leave_site when they step back out.",
+            }
+    return schema
 
 
 def _build_graph_adjacency(world_data: dict) -> dict:
@@ -641,6 +673,33 @@ def _clean_option(value):
 
 def _get_travel(state: dict):
     return (state.get("module_data", {}).get("wb_worldgen") or {}).get("travel")
+
+
+def _get_site_position(state: dict):
+    return (state.get("module_data", {}).get("wb_worldgen") or {}).get("site_position")
+
+
+def _resolve_sub_location_move(mutation: dict, state: dict, world_data: dict) -> dict:
+    """Interpret a Reader-declared move within the current location's interior.
+
+    Returns {} (no change), {"site_position": None} (stepped back out) or
+    {"site_position": {parent_node_id, sub_location_id}}. Sub-moves are
+    instant and never interact with travel, fog or the node graph."""
+    raw = _clean_option(mutation.get("player_sub_location"))
+    if not raw:
+        return {}
+    if raw == "leave_site":
+        return {"site_position": None} if _get_site_position(state) else {}
+    current_node = state.get("player_location_node_id")
+    site = (world_data.get("site_maps") or {}).get(current_node)
+    if not site:
+        return {}
+    if not any(sub.get("id") == raw for sub in site.get("sub_locations", [])):
+        return {}
+    existing = _get_site_position(state)
+    if existing and existing.get("sub_location_id") == raw:
+        return {}
+    return {"site_position": {"parent_node_id": current_node, "sub_location_id": raw}}
 
 
 def _remaining_travel(travel: dict, adjacency: dict) -> float:
@@ -1098,6 +1157,10 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
     new_layer_id = _clean_option(mutation.get("player_location_layer_id"))
     interrupted = bool(mutation.get("travel_interrupted"))
 
+    # Intra-site movement (instant, inside the current node's interior).
+    # Any real node move clears the position — the player walked out.
+    site_position_update = _resolve_sub_location_move(mutation, state, world_data)
+
     revealed = list(set(state.get("revealed_node_ids", [])))
     revealed_dirty = False
     newly_revealed: list[str] = []
@@ -1131,7 +1194,7 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
             "player_location_region": new_region or state.get("player_location_region"),
             "player_location_layer_id": new_layer_id or state.get("player_location_layer_id"),
             "revealed_node_ids": revealed,
-            "module_data": {"wb_worldgen": {"travel": None}},
+            "module_data": {"wb_worldgen": {"travel": None, "site_position": None}},
         }
 
     # --- A Reader-declared destination -----------------------------------
@@ -1160,6 +1223,7 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
                 "destination_region": new_region,
             }
             interrupted = False  # setting out counts as traveling this turn
+            site_position_update = {"site_position": None}  # walked out of the interior
             if _site_mode() == "prefetch":
                 # Start the destination's interior now — the journey's turns
                 # hide the generation latency.
@@ -1168,9 +1232,11 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
     if travel and speed is None:
         # Travel was switched off mid-journey; the player simply stays at the
         # last reached node and the journey record is dropped.
-        return {"module_data": {"wb_worldgen": {"travel": None}}}
+        return {"module_data": {"wb_worldgen": {"travel": None, **site_position_update}}}
 
     if not travel:
+        if site_position_update:
+            return {"module_data": {"wb_worldgen": dict(site_position_update)}}
         return {}
 
     # --- Advance the journey ----------------------------------------------
@@ -1203,8 +1269,11 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
             travel["leg_progress"] = 0.0
             travel["leg_distance"] = _edge_length(adjacency, route[travel["leg_index"]], route[travel["leg_index"] + 1])
 
-    result = {"module_data": {"wb_worldgen": {"travel": travel}}}
+    result = {"module_data": {"wb_worldgen": {"travel": travel, **site_position_update}}}
     if location_update:
+        # The player physically moved to another node — they are no longer
+        # inside the previous location's interior.
+        result["module_data"]["wb_worldgen"]["site_position"] = None
         result.update(location_update)
         result["revealed_node_ids"] = revealed
     elif revealed_dirty:

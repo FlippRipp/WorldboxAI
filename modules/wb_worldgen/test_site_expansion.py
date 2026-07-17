@@ -304,3 +304,74 @@ def test_location_context_includes_site_interior(builder, tmpdir):
     assert "<location_interior>" in ctx
     assert site["sub_locations"][0]["name"] in ctx
     assert "Layout:" in ctx
+
+
+# ---------------------------------------------------------------------------
+# Intra-site movement (player position inside an expanded interior)
+# ---------------------------------------------------------------------------
+
+def _sited_play_state(builder, tmpdir, wid):
+    site = asyncio.run(builder.expand_site(wid, "c1"))
+    sm, engine, state = _play_session(builder, tmpdir, wid)
+    state["player_location_node_id"] = "c1"
+    return site, sm, state
+
+
+def test_mutation_schema_offers_sub_locations_when_inside_a_site(builder, tmpdir):
+    site, sm, state = _sited_play_state(builder, tmpdir, wid := _site_world(builder))
+    schema = wbg._build_location_mutation_schema(state["world_data"], state)
+    options = schema["player_sub_location"]["options"]
+    first = site["sub_locations"][0]
+    assert f"{first['id']} ({first['name']})" in options
+    assert any(o.startswith("leave_site") for o in options)
+    # Away from the site there is no sub-location field.
+    state["player_location_node_id"] = "w1"
+    schema = wbg._build_location_mutation_schema(state["world_data"], state)
+    assert "player_sub_location" not in schema
+
+
+def test_sub_location_move_sets_and_clears_position(builder, tmpdir):
+    site, sm, state = _sited_play_state(builder, tmpdir, _site_world(builder))
+    sub_id = site["sub_locations"][0]["id"]
+
+    result = asyncio.run(wbg.on_mutate_state(
+        {"player_sub_location": f"{sub_id} (X)"}, state, None))
+    assert result["module_data"]["wb_worldgen"]["site_position"] == {
+        "parent_node_id": "c1", "sub_location_id": sub_id}
+
+    # Apply and step back out.
+    state["module_data"] = {"wb_worldgen": {"site_position":
+        result["module_data"]["wb_worldgen"]["site_position"]}}
+    result = asyncio.run(wbg.on_mutate_state(
+        {"player_sub_location": "leave_site (step back out)"}, state, None))
+    assert result["module_data"]["wb_worldgen"]["site_position"] is None
+
+    # Invalid sub ids are ignored.
+    result = asyncio.run(wbg.on_mutate_state(
+        {"player_sub_location": "c1:s999 (Nowhere)"}, state, None))
+    assert result == {}
+
+
+def test_node_move_clears_site_position(builder, tmpdir):
+    site, sm, state = _sited_play_state(builder, tmpdir, _site_world(builder))
+    sub_id = site["sub_locations"][0]["id"]
+    state["module_data"] = {"wb_worldgen": {"site_position": {
+        "parent_node_id": "c1", "sub_location_id": sub_id}}}
+    wbg._services["settings"].values["world.travel_turns_per_edge"] = 0  # instant
+
+    result = asyncio.run(wbg.on_mutate_state({"player_location_node_id": "w1"}, state, None))
+    assert result["player_location_node_id"] == "w1"
+    assert result["module_data"]["wb_worldgen"]["site_position"] is None
+
+
+def test_location_context_leads_with_current_sub_location(builder, tmpdir):
+    site, sm, state = _sited_play_state(builder, tmpdir, _site_world(builder))
+    first = site["sub_locations"][0]
+    second = site["sub_locations"][1]
+    state["module_data"] = {"wb_worldgen": {"site_position": {
+        "parent_node_id": "c1", "sub_location_id": second["id"]}}}
+
+    ctx = wbg._build_location_context(state, state["world_data"])
+    assert f"The player is currently at: {second['name']}" in ctx
+    # Mock site adjacency links each district to the previous one.
+    assert f"Directly adjoining: {first['name']}" in ctx

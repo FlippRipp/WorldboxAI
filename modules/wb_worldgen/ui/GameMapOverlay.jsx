@@ -44,6 +44,10 @@ export default function GameMapOverlay({ state = {} }) {
   const site = localSite?.parent_node_id === playerNodeId
     ? localSite
     : worldData?.site_maps?.[playerNodeId] || null;
+  const sitePosition = state.module_data?.wb_worldgen?.site_position;
+  const currentSubId = sitePosition?.parent_node_id === playerNodeId
+    ? sitePosition.sub_location_id
+    : null;
   const canExplore = !site && playerNode && playerNode.name
     && EXPANDABLE_TYPES.has(playerNode.type) && (playerNode.importance ?? 0) >= 6;
 
@@ -148,9 +152,17 @@ export default function GameMapOverlay({ state = {} }) {
               )}
               <ul className="space-y-0.5">
                 {(site.sub_locations || []).map((sub) => (
-                  <li key={sub.id} className="text-[11px] text-gray-300">
-                    <span className="text-amber-400">{sub.name}</span>
+                  <li
+                    key={sub.id}
+                    className={`text-[11px] ${sub.id === currentSubId
+                      ? 'text-purple-200 bg-purple-900/40 rounded px-1 -mx-1'
+                      : 'text-gray-300'}`}
+                  >
+                    <span className={sub.id === currentSubId ? 'text-purple-300 font-medium' : 'text-amber-400'}>
+                      {sub.name}
+                    </span>
                     <span className="text-gray-500"> ({sub.type})</span>
+                    {sub.id === currentSubId && <span className="text-purple-400"> ● here</span>}
                     {sub.description && (
                       <span className="text-gray-500"> — {sub.description.slice(0, 90)}</span>
                     )}
