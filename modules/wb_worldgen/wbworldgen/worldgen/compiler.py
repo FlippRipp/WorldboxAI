@@ -150,6 +150,12 @@ def compile_world(world_state: dict, steps: Optional[dict] = None) -> dict:
         elif "nodes" in map_data:
             compiled["map"] = map_data
 
+    # Lazily-expanded interior detail (site bundles), keyed by parent node id.
+    # Additive: worlds without sites simply lack the key.
+    sites = world_state.get("sites")
+    if isinstance(sites, dict) and sites:
+        compiled["site_maps"] = sites
+
     # Optional per-step contributions (for custom/extension steps).
     for step in (steps or {}).values():
         contribute = getattr(step, "contribute_to_compiled", None)

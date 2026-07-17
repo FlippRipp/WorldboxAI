@@ -138,12 +138,16 @@ class WorldPersistence:
             with open(step_file, "r", encoding="utf-8") as f:
                 steps[step_id] = json.load(f)
 
-        return {
+        world_state = {
             "seed_prompt": metadata.get("seed_prompt", ""),
             "steps": steps,
             "complete": not metadata.get("in_progress", False),
             "current_step": metadata.get("current_step") if metadata.get("in_progress") else None,
         }
+        sites = self.load_sites(world_id)
+        if sites:
+            world_state["sites"] = sites
+        return world_state
 
     def save_step(self, world_id: str, step_id: str, step_data: dict):
         world_dir = self._dir / world_id
@@ -160,6 +164,45 @@ class WorldPersistence:
             raise FileNotFoundError(f"World '{world_id}' not found.")
         shutil.rmtree(world_dir)
         self.invalidate_enrichment_cache(world_id)
+
+    # --- site bundles (lazy interior detail) --------------------------------
+
+    def site_path(self, world_id: str, node_id: str) -> Path:
+        return self._dir / safe_world_id(world_id) / "sites" / f"{safe_world_id(node_id)}.json"
+
+    def save_site(self, world_id: str, node_id: str, site: dict):
+        """Write-once cache of a node's interior detail — future saves of the
+        same world inherit it, so a site is generated at most once per world."""
+        path = self.site_path(world_id, node_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(site, f, indent=2, default=str)
+
+    def load_site(self, world_id: str, node_id: str) -> dict | None:
+        path = self.site_path(world_id, node_id)
+        if not path.is_file():
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def load_sites(self, world_id: str) -> dict:
+        """All persisted sites for a world, keyed by parent node id."""
+        sites_dir = self._dir / world_id / "sites"
+        if not sites_dir.is_dir():
+            return {}
+        sites = {}
+        for path in sorted(sites_dir.glob("*.json")):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    site = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                continue
+            parent_id = site.get("parent_node_id") or path.stem
+            sites[parent_id] = site
+        return sites
 
     def terrain_dir(self, world_id: str, layer_id: str = "") -> Path:
         """Directory holding a world's terrain rasters/images. When ``layer_id``

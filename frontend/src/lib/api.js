@@ -231,6 +231,10 @@ export const api = {
     return final;
   },
   enrichCancel:           (worldId) => request(`/api/world/${worldId}/enrich/cancel`, { method: 'POST' }),
+  // Site interiors (lazy per-location detail)
+  expandWorldSite:        (worldId, nodeId, force = false) => request(`/api/world/${worldId}/site/${nodeId}/expand`, { method: 'POST', body: JSON.stringify({ force }) }),
+  getWorldSites:          (worldId) => request(`/api/world/${worldId}/sites`),
+  expandSessionSite:      (nodeId) => request('/api/world/session/expand-site', { method: 'POST', body: JSON.stringify({ node_id: nodeId }) }),
   enrichCommit:           (worldId, stepId) => request(`/api/world/${worldId}/enrich/commit`, { method: 'POST', body: JSON.stringify({ step_id: stepId }) }),
   // Debug / seed
   debugSeedWorld:         (seedPrompt, worldId = null, totalNodes = 60) => request('/api/world/debug/seed', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, world_id: worldId, total_nodes: totalNodes }) }),

@@ -511,6 +511,71 @@ async def save_world_step(world_id: str, step_id: str, request: SaveStepRequest 
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+class ExpandSiteRequest(BaseModel):
+    force: bool = False
+
+
+@router.post("/api/world/{world_id}/site/{node_id}/expand")
+async def expand_world_site(world_id: str, node_id: str, request: ExpandSiteRequest = None):
+    """Generate (or return the cached) interior detail for a major location.
+    World-scoped: used at authoring time to pre-bake key cities."""
+    try:
+        force = request.force if request else False
+        site = await world_builder.expand_site(world_id, node_id, force=force)
+        return {"world_id": world_id, "node_id": node_id, "site": site}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/api/world/{world_id}/sites")
+async def get_world_sites(world_id: str):
+    return {"world_id": world_id, "sites": world_builder._persistence.load_sites(world_id)}
+
+
+class SessionExpandSiteRequest(BaseModel):
+    node_id: str
+
+
+@router.post("/api/world/session/expand-site")
+async def expand_site_in_session(request: SessionExpandSiteRequest):
+    """Play-time manual trigger (the map's Explore button): expand a site in
+    the active save's world and sync it into the live session, the save's
+    world_data.json and the RAG world index."""
+    world_id = session_manager.state.get("world_id")
+    if not world_id:
+        raise HTTPException(status_code=400, detail="No world-backed save is active.")
+    try:
+        site = await world_builder.expand_site(world_id, request.node_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    wd = session_manager.state.get("world_data")
+    if wd is not None:
+        wd.setdefault("site_maps", {})[request.node_id] = site
+        try:
+            save_id = session_manager.state.get("active_save_id")
+            if save_id:
+                world_dir = session_manager.data_dir / "saves" / save_id / "World"
+                if world_dir.is_dir():
+                    with open(world_dir / "world_data.json", "w", encoding="utf-8") as f:
+                        json.dump(wd, f, indent=2)
+        except Exception:
+            logger.exception("failed to persist world_data after site expansion")
+    if engine is not None and engine.memory is not None and engine.memory.has_world_index():
+        from wbworldgen.worldgen.enrichment import site_world_entries
+        entries = site_world_entries(request.node_id, site)
+        if entries:
+            try:
+                await engine.memory.embed_world_entries(entries, engine.llm)
+            except Exception:
+                logger.exception("failed to embed site entries")
+    return {"world_id": world_id, "node_id": request.node_id, "site": site}
+
+
 class PickStartRequest(BaseModel):
     preference: Optional[str] = ""
 

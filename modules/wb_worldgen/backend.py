@@ -220,6 +220,22 @@ def set_services(services: dict):
                 is_global=True,
                 min=0, max=5,
             )
+            settings.register(
+                "world.site_expansion_mode", "select", "prefetch",
+                label="Location Interiors",
+                category="World Building",
+                description="When major locations (cities, ports, strongholds) get their interior detail — districts, venues, layout — generated. 'prefetch' starts generating while the player travels toward one so it's ready on arrival; 'on_arrival' generates when they get there; 'manual' only via the map's Explore button; 'off' never. Interiors are generated once per world and cached.",
+                is_global=True,
+                options=["prefetch", "on_arrival", "manual", "off"],
+            )
+            settings.register(
+                "world.site_max_sublocations", "slider", 10,
+                label="Interior Detail Size",
+                category="World Building",
+                description="Maximum sub-locations (districts, venues, notable places) generated inside a major location's interior.",
+                is_global=True,
+                min=4, max=16,
+            )
         except Exception as e:
             print(f"[wb_worldgen] Failed to register enrichment settings: {e}")
     if registry is not None:
@@ -393,6 +409,20 @@ def _build_location_context(state: dict, world_data: dict) -> str:
                     target_layer = lc.get("to_layer_id") if lc.get("from_layer_id") == layer_id else lc.get("from_layer_id")
                     parts.append(f"Inter-layer connection: {lc.get('connection_type', 'passage')} to layer '{target_layer}' — {lc.get('description', '')[:200]}")
                     break
+        site = (world_data.get("site_maps") or {}).get(node_id)
+        if site:
+            parts.append("<location_interior>")
+            if site.get("layout_summary"):
+                parts.append(f"Layout: {site['layout_summary']}")
+            subs = site.get("sub_locations", [])
+            if subs:
+                parts.append("Places within this location:")
+                for sub in subs[:12]:
+                    line = f"  - {sub.get('name', '')} ({sub.get('type', 'place')})"
+                    if sub.get("description"):
+                        line += f": {sub['description'][:200]}"
+                    parts.append(line)
+            parts.append("</location_interior>")
     if current_region:
         parts.append(f"Region: {current_region.get('name', '')}")
         parts.append(f"Terrain: {current_region.get('terrain', 'N/A')[:400]}")
@@ -656,6 +686,7 @@ def _backfill_reset():
     _backfill["failed"] = set()
     _backfill["futures"] = {}
     _backfill["disabled"] = False
+    _site_tasks.clear()
 
 
 def _backfill_available(state: dict) -> bool:
@@ -726,6 +757,23 @@ async def _backfill_worker(world_id: str):
         _backfill["task"] = None
 
 
+def _write_session_world_data(sm):
+    """Rewrite the active save's World/world_data.json from the live session's
+    world_data so a reload sees play-time generated content."""
+    wd = sm.state.get("world_data")
+    save_id = sm.state.get("active_save_id")
+    if not wd or not save_id:
+        return
+    try:
+        import json as _json
+        world_dir = sm.data_dir / "saves" / save_id / "World"
+        if world_dir.is_dir():
+            with open(world_dir / "world_data.json", "w", encoding="utf-8") as f:
+                _json.dump(wd, f, indent=2)
+    except Exception:
+        _logger.exception("failed to persist world_data for save %s", save_id)
+
+
 def _sync_enriched_nodes(world_id: str, node_ids: list):
     """Merge freshly generated node fields into the live session's world_data
     and rewrite the save's World/world_data.json so a reload sees them."""
@@ -749,19 +797,8 @@ def _sync_enriched_nodes(world_id: str, node_ids: list):
             if value and value != target.get(field):
                 target[field] = value
                 changed = True
-    if not changed:
-        return
-    save_id = sm.state.get("active_save_id")
-    if not save_id:
-        return
-    try:
-        import json as _json
-        world_dir = sm.data_dir / "saves" / save_id / "World"
-        if world_dir.is_dir():
-            with open(world_dir / "world_data.json", "w", encoding="utf-8") as f:
-                _json.dump(wd, f, indent=2)
-    except Exception:
-        _logger.exception("failed to persist backfilled world_data for save %s", save_id)
+    if changed:
+        _write_session_world_data(sm)
 
 
 def _node_world_entry(wd: dict, node: dict) -> dict | None:
@@ -812,6 +849,92 @@ async def _embed_backfilled_nodes(world_id: str, node_ids: list):
         _logger.exception("failed to embed backfilled world entries")
 
 
+# ---------------------------------------------------------------------------
+# Lazy site expansion: major locations (cities, ports, strongholds) get their
+# interior detail — layout + districts/venues — generated by ONE full-attention
+# LLM call the first time the story approaches them, prefetched during travel
+# so multi-turn journeys hide the latency entirely. Cached per world.
+# ---------------------------------------------------------------------------
+
+_site_tasks: dict = {}
+
+
+def _site_mode() -> str:
+    try:
+        if _services is not None and _services.get("settings") is not None:
+            mode = _services["settings"].get("world.site_expansion_mode")
+            if mode:
+                return str(mode)
+    except Exception:
+        pass
+    return "prefetch"
+
+
+def _maybe_expand_site(state: dict, node_id: str):
+    """Fire-and-forget interior expansion for a major location (automatic
+    modes only; the manual route calls the facade directly)."""
+    if _site_mode() not in ("prefetch", "on_arrival") or not node_id:
+        return
+    if not _backfill_available(state):
+        return
+    wd = state.get("world_data")
+    if not wd or node_id in (wd.get("site_maps") or {}):
+        return
+    node = next((n for n in _all_map_nodes(wd) if n.get("id") == node_id), None)
+    if node is None or not world_builder.is_site_expandable(node):
+        return
+    existing = _site_tasks.get(node_id)
+    if existing is not None and not existing.done():
+        return
+    _site_tasks[node_id] = _asyncio.create_task(
+        _expand_site_task(state.get("world_id"), node_id))
+
+
+async def _expand_site_task(world_id: str, node_id: str):
+    try:
+        site = await world_builder.expand_site(world_id, node_id)
+        _sync_site(world_id, node_id, site)
+        await _embed_site(world_id, site)
+    except FileNotFoundError:
+        _backfill["disabled"] = True
+        _logger.warning("world '%s' missing; site expansion disabled", world_id)
+    except Exception:
+        _logger.exception("site expansion failed for node %s", node_id)
+    finally:
+        _site_tasks.pop(node_id, None)
+
+
+def _sync_site(world_id: str, node_id: str, site: dict):
+    """Merge a freshly expanded site into the live session and its save."""
+    sm = _services.get("session_manager") if _services else None
+    if sm is None or sm.state.get("world_id") != world_id:
+        return
+    wd = sm.state.get("world_data")
+    if not wd:
+        return
+    wd.setdefault("site_maps", {})[node_id] = site
+    _write_session_world_data(sm)
+
+
+async def _embed_site(world_id: str, site: dict):
+    """Add a freshly expanded site's entries to the save's RAG world index."""
+    from wbworldgen.worldgen.enrichment import site_world_entries
+    sm = _services.get("session_manager") if _services else None
+    engine = _services.get("engine") if _services else None
+    if sm is None or engine is None or sm.state.get("world_id") != world_id:
+        return
+    memory = getattr(engine, "memory", None)
+    if memory is None or not memory.has_world_index():
+        return
+    entries = site_world_entries(site.get("parent_node_id", ""), site)
+    if not entries:
+        return
+    try:
+        await memory.embed_world_entries(entries, engine.llm)
+    except Exception:
+        _logger.exception("failed to embed site entries")
+
+
 async def _ensure_current_node_detailed(state: dict):
     """Await-on-arrival: if the player stands on an undetailed node, wait
     (bounded) for its detail so the storyteller never narrates a fresh scene
@@ -860,6 +983,9 @@ def _kick_background_detail(state: dict):
                  if nid in by_id and _node_needs_detail(by_id[nid])]
         if needs:
             _queue_backfill(state, needs, front=True)
+        if _site_mode() == "prefetch" and dest:
+            # Start the destination's interior while the journey plays out.
+            _maybe_expand_site(state, dest)
 
     # Idle trickle: keep quietly finishing the world, visited areas first.
     per_turn = _backfill_per_turn()
@@ -882,6 +1008,10 @@ async def on_gather_context(state: dict, sdk) -> dict:
         return {}
     await _ensure_current_node_detailed(state)
     _kick_background_detail(state)
+    if not _get_travel(state):
+        # Arrived (or standing) somewhere expandable whose interior is still
+        # missing (prefetch missed / on_arrival mode) — start it now.
+        _maybe_expand_site(state, state.get("player_location_node_id"))
     location_context = _build_location_context(state, world_data)
     if not location_context:
         return {}
@@ -995,6 +1125,7 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
     def teleport(node_id):
         reveal_around(node_id)
         queue_revealed_backfill()
+        _maybe_expand_site(state, node_id)
         return {
             "player_location_node_id": node_id,
             "player_location_region": new_region or state.get("player_location_region"),
@@ -1029,6 +1160,10 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
                 "destination_region": new_region,
             }
             interrupted = False  # setting out counts as traveling this turn
+            if _site_mode() == "prefetch":
+                # Start the destination's interior now — the journey's turns
+                # hide the generation latency.
+                _maybe_expand_site(state, new_node_id)
 
     if travel and speed is None:
         # Travel was switched off mid-journey; the player simply stays at the

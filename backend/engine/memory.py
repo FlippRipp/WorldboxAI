@@ -579,6 +579,33 @@ class MemoryManager:
                     "source_id": node.get("id", ""),
                     "region": node.get("name", ""),
                 })
+        # Lazily-expanded site interiors (districts/venues inside major
+        # locations). Format must stay in lockstep with
+        # wbworldgen.worldgen.enrichment.sites.site_world_entries, which emits
+        # the same entries incrementally when a site is expanded mid-play.
+        for parent_id, site in (world_data.get("site_maps") or {}).items():
+            parent_name = site.get("name", "")
+            if site.get("layout_summary"):
+                entries.append({
+                    "id": str(uuid.uuid4()),
+                    "text": f"Layout of {parent_name}: {site['layout_summary']}",
+                    "source_type": "site",
+                    "source_id": parent_id,
+                    "region": parent_name,
+                })
+            for sub in site.get("sub_locations", []):
+                if not sub.get("name"):
+                    continue
+                text = f"Place in {parent_name}: {sub['name']} ({sub.get('type', 'place')})"
+                if sub.get("description"):
+                    text += f". {sub['description']}"
+                entries.append({
+                    "id": str(uuid.uuid4()),
+                    "text": text,
+                    "source_type": "site_node",
+                    "source_id": sub.get("id", ""),
+                    "region": parent_name,
+                })
         for layer_cfg in world_data.get("layers", []):
             lid = layer_cfg.get("layer_id", "")
             lname = layer_cfg.get("name", lid)

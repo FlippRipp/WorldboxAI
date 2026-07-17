@@ -1,5 +1,10 @@
 import { useState, useEffect, useMemo } from 'react';
+import { api } from 'api';
 import MapRenderer from './WorldBuilder/MapRenderer';
+
+// Node types whose interiors can be expanded into districts/venues (mirrors
+// the backend's expandable set).
+const EXPANDABLE_TYPES = new Set(['city', 'settlement', 'port', 'stronghold']);
 
 // Rendered generically by the host's in-game overlay slot, which passes the
 // whole game `state`. We derive the world props from it and render nothing when
@@ -24,6 +29,36 @@ export default function GameMapOverlay({ state = {} }) {
   const [open, setOpen] = useState(false);
   const [activeLayerId, setActiveLayerId] = useState(null);
   const [focusNodeId, setFocusNodeId] = useState(null);
+  const [expanding, setExpanding] = useState(false);
+  const [localSite, setLocalSite] = useState(null); // freshly expanded, pre-refresh
+
+  // The player's current node + its interior (if expanded).
+  const playerNode = useMemo(() => {
+    if (!worldData) return null;
+    const nodes = worldData.map_layers
+      ? worldData.map_layers.flatMap((l) => l.map?.nodes || [])
+      : worldData.map?.nodes || [];
+    return nodes.find((n) => n.id === playerNodeId) || null;
+  }, [worldData, playerNodeId]);
+
+  const site = localSite?.parent_node_id === playerNodeId
+    ? localSite
+    : worldData?.site_maps?.[playerNodeId] || null;
+  const canExplore = !site && playerNode && playerNode.name
+    && EXPANDABLE_TYPES.has(playerNode.type) && (playerNode.importance ?? 0) >= 6;
+
+  const exploreInterior = async () => {
+    if (!playerNodeId || expanding) return;
+    setExpanding(true);
+    try {
+      const res = await api.expandSessionSite(playerNodeId);
+      setLocalSite(res.site);
+    } catch (e) {
+      console.error('Site expansion failed:', e);
+    } finally {
+      setExpanding(false);
+    }
+  };
 
   // Set initial layer from player or first layer
   useEffect(() => {
@@ -74,7 +109,7 @@ export default function GameMapOverlay({ state = {} }) {
           Map
         </button>
       ) : (
-        <div className="bg-gray-900/95 border border-gray-700 rounded-xl shadow-2xl overflow-hidden" style={{ width: 360, height: 300 }}>
+        <div className="bg-gray-900/95 border border-gray-700 rounded-xl shadow-2xl overflow-hidden" style={{ width: 360 }}>
           <div className="flex items-center justify-between px-3 py-2 bg-gray-800/80 border-b border-gray-700">
             <span className="text-xs text-gray-400 font-medium">World Map</span>
             <button
@@ -103,6 +138,40 @@ export default function GameMapOverlay({ state = {} }) {
               />
             )}
           </div>
+          {site && (
+            <div className="border-t border-gray-700 px-3 py-2 max-h-40 overflow-y-auto">
+              <div className="text-xs text-purple-300 font-medium mb-1">
+                Inside {site.name || playerNode?.name}
+              </div>
+              {site.layout_summary && (
+                <p className="text-[11px] text-gray-400 mb-1">{site.layout_summary}</p>
+              )}
+              <ul className="space-y-0.5">
+                {(site.sub_locations || []).map((sub) => (
+                  <li key={sub.id} className="text-[11px] text-gray-300">
+                    <span className="text-amber-400">{sub.name}</span>
+                    <span className="text-gray-500"> ({sub.type})</span>
+                    {sub.description && (
+                      <span className="text-gray-500"> — {sub.description.slice(0, 90)}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {canExplore && (
+            <div className="border-t border-gray-700 px-3 py-2">
+              <button
+                onClick={exploreInterior}
+                disabled={expanding}
+                className="w-full px-3 py-1.5 bg-purple-700 hover:bg-purple-600 disabled:opacity-50 rounded-lg text-xs font-medium text-gray-100 transition-colors"
+              >
+                {expanding
+                  ? 'Detailing this place...'
+                  : `Explore ${playerNode?.name} in detail`}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -14,7 +14,8 @@ import logging
 from wbworldgen.worldgen import compiler
 from wbworldgen.worldgen import pipeline as _pipeline
 from wbworldgen.worldgen import start_locations as _start
-from wbworldgen.worldgen.enrichment import EnrichmentEngine, collect_nodes_by_layer
+from wbworldgen.worldgen.enrichment import EnrichmentEngine, SiteExpansionEngine, collect_nodes_by_layer
+from wbworldgen.worldgen.enrichment import sites as _sites_mod
 from wbworldgen.worldgen.generation import LLMStepGenerator, MapStepGenerator, MockStepGenerator
 from wbworldgen.worldgen.hooks import HookRegistry
 from wbworldgen.worldgen.persistence import WorldPersistence
@@ -59,6 +60,7 @@ class WorldBuilder:
         self._map_gen = MapStepGenerator(worlds_dir=str(self._worlds_dir))
         self._llm_gen = LLMStepGenerator(settings=None, retry_attempts=self._json_retry_attempts)
         self._enrichment = EnrichmentEngine(host=self)
+        self._sites = SiteExpansionEngine(host=self)
 
     # --- configuration ------------------------------------------------------
 
@@ -365,6 +367,38 @@ class WorldBuilder:
         """Label + describe an explicit set of nodes (play-time backfill).
         Same single-call-per-node quality as the upfront pass."""
         return await self.enrich_run(world_id, phase="all", node_ids=list(node_ids))
+
+    # --- site expansion (lazy interior detail) ------------------------------
+
+    def is_site_expandable(self, node: dict) -> bool:
+        return _sites_mod.is_expandable(node)
+
+    def get_site(self, world_id: str, node_id: str) -> dict | None:
+        return self._persistence.load_site(world_id, node_id)
+
+    async def expand_site(self, world_id: str, node_id: str, force: bool = False) -> dict:
+        """Generate (or return the cached) interior site bundle for one node.
+
+        One full-attention LLM call per site, cached write-once under the
+        world's ``sites/`` directory — every save of the world inherits it.
+        """
+        if not force:
+            existing = self._persistence.load_site(world_id, node_id)
+            if existing:
+                return existing
+        compiled = self._enrichment._load_compiled(world_id)
+        node = self._enrichment.get_node(world_id, node_id)
+        if node is None:
+            raise ValueError(f"Unknown map node: {node_id}")
+        max_subs = self._resolve_enrichment_setting("world.site_max_sublocations", 10, 4, 16)
+        site = await self._sites.expand(
+            compiled, node, max_sub_locations=max_subs,
+            template_vocab=compiled.get("template_vocab"))
+        self._persistence.save_site(world_id, node_id, site)
+        # Keep the cached compiled world truthful without a full invalidation
+        # (a reload would also re-read sites/ via load_world).
+        compiled.setdefault("site_maps", {})[node_id] = site
+        return site
 
     # --- start locations ----------------------------------------------------
 

@@ -198,6 +198,89 @@ def test_embed_world_preserves_lorebook_rows(tmp_path):
     assert lorebook_count == 2
 
 
+def test_embed_world_entries_is_additive_and_replaces_same_source(tmp_path):
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    manager.init_world_index(str(tmp_path / "world_index"))
+    _run(manager.embed_world({"lore": {"premise": "A quiet harbor town."}}, _FakeEmbedder()))
+
+    # Incremental insert (play-time backfill) leaves existing rows alone.
+    count = _run(manager.embed_world_entries([
+        {"text": "Location: Emberhold (town). A soot-stained mining town.",
+         "source_type": "node", "source_id": "n7", "region": "Emberhold"},
+    ], _FakeEmbedder()))
+    assert count == 1
+    types = [row["source_type"] for row in manager._world_conn.execute(
+        "SELECT source_type FROM world_entries ORDER BY source_type")]
+    assert types == ["lore", "node"]
+
+    # Re-embedding the same source replaces instead of duplicating.
+    _run(manager.embed_world_entries([
+        {"text": "Location: Emberhold (city). Rebuilt after the fire.",
+         "source_type": "node", "source_id": "n7", "region": "Emberhold"},
+    ], _FakeEmbedder()))
+    rows = manager._world_conn.execute(
+        "SELECT text FROM world_entries WHERE source_type = 'node'").fetchall()
+    assert len(rows) == 1 and "Rebuilt" in rows[0]["text"]
+
+    # Entries without text are skipped.
+    assert _run(manager.embed_world_entries([{"text": ""}], _FakeEmbedder())) == 0
+
+
+def test_embed_world_includes_site_maps(tmp_path):
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    manager.init_world_index(str(tmp_path / "world_index"))
+    world = {
+        "lore": {"premise": "A quiet harbor town."},
+        "site_maps": {
+            "n1": {
+                "parent_node_id": "n1",
+                "name": "Vessencia",
+                "layout_summary": "Terraces ring the harbor.",
+                "sub_locations": [
+                    {"id": "n1:s1", "name": "Saltmarket Row", "type": "market",
+                     "description": "Fish and rope."},
+                    {"id": "n1:s2", "name": "", "type": "empty"},  # unnamed skipped
+                ],
+            },
+        },
+    }
+    _run(manager.embed_world(world, _FakeEmbedder()))
+    rows = {row["source_type"]: row for row in manager._world_conn.execute(
+        "SELECT source_type, source_id, text, region FROM world_entries")}
+    assert rows["site"]["source_id"] == "n1"
+    assert "Layout of Vessencia" in rows["site"]["text"]
+    assert rows["site_node"]["source_id"] == "n1:s1"
+    assert rows["site_node"]["text"] == "Place in Vessencia: Saltmarket Row (market). Fish and rope."
+    assert rows["site_node"]["region"] == "Vessencia"
+
+
+def test_site_entry_formats_stay_in_lockstep(tmp_path):
+    """memory._build_world_entries and the module's incremental
+    site_world_entries must emit identical text/source/region for a site."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path("modules/wb_worldgen").resolve()))
+    try:
+        from wbworldgen.worldgen.enrichment.sites import site_world_entries
+    finally:
+        sys.path.pop(0)
+
+    site = {
+        "parent_node_id": "n1",
+        "name": "Vessencia",
+        "layout_summary": "Terraces ring the harbor.",
+        "sub_locations": [
+            {"id": "n1:s1", "name": "Saltmarket Row", "type": "market",
+             "description": "Fish and rope."},
+        ],
+    }
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    built = manager._build_world_entries({"site_maps": {"n1": site}})
+    incremental = site_world_entries("n1", site)
+    keyed = lambda e: (e["source_type"], e["source_id"], e["text"], e["region"])
+    assert sorted(map(keyed, built)) == sorted(map(keyed, incremental))
+
+
 def test_embed_lorebooks_couples_each_text_with_its_vector(tmp_path):
     # Concurrent embedding must not scramble text/vector pairing.
     from backend.engine.memory import _serialize
