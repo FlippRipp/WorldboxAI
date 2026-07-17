@@ -75,10 +75,10 @@ def test_degree_cap_and_no_isolated(seed):
 
 @pytest.mark.parametrize("seed", SEEDS)
 def test_min_angle(seed):
-    """Incident street pairs meet at >= 55 degrees.
+    """EVERY pair of incident streets meets at >= 55 degrees.
 
-    Edges added by the relaxed connectivity pass (net.relaxed_edges) are
-    exempt — they trade the angle rule for a connected network.
+    The minimum junction angle is a hard constraint with no exemptions —
+    relaxed edges may only waive the triangle rule, never the angle.
     """
     net = _net(seed)
     adj = _adjacency(net)
@@ -87,14 +87,10 @@ def test_min_angle(seed):
         ns = sorted(ns)
         for i, a in enumerate(ns):
             for b in ns[i + 1:]:
-                if (min(v, a), max(v, a)) in net.relaxed_edges:
-                    continue
-                if (min(v, b), max(v, b)) in net.relaxed_edges:
-                    continue
                 pa, pb = net.points[a], net.points[b]
                 ang = _angle_deg((pa[0] - pv[0], pa[1] - pv[1]),
                                  (pb[0] - pv[0], pb[1] - pv[1]))
-                assert ang >= 55.0, f"{ang:.1f} deg at vertex {v}"
+                assert ang >= 55.0 - 1e-6, f"{ang:.1f} deg at vertex {v}"
 
 
 @pytest.mark.parametrize("seed", SEEDS)

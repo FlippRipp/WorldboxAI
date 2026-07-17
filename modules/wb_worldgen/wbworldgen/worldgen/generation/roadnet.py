@@ -52,9 +52,11 @@ DEFAULT_LEVELS: tuple[LevelParams, ...] = (
 #: tethered to the network instead of flooding the map.
 OUTWARD_GENERATIONS = 4
 
-#: Streets rarely dead-end in a real city: tips that cannot loop back into
-#: the fabric even at this relaxed junction angle get pruned instead.
-_JOIN_ANGLE_DEG = 48.0
+#: Streets rarely dead-end in a real city: tips try to loop back into the
+#: fabric, easing from the strict knob down to the bottom of the article's
+#: recommended 55-65 degree band — never below it. Unjoinable tips are
+#: pruned instead.
+_JOIN_ANGLE_DEG = 55.0
 
 #: A street only continues through a candidate that keeps it reasonably
 #: straight (bend under ~50 degrees); sharper turns end the street and the
@@ -475,13 +477,12 @@ def _join_components(state: _NetState, members, params: LevelParams,
                      level: int, anchors=None):
     """Merge disconnected components with the shortest valid edges.
 
-    Constraints are relaxed in stages (triangle rule first, then angle) —
-    planarity, duplicates and the degree cap always hold. Components that
+    Only the triangle rule may be relaxed — planarity, duplicates, the
+    degree cap and the minimum junction angle always hold. Components that
     still cannot be reached are removed (anchored components survive).
     """
     reach = 2.5 * params.connect_radius
-    for relax in ({}, {"ignore_triangle": True},
-                  {"ignore_triangle": True, "ignore_angle": True}):
+    for relax in ({}, {"ignore_triangle": True}):
         while True:
             comps = _components(state, members)
             if len(comps) <= 1:
@@ -667,10 +668,11 @@ def _close_dead_ends(state: _NetState, levels):
     """Loop the network: join every degree-1 tip back into the fabric.
 
     Real street grids are meshes, not trees — a dead end is the exception.
-    Each tip tries the nearest joinable street vertex under progressively
-    relaxed rules (strict; shallower junction angle; then also ignoring the
-    triangle rule — those joins are tagged relaxed). Tips that still cannot
-    loop back are pruned, cascading up their spur chain.
+    Each tip tries the nearest joinable street vertex, easing the junction
+    angle down to the article's 55-degree floor and finally waiving the
+    triangle rule (those joins are tagged relaxed). The minimum angle is
+    never broken. Tips that still cannot loop back are pruned, cascading up
+    their spur chain.
     """
     def try_join(v) -> bool:
         level = state.point_levels[v]
@@ -688,7 +690,7 @@ def _close_dead_ends(state: _NetState, levels):
             for j in cands:
                 if state.edge_valid(v, j, min_deg, **relax):
                     state.add_edge(v, j, level)
-                    if min_deg < MIN_ANGLE_DEG:
+                    if relax:
                         e = (v, j) if v < j else (j, v)
                         state.relaxed_edges.add(e)
                     return True
