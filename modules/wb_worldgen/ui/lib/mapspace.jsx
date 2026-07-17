@@ -1,4 +1,6 @@
-// mapspace.js — shared normalizer for wb_worldgen world map data.
+// mapspace.jsx — shared normalizer for wb_worldgen world map data.
+// (Plain JS, but the .jsx extension is required: the module loader and the
+// /widgets/{mod_id} route only fetch/serve .jsx files.)
 //
 // The backend's "world_format 2" replaces the legacy `map` / `map_layers` /
 // `map_connections` keys with a flat map space:

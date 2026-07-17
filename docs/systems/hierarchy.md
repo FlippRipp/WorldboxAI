@@ -91,7 +91,7 @@ A compiled world dict (`world_data`) carries:
 | Session/save/RAG sync | `wbruntime/sync.py` |
 | Pipeline step for structure | `wbworldgen/worldgen/steps/hierarchy_design.py` |
 | Scope-attached landmarks/factions | `compiler.collect_scope_content` / `attach_scope_content` |
-| Frontend normalizer | `modules/wb_worldgen/ui/lib/mapspace.js` |
+| Frontend normalizer | `modules/wb_worldgen/ui/lib/mapspace.jsx` |
 
 ## What future edits touch
 
