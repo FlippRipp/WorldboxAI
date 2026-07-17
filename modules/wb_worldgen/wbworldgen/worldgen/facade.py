@@ -23,6 +23,7 @@ from wbworldgen.worldgen.generation import LLMStepGenerator, MapStepGenerator, M
 from wbworldgen.worldgen.hooks import HookRegistry
 from wbworldgen.worldgen.persistence import WorldPersistence
 from wbworldgen.worldgen.base import USES_MAP
+from wbworldgen.worldgen.steps import hierarchy_design as _hierarchy_design
 from wbworldgen.worldgen.steps import world_form as _world_form
 from wbworldgen.worldgen.fixtures.mock_data import (
     mock_hierarchy_design, mock_layer_design, mock_layer_rules, mock_lore,
@@ -258,14 +259,7 @@ class WorldBuilder:
                 default_nodes = template.default_total_nodes()
                 if default_nodes:
                     config = {"total_nodes": default_nodes}
-            # The template's root level picks the map generator (world_map,
-            # city_roadnet, ...); non-root levels are generated on expansion.
-            # The world's own design (world_form map_style "city") overrides
-            # the template default, so "let the AI decide" worlds that read
-            # as a city get a real street network.
-            levels = template.resolved_levels() or [{}]
-            root_gen = (_world_form.map_generator_override(world_state)
-                        or levels[0].get("generator_id") or "world_map")
+            root_gen = self._root_generator_for(world_state)
             # Delaunay + road pathfinding are CPU-bound; keep the event loop free.
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
@@ -372,12 +366,32 @@ class WorldBuilder:
     def _merge_geography_steps(self, steps_data: dict) -> dict:
         return compiler.merge_geography_steps(steps_data)
 
+    def _root_generator_for(self, world_state: dict) -> str:
+        """The generator that draws a world's root map. The world's own
+        designed structure (hierarchy_design levels) is authoritative when
+        present; worlds without one (old worlds, junk design output) fall
+        back to the world_form "city" override over the template's declared
+        root, exactly as before the structure step existed."""
+        designed = _hierarchy_design.designed_levels(world_state)
+        if designed:
+            return designed[0].get("generator_id") or "world_map"
+        levels = self.template_for(world_state).resolved_levels() or [{}]
+        return (_world_form.map_generator_override(world_state)
+                or levels[0].get("generator_id") or "world_map")
+
+    def resolved_levels_for(self, world_state: dict) -> list:
+        """A world's hierarchy levels: its own AI-designed structure when
+        present, else the template's declaration (default [world, interior])
+        so old worlds behave exactly as before."""
+        return (_hierarchy_design.designed_levels(world_state)
+                or self.template_for(world_state).resolved_levels())
+
     def compile_world(self, world_state: dict) -> dict:
-        # The template's hierarchy levels (free text) ride into the compiled
+        # The world's hierarchy levels (free text) ride into the compiled
         # world so play-time expansion knows which child levels may exist.
         if not world_state.get("hierarchy_levels"):
             world_state = dict(world_state)
-            world_state["hierarchy_levels"] = self.template_for(world_state).resolved_levels()
+            world_state["hierarchy_levels"] = self.resolved_levels_for(world_state)
         return compiler.compile_world(world_state, self._steps)
 
     # --- persistence (delegated) -------------------------------------------
@@ -419,7 +433,8 @@ class WorldBuilder:
         note_for_layer = ""
         for step_id in self._ordered_ids:
             if step_id == "map_generation":
-                data = self._map_gen.generate(world_state, {"total_nodes": total_nodes})
+                data = self._map_gen.generate(world_state, {"total_nodes": total_nodes},
+                                              self._root_generator_for(world_state))
             else:
                 handler = MOCK_GENERATORS.get(step_id)
                 if handler:

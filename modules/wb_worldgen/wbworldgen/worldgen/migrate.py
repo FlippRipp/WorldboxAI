@@ -125,11 +125,15 @@ def migrate_world_data(wd: dict) -> dict:
     if wd.get("map_layers"):
         maps, connections = _migrate_layers(wd)
     elif isinstance(wd.get("map"), dict) and wd["map"].get("nodes") is not None:
+        # The root map's level is whatever the world's hierarchy declares at
+        # the top (AI-designed structures may root at "city", "star_system",
+        # ...); "world" only when no hierarchy rode in.
+        root_levels = (wd.get("hierarchy") or {}).get("levels") or []
         maps = {ROOT_MAP_ID: _map_record_from(
             wd["map"],
             map_id=ROOT_MAP_ID,
             label=(wd.get("lore") or {}).get("world_name") or "World",
-            level_type="world",
+            level_type=(root_levels[0].get("level_type") if root_levels else "") or "world",
             legacy_layer_id=wd["map"].get("layer_id") or "main",
         )}
         connections = []

@@ -235,11 +235,41 @@ def mock_world_form(prompt: str, note: str = "") -> dict:
 
 #: Maps step id -> fixture function. Used by the mock generator.
 def mock_hierarchy_design(prompt: str, note: str = "") -> dict:
+    # Emits the normalized shape (levels bound to implemented generators) so
+    # seeded/offline worlds exercise the designed-structure path end to end.
+    # City-flavored prompts design a street-network root, mirroring
+    # mock_world_form's map_style pick.
+    text = (prompt or "").lower()
+    if any(w in text for w in ("city", "metropolis", "urban", "town")):
+        return {
+            "notes": "One city drawn as a street network; venues open into "
+                     "their own interior maps during play (mock).",
+            "levels": [
+                {"level_type": "city", "label": "City", "generator_id": "city_roadnet",
+                 "guidance": "The whole city: avenues, blocks, districts and venues (mock)."},
+                {"level_type": "interior", "label": "Interior", "generator_id": "interior",
+                 "nestable": True,
+                 "guidance": "Rooms and halls of one building (mock)."},
+            ],
+            "parallel_maps": [],
+            "pregenerate": [],
+            "site_sub_noun": "rooms, floors and back offices",
+            "connection_looks": [],
+        }
     return {
         "notes": "A single overworld map; key locations open into their own "
-                 "interior maps during play.",
+                 "interior maps during play (mock).",
+        "levels": [
+            {"level_type": "world", "label": "World", "generator_id": "world_map",
+             "guidance": "The top-level overworld map (mock)."},
+            {"level_type": "interior", "label": "Interior", "generator_id": "interior",
+             "nestable": True,
+             "guidance": "Rooms, halls and courts of one building, complex or vessel (mock)."},
+        ],
         "parallel_maps": [],
         "pregenerate": [],
+        "site_sub_noun": "",
+        "connection_looks": [],
     }
 
 
