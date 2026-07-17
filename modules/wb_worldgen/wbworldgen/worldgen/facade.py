@@ -313,7 +313,8 @@ class WorldBuilder:
 
     async def enrich_run(self, world_id: str, phase: str = "all", count: int = None,
                          layer_filter: str = None, rework: bool = False,
-                         exclude_node_ids: list = None, on_event=None) -> dict:
+                         exclude_node_ids: list = None, on_event=None,
+                         importance_floor: int = None, node_ids: list = None) -> dict:
         # 1 keeps the old fully-serialized behavior for rate-limited providers.
         concurrency = self._resolve_enrichment_setting(
             "world.enrichment_concurrency", self._enrichment_concurrency, 1, 8)
@@ -330,10 +331,40 @@ class WorldBuilder:
             world_id, phase=phase, count=count, layer_filter=layer_filter,
             rework=rework, exclude_node_ids=exclude_node_ids,
             concurrency=concurrency, batch_size=batch_size, on_event=on_event,
+            importance_floor=importance_floor, node_ids=node_ids,
         )
 
     def enrich_cancel(self, world_id: str):
         self._enrichment.cancel(world_id)
+
+    # Importance at or above this marks a node as a "major location": authored
+    # settlements bind at importance 8 and landmarks at 6 (world_map anchoring),
+    # so 6 covers every authored named_location plus high-degree hubs.
+    MAJOR_IMPORTANCE_FLOOR = 6
+
+    def default_importance_floor(self) -> int | None:
+        """The upfront-enrichment importance floor from the
+        ``world.upfront_detail`` setting: ``major_locations`` (the default)
+        details only major nodes at world creation — the rest is generated
+        on demand during play; ``full`` restores enrich-everything."""
+        detail = "major_locations"
+        if self._settings is not None:
+            try:
+                configured = self._settings.get("world.upfront_detail")
+                if configured:
+                    detail = str(configured)
+            except Exception:
+                pass
+        return None if detail == "full" else self.MAJOR_IMPORTANCE_FLOOR
+
+    def get_map_node(self, world_id: str, node_id: str) -> dict | None:
+        """Current state of one map node (enrichment fields included)."""
+        return self._enrichment.get_node(world_id, node_id)
+
+    async def detail_nodes(self, world_id: str, node_ids: list) -> dict:
+        """Label + describe an explicit set of nodes (play-time backfill).
+        Same single-call-per-node quality as the upfront pass."""
+        return await self.enrich_run(world_id, phase="all", node_ids=list(node_ids))
 
     # --- start locations ----------------------------------------------------
 
@@ -342,9 +373,51 @@ class WorldBuilder:
         return _start.get_start_locations(compiled)
 
     async def llm_pick_start_location(self, world_id: str, preference: str, llm):
+        """Pick the best existing start candidate — or, when nothing genuinely
+        matches the player's request, author a brand-new start location on one
+        of the world's unnamed map positions and persist it into the world."""
         compiled = self.compile_world(self.load_world(world_id))
         candidates = _start.get_start_locations(compiled)
-        return await _start.llm_pick_start_location(compiled, candidates, preference, llm)
+        live = llm is not None and getattr(llm, "mode", "mock") != "mock"
+        result = await _start.llm_pick_start_location(
+            compiled, candidates, preference, llm, allow_no_match=live)
+        if not (isinstance(result, dict) and result.get("no_match")):
+            return result
+
+        authored = await _start.generate_start_location(
+            compiled, preference, result.get("wanted", ""), llm)
+        if not authored:
+            # Generation failed — settle for the best existing candidate.
+            return await _start.llm_pick_start_location(compiled, candidates, preference, llm)
+        return self._persist_generated_start(world_id, authored)
+
+    def _persist_generated_start(self, world_id: str, authored: dict) -> dict:
+        """Write an on-demand start location onto its map node (name, type,
+        description, importance bump) and return it in candidate shape."""
+        node_id = authored["node_id"]
+        writes = {
+            "name": authored["name"],
+            "type": authored["type"],
+            "importance": self.MAJOR_IMPORTANCE_FLOOR if authored["type"] == "landmark" else 8,
+        }
+        if authored.get("label_description"):
+            writes["label_description"] = authored["label_description"]
+        if authored.get("description"):
+            writes["description"] = authored["description"]
+        for field, value in writes.items():
+            self._save_node_enrichment(world_id, node_id, field, value)
+        self._flush_enrichment_cache(world_id)
+        self._enrichment.invalidate_compiled(world_id)
+
+        compiled = self.compile_world(self.load_world(world_id))
+        for entry in _start.get_start_locations(compiled):
+            if entry.get("node_id") == node_id:
+                entry["reason"] = authored.get("reason", "")
+                entry["generated"] = True
+                return entry
+        # Node fell outside the candidate filter (shouldn't happen) — return
+        # the authored fields directly so the caller still gets a start.
+        return {**authored, "generated": True}
 
     # --- mock fixtures (kept as methods for direct callers/tests) ----------
 

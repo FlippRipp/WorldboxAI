@@ -103,6 +103,11 @@ async def create_world_story_source(*, save_id, source_id, start_preference, ses
         start_location = next((l for l in locations if l.get("node_id") == start_location_node_id), None)
     if start_location is None and start_preference:
         start_location = await world_builder.llm_pick_start_location(world_id, start_preference, engine.llm)
+        if start_location and start_location.get("generated"):
+            # The pick authored a brand-new start location onto the map —
+            # recompile so the save's world_data carries it.
+            world_state = world_builder.load_world(world_id)
+            compiled = world_builder.compile_world(world_state)
     if start_location is None:
         locations = world_builder.get_start_locations(world_id)
         start_location = _random.choice(locations) if locations else None
@@ -199,6 +204,22 @@ def set_services(services: dict):
                 is_global=True,
                 min=0, max=8,
             )
+            settings.register(
+                "world.upfront_detail", "select", "major_locations",
+                label="Upfront World Detail",
+                category="World Building",
+                description="How much of the map is named/described at world creation. 'major_locations' details only settlements, landmarks and other important nodes upfront — the rest is generated silently in the background during play as the story approaches it. 'full' details every node upfront (slower, more tokens).",
+                is_global=True,
+                options=["major_locations", "full"],
+            )
+            settings.register(
+                "world.backfill_per_turn", "slider", 2,
+                label="Background Detail Per Turn",
+                category="World Building",
+                description="How many not-yet-detailed map locations are quietly named/described in the background each story turn (visited and revealed areas always come first). 0 disables the idle trickle — only places the story actually approaches get detailed.",
+                is_global=True,
+                min=0, max=5,
+            )
         except Exception as e:
             print(f"[wb_worldgen] Failed to register enrichment settings: {e}")
     if registry is not None:
@@ -278,8 +299,9 @@ def _build_travel_context(travel: dict, state: dict, world_data: dict) -> str:
         parts.append(f"Final destination: {dest_name}.")
     if turns_left is not None:
         parts.append(f"Estimated travel remaining: about {turns_left} turn(s) until arrival at {dest_name}.")
-    if to_node.get("description"):
-        parts.append(f"Ahead lies {to_name} ({to_node.get('type', 'location')}) — {to_node['description'][:300]}")
+    to_desc = to_node.get("description") or to_node.get("label_description")
+    if to_desc:
+        parts.append(f"Ahead lies {to_name} ({to_node.get('type', 'location')}) — {to_desc[:300]}")
     region_name = from_node.get("region") or state.get("player_location_region")
     if region_name:
         regions = world_data.get("regions", {}).get("regions", [])
@@ -352,11 +374,18 @@ def _build_location_context(state: dict, world_data: dict) -> str:
     if current_node:
         node_name = current_node.get("name", "")
         node_type = current_node.get("type", "location")
-        node_desc = current_node.get("description", "")
+        node_desc = current_node.get("description", "") or current_node.get("label_description", "")
         if node_name and node_desc:
             parts.append(f"Location: {node_name} ({node_type}) — {node_desc[:600]}")
         elif node_name:
             parts.append(f"Location: {node_name} ({node_type})")
+        else:
+            # Not yet generated (lazy world detail) — give the storyteller an
+            # honest basis to improvise from the region/terrain context below.
+            parts.append(
+                f"Location: an unexplored {node_type} — this place has no established "
+                "name or details yet. Improvise fitting local color from the region "
+                "and terrain context; keep any specifics provisional.")
         if current_node.get("interlayer_connection_id"):
             map_connections = world_data.get("map_connections", [])
             for lc in map_connections:
@@ -380,7 +409,7 @@ def _build_location_context(state: dict, world_data: dict) -> str:
     return "\n".join(parts)
 
 
-def _build_location_mutation_schema(world_data: dict) -> dict:
+def _build_location_mutation_schema(world_data: dict, state: dict = None) -> dict:
     nodes = world_data.get("map", {}).get("nodes", [])
     map_layers = world_data.get("map_layers", [])
     if map_layers:
@@ -393,6 +422,16 @@ def _build_location_mutation_schema(world_data: dict) -> dict:
     for n in nodes:
         if n.get("name"):
             location_options.append(f"{n['id']} ({n.get('name', '')})")
+    # Lazy worlds leave minor waypoints unnamed until visited; offer the
+    # revealed ones as explicit "unexplored" destinations so the player can
+    # still head toward them (they get detailed on approach).
+    if state is not None and len(location_options) < 30:
+        revealed = set(state.get("revealed_node_ids", []))
+        for n in nodes:
+            if len(location_options) >= 30:
+                break
+            if not n.get("name") and n.get("id") in revealed:
+                location_options.append(f"{n['id']} (unexplored {n.get('type', 'waypoint')})")
     if not location_options:
         location_options = ["any"]
     region_names = [r.get("name", "") for r in regions if r.get("name")]
@@ -584,11 +623,265 @@ def _remaining_travel(travel: dict, adjacency: dict) -> float:
     return max(remaining, 0.0)
 
 
+# ---------------------------------------------------------------------------
+# Silent background backfill. Worlds created in "major_locations" mode leave
+# ordinary waypoints unnamed/undescribed; during play they are detailed on
+# demand — nodes the story approaches first (fog reveal, travel routes,
+# arrival), then a low-priority idle trickle over the rest. All generation
+# goes through one serialized worker so runs never overlap, and every result
+# is synced into the live session, the save's world_data.json and the RAG
+# world index. Node detail is generated at most once per world.
+# ---------------------------------------------------------------------------
+
+import asyncio as _asyncio
+import logging as _logging
+
+_logger = _logging.getLogger(__name__)
+
+_backfill = {
+    "task": None,       # the single running worker task, or None
+    "queue": [],        # ordered node ids waiting for detail
+    "queued": set(),    # membership mirror of queue + in-flight chunk
+    "failed": set(),    # ids that exhausted retries this session
+    "futures": {},      # node_id -> Future resolved when its detail is synced
+    "disabled": False,  # set when the world template dir is gone
+}
+
+
+def _backfill_reset():
+    """Forget session-scoped backfill state (tests / world switch)."""
+    _backfill["task"] = None
+    _backfill["queue"] = []
+    _backfill["queued"] = set()
+    _backfill["failed"] = set()
+    _backfill["futures"] = {}
+    _backfill["disabled"] = False
+
+
+def _backfill_available(state: dict) -> bool:
+    if _backfill["disabled"] or world_builder is None or _services is None:
+        return False
+    if not state.get("world_id"):
+        return False
+    llm = getattr(_services.get("engine"), "llm", None)
+    return llm is not None and getattr(llm, "mode", "mock") != "mock"
+
+
+def _node_needs_detail(node: dict) -> bool:
+    return not node.get("name") or not node.get("description")
+
+
+def _backfill_per_turn() -> int:
+    try:
+        if _services is not None and _services.get("settings") is not None:
+            return max(0, int(_services["settings"].get("world.backfill_per_turn")))
+    except Exception:
+        pass
+    return 2
+
+
+def _queue_backfill(state: dict, node_ids: list, front: bool = False):
+    """Queue nodes for background detailing and make sure the worker runs."""
+    if not _backfill_available(state):
+        return
+    fresh = [nid for nid in node_ids
+             if nid and nid not in _backfill["queued"] and nid not in _backfill["failed"]]
+    if fresh:
+        if front:
+            _backfill["queue"][:0] = fresh
+        else:
+            _backfill["queue"].extend(fresh)
+        _backfill["queued"].update(fresh)
+    if _backfill["queue"] and (_backfill["task"] is None or _backfill["task"].done()):
+        _backfill["task"] = _asyncio.create_task(_backfill_worker(state.get("world_id")))
+
+
+async def _backfill_worker(world_id: str):
+    """Drain the queue in small chunks: enrich via the world builder (writes
+    the world template files), then sync results into the live session."""
+    try:
+        while _backfill["queue"]:
+            chunk = _backfill["queue"][:4]
+            del _backfill["queue"][:len(chunk)]
+            try:
+                summary = await world_builder.detail_nodes(world_id, chunk)
+                _backfill["failed"].update(summary.get("failed_node_ids", []))
+                _sync_enriched_nodes(world_id, chunk)
+                await _embed_backfilled_nodes(world_id, chunk)
+            except FileNotFoundError:
+                # The world template dir is gone — nothing to generate from.
+                _backfill["disabled"] = True
+                _logger.warning("world '%s' missing; background detail disabled", world_id)
+                return
+            except Exception:
+                _backfill["failed"].update(chunk)
+                _logger.exception("background detail failed for nodes %s", chunk)
+            finally:
+                for nid in chunk:
+                    _backfill["queued"].discard(nid)
+                    fut = _backfill["futures"].pop(nid, None)
+                    if fut is not None and not fut.done():
+                        fut.set_result(True)
+    finally:
+        _backfill["task"] = None
+
+
+def _sync_enriched_nodes(world_id: str, node_ids: list):
+    """Merge freshly generated node fields into the live session's world_data
+    and rewrite the save's World/world_data.json so a reload sees them."""
+    sm = _services.get("session_manager") if _services else None
+    if sm is None or sm.state.get("world_id") != world_id:
+        return
+    wd = sm.state.get("world_data")
+    if not wd:
+        return
+    by_id = {n.get("id"): n for n in _all_map_nodes(wd)}
+    changed = False
+    for nid in node_ids:
+        target = by_id.get(nid)
+        if target is None:
+            continue
+        enriched = world_builder.get_map_node(world_id, nid)
+        if not enriched:
+            continue
+        for field in ("name", "label_description", "description", "type", "importance"):
+            value = enriched.get(field)
+            if value and value != target.get(field):
+                target[field] = value
+                changed = True
+    if not changed:
+        return
+    save_id = sm.state.get("active_save_id")
+    if not save_id:
+        return
+    try:
+        import json as _json
+        world_dir = sm.data_dir / "saves" / save_id / "World"
+        if world_dir.is_dir():
+            with open(world_dir / "world_data.json", "w", encoding="utf-8") as f:
+                _json.dump(wd, f, indent=2)
+    except Exception:
+        _logger.exception("failed to persist backfilled world_data for save %s", save_id)
+
+
+def _node_world_entry(wd: dict, node: dict) -> dict | None:
+    """RAG world-index entry for a backfilled node, matching the format
+    memory._build_world_entries uses for map nodes."""
+    if not node.get("name") or not node.get("description"):
+        return None
+    nid = node.get("id", "")
+    for map_layer in wd.get("map_layers", []):
+        if any(n.get("id") == nid for n in map_layer.get("map", {}).get("nodes", [])):
+            layer_name = map_layer.get("name", "")
+            return {
+                "text": f"Location [{layer_name}]: {node['name']} ({node.get('type', 'location')}). {node['description']}",
+                "source_type": "node", "source_id": nid, "region": layer_name,
+            }
+    return {
+        "text": f"Location: {node['name']} ({node.get('type', 'location')}). {node['description']}",
+        "source_type": "node", "source_id": nid, "region": node.get("name", ""),
+    }
+
+
+async def _embed_backfilled_nodes(world_id: str, node_ids: list):
+    """Add freshly detailed nodes to the save's RAG world index."""
+    sm = _services.get("session_manager") if _services else None
+    engine = _services.get("engine") if _services else None
+    if sm is None or engine is None or sm.state.get("world_id") != world_id:
+        return
+    memory = getattr(engine, "memory", None)
+    if memory is None or not memory.has_world_index():
+        return
+    wd = sm.state.get("world_data")
+    if not wd:
+        return
+    by_id = {n.get("id"): n for n in _all_map_nodes(wd)}
+    entries = []
+    for nid in node_ids:
+        node = by_id.get(nid)
+        if node is None:
+            continue
+        entry = _node_world_entry(wd, node)
+        if entry:
+            entries.append(entry)
+    if not entries:
+        return
+    try:
+        await memory.embed_world_entries(entries, engine.llm)
+    except Exception:
+        _logger.exception("failed to embed backfilled world entries")
+
+
+async def _ensure_current_node_detailed(state: dict):
+    """Await-on-arrival: if the player stands on an undetailed node, wait
+    (bounded) for its detail so the storyteller never narrates a fresh scene
+    from thin air. Everything else stays non-blocking; on timeout the
+    generation keeps running in the background and lands next turn."""
+    world_data = state.get("world_data")
+    node_id = state.get("player_location_node_id")
+    if not world_data or not node_id or not _backfill_available(state):
+        return
+    if _get_travel(state):
+        return  # en route — the journey narration doesn't need the destination yet
+    node = next((n for n in _all_map_nodes(world_data) if n.get("id") == node_id), None)
+    if node is None or not _node_needs_detail(node) or node_id in _backfill["failed"]:
+        return
+    fut = _backfill["futures"].get(node_id)
+    if fut is None:
+        fut = _asyncio.get_running_loop().create_future()
+        _backfill["futures"][node_id] = fut
+    _queue_backfill(state, [node_id], front=True)
+    try:
+        await _asyncio.wait_for(_asyncio.shield(fut), timeout=20)
+    except _asyncio.TimeoutError:
+        _logger.warning("timed out waiting for detail of node %s; continuing with sparse context", node_id)
+    except Exception:
+        pass
+
+
+def _kick_background_detail(state: dict):
+    """Fire-and-forget per-turn triggers: prefetch along an active travel
+    route, then top up the idle trickle with the most important pending nodes."""
+    world_data = state.get("world_data")
+    if not world_data or not _backfill_available(state):
+        return
+    all_nodes = _all_map_nodes(world_data)
+    by_id = {n.get("id"): n for n in all_nodes}
+
+    # Travel prefetch: destination and remaining waypoints, highest priority —
+    # multi-turn journeys hide the generation latency entirely.
+    travel = _get_travel(state)
+    if travel:
+        route = travel.get("route", [])
+        ahead = route[travel.get("leg_index", 0) + 1:]
+        dest = travel.get("destination_node_id")
+        wanted = ([dest] if dest else []) + list(ahead)
+        needs = [nid for nid in wanted
+                 if nid in by_id and _node_needs_detail(by_id[nid])]
+        if needs:
+            _queue_backfill(state, needs, front=True)
+
+    # Idle trickle: keep quietly finishing the world, visited areas first.
+    per_turn = _backfill_per_turn()
+    if per_turn <= 0 or _backfill["queue"]:
+        return
+    pending = [n for n in all_nodes
+               if _node_needs_detail(n) and n.get("id") not in _backfill["failed"]
+               and n.get("id") not in _backfill["queued"]]
+    if not pending:
+        return
+    revealed = set(state.get("revealed_node_ids", []))
+    pending.sort(key=lambda n: (-(n.get("id") in revealed), -n.get("importance", 0)))
+    _queue_backfill(state, [n["id"] for n in pending[:per_turn]])
+
+
 async def on_gather_context(state: dict, sdk) -> dict:
     """Per-turn world context: the player's current location block."""
     world_data = state.get("world_data")
     if not world_data:
         return {}
+    await _ensure_current_node_detailed(state)
+    _kick_background_detail(state)
     location_context = _build_location_context(state, world_data)
     if not location_context:
         return {}
@@ -649,7 +942,7 @@ async def on_mutation_schema(state: dict, sdk) -> dict:
     world_data = state.get("world_data")
     if not world_data:
         return {}
-    return _build_location_mutation_schema(world_data)
+    return _build_location_mutation_schema(world_data, state)
 
 
 async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
@@ -677,6 +970,7 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
 
     revealed = list(set(state.get("revealed_node_ids", [])))
     revealed_dirty = False
+    newly_revealed: list[str] = []
 
     def reveal_around(nid):
         nonlocal revealed_dirty
@@ -684,10 +978,23 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
         for x in _reveal_bfs(nid, adjacency, radius=1):
             if x not in revealed:
                 revealed.append(x)
+                newly_revealed.append(x)
                 revealed_dirty = True
+
+    def queue_revealed_backfill():
+        # Newly revealed places get detailed silently in the background so
+        # they have names/descriptions by the time the story reaches them.
+        if not newly_revealed:
+            return
+        by_id = {n.get("id"): n for n in _all_map_nodes(world_data)}
+        needs = [nid for nid in newly_revealed
+                 if nid in by_id and _node_needs_detail(by_id[nid])]
+        if needs:
+            _queue_backfill(state, needs, front=True)
 
     def teleport(node_id):
         reveal_around(node_id)
+        queue_revealed_backfill()
         return {
             "player_location_node_id": node_id,
             "player_location_region": new_region or state.get("player_location_region"),
@@ -767,6 +1074,7 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:
         result["revealed_node_ids"] = revealed
     elif revealed_dirty:
         result["revealed_node_ids"] = revealed
+    queue_revealed_backfill()
     return result
 
 

@@ -110,13 +110,26 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
     if request.skip_review:
         enrichment_steps = {"node_labeling", "node_descriptions"}
         terrain_task = None
+        done_steps: set = set()
         try:
             for step_id in world_builder._ordered_ids:
-                if step_id in enrichment_steps:
+                if step_id in enrichment_steps or step_id in done_steps:
                     continue
                 if step_id == "terrain_generation" and terrain_task is not None:
                     data = await terrain_task
                     terrain_task = None
+                elif (step_id == "natural_landmarks"
+                        and "society_factions" in world_builder._steps
+                        and "society_factions" not in state["steps"]):
+                    # Independent full-attention calls (both depend only on
+                    # terrain_regions) — run them concurrently in one-shot mode.
+                    landmarks_data, factions_data = await asyncio.gather(
+                        world_builder.generate_step(step_id, state, request.seed_prompt),
+                        world_builder.generate_step("society_factions", state, request.seed_prompt),
+                    )
+                    state["steps"]["society_factions"] = {"data": factions_data, "approved": True}
+                    done_steps.add("society_factions")
+                    data = landmarks_data
                 else:
                     data = await world_builder.generate_step(step_id, state, request.seed_prompt)
                 state["steps"][step_id] = {"data": data, "approved": True}
@@ -567,6 +580,9 @@ class EnrichRunRequest(BaseModel):
     # Rework batching: nodes already redone this session, so consecutive
     # partial runs move through the remaining nodes instead of repeating.
     exclude_node_ids: Optional[list[str]] = None
+    # Explicit importance floor; None resolves from the world.upfront_detail
+    # setting ("major_locations" details only importance >= 6 upfront).
+    importance_floor: Optional[int] = None
 
 
 @router.post("/api/world/{world_id}/enrich/run")
@@ -581,6 +597,11 @@ async def enrich_run(world_id: str, request: EnrichRunRequest, session_id: str =
     async def on_event(evt: dict):
         queue.put_nowait(evt)
 
+    importance_floor = request.importance_floor
+    if importance_floor is None and not request.rework:
+        resolver = getattr(world_builder, "default_importance_floor", None)
+        importance_floor = resolver() if callable(resolver) else None
+
     async def runner():
         try:
             await world_builder.enrich_run(
@@ -588,6 +609,7 @@ async def enrich_run(world_id: str, request: EnrichRunRequest, session_id: str =
                 layer_filter=request.layer_id, rework=request.rework,
                 exclude_node_ids=request.exclude_node_ids,
                 on_event=on_event,
+                importance_floor=importance_floor,
             )
         except FileNotFoundError as exc:
             queue.put_nowait({"type": "error", "detail": str(exc)})
@@ -643,10 +665,23 @@ async def enrich_progress(world_id: str, layer_id: Optional[str] = None):
         total_nodes = sum(v["total"] for v in label_progress.values())
         total_described = sum(v["done"] for v in desc_progress.values())
         total_labeled_nodes = sum(v["total"] for v in desc_progress.values())
+        # Major-location scope: what the default upfront pass will actually
+        # target when world.upfront_detail is "major_locations" (the rest is
+        # generated on demand during play).
+        importance_floor = world_builder.default_importance_floor()
+        upfront = {"importance_floor": importance_floor}
+        if importance_floor is not None:
+            majors = [n for n in all_nodes if n.get("importance", 0) >= importance_floor]
+            upfront["labeling"] = {
+                "done": sum(1 for n in majors if n.get("name")), "total": len(majors)}
+            upfront["descriptions"] = {
+                "done": sum(1 for n in majors if n.get("description")),
+                "total": sum(1 for n in majors if n.get("name"))}
         return {
             "world_id": world_id,
             "labeling": {"per_layer": label_progress, "total_labeled": total_labeled, "total_nodes": total_nodes},
             "descriptions": {"per_layer": desc_progress, "total_described": total_described, "total_nodes": total_labeled_nodes},
+            "upfront": upfront,
         }
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))

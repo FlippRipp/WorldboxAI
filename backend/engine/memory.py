@@ -318,6 +318,39 @@ class MemoryManager:
         self._world_conn.commit()
         return len(entries)
 
+    async def embed_world_entries(self, entries: list[dict], llm) -> int:
+        """Insert additional world entries without touching existing rows.
+
+        Used for content generated after the initial ``embed_world`` pass
+        (play-time node backfill, on-demand site expansion). Each entry is a
+        {"text", "source_type", "source_id", "region"} dict (id optional).
+        Existing rows with the same (source_type, source_id) are replaced so
+        re-generating a node never accumulates duplicates.
+        """
+        if self._world_conn is None:
+            raise RuntimeError("World index not initialized. Call init_world_index() first.")
+        entries = [e for e in entries if e.get("text")]
+        if not entries:
+            return 0
+        for entry in entries:
+            self._world_conn.execute(
+                "DELETE FROM world_entries WHERE source_type = ? AND source_id = ?",
+                (entry.get("source_type", ""), entry.get("source_id", "")),
+            )
+        vectors = await self._embed_texts([e["text"] for e in entries], llm)
+        for entry, vec in zip(entries, vectors):
+            self._world_conn.execute(
+                """INSERT INTO world_entries (id, embedding, text, source_type, source_id, region)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    entry.get("id") or str(uuid.uuid4()), _serialize(vec), entry["text"],
+                    entry.get("source_type", ""), entry.get("source_id", ""),
+                    entry.get("region", ""),
+                ),
+            )
+        self._world_conn.commit()
+        return len(entries)
+
     async def _embed_texts(self, texts: list[str], llm) -> list[List[float]]:
         """Embed texts in _EMBED_BATCH_SIZE provider batches with up to
         _EMBED_CONCURRENCY batches in flight; result order matches input."""

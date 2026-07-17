@@ -23,6 +23,7 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldI
   const [targetCount, setTargetCount] = useState(30);
   const [enrichResults, setEnrichResults] = useState([]);
   const [progress, setProgress] = useState(null);
+  const [upfront, setUpfront] = useState(null);
   const [layerFilter, setLayerFilter] = useState('');
   const [labelSessionIds, setLabelSessionIds] = useState([]);
   const [descSessionIds, setDescSessionIds] = useState([]);
@@ -37,6 +38,7 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldI
     try {
       const p = await api.enrichProgress(worldId, layerFilter || null);
       setProgress(isLabeling ? p.labeling : p.descriptions);
+      setUpfront(p.upfront || null);
     } catch (e) {
       console.error('Progress fetch failed:', e);
     }
@@ -167,6 +169,19 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldI
               : 'Loading progress...'}
           </span>
         </div>
+
+        {upfront?.importance_floor != null && (() => {
+          const m = isLabeling ? upfront.labeling : upfront.descriptions;
+          const majorsDone = m && m.total > 0 && m.done >= m.total;
+          return (
+            <p className="text-xs text-gray-500">
+              Lazy detail is on: only major locations
+              {m ? ` (${m.done}/${m.total})` : ''} are detailed upfront
+              {majorsDone ? ' — done' : ''}. The rest of the map generates
+              silently during play as the story approaches it.
+            </p>
+          );
+        })()}
 
         {layers.length > 0 && layers.map((layer) => {
           const lp = perLayer[layer.layer_id] || { done: 0, total: 0 };

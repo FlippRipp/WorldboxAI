@@ -321,8 +321,12 @@ def test_enrich_run_route_streams_sse_and_syncs_draft():
     import routes as world_routes
 
     class FakeBuilder:
+        def default_importance_floor(self):
+            return None
+
         async def enrich_run(self, world_id, phase="all", count=None, layer_filter=None,
-                             rework=False, exclude_node_ids=None, on_event=None):
+                             rework=False, exclude_node_ids=None, on_event=None,
+                             importance_floor=None, node_ids=None):
             await on_event({"type": "phase", "phase": "label", "pending": 1,
                             "total_labeled": 0, "total_nodes": 1, "per_layer": {}})
             await on_event({"type": "node", "phase": "label", "node_id": "n1",

@@ -137,10 +137,9 @@ class EnrichmentEngine:
         if compiled is not None:
             compiled.pop("_terrain_layers", None)
 
-    def _update_cached_node(self, compiled: dict, node_id: str, field: str, value: str):
-        """Mirror an enrichment write onto the compiled world's own node dicts
-        so the cached compiled state stays truthful across calls/runs (the node
-        lists handed to prompts are per-call copies)."""
+    def _node_index(self, compiled: dict) -> dict:
+        """Lazily-built {node_id: node dict} index over the compiled world's own
+        node dicts (not the per-call copies handed to prompts)."""
         index = compiled.get("_node_by_id")
         if index is None:
             index = {}
@@ -152,7 +151,18 @@ class EnrichmentEngine:
                 for n in compiled.get("map", {}).get("nodes", []):
                     index[n.get("id")] = n
             compiled["_node_by_id"] = index
-        node = index.get(node_id)
+        return index
+
+    def get_node(self, world_id: str, node_id: str) -> dict | None:
+        """Current state of one map node (post-enrichment fields included)."""
+        compiled = self._load_compiled(world_id)
+        return self._node_index(compiled).get(node_id)
+
+    def _update_cached_node(self, compiled: dict, node_id: str, field: str, value: str):
+        """Mirror an enrichment write onto the compiled world's own node dicts
+        so the cached compiled state stays truthful across calls/runs (the node
+        lists handed to prompts are per-call copies)."""
+        node = self._node_index(compiled).get(node_id)
         if node is not None:
             node[field] = value
 
@@ -497,18 +507,38 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
         self._cancel_flags.add(world_id)
 
     def _pending_for_phase(self, all_nodes: list, layer_map: dict, phase: str,
-                           layer_filter: str, rework: bool) -> tuple:
+                           layer_filter: str, rework: bool,
+                           importance_floor: int = None,
+                           node_ids: list = None) -> tuple:
         """Work queue + progress baseline for one run phase.
 
         Returns (pending, per_layer, done, total) where pending is importance-
         sorted, per_layer mirrors the shape the frontend progress bars consume,
-        and done/total match the legacy *_next counters for that phase."""
+        and done/total match the legacy *_next counters for that phase.
+
+        ``node_ids`` narrows the run to an explicit target set (play-time
+        backfill of specific nodes) and takes precedence over
+        ``importance_floor``, which narrows it to major locations
+        (importance >= floor). When either is set, done/total and the per-layer
+        counters are scoped to the targeted nodes so progress reads as complete
+        when the targeted work is done."""
         in_scope = [n for n in all_nodes if not layer_filter or n.get("layer_id", "") == layer_filter]
+        scoped = node_ids is not None or importance_floor is not None
+        if node_ids is not None:
+            wanted = {str(nid) for nid in node_ids}
+            in_scope = [n for n in in_scope if str(n.get("id")) in wanted]
+        elif importance_floor is not None:
+            in_scope = [n for n in in_scope if n.get("importance", 0) >= importance_floor]
+
         if phase == "label":
             if rework:
                 pending = [n for n in in_scope if n.get("name")]
                 total = len(pending)
                 done = 0
+            elif scoped:
+                pending = [n for n in in_scope if not n.get("name")]
+                total = len(in_scope)
+                done = sum(1 for n in in_scope if n.get("name"))
             else:
                 pending = [n for n in in_scope if not n.get("name")]
                 total = sum(info["total"] for info in layer_map.values())
@@ -519,21 +549,30 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
                 pending = [n for n in in_scope if n.get("name") and n.get("description")]
                 total = len(pending)
                 done = 0
+            elif scoped:
+                pending = [n for n in in_scope if n.get("name") and not n.get("description")]
+                total = sum(1 for n in in_scope if n.get("name"))
+                done = sum(1 for n in in_scope if n.get("description"))
             else:
                 pending = [n for n in in_scope if n.get("name") and not n.get("description")]
                 total = sum(1 for n in all_nodes if n.get("name"))
                 done = sum(1 for n in all_nodes if n.get("description"))
             done_field = "description"
 
+        count_pool = in_scope if scoped else all_nodes
         per_layer = {}
         for lid, info in layer_map.items():
             # Flat (single-layer) maps tag nodes with layer_id "" but the layer
             # map keys them "main" — count both under the map key.
             lid_done = 0 if rework else sum(
-                1 for n in all_nodes
+                1 for n in count_pool
                 if (n.get("layer_id", "") or "main") == (lid or "main") and n.get(done_field)
             )
-            per_layer[lid] = {"done": lid_done, "total": info["total"]}
+            lid_total = info["total"] if not scoped else sum(
+                1 for n in in_scope
+                if (n.get("layer_id", "") or "main") == (lid or "main")
+            )
+            per_layer[lid] = {"done": lid_done, "total": lid_total}
 
         pending.sort(key=lambda n: -n.get("importance", 0))
         return pending, per_layer, done, total
@@ -541,7 +580,8 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
     async def run(self, world_id: str, phase: str = "all", count: int = None,
                   layer_filter: str = None, rework: bool = False,
                   exclude_node_ids: list = None, concurrency: int = 3,
-                  batch_size: int = 8, on_event=None) -> dict:
+                  batch_size: int = 8, on_event=None,
+                  importance_floor: int = None, node_ids: list = None) -> dict:
         """Enrich many nodes in one server-driven run with bounded concurrency.
 
         ``phase`` is "label", "describe" or "all" (label to completion, then
@@ -550,6 +590,10 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
         (async callable) as {"type": "node"|"failed"|"phase"|"done", ...} dicts.
         Results are write-cached per node and flushed to disk every few nodes,
         at phase end and on cancellation.
+
+        ``importance_floor`` limits the run to major locations
+        (importance >= floor); ``node_ids`` limits it to an explicit target set
+        and wins over the floor. See ``_pending_for_phase``.
         """
         if not self._llm or self._llm.mode == "mock":
             raise RuntimeError("Enrichment requires an LLM service. The mock enrichment has been removed.")
@@ -578,7 +622,8 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
         try:
             for ph in (("label", "describe") if phase == "all" else (phase,)):
                 pending, per_layer, done, total = self._pending_for_phase(
-                    all_nodes, layer_map, ph, layer_filter, rework)
+                    all_nodes, layer_map, ph, layer_filter, rework,
+                    importance_floor=importance_floor, node_ids=node_ids)
                 if exclude_node_ids:
                     skip = set(exclude_node_ids)
                     pending = [n for n in pending if n.get("id") not in skip]
