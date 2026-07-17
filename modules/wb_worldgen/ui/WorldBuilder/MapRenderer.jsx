@@ -935,8 +935,27 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
             );
           })}
 
-          {/* City street fabric (city_roadnet): side streets under avenues,
-              solid grey so the network reads as pavement, not trails. */}
+          {/* City street fabric (city_roadnet): lanes under side streets
+              under avenues, solid grey so the network reads as pavement,
+              not trails. */}
+          {activeRoads && activeRoads.map((road, i) => {
+            if (road.tier !== 'lane') return null;
+            if (!road.path || road.path.length < 2) return null;
+            if (!isEdgeRevealed(road.from, road.to)) return null;
+            const pts = road.path.map(([x, y]) => `${sx(x)},${sy(y)}`).join(' ');
+            return (
+              <polyline
+                key={`lane-${i}`}
+                points={pts}
+                fill="none"
+                stroke="rgba(148,163,184,0.18)"
+                strokeWidth={0.45}
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                pointerEvents="none"
+              />
+            );
+          })}
           {activeRoads && activeRoads.map((road, i) => {
             if (road.tier !== 'street') return null;
             if (!road.path || road.path.length < 2) return null;
@@ -976,7 +995,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
 
           {/* Roads: terrain-following least-cost paths between settlements */}
           {activeRoads && activeRoads.map((road, i) => {
-            if (road.tier === 'path' || road.tier === 'street' || road.tier === 'avenue') return null;
+            if (['path', 'street', 'avenue', 'lane'].includes(road.tier)) return null;
             if (!road.path || road.path.length < 2) return null;
             if (!isEdgeRevealed(road.from, road.to)) return null;
             const pts = road.path.map(([x, y]) => `${sx(x)},${sy(y)}`).join(' ');

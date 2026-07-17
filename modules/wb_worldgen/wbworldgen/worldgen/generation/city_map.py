@@ -41,13 +41,53 @@ def _city_boundary(rng, width, height):
     """Jittered ellipse so the city silhouette reads organic."""
     n = rng.randint(16, 24)
     cx, cy = width / 2.0, height / 2.0
+    base = rng.uniform(0.24, 0.36)
     pts = []
     for i in range(n):
         ang = 2.0 * math.pi * i / n + rng.uniform(-0.5, 0.5) * math.pi / n
-        r = rng.uniform(0.34, 0.44)
+        r = base * rng.uniform(0.90, 1.12)
         pts.append((cx + math.cos(ang) * r * width,
                     cy + math.sin(ang) * r * height))
     return pts
+
+
+def _city_plan(rng, width, height):
+    """Pick a starting arrangement — the article gets its shape variety from
+    different seed-node layouts: a ring road, a center with cardinal seeds,
+    a line (long narrow city), or two nuclei."""
+    mode = rng.choices(("ring", "radial", "linear", "twin"),
+                       weights=(3, 2, 1, 1))[0]
+    cx, cy = width / 2.0, height / 2.0
+    if mode == "ring":
+        return {"mode": mode, "boundary": _city_boundary(rng, width, height),
+                "seed_points": None, "generations": 0}
+    if mode == "radial":
+        r = rng.uniform(0.16, 0.23) * min(width, height)
+        pts = [(cx, cy)]
+        for i in range(4):
+            a = math.pi / 2.0 * i + rng.uniform(-0.35, 0.35)
+            pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+        gens = rng.uniform(2.0, 2.6)
+    elif mode == "linear":
+        a = rng.uniform(0.0, math.pi)
+        n = rng.randint(3, 5)
+        span = 0.48 * max(width, height)
+        pts = []
+        for i in range(n):
+            t = (i / (n - 1) - 0.5) * span
+            pts.append((cx + t * math.cos(a) + rng.uniform(-40, 40),
+                        cy + t * math.sin(a) + rng.uniform(-40, 40)))
+        gens = rng.uniform(1.6, 2.2)
+    else:  # twin nuclei
+        a = rng.uniform(0.0, math.pi)
+        r = rng.uniform(0.15, 0.21) * min(width, height)
+        pts = [(cx + r * math.cos(a), cy + r * math.sin(a)),
+               (cx - r * math.cos(a), cy - r * math.sin(a))]
+        gens = rng.uniform(2.0, 2.6)
+    pts = [(min(max(x, 60.0), width - 60.0), min(max(y, 60.0), height - 60.0))
+           for x, y in pts]
+    return {"mode": mode, "boundary": None, "seed_points": pts,
+            "generations": gens}
 
 
 def _district_names(compiled_world, rng):
@@ -97,27 +137,44 @@ def _farthest_point_seeds(centroids, order_hint, count):
 
 
 def _assign_districts(faces, centroids, adj, count, eligible):
-    """Contiguous multi-source BFS over face adjacency. Returns face->district.
+    """Balanced contiguous region growing over the face-adjacency graph.
 
-    Districts grow over ``eligible`` (city-core) faces only; every other face
-    (outskirts sprawl) inherits the district of its nearest assigned face so
-    vertex lookups always resolve.
+    Seeds spread by farthest-point sampling (only well-connected core faces
+    qualify), then the district with the least claimed area expands next, so
+    no district gets enclosed while still tiny. Districts grow over
+    ``eligible`` (city-core) faces only; every other face (outskirts sprawl)
+    inherits the district of its nearest assigned face so vertex lookups
+    always resolve.
     """
-    by_area_hint = sorted(eligible, key=lambda fi: -abs(polygon_area_cached(fi)))
-    seeds = _farthest_point_seeds(centroids, by_area_hint, count)
-    assignment = {}
-    queue = []
-    for di, fi in enumerate(seeds):
-        assignment[fi] = di
-        queue.append(fi)
-    head = 0
-    while head < len(queue):
-        fi = queue[head]
-        head += 1
-        for nb in sorted(adj[fi]):
-            if nb in eligible and nb not in assignment:
-                assignment[nb] = assignment[fi]
-                queue.append(nb)
+    interior = [fi for fi in sorted(eligible)
+                if len(adj[fi] & eligible) >= 2] or sorted(eligible)
+    hint = sorted(interior, key=lambda fi: -abs(polygon_area_cached(fi)))
+    seeds = _farthest_point_seeds(centroids, hint, count)
+    assignment = {fi: di for di, fi in enumerate(seeds)}
+    frontier = {di: [fi] for di, fi in enumerate(seeds)}
+    area = {di: abs(polygon_area_cached(fi)) for di, fi in enumerate(seeds)}
+    heap = [(area[di], di) for di in frontier]
+    heapq.heapify(heap)
+    while heap:
+        a, di = heapq.heappop(heap)
+        if a != area[di]:
+            continue  # stale entry
+        grabbed = None
+        queue = frontier[di]
+        while queue and grabbed is None:
+            fi = queue[0]
+            for nb in sorted(adj[fi]):
+                if nb in eligible and nb not in assignment:
+                    grabbed = nb
+                    break
+            if grabbed is None:
+                queue.pop(0)  # frontier face exhausted
+        if grabbed is None:
+            continue  # district can grow no further
+        assignment[grabbed] = di
+        queue.append(grabbed)
+        area[di] += abs(polygon_area_cached(grabbed))
+        heapq.heappush(heap, (area[di], di))
     for fi in range(len(faces)):
         if fi not in assignment:
             nearest = min(assignment,
@@ -204,8 +261,6 @@ def build_city_map(spec: dict) -> dict:
     id_prefix?}.
     """
     compiled = spec.get("compiled_world") or {}
-    width = float(spec.get("map_width") or 1000)
-    height = float(spec.get("map_height") or 1000)
     budget = int(spec.get("total_nodes") or 60)
     budget = max(MIN_PLAYABLE, min(MAX_PLAYABLE, budget))
     seed = spec.get("seed")
@@ -215,9 +270,50 @@ def build_city_map(spec: dict) -> dict:
     id_prefix = spec.get("id_prefix", "") or ""
     rng = random.Random(seed)
 
-    boundary = _city_boundary(rng, width, height)
-    net = generate_roadnet(seed, width, height, DEFAULT_LEVELS, boundary,
-                           outward_generations=OUTWARD_GENERATIONS)
+    if spec.get("map_width") and spec.get("map_height"):
+        width = float(spec["map_width"])
+        height = float(spec["map_height"])
+    else:
+        # Vary the canvas shape per city; the longest side stays 1000.
+        aspect = rng.choice((1.0, 1.0, 1.3, 1.6))
+        width, height = 1000.0, round(1000.0 / aspect)
+        if rng.random() < 0.5:
+            width, height = height, width
+
+    # Generate on an overscanned virtual canvas so organic growth is never
+    # clipped by the map border, then uniformly scale/centre the result into
+    # the real map — the fringe peters out instead of squishing into a box.
+    over = 1.5
+    off = ((over - 1.0) / 2.0 * width, (over - 1.0) / 2.0 * height)
+    plan = _city_plan(rng, width, height)
+    boundary = plan["boundary"]
+    if boundary is not None:
+        boundary = [(x + off[0], y + off[1]) for x, y in boundary]
+    seed_pts = plan["seed_points"]
+    if seed_pts is not None:
+        seed_pts = [(x + off[0], y + off[1]) for x, y in seed_pts]
+    net = generate_roadnet(seed, width * over, height * over, DEFAULT_LEVELS,
+                           boundary,
+                           outward_generations=OUTWARD_GENERATIONS,
+                           seed_points=seed_pts,
+                           seed_generations=plan["generations"])
+    xs = [p[0] for p in net.points]
+    ys = [p[1] for p in net.points]
+    pad = 0.025 * min(width, height)
+    bcx, bcy = (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+    scale = min(1.0,
+                (width - 2 * pad) / max(1.0, max(xs) - min(xs)),
+                (height - 2 * pad) / max(1.0, max(ys) - min(ys)))
+
+    def _fit(p):
+        return ((p[0] - bcx) * scale + width / 2.0,
+                (p[1] - bcy) * scale + height / 2.0)
+
+    net.points = [_fit(p) for p in net.points]
+    if boundary is not None:
+        boundary = [_fit(p) for p in boundary]
+    if seed_pts is not None:
+        seed_pts = [_fit(p) for p in seed_pts]
     faces = net.faces
 
     _AREA_CACHE.clear()
@@ -226,11 +322,22 @@ def build_city_map(spec: dict) -> dict:
     centroids = [polygon_centroid([net.points[i] for i in face])
                  for face in faces]
 
-    # Blocks outside the city boundary belong to the outskirts: streets
-    # render there, but districts, plazas and venues stay in the core.
-    core_vertex = [point_in_polygon(p, boundary) for p in net.points]
-    core_faces = {fi for fi, face in enumerate(faces)
-                  if point_in_polygon(centroids[fi], boundary)}
+    # Blocks outside the city core belong to the outskirts: streets render
+    # there, but districts, plazas and venues stay in the core. Ring cities
+    # bound the core with the boundary polygon; seed-grown cities bound it
+    # by distance to the arterial seed points.
+    if boundary is not None:
+        def _is_core(p):
+            return point_in_polygon(p, boundary)
+    else:
+        seeds_xy = seed_pts
+        reach = (plan["generations"] * DEFAULT_LEVELS[0].extension_max
+                 * 0.75 * scale)
+
+        def _is_core(p):
+            return min(math.dist(p, s) for s in seeds_xy) <= reach
+    core_vertex = [_is_core(p) for p in net.points]
+    core_faces = {fi for fi in range(len(faces)) if _is_core(centroids[fi])}
     if not core_faces:
         core_faces = set(range(len(faces)))
 
@@ -422,20 +529,69 @@ def build_city_map(spec: dict) -> dict:
             _add_playable_edge(key)
             added += 1
 
-    # Street fabric export: every raw segment, owned by nearest playable node.
+    # Street fabric export, owned by nearest playable nodes. Same-tier runs
+    # through degree-2 vertices merge into single polylines — an order of
+    # magnitude fewer road entries for the SVG renderer to draw.
     owner = _nearest_owner(graph, [(snap[nid], nid) for nid in snap])
     fallback = ids[0]
+
+    def _tier(lvl):
+        return "avenue" if lvl == 0 else "lane" if lvl >= 3 else "street"
+
+    adj_by_tier = {}
+    for (a, b), lvl in net.edge_levels.items():
+        t = _tier(lvl)
+        adj_by_tier.setdefault(t, {}).setdefault(a, set()).add(b)
+        adj_by_tier[t].setdefault(b, set()).add(a)
+
+    _MAX_STROKE = 10  # segments per polyline; keeps fog reveal granular
+
+    def _extend(chain, tadj, used):
+        while len(chain) <= _MAX_STROKE:
+            tail, prev = chain[-1], chain[-2]
+            pt, pp = net.points[tail], net.points[prev]
+            din = (pt[0] - pp[0], pt[1] - pp[1])
+            nin = math.hypot(*din)
+            best, best_align = None, 0.77  # only continue near-straight (<40 deg)
+            for n in sorted(tadj.get(tail, ())):
+                if n == prev:
+                    continue
+                if ((tail, n) if tail < n else (n, tail)) in used:
+                    continue
+                pn = net.points[n]
+                dout = (pn[0] - pt[0], pn[1] - pt[1])
+                nout = math.hypot(*dout)
+                if nin < 1e-9 or nout < 1e-9:
+                    continue
+                align = (din[0] * dout[0] + din[1] * dout[1]) / (nin * nout)
+                if align > best_align:
+                    best_align, best = align, n
+            if best is None:
+                break
+            used.add((tail, best) if tail < best else (best, tail))
+            chain.append(best)
+
     roads = []
+    used = set()
     for (a, b) in sorted(net.edges):
+        if (a, b) in used:
+            continue
         lvl = net.edge_levels.get((a, b), 1)
-        pa, pb = net.points[a], net.points[b]
+        t = _tier(lvl)
+        tadj = adj_by_tier[t]
+        chain = [a, b]
+        used.add((a, b))
+        # Grow the stroke both ways along near-straight same-tier segments.
+        _extend(chain, tadj, used)
+        chain.reverse()
+        _extend(chain, tadj, used)
         roads.append({
-            "from": owner.get(a, fallback),
-            "to": owner.get(b, fallback),
-            "path": [[round(pa[0], 2), round(pa[1], 2)],
-                     [round(pb[0], 2), round(pb[1], 2)]],
-            "tier": "avenue" if lvl == 0 else "street",
-            "importance": 5 if lvl == 0 else 2,
+            "from": owner.get(chain[0], fallback),
+            "to": owner.get(chain[-1], fallback),
+            "path": [[round(net.points[v][0], 2), round(net.points[v][1], 2)]
+                     for v in chain],
+            "tier": t,
+            "importance": 5 if lvl == 0 else 2 if lvl < 3 else 1,
         })
 
     regions = []
@@ -471,6 +627,7 @@ def build_city_map(spec: dict) -> dict:
         "map_width": width,
         "map_height": height,
         "seed": seed,
+        "city_plan": plan["mode"],
         "generator_id": GENERATOR_ID,
         "generated_from": compiled.get("generated_from", ""),
     }

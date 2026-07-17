@@ -325,4 +325,4 @@ def test_modern_city_map_generation_and_compile(builder):
     root = compiled["maps"][compiled["root_map_id"]]
     assert root["generator_id"] == "city_roadnet"
     assert root["roads"] and root["regions"]
-    assert {r["tier"] for r in root["roads"]} == {"avenue", "street"}
+    assert {"avenue", "street"} <= {r["tier"] for r in root["roads"]}

@@ -55,14 +55,26 @@ def test_determinism():
 @pytest.mark.parametrize("seed", SEEDS)
 def test_planarity(seed):
     net = _net(seed)
-    edges = sorted(net.edges)
-    for i, (a, b) in enumerate(edges):
-        for c, d in edges[i + 1:]:
-            if len({a, b, c, d}) < 4:
-                continue
-            assert not segments_intersect(
-                net.points[a], net.points[b], net.points[c], net.points[d]), \
-                f"edges ({a},{b}) and ({c},{d}) cross"
+    # Grid-bucketed pair check: only edges sharing a spatial cell can cross.
+    cell = 64.0
+    buckets = {}
+    for e in sorted(net.edges):
+        (x1, y1), (x2, y2) = net.points[e[0]], net.points[e[1]]
+        for gx in range(int(min(x1, x2) // cell), int(max(x1, x2) // cell) + 1):
+            for gy in range(int(min(y1, y2) // cell),
+                            int(max(y1, y2) // cell) + 1):
+                buckets.setdefault((gx, gy), []).append(e)
+    checked = set()
+    for bucket in buckets.values():
+        for i, (a, b) in enumerate(bucket):
+            for c, d in bucket[i + 1:]:
+                pair = ((a, b), (c, d)) if (a, b) < (c, d) else ((c, d), (a, b))
+                if pair in checked or len({a, b, c, d}) < 4:
+                    continue
+                checked.add(pair)
+                assert not segments_intersect(
+                    net.points[a], net.points[b], net.points[c], net.points[d]), \
+                    f"edges ({a},{b}) and ({c},{d}) cross"
 
 
 @pytest.mark.parametrize("seed", SEEDS)
@@ -256,13 +268,15 @@ def test_city_map_shape():
     assert m["generator_id"] == "city_roadnet"
     assert m["config"]["generator_id"] == "city_roadnet"
     assert m["config"]["seed"] == 1234
-    assert m["config"]["map_width"] == 1000
+    w, h = m["config"]["map_width"], m["config"]["map_height"]
+    assert max(w, h) == 1000 and min(w, h) >= 600  # aspect varies per seed
+    assert m["config"]["city_plan"] in ("ring", "radial", "linear", "twin")
     ids = {n["id"] for n in m["nodes"]}
     assert 30 <= len(ids) <= 60
     assert len(ids) == len(m["nodes"])  # unique ids
     for n in m["nodes"]:
-        assert 0.0 <= n["x"] <= 1000.0
-        assert 0.0 <= n["y"] <= 1000.0
+        assert 0.0 <= n["x"] <= w
+        assert 0.0 <= n["y"] <= h
         assert n["type"] in ("settlement", "landmark", "crossroads", "waypoint")
         assert 1 <= n["importance"] <= 10
         assert n["region"]
@@ -312,7 +326,7 @@ def test_city_map_roads():
     ids = {n["id"] for n in m["nodes"]}
     assert len(m["roads"]) > len(m["edges"])  # full fabric, not just adjacency
     tiers = {r["tier"] for r in m["roads"]}
-    assert tiers == {"avenue", "street"}
+    assert {"avenue", "street"} <= tiers <= {"avenue", "street", "lane"}
     for r in m["roads"]:
         assert r["from"] in ids and r["to"] in ids  # fog-of-war reveal ids
         assert len(r["path"]) >= 2

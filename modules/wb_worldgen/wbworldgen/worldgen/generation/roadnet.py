@@ -38,19 +38,25 @@ class LevelParams:
     min_face_area: float    # only densify faces bigger than this
 
 
-# Ladder tuned for a 1000x1000 map: avenues, streets, lanes. Thresholds are
-# deliberately low so most blocks subdivide — the reference algorithm's look
-# is a dense fabric, not a sparse web.
+# Ladder tuned for a 1000x1000 map: avenues, streets, lanes, alleys.
+# Thresholds are deliberately low so most blocks subdivide — the reference
+# algorithm's look is a dense fabric, not a sparse web. Edge-split distances
+# sit at ~1.7x the NEXT level's clearance: anchors on the bigger roads must
+# be dense enough that the finer fill can T-join them at a legal (>=55
+# degree) angle, otherwise inner streets can only form long loops that
+# never touch the roads around them.
 DEFAULT_LEVELS: tuple[LevelParams, ...] = (
-    LevelParams(80.0, 100.0, 155.0, 180.0, 130.0, 11000.0),
-    LevelParams(34.0, 40.0, 66.0, 80.0, 55.0, 2400.0),
-    LevelParams(15.0, 17.0, 29.0, 36.0, math.inf, 0.0),
+    LevelParams(80.0, 100.0, 155.0, 180.0, 55.0, 11000.0),
+    LevelParams(34.0, 40.0, 66.0, 80.0, 26.0, 2400.0),
+    LevelParams(15.0, 17.0, 29.0, 36.0, 13.0, 600.0),
+    LevelParams(7.5, 9.0, 15.5, 19.0, math.inf, 0.0),
 )
 
-#: How many child generations each level's outward growth may spawn beyond
-#: the network's edge (the article's split-number sprawl). Keeps branches
-#: tethered to the network instead of flooding the map.
-OUTWARD_GENERATIONS = 4
+#: Split number for outward growth beyond the network's edge (the
+#: article's sprawl). Decays by one per recursion level, and the
+#: fractional part is a spawn *probability* — the fringe peters out
+#: raggedly instead of flooding to the map border and clipping there.
+OUTWARD_GENERATIONS = 3.5
 
 #: Streets rarely dead-end in a real city: tips try to loop back into the
 #: fabric, easing from the strict knob down to the bottom of the article's
@@ -179,7 +185,7 @@ def _angle_between_deg(v1, v2) -> float:
 
 
 class _PointGrid:
-    def __init__(self, cell: float = 40.0):
+    def __init__(self, cell: float = 20.0):
         self.cell = cell
         self.cells: dict = {}
 
@@ -276,7 +282,7 @@ class _NetState:
         self.removed.add(i)
 
     def clear_at(self, p, clearance) -> bool:
-        for j in set(self.grid.near(p, clearance)):
+        for j in self.grid.near(p, clearance):
             if j in self.removed:
                 continue
             if _dist(p, self.points[j]) < clearance:
@@ -374,8 +380,13 @@ def scatter_points(state: _NetState, rng: random.Random, level: int,
     while head < len(open_list):
         base_idx, gen = open_list[head]
         head += 1
-        if max_generations is not None and gen >= max_generations:
-            continue
+        if max_generations is not None:
+            remaining = max_generations - gen
+            if remaining <= 0:
+                continue
+            # Fractional split number: this node splits with that probability.
+            if remaining < 1.0 and rng.random() >= remaining:
+                continue
         base = state.points[base_idx]
         k = rng.randint(10, 16)
         ang0 = rng.uniform(0.0, 2.0 * math.pi)
@@ -419,7 +430,7 @@ def connect_points(state: _NetState, rng: random.Random, candidates,
             while state.degree(cur) < MAX_DEGREE:
                 pc = state.points[cur]
                 best, best_score = None, -math.inf
-                for j in sorted(set(state.grid.near(pc, params.connect_radius))):
+                for j in sorted(state.grid.near(pc, params.connect_radius)):
                     if j == cur or j not in cset:
                         continue
                     pj = state.points[j]
@@ -637,7 +648,7 @@ def _densify_faces(state: _NetState, rng: random.Random, params: LevelParams,
 
 
 def _grow_outward(state: _NetState, rng: random.Random, params: LevelParams,
-                  level: int, width: float, height: float, generations: int):
+                  level: int, width: float, height: float, generations: float):
     """Branch the next-level streets outward from the network's outer edge.
 
     Seeds are the current outer-face vertices; growth is bounded to
@@ -680,7 +691,7 @@ def _close_dead_ends(state: _NetState, levels):
         radius = params.connect_radius * 1.5
         pv = state.points[v]
         cands = sorted(
-            (j for j in set(state.grid.near(pv, radius))
+            (j for j in state.grid.near(pv, radius)
              if j != v and j not in state.removed
              and 0 < _dist(pv, state.points[j]) <= radius),
             key=lambda j: (_dist(pv, state.points[j]), j))
@@ -714,20 +725,31 @@ def _close_dead_ends(state: _NetState, levels):
 
 def generate_roadnet(seed, width: float, height: float,
                      levels=DEFAULT_LEVELS, boundary=None,
-                     outward_generations: int = 0) -> RoadNetwork:
+                     outward_generations: float = 0,
+                     seed_points=None, seed_generations: float = 3) -> RoadNetwork:
     """Generate a planar street network; see module docstring.
 
-    With ``outward_generations`` > 0 (requires a ``boundary``), each
-    recursion level also branches its streets outward from the network's
-    current outer edge — big roads first, then smaller roads growing both
-    inside the blocks and beyond the edge, recursively.
+    The arterial skeleton starts either inside a ``boundary`` polygon (the
+    article's ring-road mode) or radiating from ``seed_points`` with a
+    split number of ``seed_generations`` (the article's seed-node mode —
+    different arrangements give radial, linear or multi-nucleus cities).
+    With ``outward_generations`` > 0, each recursion level also branches
+    its streets outward from the network's current outer edge — big roads
+    first, then smaller roads growing both inside the blocks and beyond
+    the edge, recursively.
     """
     rng = random.Random(seed)
-    if boundary is None:
-        boundary = [(0.0, 0.0), (width, 0.0), (width, height), (0.0, height)]
-        outward_generations = 0
+    rect = [(0.0, 0.0), (width, 0.0), (width, height), (0.0, height)]
     state = _NetState()
-    scatter_points(state, rng, 0, levels[0], boundary)
+    if seed_points:
+        starters = [state.add_point(p, 0) for p in seed_points]
+        scatter_points(state, rng, 0, levels[0], rect, seeds=starters,
+                       max_generations=seed_generations)
+    else:
+        if boundary is None:
+            boundary = rect
+            outward_generations = 0
+        scatter_points(state, rng, 0, levels[0], boundary)
     all_pts = set(range(len(state.points)))
     connect_points(state, rng, all_pts, levels[0], 0)
     _join_components(state, all_pts, levels[0], 0)
@@ -735,8 +757,10 @@ def generate_roadnet(seed, width: float, height: float,
         split_long_edges(state, levels[li].edge_split_len)
         _densify_faces(state, rng, levels[li], levels[li + 1], li + 1)
         if outward_generations > 0:
+            # Sprawl reach shrinks each level: streets ride further out than
+            # lanes, so the fringe thins with distance instead of clipping.
             _grow_outward(state, rng, levels[li + 1], li + 1, width, height,
-                          outward_generations)
+                          max(1.0, outward_generations - li))
     _close_dead_ends(state, levels)
 
     # Compact: drop removed and never-connected points, remap indices.
