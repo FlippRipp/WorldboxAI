@@ -112,6 +112,8 @@ class WorldPersistence:
             "seed_prompt": world_state.get("seed_prompt", ""),
             "created_at": datetime.utcnow().isoformat() + "Z",
         }
+        if world_state.get("scenario"):
+            metadata["scenario"] = world_state["scenario"]
         if world_state.get("template_id"):
             metadata["template_id"] = world_state["template_id"]
             # Snapshot the vocabulary at creation time so a later template
@@ -150,6 +152,8 @@ class WorldPersistence:
             "complete": not metadata.get("in_progress", False),
             "current_step": metadata.get("current_step") if metadata.get("in_progress") else None,
         }
+        if metadata.get("scenario"):
+            world_state["scenario"] = metadata["scenario"]
         if metadata.get("template_id"):
             world_state["template_id"] = metadata["template_id"]
             if isinstance(metadata.get("template_vocab"), dict):

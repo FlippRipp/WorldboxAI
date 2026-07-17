@@ -213,6 +213,8 @@ def compile_world(world_state: dict, steps: Optional[dict] = None) -> dict:
         "regions": merge_geography_steps(steps_data),
         "generated_from": world_state.get("seed_prompt", ""),
     }
+    if world_state.get("scenario"):
+        compiled["scenario"] = world_state["scenario"]
 
     rules_data = steps_data.get("world_rules", {}).get("data", {})
     if isinstance(rules_data, dict) and rules_data.get("module_data"):

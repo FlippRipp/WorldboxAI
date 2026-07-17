@@ -293,6 +293,54 @@ def test_compile_world_includes_layer_data(builder_with_steps):
 
 
 # ---------------------------------------------------------------------------
+# Scenario (optional source material alongside the seed prompt)
+# ---------------------------------------------------------------------------
+
+def test_seed_with_scenario_composition():
+    from wbworldgen.worldgen.facade import seed_with_scenario
+    assert seed_with_scenario({}, "a grim world") == "a grim world"
+    assert seed_with_scenario({"scenario": "   "}, "a grim world") == "a grim world"
+    composed = seed_with_scenario({"scenario": "The iron citadel stands."}, "a grim world")
+    assert composed.index("a grim world") < composed.index("The iron citadel stands.")
+    assert "SCENARIO" in composed
+
+
+def test_generate_step_composes_scenario(builder):
+    captured = {}
+
+    async def _gen(ctx):
+        captured["prompt"] = ctx.user_prompt
+        return {"ok": True}
+
+    step = _make_step("custom_scenario_step", after=None)
+    step.generate = _gen
+    builder.register_step(step)
+    state = {"steps": {}, "seed_prompt": "a mining colony",
+             "scenario": "The colony of Kharn-3 orbits a dying star."}
+    asyncio.run(builder.generate_step("custom_scenario_step", state, "a mining colony"))
+    assert captured["prompt"].startswith("a mining colony")
+    assert "Kharn-3" in captured["prompt"]
+
+
+def test_compile_world_carries_scenario(builder_with_steps):
+    wb = builder_with_steps
+    with_scn = wb.compile_world({"steps": {}, "seed_prompt": "p", "scenario": "src material"})
+    assert with_scn["scenario"] == "src material"
+    without = wb.compile_world({"steps": {}, "seed_prompt": "p"})
+    assert "scenario" not in without
+
+
+def test_scenario_persistence_roundtrip(builder):
+    state = {"seed_prompt": "p", "scenario": "The Duchy of Ash has fallen.",
+             "steps": {"lore": {"data": {"world_name": "Ashlands"}}}}
+    wid = builder.save_world("scn_world", state)
+    assert builder.load_world(wid)["scenario"] == "The Duchy of Ash has fallen."
+
+    plain = builder.save_world("scn_none", {"seed_prompt": "p", "steps": {}})
+    assert "scenario" not in builder.load_world(plain)
+
+
+# ---------------------------------------------------------------------------
 # Merge geography
 # ---------------------------------------------------------------------------
 

@@ -33,6 +33,30 @@ from wbworldgen.worldgen.types import StepContext
 logger = logging.getLogger(__name__)
 
 
+def seed_with_scenario(world_state: dict, user_prompt: str) -> str:
+    """The effective seed text for generation: the user's prompt, plus the
+    optional scenario document supplied at world creation.
+
+    The scenario is longer-form source material (a campaign setting, an
+    adventure premise, pasted background text) the world must be grounded in;
+    the seed prompt is the creative direction on top of it. Composed here —
+    the single seam every step generation passes through — so the LLM, mock
+    and custom-step paths all see both. Never truncated.
+    """
+    scenario = str((world_state or {}).get("scenario") or "").strip()
+    if not scenario:
+        return user_prompt
+    return (
+        f"{user_prompt}\n\n"
+        "The world's creator also provided a scenario — source material this world is set in. "
+        "Ground the world in it: keep its facts, names, tone and situation consistent, and treat "
+        "the seed prompt above as direction for what to build from it.\n"
+        "--- SCENARIO ---\n"
+        f"{scenario}\n"
+        "--- END SCENARIO ---"
+    )
+
+
 class WorldBuilder:
     def __init__(self, worlds_dir: str = "data/worlds"):
         self._steps: dict = {}
@@ -135,6 +159,8 @@ class WorldBuilder:
         if not step:
             raise ValueError(f"Unknown step: {step_id}")
 
+        user_prompt = seed_with_scenario(world_state, user_prompt)
+
         # Custom steps may override generation entirely.
         custom = getattr(step, "generate", None)
         if callable(custom):
@@ -191,6 +217,7 @@ class WorldBuilder:
         step = self._steps.get(step_id)
         if not step:
             raise ValueError(f"Unknown step: {step_id}")
+        user_prompt = seed_with_scenario(world_state, user_prompt)
         template = self.template_for(world_state)
         step = template.apply_to_step(step)
         field_schema = (step.schema or {}).get(field)

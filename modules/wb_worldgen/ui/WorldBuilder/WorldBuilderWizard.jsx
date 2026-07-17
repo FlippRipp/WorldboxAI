@@ -35,6 +35,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
   const [loading, setLoading] = useState(false);
   const [skipReview, setSkipReview] = useState(false);
   const [seedPrompt, setSeedPrompt] = useState('');
+  const [scenario, setScenario] = useState('');
   const [started, setStarted] = useState(false);
   const [templates, setTemplates] = useState([]);
   const [templateId, setTemplateId] = useState('overworld_fantasy');
@@ -64,6 +65,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
         if (data.state.steps?.lore?.data?.world_name) {
           setSeedPrompt(data.state.seed_prompt || '');
         }
+        setScenario(data.state.scenario || '');
         if (!data.state.complete) {
           setCurrentStepId(data.state.current_step);
         }
@@ -75,7 +77,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
     if (!seedPrompt.trim()) return;
     setLoading(true);
     try {
-      const result = await api.generateWorld(seedPrompt.trim(), skipReview, templateId);
+      const result = await api.generateWorld(seedPrompt.trim(), skipReview, templateId, scenario.trim());
       setWorldState(result.state);
       setStarted(true);
 
@@ -253,6 +255,21 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
                 </div>
               </div>
             )}
+
+            <div>
+              <label className="block text-sm font-medium text-gray-400 mb-2">Scenario <span className="text-gray-600">(optional)</span></label>
+              <p className="text-xs text-gray-500 mb-2">
+                Longer source material the world should be grounded in — a campaign setting, an adventure premise,
+                pasted background text. The AI builds the world from this together with the prompt below.
+              </p>
+              <AutoTextarea
+                value={scenario}
+                onChange={(e) => setScenario(e.target.value)}
+                minRows={2}
+                placeholder="Paste or write the setting, situation, and any established facts, names or history the world must honor..."
+                disabled={loading}
+              />
+            </div>
 
             <div>
               <label className="block text-sm font-medium text-gray-400 mb-2">World Prompt</label>

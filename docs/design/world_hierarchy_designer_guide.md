@@ -25,6 +25,10 @@ Rules of thumb:
 ## How a world is born
 
 1. The player writes a seed prompt and picks a template (or none — default fantasy).
+   They can also paste a **scenario** — longer source material (a campaign
+   setting, an adventure premise, established background text) that every
+   generation step grounds itself in, with the seed prompt as the creative
+   direction on top.
 2. The AI designs the world's rules and lore, then its **structure**: which parallel maps exist, and which specific places deserve fully mapped sub-areas *right now* because the seed makes them central (the story's starting planet, the villain's fortress). Everything else waits.
 3. The top-level map is generated with its major locations named and described.
 4. Play begins. The rest of the world builds itself silently in the background, closest-to-the-story first.

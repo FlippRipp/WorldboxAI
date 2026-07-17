@@ -340,6 +340,7 @@ data/saves/my_world/
 {
   "world_name": "The Mycelium Expanse",
   "seed_prompt": "a post-apocalyptic Earth where fungi have evolved sentience",
+  "scenario": "(optional) longer source material every generation step is grounded in",
   "generated_at": "2026-06-20T18:00:00Z",
   "generation_version": "1.0.0",
   "cascade_stage": "complete",
