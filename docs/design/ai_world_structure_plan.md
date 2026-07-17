@@ -1,6 +1,9 @@
 # AI-Designed World Structure — Plan
 
-*Status: agreed, not yet implemented. This document records the decisions made
+*Status: M1 (AI-designed structure), M2 (templates deleted) and M3 (unified
+generation: procedural children, authored roots, generalized parallel planes)
+are implemented; M4 (docs + polish) is pending. Implementation deviations are
+noted inline under each milestone. This document records the decisions made
 with Filip (2026-07-17) and the milestone plan. The technical background is
 `docs/systems/hierarchy.md`; the player-facing vision is
 `docs/design/world_hierarchy_designer_guide.md` (parts of which this plan
@@ -192,6 +195,24 @@ recurse into what the design marks upfront.*
 - Tests: solar-system-style world end-to-end in mock mode (abstract root,
   planet child via world_map, station child via interior), city child
   expansion, parallel-plane world, terrain-root regression suite green.
+
+**M3 as implemented** (deviations from the sketch above):
+
+- Procedural children (`world_map`, `city_roadnet`) build in **abstract
+  mode** — per-child terrain rasters are deferred (see below). They are born
+  unnamed; the play-time enrichment engine names/describes them lazily, and
+  `save_node_enrichment` now persists into the owning `maps/*.json` bundle.
+- Hierarchy levels resolve inside the **pure compiler**, not the facade —
+  the enrichment engine compiles worlds directly and must see the same
+  hierarchy.
+- The expansion call accepts a pinned `level_type` (pregenerate plans carry
+  theirs through; the expand API exposes it); otherwise the LLM picks.
+- The authored root applies to `needs_llm_content` root generators (an
+  interior-root world). Abstract solar-system-style roots stay procedural
+  per decision 6.
+- Parallel planes with a `world_map` root keep the existing multilayer path
+  byte-for-byte; only non-world_map roots use the new generalized builder
+  (per-plane generators, border-picked crossings).
 
 ### M4 — Polish and docs
 

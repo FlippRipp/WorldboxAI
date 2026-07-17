@@ -238,6 +238,43 @@ def test_procedural_roots_keep_the_procedural_path(builder):
     assert level and level["level_type"] == "interior"
 
 
+def test_parallel_plane_with_non_world_map_root(builder):
+    # Generalized parallel maps (M3c): a city street-network root joined to
+    # an abstract undercity plane by border crossings.
+    state = {"seed_prompt": "a rain-slick city over a buried undercity", "steps": {
+        "hierarchy_design": {"data": {
+            "levels": [
+                {"level_type": "city", "label": "City", "generator_id": "city_roadnet",
+                 "guidance": "The streets above."},
+                {"level_type": "interior", "label": "Interior", "generator_id": "interior",
+                 "nestable": True, "guidance": "Rooms of one building."}],
+            "parallel_maps": [{"label": "The Undercity", "level_type": "undercity",
+                               "description": "Sewers and buried streets.",
+                               "connection_kind": "sewer_grate", "connection_count": 3}]},
+            "approved": True}}}
+    data = asyncio.run(builder.generate_step(
+        "map_generation", state, state["seed_prompt"], config={"total_nodes": 80}))
+    assert [l["layer_id"] for l in data["layers"]] == ["root", "the_undercity"]
+    state["steps"]["map_generation"] = {"data": data, "approved": True}
+    builder.save_world("under", state)
+    compiled = builder.compile_world(builder.load_world("under"))
+    root = compiled["maps"][compiled["root_map_id"]]
+    assert (root["level_type"], root["generator_id"]) == ("city", "city_roadnet")
+    under = compiled["maps"]["the_undercity"]
+    assert (under["level_type"], under["generator_id"]) == ("undercity", "world_map")
+    assert under["parent_map_id"] == compiled["root_map_id"]
+    crossings = [c for c in compiled["connections"]
+                 if c["from"]["map_id"] != c["to"]["map_id"]]
+    assert len(crossings) == 3
+    assert {c["kind"] for c in crossings} == {"sewer_grate"}
+    # Crossing anchors are marked on both maps and never reused.
+    anchors = [n for n in root["nodes"] + under["nodes"]
+               if n.get("interlayer_connection_id")]
+    assert len(anchors) == 6
+    assert len({n["id"] for n in anchors}) == 6
+    assert all(n["type"] == "sewer_grate" and n["importance"] >= 4 for n in anchors)
+
+
 def test_enrichment_engine_sees_child_map_nodes(solar):
     compiled, root_id, root = _root(solar)
     anchor = _node_named(root, "Planet Kestrel")
