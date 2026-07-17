@@ -33,6 +33,33 @@ from wbworldgen.worldgen.types import StepContext
 logger = logging.getLogger(__name__)
 
 
+def scenario_grounding_text(scenario: dict) -> str:
+    """Render a linked scenario record (backend.engine.scenario) as the
+    grounding text world generation is seeded with.
+
+    The scenario's situation and opening scene are treated as established
+    facts: the generated world must contain the places, people and stakes
+    they reference, because the story will open there. Never truncated.
+    """
+    parts = []
+    name = str(scenario.get("name") or "").strip()
+    if name:
+        parts.append(f"Scenario: {name}")
+    desc = str(scenario.get("scenario_description") or "").strip()
+    if desc:
+        parts.append(f"Setting and situation:\n{desc}")
+    opening = str(scenario.get("starting_prompt") or "").strip()
+    if opening:
+        parts.append(
+            "The story will open with this exact scene — the world must contain "
+            f"the places, people and situation it references:\n{opening}")
+    for key, label in (("themes", "Themes"), ("tags", "Tags"), ("pacing", "Pacing")):
+        val = str(scenario.get(key) or "").strip()
+        if val:
+            parts.append(f"{label}: {val}")
+    return "\n\n".join(parts)
+
+
 def seed_with_scenario(world_state: dict, user_prompt: str) -> str:
     """The effective seed text for generation: the user's prompt, plus the
     optional scenario document supplied at world creation.

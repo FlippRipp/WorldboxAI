@@ -34,17 +34,22 @@ export default function StorytellerStart({ selected, onSelect }) {
     }
   }, [activeWorldId]);
 
+  // A world created with a linked scenario carries its scenario_id; surfacing
+  // it on the selection lets the host pre-select that scenario.
+  const linkedScenarioId = (worldId) =>
+    worlds.find((w) => w.id === worldId)?.scenario_id || null;
+
   const chooseWorld = (worldId) => {
     setStartPreference('');
     setStartLocation(null);
     setPickError(null);
-    onSelect({ type: 'world', id: worldId, startPreference: '', startLocation: null });
+    onSelect({ type: 'world', id: worldId, startPreference: '', startLocation: null, linkedScenarioId: linkedScenarioId(worldId) });
   };
 
   const updatePreference = (value) => {
     setStartPreference(value);
     if (activeWorldId) {
-      onSelect({ type: 'world', id: activeWorldId, startPreference: value, startLocation });
+      onSelect({ type: 'world', id: activeWorldId, startPreference: value, startLocation, linkedScenarioId: linkedScenarioId(activeWorldId) });
     }
   };
 
@@ -55,7 +60,7 @@ export default function StorytellerStart({ selected, onSelect }) {
     try {
       const result = await api.pickStartLocation(activeWorldId, startPreference.trim());
       setStartLocation(result.location);
-      onSelect({ type: 'world', id: activeWorldId, startPreference, startLocation: result.location });
+      onSelect({ type: 'world', id: activeWorldId, startPreference, startLocation: result.location, linkedScenarioId: linkedScenarioId(activeWorldId) });
     } catch (e) {
       setPickError(e.message);
     }

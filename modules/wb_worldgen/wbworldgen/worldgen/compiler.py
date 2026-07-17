@@ -215,6 +215,8 @@ def compile_world(world_state: dict, steps: Optional[dict] = None) -> dict:
     }
     if world_state.get("scenario"):
         compiled["scenario"] = world_state["scenario"]
+    if world_state.get("scenario_id"):
+        compiled["scenario_id"] = world_state["scenario_id"]
 
     rules_data = steps_data.get("world_rules", {}).get("data", {})
     if isinstance(rules_data, dict) and rules_data.get("module_data"):

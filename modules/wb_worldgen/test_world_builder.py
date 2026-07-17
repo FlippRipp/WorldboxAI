@@ -305,6 +305,25 @@ def test_seed_with_scenario_composition():
     assert "SCENARIO" in composed
 
 
+def test_scenario_grounding_text():
+    from wbworldgen.worldgen.facade import scenario_grounding_text
+    assert scenario_grounding_text({}) == ""
+    text = scenario_grounding_text({
+        "name": "The Heist of Kharn-3",
+        "scenario_description": "A mining colony under corporate lockdown.",
+        "starting_prompt": "You wake in the cargo hold of the Dawnrunner.",
+        "themes": "greed, loyalty",
+        "tags": "",
+    })
+    assert "The Heist of Kharn-3" in text
+    assert "A mining colony under corporate lockdown." in text
+    assert "You wake in the cargo hold of the Dawnrunner." in text
+    # The opening scene is framed as facts the world must contain.
+    assert "must contain" in text
+    assert "greed, loyalty" in text
+    assert "Tags" not in text
+
+
 def test_generate_step_composes_scenario(builder):
     captured = {}
 
@@ -332,12 +351,22 @@ def test_compile_world_carries_scenario(builder_with_steps):
 
 def test_scenario_persistence_roundtrip(builder):
     state = {"seed_prompt": "p", "scenario": "The Duchy of Ash has fallen.",
+             "scenario_id": "duchy_of_ash",
              "steps": {"lore": {"data": {"world_name": "Ashlands"}}}}
     wid = builder.save_world("scn_world", state)
-    assert builder.load_world(wid)["scenario"] == "The Duchy of Ash has fallen."
+    loaded = builder.load_world(wid)
+    assert loaded["scenario"] == "The Duchy of Ash has fallen."
+    assert loaded["scenario_id"] == "duchy_of_ash"
+    # The listing surfaces the link so story creation can pair them back up.
+    listed = {w["id"]: w for w in builder.list_worlds()}
+    assert listed[wid]["scenario_id"] == "duchy_of_ash"
+
+    compiled = builder.compile_world(loaded)
+    assert compiled["scenario_id"] == "duchy_of_ash"
 
     plain = builder.save_world("scn_none", {"seed_prompt": "p", "steps": {}})
     assert "scenario" not in builder.load_world(plain)
+    assert listed.get("scn_none", {"scenario_id": None})["scenario_id"] is None
 
 
 # ---------------------------------------------------------------------------

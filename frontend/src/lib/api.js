@@ -166,7 +166,7 @@ export const api = {
 
   // World Builder
   getWorldPipeline:       (templateId = null) => request(`/api/world/pipeline${templateId ? `?template_id=${encodeURIComponent(templateId)}` : ''}`),
-  generateWorld:          (seedPrompt, skipReview = false, templateId = null, scenario = '') => request('/api/world/generate', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, skip_review: skipReview, ...(templateId ? { template_id: templateId } : {}), ...(scenario ? { scenario } : {}) }) }),
+  generateWorld:          (seedPrompt, skipReview = false, templateId = null, scenarioId = null) => request('/api/world/generate', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, skip_review: skipReview, ...(templateId ? { template_id: templateId } : {}), ...(scenarioId ? { scenario_id: scenarioId } : {}) }) }),
   getWorldTemplates:      () => request('/api/world/templates'),
   generateWorldStep:      (stepId, note = '', data = null) => {
     const body = { note };

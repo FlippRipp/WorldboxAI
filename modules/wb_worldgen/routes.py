@@ -94,9 +94,14 @@ def _sync_enrichment_result_to_draft(session_id: str, world_id: str, result: dic
 
 class WorldGenerateRequest(BaseModel):
     seed_prompt: str
-    #: Optional longer-form source material (a campaign setting, an adventure
-    #: premise, pasted background text) the world is grounded in alongside the
-    #: seed prompt. Fed to every generation step.
+    #: Optional link to a saved scenario (backend.engine.scenario). The
+    #: scenario's description and starting prompt are fed to every generation
+    #: step, and the world remembers the link (metadata + compiled
+    #: ``scenario_id``) so story creation can pair them back up.
+    scenario_id: Optional[str] = None
+    #: Optional free-form source material the world is grounded in alongside
+    #: the seed prompt (API-level alternative to a saved scenario;
+    #: ``scenario_id`` wins when both are given).
     scenario: str = ""
     skip_review: bool = False
     template_id: Optional[str] = None
@@ -124,7 +129,18 @@ async def get_world_pipeline(template_id: Optional[str] = None):
 @router.post("/api/world/generate")
 async def generate_world(request: WorldGenerateRequest, session_id: str = "default"):
     state = {"seed_prompt": request.seed_prompt, "steps": {}}
-    if request.scenario.strip():
+    if request.scenario_id:
+        from backend.engine.scenario import ScenarioStore
+        from wbworldgen.worldgen.facade import scenario_grounding_text
+        try:
+            record = ScenarioStore(session_manager.data_dir).load_scenario(request.scenario_id)
+        except (FileNotFoundError, ValueError):
+            raise HTTPException(status_code=404, detail=f"Scenario '{request.scenario_id}' not found.")
+        state["scenario_id"] = record.get("id", request.scenario_id)
+        grounding = scenario_grounding_text(record)
+        if grounding:
+            state["scenario"] = grounding
+    elif request.scenario.strip():
         state["scenario"] = request.scenario.strip()
     if request.template_id:
         template = world_builder.get_template(request.template_id)
@@ -397,7 +413,7 @@ async def debug_skip_to(step_id: str, request: SkipToRequest):
         "current_step": step_id,
         "worldId": request.world_id,
     }
-    for key in ("template_id", "template_vocab", "scenario"):
+    for key in ("template_id", "template_vocab", "scenario", "scenario_id"):
         if world_data.get(key):
             state[key] = world_data[key]
     world_gen_sessions[session_id] = state

@@ -136,6 +136,18 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
     }
   };
 
+  // Choosing a world that was created with a linked scenario pre-selects that
+  // scenario (still deselectable). Only fires when the picked world actually
+  // changes, so tweaking the start preference never re-links a scenario the
+  // user deselected.
+  const selectStorySource = (src) => {
+    const prevWorldId = storySource?.type === 'world' ? storySource.id : null;
+    setStorySource(src);
+    if (src?.type === 'world' && src.id !== prevWorldId && src.linkedScenarioId) {
+      selectScenario(src.linkedScenarioId);
+    }
+  };
+
   const toggleEditModule = (modId, on) => {
     setEditModules((prev) => {
       const next = new Set(prev);
@@ -442,7 +454,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                     modId={m.id}
                     file={m.storyteller_start.screen}
                     selected={storySource}
-                    onSelect={setStorySource}
+                    onSelect={selectStorySource}
                   />
                 ))}
 

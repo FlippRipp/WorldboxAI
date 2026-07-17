@@ -35,7 +35,8 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
   const [loading, setLoading] = useState(false);
   const [skipReview, setSkipReview] = useState(false);
   const [seedPrompt, setSeedPrompt] = useState('');
-  const [scenario, setScenario] = useState('');
+  const [scenarios, setScenarios] = useState([]);
+  const [scenarioId, setScenarioId] = useState(null);
   const [started, setStarted] = useState(false);
   const [templates, setTemplates] = useState([]);
   const [templateId, setTemplateId] = useState('overworld_fantasy');
@@ -43,6 +44,9 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
   useEffect(() => {
     api.getWorldTemplates()
       .then((data) => setTemplates(data.templates || []))
+      .catch(() => {});
+    api.listScenarios()
+      .then((data) => setScenarios(data.scenarios || []))
       .catch(() => {});
   }, []);
 
@@ -65,7 +69,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
         if (data.state.steps?.lore?.data?.world_name) {
           setSeedPrompt(data.state.seed_prompt || '');
         }
-        setScenario(data.state.scenario || '');
+        setScenarioId(data.state.scenario_id || null);
         if (!data.state.complete) {
           setCurrentStepId(data.state.current_step);
         }
@@ -77,7 +81,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
     if (!seedPrompt.trim()) return;
     setLoading(true);
     try {
-      const result = await api.generateWorld(seedPrompt.trim(), skipReview, templateId, scenario.trim());
+      const result = await api.generateWorld(seedPrompt.trim(), skipReview, templateId, scenarioId);
       setWorldState(result.state);
       setStarted(true);
 
@@ -256,20 +260,48 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
               </div>
             )}
 
-            <div>
-              <label className="block text-sm font-medium text-gray-400 mb-2">Scenario <span className="text-gray-600">(optional)</span></label>
-              <p className="text-xs text-gray-500 mb-2">
-                Longer source material the world should be grounded in — a campaign setting, an adventure premise,
-                pasted background text. The AI builds the world from this together with the prompt below.
-              </p>
-              <AutoTextarea
-                value={scenario}
-                onChange={(e) => setScenario(e.target.value)}
-                minRows={2}
-                placeholder="Paste or write the setting, situation, and any established facts, names or history the world must honor..."
-                disabled={loading}
-              />
-            </div>
+            {scenarios.length > 0 && (
+              <div>
+                <label className="block text-sm font-medium text-gray-400 mb-2">Link a Scenario <span className="text-gray-600">(optional)</span></label>
+                <p className="text-xs text-gray-500 mb-2">
+                  The world is built to contain the linked scenario's setting and opening scene,
+                  and creating a story from this world starts that scenario in it.
+                </p>
+                <div className="grid gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setScenarioId(null)}
+                    disabled={loading}
+                    className={`text-left px-3 py-2 rounded-lg border transition-colors ${
+                      !scenarioId
+                        ? 'border-purple-500 bg-purple-900/30'
+                        : 'border-gray-700 bg-gray-800/40 hover:border-gray-500'
+                    }`}
+                  >
+                    <div className="text-sm font-medium text-gray-200">No Scenario</div>
+                    <div className="text-xs text-gray-500 mt-0.5">Build the world from the prompt alone</div>
+                  </button>
+                  {scenarios.map((s) => (
+                    <button
+                      key={s.id}
+                      type="button"
+                      onClick={() => setScenarioId(s.id)}
+                      disabled={loading}
+                      className={`text-left px-3 py-2 rounded-lg border transition-colors ${
+                        scenarioId === s.id
+                          ? 'border-purple-500 bg-purple-900/30'
+                          : 'border-gray-700 bg-gray-800/40 hover:border-gray-500'
+                      }`}
+                    >
+                      <div className="text-sm font-medium text-gray-200">{s.name}</div>
+                      <div className="text-xs text-gray-500 mt-0.5">
+                        Grounds the world in this scenario's description{s.has_starting_prompt ? ' and opening scene' : ''}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div>
               <label className="block text-sm font-medium text-gray-400 mb-2">World Prompt</label>

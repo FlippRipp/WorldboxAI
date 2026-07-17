@@ -74,6 +74,8 @@ class WorldPersistence:
                 "step_count": step_count,
                 "in_progress": in_progress,
                 "current_step": meta.get("current_step") if in_progress else None,
+                # Scenario linked at creation; story creation pairs them back up.
+                "scenario_id": meta.get("scenario_id"),
             })
         worlds.sort(key=lambda w: w.get("created_at", ""), reverse=True)
         return worlds
@@ -114,6 +116,8 @@ class WorldPersistence:
         }
         if world_state.get("scenario"):
             metadata["scenario"] = world_state["scenario"]
+        if world_state.get("scenario_id"):
+            metadata["scenario_id"] = world_state["scenario_id"]
         if world_state.get("template_id"):
             metadata["template_id"] = world_state["template_id"]
             # Snapshot the vocabulary at creation time so a later template
@@ -154,6 +158,8 @@ class WorldPersistence:
         }
         if metadata.get("scenario"):
             world_state["scenario"] = metadata["scenario"]
+        if metadata.get("scenario_id"):
+            world_state["scenario_id"] = metadata["scenario_id"]
         if metadata.get("template_id"):
             world_state["template_id"] = metadata["template_id"]
             if isinstance(metadata.get("template_vocab"), dict):
