@@ -28,8 +28,13 @@ You move the player with these tools:
   - player_passage: one of the listed exits/ways that lead to another map
     (doors, gates, shuttles, stairs, portals). If the player isn't there yet,
     they will travel to it first.
+  - custom_transition: ONLY when the story creates a brand-new way through
+    (a blown-up wall, a picked window, a teleport). You choose whether it
+    persists as a new passage or leaves no trace.
 Requirements on an exit are enforced by YOU: if the player hasn't met one,
 do not select that passage — narrate the obstacle instead.
+Exits marked SECRET are unknown to the player: never volunteer them; use
+discover_passage when the story genuinely uncovers one.
 When the player arrives somewhere, looks around, or asks where they can go,
 weave the listed adjoining places and exits naturally into the narration.
 Never invent geography that contradicts them.
@@ -125,8 +130,9 @@ def _exits_block(world_data: dict, state: dict) -> list[str]:
     current_map = player_map_id(state)
     current_node = state.get("player_location_node_id")
     by_id = node_index(world_data)
-    views = connections_from(world_data, current_map)
-    views.sort(key=lambda v: v["near"].get("node_id") != current_node)
+    views = connections_from(world_data, current_map, include_hidden=True)
+    views.sort(key=lambda v: (v["connection"].get("hidden", False),
+                              v["near"].get("node_id") != current_node))
     lines = ["<exits>"]
     for view in views[:12]:
         c = view["connection"]
@@ -152,6 +158,8 @@ def _exits_block(world_data: dict, state: dict) -> list[str]:
         if view["near"].get("node_id") != current_node:
             where = near_node.get("name") or "another spot on this map"
             line += f" (elsewhere on this map, at {where} — the player would travel there first)"
+        if c.get("hidden"):
+            line += " (SECRET — the player has NOT found this; never volunteer it. Use discover_passage when the fiction earns it.)"
         lines.append(line)
     if len(lines) == 1:
         lines.append("- (no known ways off this map)")

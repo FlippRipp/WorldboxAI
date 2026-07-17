@@ -12,14 +12,17 @@ teleports are gone — crossing maps ALWAYS goes through a connection (or an
 improvised/custom transition, which is a later phase).
 """
 
+import hashlib
 import heapq
 
 from . import backfill as _backfill_rt
+from . import sync as _sync
 from . import expansion as _expansion
 from .worldspace import (
     all_map_nodes,
     build_graph_adjacency,
     clean_option,
+    connection_between,
     connections_from,
     find_connection,
     get_map,
@@ -250,6 +253,71 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
             return land_at(far.get("map_id"), far.get("node_id"))
         queue_revealed_backfill()
         return {"module_data": {"wb_worldgen": {"travel": transit, "site_position": None}}}
+
+    def persist_world():
+        sm = host._services.get("session_manager") if host._services else None
+        if sm is not None and sm.state.get("world_data") is world_data:
+            _sync.write_session_world_data(sm)
+
+    # --- Secret discovery: an earned find unhides a connection (no move) ---
+    discover_id = clean_option(mutation.get("discover_passage"))
+    if discover_id and discover_id not in ("none", "None", ""):
+        secret = find_connection(world_data, discover_id)
+        if secret is not None and secret.get("hidden"):
+            secret["hidden"] = False
+            persist_world()
+
+    # --- Improvised transition: a NEW way through (blown wall, picked lock,
+    # teleport). Target endpoints are engine-enumerated; the AI chooses what
+    # the way leaves behind (one_time / open_passage / conditional_passage). --
+    custom_desc = str(mutation.get("custom_transition") or "").strip()
+    custom_target = clean_option(mutation.get("custom_transition_target"))
+    if custom_target in ("none", "None", ""):
+        custom_target = None
+    becomes = clean_option(mutation.get("custom_transition_becomes")) or "one_time"
+    new_location_desc = str(mutation.get("custom_transition_new_location") or "").strip()
+
+    if custom_desc and not custom_target and new_location_desc:
+        # The destination doesn't exist yet — author it onto a fitting
+        # unnamed spot (one full-attention call), then land there.
+        try:
+            authored = await host.world_builder.author_location(
+                state.get("world_id"), new_location_desc)
+        except Exception:
+            authored = None
+        if authored and authored.get("node_id"):
+            _sync.sync_enriched_nodes(host, state.get("world_id"), [authored["node_id"]])
+            custom_target = authored["node_id"]
+
+    if custom_desc and custom_target:
+        target_map = map_of_node(world_data, custom_target)
+        if target_map is not None:
+            here = {"map_id": current_map, "node_id": current_node}
+            there = {"map_id": target_map, "node_id": custom_target}
+            existing = connection_between(world_data, here, there, include_hidden=True)
+            if existing is not None:
+                # The way already exists — using it discovers it at most.
+                if existing.get("hidden"):
+                    existing["hidden"] = False
+                    persist_world()
+            elif becomes in ("open_passage", "conditional_passage"):
+                digest = hashlib.sha1(
+                    f"{current_node}>{custom_target}>{custom_desc}".encode()).hexdigest()[:8]
+                world_data.setdefault("connections", []).append({
+                    "id": f"c_{digest}",
+                    "from": dict(here),
+                    "to": dict(there),
+                    "kind": "passage",
+                    "name": custom_desc[:60],
+                    "description": custom_desc,
+                    "travel": {"mode": "instant"},
+                    "bidirectional": True,
+                    "requirements": custom_desc if becomes == "conditional_passage" else "",
+                    "hidden": False,
+                    "origin": "improvised",
+                })
+                persist_world()
+            return land_at(target_map, custom_target)
 
     # --- Entering an unmapped place: its child map is created on demand ----
     if passage_id and passage_id.startswith("enter:"):

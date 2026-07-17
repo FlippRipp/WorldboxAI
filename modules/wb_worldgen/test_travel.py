@@ -274,3 +274,103 @@ def test_disabling_travel_mid_journey_drops_the_record():
     result = run_turn(state, {})
     assert state["module_data"]["wb_worldgen"]["travel"] is None
     assert "player_location_node_id" not in result
+
+
+def _two_map_state():
+    """Migrated line world + an undercroft map joined by one hidden and one
+    open connection, player at n_a."""
+    state = make_state(make_world())
+    run_turn(state, {})  # migrate in place
+    wd = state["world_data"]
+    wd["maps"]["undercroft"] = {
+        "map_id": "undercroft", "label": "The Undercroft", "level_type": "underground",
+        "description": "", "parent_map_id": "root", "anchor_node_id": None,
+        "generator_id": "world_map", "schema": 2,
+        "nodes": [{"id": "u_1", "name": "Cave Landing", "type": "cavern", "x": 0, "y": 0}],
+        "edges": [], "config": {},
+    }
+    wd["connections"] = [{
+        "id": "c_secret", "from": {"map_id": "root", "node_id": "n_a"},
+        "to": {"map_id": "undercroft", "node_id": "u_1"},
+        "kind": "trapdoor", "name": "Hidden Trapdoor", "description": "",
+        "travel": {"mode": "instant"}, "bidirectional": True,
+        "requirements": "", "hidden": True, "origin": "generated",
+    }]
+    return state
+
+
+def test_improvised_transition_one_time_leaves_no_connection():
+    state = make_state(make_world())
+    run_turn(state, {})
+    result = run_turn(state, {
+        "custom_transition": "lockpicked the mill's rear window",
+        "custom_transition_target": "n_b (Bryn — visited, on Aldern)",
+        "custom_transition_becomes": "one_time (leaves no usable way behind)",
+    })
+    assert result["player_location_node_id"] == "n_b"
+    assert state["world_data"].get("connections", []) == []
+
+
+def test_improvised_transition_open_passage_persists_and_dedupes():
+    state = make_state(make_world())
+    run_turn(state, {})
+    mutation = {
+        "custom_transition": "blew a hole in the western wall",
+        "custom_transition_target": "n_b (Bryn)",
+        "custom_transition_becomes": "open_passage (a permanent open way)",
+    }
+    run_turn(state, mutation)
+    conns = state["world_data"]["connections"]
+    assert len(conns) == 1
+    assert conns[0]["origin"] == "improvised" and conns[0]["bidirectional"]
+    assert conns[0]["requirements"] == ""
+    # Same endpoints again: reuse, never duplicate.
+    state["player_location_node_id"] = "n_a"
+    run_turn(state, mutation)
+    assert len(state["world_data"]["connections"]) == 1
+
+
+def test_improvised_conditional_passage_carries_requirements():
+    state = make_state(make_world())
+    run_turn(state, {})
+    run_turn(state, {
+        "custom_transition": "pried open the sewer grate",
+        "custom_transition_target": "n_c (Cael)",
+        "custom_transition_becomes": "conditional_passage (permanent but gated)",
+    })
+    (c,) = state["world_data"]["connections"]
+    assert c["requirements"] == "pried open the sewer grate"
+
+
+def test_teleport_to_visited_node_on_another_map():
+    state = _two_map_state()
+    state["revealed_node_ids"].append("u_1")
+    result = run_turn(state, {
+        "custom_transition": "spoke the word of recall",
+        "custom_transition_target": "u_1 (Cave Landing — visited, on The Undercroft)",
+        "custom_transition_becomes": "one_time (leaves no usable way behind)",
+    })
+    assert result["player_location_map_id"] == "undercroft"
+    assert result["player_location_node_id"] == "u_1"
+    # A teleport is not a doorway: only the pre-existing hidden connection
+    # remains, and matching endpoints just unhide it rather than duplicate.
+    conns = state["world_data"]["connections"]
+    assert len(conns) == 1 and conns[0]["id"] == "c_secret"
+    assert conns[0]["hidden"] is False  # matching endpoints revealed it
+
+
+def test_hidden_connection_is_not_offered_until_discovered():
+    state = _two_map_state()
+    schema = asyncio.run(wbg.on_mutation_schema(state, None))
+    passages = schema.get("player_passage", {}).get("options", [])
+    assert not any(p.startswith("c_secret") for p in passages)
+    # The storyteller sees it marked SECRET in context.
+    context = wbg._build_location_context(state, state["world_data"])
+    assert "SECRET" in context and "Hidden Trapdoor" in context
+    # Discovery is offered, and unhides it for future turns.
+    discover = schema["discover_passage"]["options"]
+    assert any(o.startswith("c_secret") for o in discover)
+    run_turn(state, {"discover_passage": discover[0]})
+    assert state["world_data"]["connections"][0]["hidden"] is False
+    schema2 = asyncio.run(wbg.on_mutation_schema(state, None))
+    assert any(p.startswith("c_secret") for p in schema2["player_passage"]["options"])

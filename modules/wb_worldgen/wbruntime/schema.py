@@ -5,12 +5,58 @@ only; crossing to another map goes through ``player_passage`` (a connection
 id from the listed exits). Hidden connections are never offered."""
 
 from .worldspace import (
+    children_by_anchor,
     connections_from,
     get_map,
     map_nodes,
+    map_of_node,
     node_index,
     player_map_id,
 )
+
+
+def _custom_transition_targets(world_data: dict, state: dict) -> list[str]:
+    """Engine-enumerated endpoints for an improvised transition: the parent
+    anchor, child-map entrances, adjacent-map connection far-ends, then
+    visited named nodes anywhere in the world (teleports). Node ids are
+    globally unique, so the option is just the node id."""
+    current_map = player_map_id(state)
+    current_node = state.get("player_location_node_id")
+    by_id = node_index(world_data)
+    revealed = set(state.get("revealed_node_ids", []))
+    seen = set()
+    options = []
+
+    def _add(node_id, note):
+        if not node_id or node_id in seen or node_id == current_node:
+            return
+        node = by_id.get(node_id)
+        if node is None:
+            return
+        seen.add(node_id)
+        label = node.get("name") or f"unexplored {node.get('type', 'spot')}"
+        options.append(f"{node_id} ({label} — {note})")
+
+    this_map = get_map(world_data, current_map) or {}
+    if this_map.get("anchor_node_id"):
+        parent_node = by_id.get(this_map["anchor_node_id"]) or {}
+        _add(this_map["anchor_node_id"],
+             f"back out to {parent_node.get('name', 'the outside')}")
+    for (mid, anchor), child_ids in children_by_anchor(world_data).items():
+        if mid == current_map:
+            for child_id in child_ids:
+                child = get_map(world_data, child_id) or {}
+                for n in (child.get("nodes") or [])[:1]:
+                    _add(n.get("id"), f"inside {child.get('label', child_id)}")
+    for view in connections_from(world_data, current_map, include_hidden=True):
+        _add(view["far"].get("node_id"), "beyond a known way")
+    # Visited named places anywhere (teleport targets), nearest-listed last.
+    for nid in revealed:
+        node = by_id.get(nid)
+        if node is not None and node.get("name") and len(options) < 15:
+            far_map = get_map(world_data, map_of_node(world_data, nid) or "") or {}
+            _add(nid, f"visited, on {far_map.get('label', 'this world')}")
+    return options[:15]
 
 
 def _passage_options(world_data: dict, state: dict) -> list[str]:
@@ -119,6 +165,74 @@ def build_location_mutation_schema(world_data: dict, state: dict = None) -> dict
                 "instead. Leave as none for ordinary same-map movement."
             ),
         }
+
+    # Improvised transitions: a NEW way through that no listed exit covers
+    # (a blown-up wall, a picked lock, a teleport spell).
+    if state:
+        targets = _custom_transition_targets(world_data, state)
+        if targets:
+            schema["custom_transition"] = {
+                "type": "string",
+                "label": "How the player got through by an UNLISTED way",
+                "description": (
+                    "ONLY when the story just established a NEW way through — blew a hole in a "
+                    "wall, picked a lock on a window, cast a teleport. If a listed exit fits, use "
+                    "player_passage instead. Describe the way briefly (e.g. 'lockpicked the rear "
+                    "window'). Leave empty otherwise."
+                ),
+            }
+            schema["custom_transition_target"] = {
+                "type": "select",
+                "label": "Where the unlisted way leads",
+                "options": targets + ["none"],
+                "description": "The destination of the improvised way. Set only with custom_transition.",
+            }
+            schema["custom_transition_becomes"] = {
+                "type": "select",
+                "label": "Does the new way persist?",
+                "options": [
+                    "one_time (leaves no usable way behind — picked locks, teleports)",
+                    "open_passage (a permanent open way — the hole in the wall stays)",
+                    "conditional_passage (permanent but gated — reachable only by repeating the effort)",
+                ],
+                "description": "What the improvised way leaves behind. Set only with custom_transition.",
+            }
+            schema["custom_transition_new_location"] = {
+                "type": "string",
+                "label": "Describe the destination if it does not exist yet",
+                "description": (
+                    "When the player names a destination that exists nowhere on any map (e.g. "
+                    "teleporting to 'the Sunken Library'), describe it in one sentence and leave "
+                    "custom_transition_target as none — the world will author it in a fitting "
+                    "unexplored spot. If no spot fits, the player arrives at the nearest known "
+                    "place instead; narrate accordingly."
+                ),
+            }
+
+        # Secrets: hidden connections at the player's node the fiction may
+        # reveal (searching the wall, finding the old map).
+        hidden_here = [v for v in connections_from(
+            world_data, player_map_id(state), state.get("player_location_node_id"),
+            include_hidden=True) if v["connection"].get("hidden")]
+        if hidden_here:
+            by_id_h = node_index(world_data)
+            opts = []
+            for v in hidden_here[:6]:
+                c = v["connection"]
+                far_map_h = get_map(world_data, v["far"].get("map_id", "")) or {}
+                far_node_h = by_id_h.get(v["far"].get("node_id")) or {}
+                target = far_node_h.get("name") or far_map_h.get("label", "")
+                opts.append(f"{c.get('id')} ({c.get('kind', 'passage')}: {c.get('name') or 'hidden way'} -> {target})")
+            schema["discover_passage"] = {
+                "type": "select",
+                "label": "Secret way the player just DISCOVERED",
+                "options": opts + ["none"],
+                "description": (
+                    "Set when the story has the player genuinely find one of these hidden ways "
+                    "(searching, a clue, a map). It becomes a normal listed exit afterwards. "
+                    "Never reveal a secret the player hasn't earned."
+                ),
+            }
 
     # Intra-site movement: when the player's current location has an expanded
     # interior, offer its sub-locations as instant moves within the place.
