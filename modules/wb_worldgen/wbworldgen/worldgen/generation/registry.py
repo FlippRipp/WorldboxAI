@@ -6,8 +6,9 @@ generators by id via a level's ``generator_id``; unknown or unimplemented
 ids fail loudly so a template can never silently select a generator that
 does not exist.
 
-Shipped now: ``world_map`` (the procedural overworld generator) and
-``interior`` (deterministic layout over LLM-authored rooms). ``region`` and
+Shipped now: ``world_map`` (the procedural overworld generator),
+``city_roadnet`` (planar street-network city) and ``interior``
+(deterministic layout over LLM-authored rooms). ``region`` and
 ``star_system`` are reserved ids — registered as explicit stubs.
 """
 
@@ -72,6 +73,15 @@ def _build_world_map(spec: dict) -> dict:
     return wm.to_dict()
 
 
+def _build_city_roadnet(spec: dict) -> dict:
+    """Planar street-network city (wraps build_city_map).
+
+    spec: {compiled_world, total_nodes?, map_width?, map_height?, seed?,
+    id_prefix?}."""
+    from .city_map import build_city_map
+    return build_city_map(spec)
+
+
 def _build_interior(spec: dict) -> dict:
     """Deterministic layout over authored rooms.
 
@@ -89,6 +99,16 @@ register_generator(MapGeneratorSpec(
                 "wide-open scales.",
     needs_llm_content=False,
     build=_build_world_map,
+))
+
+register_generator(MapGeneratorSpec(
+    id="city_roadnet",
+    label="City Street Map",
+    description="Planar street-network city: recursively grown avenues and "
+                "streets, blocks clustered into districts, plazas and venues "
+                "as playable locations.",
+    needs_llm_content=False,
+    build=_build_city_roadnet,
 ))
 
 register_generator(MapGeneratorSpec(

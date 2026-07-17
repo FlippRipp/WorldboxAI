@@ -182,14 +182,17 @@ def test_get_pipeline_applies_template_view(builder):
 def test_template_map_default_flows_into_map_config(builder):
     captured = {}
 
-    def fake_map_generate(world_state, config=None):
+    def fake_map_generate(world_state, config=None, generator_id="world_map"):
         captured["config"] = config
+        captured["generator_id"] = generator_id
         return {"nodes": [], "edges": []}
 
     builder._map_gen.generate = fake_map_generate
     state = {"seed_prompt": "seed", "steps": {}, "template_id": "single_city"}
     asyncio.run(builder.generate_step("map_generation", state, "seed"))
     assert captured["config"] == {"total_nodes": 60}
+    # single_city's root level selects the street-network generator.
+    assert captured["generator_id"] == "city_roadnet"
 
     # Explicit config always wins; no template means no injected default.
     asyncio.run(builder.generate_step("map_generation", state, "seed", config={"total_nodes": 45}))
@@ -263,3 +266,63 @@ def test_user_templates_override_shipped(tmpdir, monkeypatch):
         assert "interplanetary_scifi" in templates          # shipped still there
     finally:
         shutil.rmtree(user_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# City street-network templates (modern_city + upgraded single_city)
+# ---------------------------------------------------------------------------
+
+def test_city_templates_use_roadnet_generator(builder):
+    ids = {t["id"] for t in builder.list_templates()}
+    assert "modern_city" in ids
+    for tid in ("modern_city", "single_city"):
+        t = builder.get_template(tid)
+        levels = t.resolved_levels()
+        assert levels[0]["generator_id"] == "city_roadnet"
+        assert "terrain_generation" in t.skip_steps
+    # The seed knob is patched into the map step's form schema.
+    pipeline = {s["id"]: s for s in builder.get_pipeline("modern_city")}
+    schema = pipeline["map_generation"]["schema"]
+    assert "seed" in schema
+    assert schema["total_nodes"]["max"] == 120
+
+
+def test_modern_city_map_generation_and_compile(builder):
+    state = {
+        "seed_prompt": "a neon port city",
+        "template_id": "modern_city",
+        "steps": {
+            "terrain_regions": {"data": {"regions": [
+                {"name": "Downtown", "terrain": "glass towers"},
+                {"name": "Docklands", "terrain": "container yards"},
+            ]}, "approved": True},
+            "society_factions": {"data": {"factions": [
+                {"name": "Harbor Syndicate", "region": "Docklands",
+                 "settlements": ["The Customs House"]},
+            ]}, "approved": True},
+        },
+    }
+    data = asyncio.run(builder.generate_step(
+        "map_generation", state, "seed", config={"total_nodes": 60, "seed": 77}))
+    assert data["generator_id"] == "city_roadnet"
+    assert data["config"]["seed"] == 77
+    assert data["nodes"] and data["edges"] and data["roads"]
+    regions = {r["region_name"] for r in data["regions"]}
+    assert regions == {"Downtown", "Docklands"}
+    named = {n["name"] for n in data["nodes"] if n.get("name")}
+    assert "The Customs House" in named
+
+    # Same seed regenerates the identical map.
+    again = asyncio.run(builder.generate_step(
+        "map_generation", state, "seed", config={"total_nodes": 60, "seed": 77}))
+    assert again == data
+
+    # Compile -> world_format 2 with the generator id preserved on the root
+    # MapRecord and streets/regions carried through migration.
+    state["steps"]["map_generation"] = {"data": data, "approved": True}
+    compiled = builder.compile_world(state)
+    assert compiled["world_format"] == 2
+    root = compiled["maps"][compiled["root_map_id"]]
+    assert root["generator_id"] == "city_roadnet"
+    assert root["roads"] and root["regions"]
+    assert {r["tier"] for r in root["roads"]} == {"avenue", "street"}

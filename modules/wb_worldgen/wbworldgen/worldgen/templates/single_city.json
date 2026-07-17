@@ -31,7 +31,18 @@
         "modify": {
           "total_nodes": {
             "label": "Location Density",
-            "default": 60
+            "default": 60,
+            "min": 30,
+            "max": 120
+          }
+        },
+        "add": {
+          "seed": {
+            "type": "number",
+            "label": "Map Seed (0 = random)",
+            "min": 0,
+            "max": 2147483647,
+            "default": 0
           }
         }
       }
@@ -59,7 +70,7 @@
     {
       "level_type": "city",
       "label": "The City",
-      "generator_id": "world_map",
+      "generator_id": "city_roadnet",
       "guidance": "The whole playable world: one city of districts, streets and venues."
     },
     {

@@ -935,9 +935,48 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
             );
           })}
 
+          {/* City street fabric (city_roadnet): side streets under avenues,
+              solid grey so the network reads as pavement, not trails. */}
+          {activeRoads && activeRoads.map((road, i) => {
+            if (road.tier !== 'street') return null;
+            if (!road.path || road.path.length < 2) return null;
+            if (!isEdgeRevealed(road.from, road.to)) return null;
+            const pts = road.path.map(([x, y]) => `${sx(x)},${sy(y)}`).join(' ');
+            return (
+              <polyline
+                key={`street-${i}`}
+                points={pts}
+                fill="none"
+                stroke="rgba(148,163,184,0.30)"
+                strokeWidth={0.7}
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                pointerEvents="none"
+              />
+            );
+          })}
+          {activeRoads && activeRoads.map((road, i) => {
+            if (road.tier !== 'avenue') return null;
+            if (!road.path || road.path.length < 2) return null;
+            if (!isEdgeRevealed(road.from, road.to)) return null;
+            const pts = road.path.map(([x, y]) => `${sx(x)},${sy(y)}`).join(' ');
+            return (
+              <polyline
+                key={`avenue-${i}`}
+                points={pts}
+                fill="none"
+                stroke="rgba(148,163,184,0.55)"
+                strokeWidth={1.4}
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                pointerEvents="none"
+              />
+            );
+          })}
+
           {/* Roads: terrain-following least-cost paths between settlements */}
           {activeRoads && activeRoads.map((road, i) => {
-            if (road.tier === 'path') return null;
+            if (road.tier === 'path' || road.tier === 'street' || road.tier === 'avenue') return null;
             if (!road.path || road.path.length < 2) return null;
             if (!isEdgeRevealed(road.from, road.to)) return null;
             const pts = road.path.map(([x, y]) => `${sx(x)},${sy(y)}`).join(' ');

@@ -46,7 +46,7 @@ def _map_record_from(map_dict: dict, *, map_id: str, label: str, level_type: str
         "description": description or "",
         "parent_map_id": parent_map_id,
         "anchor_node_id": anchor_node_id,
-        "generator_id": "world_map",
+        "generator_id": map_dict.get("generator_id", "world_map"),
         "nodes": map_dict.get("nodes", []),
         "edges": map_dict.get("edges", []),
         "config": map_dict.get("config", {}),

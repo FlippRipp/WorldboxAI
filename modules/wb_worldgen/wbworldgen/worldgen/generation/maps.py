@@ -31,15 +31,17 @@ class MapStepGenerator:
             logger.warning("terrain load failed for %s/%s: %s", world_id, layer_id, e)
             return {}
 
-    def generate(self, world_state: dict, config: dict = None) -> dict:
+    def generate(self, world_state: dict, config: dict = None,
+                 generator_id: str = "world_map") -> dict:
         compiled = build_compiled_for_map(world_state)
         world_id = compiled.get("world_id", "") or world_state.get("_draft_id", "")
 
+        step_data = world_state.get("steps", {}).get("map_generation", {}).get("data", {})
         total_nodes = 100
         if config:
             total_nodes = config.get("total_nodes", 100)
-        elif world_state.get("steps", {}).get("map_generation", {}).get("data", {}).get("total_nodes"):
-            total_nodes = world_state["steps"]["map_generation"]["data"]["total_nodes"]
+        elif step_data.get("total_nodes"):
+            total_nodes = step_data["total_nodes"]
         total_nodes = max(30, min(500, int(total_nodes)))
 
         steps_data = world_state.get("steps", {})
@@ -56,6 +58,24 @@ class MapStepGenerator:
         hierarchy_data = steps_data.get("hierarchy_design", {}).get("data", {})
         parallel_maps = [p for p in (hierarchy_data.get("parallel_maps") or [])
                          if isinstance(p, dict) and p.get("label")]
+
+        if generator_id and generator_id != "world_map":
+            if parallel_maps:
+                logger.warning(
+                    "generator %s does not support parallel maps yet; "
+                    "falling back to world_map multilayer", generator_id)
+            else:
+                from wbworldgen.worldgen.generation.registry import get_generator
+                seed = (config or {}).get("seed") or step_data.get("seed") or None
+                result = get_generator(generator_id).build({
+                    "compiled_world": compiled,
+                    "total_nodes": total_nodes,
+                    "seed": seed,
+                    "id_prefix": "",
+                })
+                _bind_scope(result.get("nodes", []), "")
+                return result
+
         if parallel_maps:
             layer_specs = [{"layer_id": "root", "name": "", "layer_type": "world", "index": 0}]
             connections_spec = []
