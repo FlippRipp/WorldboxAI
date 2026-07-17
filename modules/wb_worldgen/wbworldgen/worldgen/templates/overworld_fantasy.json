@@ -1,0 +1,11 @@
+{
+  "id": "overworld_fantasy",
+  "label": "Fantasy Overworld",
+  "description": "A classic top-down fantasy world: kingdoms, wilderness, landmarks and settlements across generated terrain. This is the default and matches the original behavior exactly.",
+  "system_framing": null,
+  "skip_steps": [],
+  "overrides": {},
+  "pinned_values": {},
+  "vocabulary": {},
+  "map": {}
+}

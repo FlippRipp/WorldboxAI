@@ -95,16 +95,37 @@ def _sync_enrichment_result_to_draft(session_id: str, world_id: str, result: dic
 class WorldGenerateRequest(BaseModel):
     seed_prompt: str
     skip_review: bool = False
+    template_id: Optional[str] = None
+
+
+def _ordered_ids_for(state: dict) -> list[str]:
+    """Effective step order for a generation session (template skip filter);
+    tolerates fakes/legacy builders without template support."""
+    resolver = getattr(world_builder, "ordered_ids_for", None)
+    if callable(resolver):
+        return resolver(state)
+    return world_builder._ordered_ids
+
+
+@router.get("/api/world/templates")
+async def get_world_templates():
+    return {"templates": world_builder.list_templates()}
 
 
 @router.get("/api/world/pipeline")
-async def get_world_pipeline():
-    return {"pipeline": world_builder.get_pipeline()}
+async def get_world_pipeline(template_id: Optional[str] = None):
+    return {"pipeline": world_builder.get_pipeline(template_id)}
 
 
 @router.post("/api/world/generate")
 async def generate_world(request: WorldGenerateRequest, session_id: str = "default"):
     state = {"seed_prompt": request.seed_prompt, "steps": {}}
+    if request.template_id:
+        template = world_builder.get_template(request.template_id)
+        state["template_id"] = template.id
+        if template.vocabulary:
+            # Snapshot: a later template edit never changes this world.
+            state["template_vocab"] = template.vocabulary
     world_gen_sessions[session_id] = state
 
     if request.skip_review:
@@ -112,14 +133,14 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
         terrain_task = None
         done_steps: set = set()
         try:
-            for step_id in world_builder._ordered_ids:
+            for step_id in _ordered_ids_for(state):
                 if step_id in enrichment_steps or step_id in done_steps:
                     continue
                 if step_id == "terrain_generation" and terrain_task is not None:
                     data = await terrain_task
                     terrain_task = None
                 elif (step_id == "natural_landmarks"
-                        and "society_factions" in world_builder._steps
+                        and "society_factions" in _ordered_ids_for(state)
                         and "society_factions" not in state["steps"]):
                     # Independent full-attention calls (both depend only on
                     # terrain_regions) — run them concurrently in one-shot mode.
@@ -149,7 +170,8 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
         state["complete"] = True
         return {"state": state, "complete": True}
 
-    first_step = world_builder._ordered_ids[0] if world_builder._ordered_ids else None
+    ordered = _ordered_ids_for(state)
+    first_step = ordered[0] if ordered else None
     if not first_step:
         raise HTTPException(status_code=500, detail="No world building steps registered.")
 
@@ -177,9 +199,10 @@ async def generate_world_step(step_id: str, body: dict = None, session_id: str =
     )
     state["steps"][step_id] = {"data": data, "approved": False, "note": note}
 
-    current_idx = world_builder._ordered_ids.index(step_id)
-    for idx in range(current_idx + 1, len(world_builder._ordered_ids)):
-        downstream_id = world_builder._ordered_ids[idx]
+    ordered = _ordered_ids_for(state)
+    current_idx = ordered.index(step_id)
+    for idx in range(current_idx + 1, len(ordered)):
+        downstream_id = ordered[idx]
         if downstream_id in state.get("steps", {}):
             state["steps"][downstream_id]["approved"] = False
 
@@ -241,17 +264,18 @@ async def approve_world_step(step_id: str, body: dict = None, session_id: str = 
         step_entry["approved"] = True
         state["steps"][step_id] = step_entry
 
-    current_idx = world_builder._ordered_ids.index(step_id)
+    ordered = _ordered_ids_for(state)
+    current_idx = ordered.index(step_id)
 
     if was_already_approved:
-        for idx in range(current_idx + 1, len(world_builder._ordered_ids)):
-            downstream_id = world_builder._ordered_ids[idx]
+        for idx in range(current_idx + 1, len(ordered)):
+            downstream_id = ordered[idx]
             if downstream_id in state.get("steps", {}):
                 state["steps"][downstream_id]["approved"] = False
 
         next_unapproved = None
-        for idx in range(current_idx + 1, len(world_builder._ordered_ids)):
-            check_id = world_builder._ordered_ids[idx]
+        for idx in range(current_idx + 1, len(ordered)):
+            check_id = ordered[idx]
             step_entry = state.get("steps", {}).get(check_id, {})
             if step_entry.get("data") and not step_entry.get("approved"):
                 next_unapproved = check_id
@@ -268,7 +292,7 @@ async def approve_world_step(step_id: str, body: dict = None, session_id: str = 
             _auto_save_draft(session_id)
             return {"state": state, "complete": True}
 
-    next_step = world_builder._ordered_ids[current_idx + 1] if current_idx + 1 < len(world_builder._ordered_ids) else None
+    next_step = ordered[current_idx + 1] if current_idx + 1 < len(ordered) else None
 
     if next_step:
         if next_step in ("node_labeling", "node_descriptions"):
@@ -336,8 +360,9 @@ async def debug_skip_to(step_id: str, request: SkipToRequest):
         raise HTTPException(status_code=404, detail=f"World '{request.world_id}' not found. Use /debug/seed first.")
 
     steps = world_data.get("steps", {})
+    ordered = _ordered_ids_for(world_data)
     target_idx = None
-    for i, sid in enumerate(world_builder._ordered_ids):
+    for i, sid in enumerate(ordered):
         if sid == step_id:
             target_idx = i
             break
@@ -345,15 +370,15 @@ async def debug_skip_to(step_id: str, request: SkipToRequest):
         raise HTTPException(status_code=404, detail=f"Unknown step: {step_id}")
 
     for i in range(target_idx):
-        sid = world_builder._ordered_ids[i]
+        sid = ordered[i]
         if sid not in steps or not isinstance(steps.get(sid), dict):
             steps[sid] = {}
         if not isinstance(steps[sid].get("data"), dict):
             steps[sid]["data"] = {}
         steps[sid]["approved"] = True
 
-    for i in range(target_idx, len(world_builder._ordered_ids)):
-        sid = world_builder._ordered_ids[i]
+    for i in range(target_idx, len(ordered)):
+        sid = ordered[i]
         if sid not in steps or not isinstance(steps.get(sid), dict):
             steps[sid] = {}
         steps[sid]["approved"] = False
@@ -366,11 +391,14 @@ async def debug_skip_to(step_id: str, request: SkipToRequest):
         "current_step": step_id,
         "worldId": request.world_id,
     }
+    for key in ("template_id", "template_vocab"):
+        if world_data.get(key):
+            state[key] = world_data[key]
     world_gen_sessions[session_id] = state
 
     note_for_layer = ""
     for i in range(target_idx):
-        sid = world_builder._ordered_ids[i]
+        sid = ordered[i]
         sd = steps.get(sid, {}).get("data", {})
         if sid == "layer_design" and isinstance(sd, dict) and sd.get("layers"):
             note_for_layer = "multi-layer world"
@@ -392,7 +420,7 @@ async def debug_skip_to(step_id: str, request: SkipToRequest):
     return {
         "world_id": request.world_id,
         "current_step": step_id,
-        "pipeline_position": f"{target_idx + 1}/{len(world_builder._ordered_ids)}",
+        "pipeline_position": f"{target_idx + 1}/{len(ordered)}",
         "state": state,
     }
 

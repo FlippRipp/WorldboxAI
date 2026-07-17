@@ -14,6 +14,7 @@ import logging
 from wbworldgen.worldgen import compiler
 from wbworldgen.worldgen import pipeline as _pipeline
 from wbworldgen.worldgen import start_locations as _start
+from wbworldgen.worldgen import templates as _templates
 from wbworldgen.worldgen.enrichment import EnrichmentEngine, SiteExpansionEngine, collect_nodes_by_layer
 from wbworldgen.worldgen.enrichment import sites as _sites_mod
 from wbworldgen.worldgen.generation import LLMStepGenerator, MapStepGenerator, MockStepGenerator
@@ -61,6 +62,7 @@ class WorldBuilder:
         self._llm_gen = LLMStepGenerator(settings=None, retry_attempts=self._json_retry_attempts)
         self._enrichment = EnrichmentEngine(host=self)
         self._sites = SiteExpansionEngine(host=self)
+        self._templates = _templates.load_templates()
 
     # --- configuration ------------------------------------------------------
 
@@ -90,11 +92,37 @@ class WorldBuilder:
     def _resolve_order(self) -> list[str]:
         return _pipeline.resolve_order(self._steps)
 
-    def get_pipeline(self) -> list[dict]:
-        return [self._steps[sid].to_frontend() for sid in self._ordered_ids]
+    def get_pipeline(self, template_id: str = None) -> list[dict]:
+        template = self.get_template(template_id)
+        skip = set(template.skip_steps)
+        return [
+            template.apply_to_step(self._steps[sid]).to_frontend()
+            for sid in self._ordered_ids if sid not in skip
+        ]
 
     def _build_chain_context(self, world_state: dict, up_to_step_id: str) -> dict:
         return _pipeline.build_chain_context(self._ordered_ids, world_state, up_to_step_id, self._steps)
+
+    # --- world templates ----------------------------------------------------
+
+    def list_templates(self) -> list[dict]:
+        return [
+            {"id": t.id, "label": t.label, "description": t.description}
+            for t in self._templates.values()
+        ]
+
+    def get_template(self, template_id: str = None) -> "_templates.WorldTemplate":
+        return _templates.get_template(self._templates, template_id)
+
+    def template_for(self, world_state: dict) -> "_templates.WorldTemplate":
+        return self.get_template((world_state or {}).get("template_id"))
+
+    def ordered_ids_for(self, world_state: dict) -> list[str]:
+        """The effective step order for a world: the registered order minus the
+        world's template skip_steps. `resolve_order` itself stays untouched, so
+        `after` chains keep resolving against the full registry."""
+        skip = set(self.template_for(world_state).skip_steps)
+        return [sid for sid in self._ordered_ids if sid not in skip]
 
     # --- generation ---------------------------------------------------------
 
@@ -112,17 +140,34 @@ class WorldBuilder:
             await self._hook_registry.dispatch_step(step_id, data, world_state, user_prompt)
             return data
 
+        template = self.template_for(world_state)
+
         uses = getattr(step, "uses", "llm")
         if step_id == "map_generation" or uses == USES_MAP:
+            if step_id == "map_generation" and config is None:
+                # No explicit node count: fall back to the template's default
+                # scale (a city is denser but smaller than an overworld).
+                default_nodes = template.default_total_nodes()
+                if default_nodes:
+                    config = {"total_nodes": default_nodes}
             # Delaunay + road pathfinding are CPU-bound; keep the event loop free.
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, self._map_gen.generate, world_state, config)
 
         if self._llm_service and self._llm_service.mode != "mock":
             context = self._build_chain_context(world_state, step_id)
-            data = await self._llm_gen.generate(step, context, user_prompt, user_note)
+            effective = template.apply_to_step(step)
+            data = await self._llm_gen.generate(
+                effective, context, user_prompt, user_note,
+                system_framing=template.resolved_system_framing())
         else:
             data = self._mock_gen.generate(step, world_state, user_prompt, user_note)
+
+        pinned = template.pinned_values.get(step_id)
+        if isinstance(pinned, dict) and isinstance(data, dict):
+            # Contract keys hidden from the form still land in the output
+            # (e.g. sci-fi pins magic_level "none").
+            data.update(pinned)
 
         await self._hook_registry.dispatch_step(step_id, data, world_state, user_prompt)
         return data
@@ -142,6 +187,8 @@ class WorldBuilder:
         step = self._steps.get(step_id)
         if not step:
             raise ValueError(f"Unknown step: {step_id}")
+        template = self.template_for(world_state)
+        step = template.apply_to_step(step)
         field_schema = (step.schema or {}).get(field)
         if not isinstance(field_schema, dict):
             raise ValueError(f"Unknown field '{field}' on step '{step_id}'")
@@ -151,13 +198,15 @@ class WorldBuilder:
 
         if self._llm_service and self._llm_service.mode != "mock":
             context = self._build_chain_context(world_state, step_id)
+            framing = template.resolved_system_framing()
             if is_structured:
                 return await self._llm_gen.generate_structured_item(
                     step, field, field_schema, items, index, context, user_prompt,
-                    user_note, subfield=subfield,
+                    user_note, subfield=subfield, system_framing=framing,
                 )
             return await self._llm_gen.generate_list_item(
                 step, field, field_schema, items, index, context, user_prompt, user_note,
+                system_framing=framing,
             )
 
         # Mock fallback: deterministic, distinct from existing entries.

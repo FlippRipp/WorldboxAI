@@ -160,6 +160,9 @@ def build_enrichment_context(node: dict, all_nodes: list, compiled: dict, includ
     connection_block = get_connection_context(node, compiled)
     if connection_block:
         result["connection"] = connection_block
+    vocab = compiled.get("template_vocab")
+    if isinstance(vocab, dict) and vocab:
+        result["vocab"] = vocab
     return result
 
 

@@ -156,6 +156,13 @@ def compile_world(world_state: dict, steps: Optional[dict] = None) -> dict:
     if isinstance(sites, dict) and sites:
         compiled["site_maps"] = sites
 
+    # World template identity + vocabulary snapshot (additive; absent for
+    # pre-template worlds, which behave as the default fantasy template).
+    if world_state.get("template_id"):
+        compiled["template_id"] = world_state["template_id"]
+    if isinstance(world_state.get("template_vocab"), dict) and world_state["template_vocab"]:
+        compiled["template_vocab"] = world_state["template_vocab"]
+
     # Optional per-step contributions (for custom/extension steps).
     for step in (steps or {}).values():
         contribute = getattr(step, "contribute_to_compiled", None)

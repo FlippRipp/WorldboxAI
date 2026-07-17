@@ -165,8 +165,9 @@ export const api = {
   deleteStoryLorebookEntry: (saveId, uid) => request(`/api/saves/${saveId}/lorebooks/entries/${encodeURIComponent(uid)}`, { method: 'DELETE' }),
 
   // World Builder
-  getWorldPipeline:       () => request('/api/world/pipeline'),
-  generateWorld:          (seedPrompt, skipReview = false) => request('/api/world/generate', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, skip_review: skipReview }) }),
+  getWorldPipeline:       (templateId = null) => request(`/api/world/pipeline${templateId ? `?template_id=${encodeURIComponent(templateId)}` : ''}`),
+  generateWorld:          (seedPrompt, skipReview = false, templateId = null) => request('/api/world/generate', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, skip_review: skipReview, ...(templateId ? { template_id: templateId } : {}) }) }),
+  getWorldTemplates:      () => request('/api/world/templates'),
   generateWorldStep:      (stepId, note = '', data = null) => {
     const body = { note };
     if (data) body.data = data;

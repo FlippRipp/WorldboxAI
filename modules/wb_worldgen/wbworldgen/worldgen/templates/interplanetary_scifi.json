@@ -1,0 +1,73 @@
+{
+  "id": "interplanetary_scifi",
+  "label": "Interplanetary Sci-Fi",
+  "description": "A sci-fi setting spanning multiple planets, moons and stations. Each world is its own map; space travel links them.",
+  "system_framing": "You are a world building AI for a science-fiction interactive story that spans multiple planets, moons and stations. Keep everything grounded in the setting's technology — no magic unless the premise explicitly calls for it.",
+  "skip_steps": [],
+  "overrides": {
+    "world_rules": {
+      "description": "Define the genre, tone, technology level, FTL travel and the practical constraints of life in this setting.",
+      "guidance": "\nEach custom_rule is a practical statement about how the setting and its inhabitants operate day-to-day.\nThink: what would a spacer take for granted as \"just the way things are\"?\n\nGood examples:\n- \"Water debt is hereditary — ships that can't pay their recycler tax get impounded at dock\"\n- \"The jump lanes are charted by one guild, and independent captains fly blind\"\n- \"Corporate law applies aboard any vessel flying a company transponder\"\n- \"Terraforming failed on every world but two; everyone else lives under domes\"\n\nAvoid vague philosophy: \"Space is dangerous\", \"Corporations are evil\".\nAvoid game mechanics: \"Players get +1\", \"Damage is doubled in vacuum\".",
+      "schema_patch": {
+        "remove": ["magic_level"],
+        "add": {
+          "ftl_travel": {
+            "type": "select",
+            "label": "FTL Travel",
+            "options": ["none", "rare", "common", "ubiquitous"],
+            "description": "How available faster-than-light travel is in this setting."
+          }
+        }
+      }
+    },
+    "lore": {
+      "description": "The setting's history: colonization, its defining eras, and the central conflict spanning the worlds.",
+      "guidance": "world_name names the star system or region of space. creation_myth is the settlement/colonization story of these worlds (how humanity or others came to be here). historical_eras track the system's history (colonization waves, wars, collapses, booms)."
+    },
+    "layer_design": {
+      "label": "Worlds & Stations",
+      "description": "Define the planets, moons and stations of the setting and the space routes connecting them.",
+      "guidance": "\nLayers here are WORLDS: each layer is one planet, moon, station or habitat with its own map. Set has_multiple_layers to true and define 2-5 worlds (layer_type e.g. planet, moon, station, asteroid). Each layer's description covers its environment, habitability and role in the setting.\n\nConnections are SPACE ROUTES between worlds. Use connection_type values like spaceport, jump_gate or orbital_elevator. count_hint is how many physical departure points exist on each world (typically 1-2 spaceports).\n\nconnection_placement controls where those points sit on each world's map: \"edges\", \"central\", \"random\" or \"scattered\"."
+    },
+    "layer_rules": {
+      "label": "Per-World Rules",
+      "guidance": "\nReview world_rules.custom_rules. Rules that hold across the whole system stay in world_rules; rules specific to one world (e.g. only on the mining moon) move to that layer's rules. Then add new practical rules unique to each world — gravity, atmosphere, law, economy."
+    },
+    "terrain_regions": {
+      "description": "Define each world's regions: continents, zones, dome clusters or station sectors with their environment.",
+      "guidance": "Regions belong to a specific world (set layer_id). On planets they are continents/zones; on stations they are sectors or ring segments. 'terrain' describes the physical environment (rust deserts, methane ice, hydroponic decks), 'climate' the conditions (thin cold air, controlled 21C, radiation storms). Make regions consistent with each world's terrain summary where one exists."
+    },
+    "natural_landmarks": {
+      "description": "Place each world's notable natural features: canyons, ice fields, crater seas, derelicts, anomalies.",
+      "guidance": "\nAuthor landmarks that fit each world's actual environment — canyons, crater seas, ice shelves, storm belts, derelict megastructures, anomalies. Do not invent oceans on an airless moon. For 'environment', pick the closest matching tag for where it should sit on that world's map (e.g. desert_waste for dune seas, snowy_peak for ice ranges, volcanic for lava fields, island for isolated outposts)."
+    },
+    "society_factions": {
+      "description": "Define the powers of the setting: governments, corporations, syndicates, movements — and their settlements per world.",
+      "guidance": "Factions are the setting's powers: colonial governments, megacorporations, syndicates, separatist movements, religious orders. 'settlements' are the colonies, dome cities, stations or outposts a faction holds (set the region and layer_id of the world they are on); significant_landmarks are other installations they control."
+    },
+    "map_generation": {
+      "label": "System Maps",
+      "description": "Generate each world's map: settlements, installations and the routes connecting them, plus the space links between worlds.",
+      "schema_patch": {
+        "modify": {
+          "total_nodes": {"label": "Location Density", "default": 120}
+        }
+      }
+    }
+  },
+  "pinned_values": {
+    "world_rules": {"magic_level": "none"},
+    "layer_design": {"has_multiple_layers": true}
+  },
+  "vocabulary": {
+    "region_noun": "zone",
+    "site_sub_noun": "districts, decks, domes and installations",
+    "connection_looks": {
+      "spaceport": "a spaceport where ships launch for other worlds",
+      "jump_gate": "a jump gate flinging ships across the void",
+      "orbital_elevator": "an orbital elevator climbing from the surface to high orbit",
+      "shuttle_pad": "a shuttle pad serving inter-world hops"
+    }
+  },
+  "map": {"default_total_nodes": 120}
+}

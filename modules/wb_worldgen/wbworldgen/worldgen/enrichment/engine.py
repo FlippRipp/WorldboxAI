@@ -48,14 +48,18 @@ _CONNECTION_LOOK = {
 }
 
 
-def _connection_block(connection: dict) -> str:
+def _connection_block(connection: dict, vocab: dict = None) -> str:
     """Multi-line note describing the inter-layer connection a node represents,
     so the LLM names/describes it as the right kind of passage. Empty when the
-    node is not a layer connection."""
+    node is not a layer connection. A world template's vocabulary may add or
+    override connection looks (e.g. spaceport/jump_gate for sci-fi)."""
     if not connection:
         return ""
     ctype = connection.get("type", "passage")
-    look = _CONNECTION_LOOK.get(ctype, f"a {ctype.replace('_', ' ')}")
+    looks = _CONNECTION_LOOK
+    if isinstance(vocab, dict) and isinstance(vocab.get("connection_looks"), dict):
+        looks = {**_CONNECTION_LOOK, **vocab["connection_looks"]}
+    look = looks.get(ctype, f"a {ctype.replace('_', ' ')}")
     parts = [f"This location is a LAYER CONNECTION ({ctype}): {look}."]
     if connection.get("target_layer_id"):
         parts.append(f"It leads to the '{connection['target_layer_id']}' layer.")
@@ -450,7 +454,7 @@ class EnrichmentEngine:
                 parts.append(f"near: {', '.join(neighbor_names)}")
             connection = ctx.get("connection", {})
             if connection:
-                parts.append(f"NOTE: {_connection_block(connection)}")
+                parts.append(f"NOTE: {_connection_block(connection, ctx.get('vocab'))}")
             lines.append(" | ".join(parts))
         nodes_block = "\n".join(lines)
 
@@ -778,7 +782,7 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
             "You are a world-building AI. Generate a concise, evocative name and a one-line label description for a map node.",
         )
         guidance = ["Do not begin the name with the word \"The\"."]
-        connection_str = _connection_block(context.get("connection", {}))
+        connection_str = _connection_block(context.get("connection", {}), context.get("vocab"))
         if connection_str:
             guidance.append(connection_str)
         system = system + "\n\n" + "\n".join(guidance)
@@ -883,7 +887,7 @@ Output ONLY valid JSON: {{"name": "...", "label_description": "..."}}""",
             )
 
         system = host._get_prompt("enrich_description_system", system_fallback)
-        connection_str = _connection_block(context.get("connection", {}))
+        connection_str = _connection_block(context.get("connection", {}), context.get("vocab"))
         if connection_str:
             system = system + "\n\n" + connection_str
         user_msg = host._get_prompt(
