@@ -178,8 +178,8 @@ def test_designed_root_generator_drives_map_generation(builder):
     assert data.get("generator_id") == "city_roadnet"
 
 
-def test_worlds_without_design_keep_template_and_city_override(builder):
-    # Old world, no designed levels: template default root.
+def test_worlds_without_design_keep_default_and_city_override(builder):
+    # Old world, no designed levels: default overworld root.
     old = {"seed_prompt": "s", "steps": {}}
     assert builder._root_generator_for(old) == "world_map"
     # world_form "city" override still applies without a designed structure.
@@ -219,6 +219,8 @@ def test_designed_levels_ride_into_compiled_world(builder):
 
 
 def test_template_vocab_snapshot_wins_over_designed(builder):
+    # A template-era world's vocabulary snapshot keeps winning so its
+    # play-time prompts never change under it.
     state = _state_with_levels(
         [{"level_type": "world", "generator_id": "world_map"},
          {"level_type": "interior", "generator_id": "interior"}],
@@ -226,6 +228,29 @@ def test_template_vocab_snapshot_wins_over_designed(builder):
     state["template_vocab"] = {"site_sub_noun": "template noun"}
     compiled = builder.compile_world(state)
     assert compiled["template_vocab"]["site_sub_noun"] == "template noun"
+
+
+def test_template_era_world_still_compiles_and_expands(builder):
+    # A world created under the deleted template system: old-shape
+    # hierarchy_design data (no levels), a template id and vocabulary
+    # snapshot in its state. It compiles with the default levels, keeps its
+    # snapshot vocabulary, and expansion still offers interiors.
+    state = {
+        "seed_prompt": "sci-fi colonies", "template_id": "interplanetary_scifi",
+        "template_vocab": {"site_sub_noun": "decks, domes and installations",
+                           "connection_looks": {"spaceport": "a spaceport"}},
+        "steps": {"hierarchy_design": {"data": {
+            "notes": "old shape", "parallel_maps": [], "pregenerate": []}}},
+    }
+    state["steps"]["map_generation"] = {"data": asyncio.run(builder.generate_step(
+        "map_generation", state, state["seed_prompt"], config={"total_nodes": 40}))}
+    assert builder._root_generator_for(state) == "world_map"
+    compiled = builder.compile_world(state)
+    assert [l["level_type"] for l in compiled["hierarchy"]["levels"]] == ["world", "interior"]
+    assert compiled["template_id"] == "interplanetary_scifi"
+    assert compiled["template_vocab"]["site_sub_noun"] == "decks, domes and installations"
+    root = compiled["maps"][compiled["root_map_id"]]
+    assert [l["level_type"] for l in allowed_child_levels(compiled, root)] == ["interior"]
 
 
 # ---------------------------------------------------------------------------
@@ -262,18 +287,20 @@ def test_live_generate_injects_catalog_and_normalizes(builder):
     assert "star_system: Star System Map" not in prompts
 
 
-def test_live_generate_style_note_and_template_levels(builder):
+def test_live_generate_style_note_and_junk_fallback(builder):
     llm = RecordingLLM({"levels": []})
     builder.set_llm_service(llm)
     state = {"seed_prompt": "s", "steps": {
-        "world_form": {"data": {"map_style": "city", "step_directives": []}}},
-        "template_id": "single_city"}
+        "world_form": {"data": {"world_kind": "One neon city.", "map_style": "city",
+                                "step_directives": []}}}}
     data = asyncio.run(builder.generate_step("hierarchy_design", state, "s"))
     prompts = _all_prompt_text(llm)
     assert 'map_style "city"' in prompts
-    assert "template declares these levels" in prompts
-    # Junk levels fall back to the template's declaration, not the default.
-    assert data["levels"][0]["generator_id"] == "city_roadnet"
+    # The world design's world_kind is the per-world genre voice.
+    assert "This world: One neon city." in prompts
+    # Junk levels fall back to the default pair, root aligned to the
+    # player-approved city map style.
+    assert [l["generator_id"] for l in data["levels"]] == ["city_roadnet", "interior"]
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@ from wbworldgen.worldgen import compiler
 from wbworldgen.worldgen import mapspace as _mapspace
 from wbworldgen.worldgen import pipeline as _pipeline
 from wbworldgen.worldgen import start_locations as _start
-from wbworldgen.worldgen import templates as _templates
+from wbworldgen.worldgen.generation.llm import DEFAULT_SYSTEM_FRAMING
 from wbworldgen.worldgen.enrichment import EnrichmentEngine, SiteExpansionEngine, collect_nodes_by_layer
 from wbworldgen.worldgen.enrichment import maps_expand as _maps_expand
 from wbworldgen.worldgen.enrichment import sites as _sites_mod
@@ -166,7 +166,6 @@ class WorldBuilder:
         self._enrichment = EnrichmentEngine(host=self)
         self._sites = SiteExpansionEngine(host=self)
         self._maps_expand = _maps_expand.MapExpansionEngine(host=self)
-        self._templates = _templates.load_templates()
 
     # --- configuration ------------------------------------------------------
 
@@ -196,40 +195,29 @@ class WorldBuilder:
     def _resolve_order(self) -> list[str]:
         return _pipeline.resolve_order(self._steps)
 
-    def get_pipeline(self, template_id: str = None) -> list[dict]:
-        template = self.get_template(template_id)
-        skip = set(template.skip_steps)
-        return [
-            template.apply_to_step(self._steps[sid]).to_frontend()
-            for sid in self._ordered_ids if sid not in skip
-        ]
+    def get_pipeline(self) -> list[dict]:
+        return [self._steps[sid].to_frontend() for sid in self._ordered_ids]
 
     def _build_chain_context(self, world_state: dict, up_to_step_id: str) -> dict:
         return _pipeline.build_chain_context(self._ordered_ids, world_state, up_to_step_id, self._steps)
 
-    # --- world templates ----------------------------------------------------
-
-    def list_templates(self) -> list[dict]:
-        return [
-            {"id": t.id, "label": t.label, "description": t.description}
-            for t in self._templates.values()
-        ]
-
-    def get_template(self, template_id: str = None) -> "_templates.WorldTemplate":
-        return _templates.get_template(self._templates, template_id)
-
-    def template_for(self, world_state: dict) -> "_templates.WorldTemplate":
-        return self.get_template((world_state or {}).get("template_id"))
-
     def ordered_ids_for(self, world_state: dict) -> list[str]:
-        """The effective step order for a world: the registered order minus the
-        world's template skip_steps and the skips its own world_form design
-        decided (abstract map style, AI-skipped optional steps). `resolve_order`
-        itself stays untouched, so `after` chains keep resolving against the
-        full registry."""
-        skip = set(self.template_for(world_state).skip_steps)
-        skip |= _world_form.dynamic_skips(world_state)
+        """The effective step order for a world: the registered order minus
+        the skips its own world_form design decided (abstract map style,
+        AI-skipped optional steps). `resolve_order` itself stays untouched, so
+        `after` chains keep resolving against the full registry."""
+        skip = _world_form.dynamic_skips(world_state)
         return [sid for sid in self._ordered_ids if sid not in skip]
+
+    def system_framing_for(self, world_state: dict) -> str:
+        """The per-world system framing: the neutral default plus the world's
+        own design (world_form's world_kind) as the genre voice. Worlds
+        without a design (old worlds, the world_form step itself) keep the
+        historical default framing byte-identical."""
+        kind = _world_form.world_kind(world_state)
+        if kind:
+            return f"{DEFAULT_SYSTEM_FRAMING} This world: {kind}"
+        return DEFAULT_SYSTEM_FRAMING
 
     # --- generation ---------------------------------------------------------
 
@@ -249,16 +237,8 @@ class WorldBuilder:
             await self._hook_registry.dispatch_step(step_id, data, world_state, user_prompt)
             return data
 
-        template = self.template_for(world_state)
-
         uses = getattr(step, "uses", "llm")
         if step_id == "map_generation" or uses == USES_MAP:
-            if step_id == "map_generation" and config is None:
-                # No explicit node count: fall back to the template's default
-                # scale (a city is denser but smaller than an overworld).
-                default_nodes = template.default_total_nodes()
-                if default_nodes:
-                    config = {"total_nodes": default_nodes}
             root_gen = self._root_generator_for(world_state)
             # Delaunay + road pathfinding are CPU-bound; keep the event loop free.
             loop = asyncio.get_running_loop()
@@ -267,19 +247,12 @@ class WorldBuilder:
 
         if self._llm_service and self._llm_service.mode != "mock":
             context = self._build_chain_context(world_state, step_id)
-            effective = template.apply_to_step(step)
             data = await self._llm_gen.generate(
-                effective, context, user_prompt, user_note,
-                system_framing=template.resolved_system_framing(),
+                step, context, user_prompt, user_note,
+                system_framing=self.system_framing_for(world_state),
                 coverage_directive=_world_form.coverage_directive(world_state, step_id))
         else:
             data = self._mock_gen.generate(step, world_state, user_prompt, user_note)
-
-        pinned = template.pinned_values.get(step_id)
-        if isinstance(pinned, dict) and isinstance(data, dict):
-            # Contract keys hidden from the form still land in the output
-            # (e.g. sci-fi pins magic_level "none").
-            data.update(pinned)
 
         await self._hook_registry.dispatch_step(step_id, data, world_state, user_prompt)
         return data
@@ -300,8 +273,6 @@ class WorldBuilder:
         if not step:
             raise ValueError(f"Unknown step: {step_id}")
         user_prompt = seed_with_scenario(world_state, user_prompt)
-        template = self.template_for(world_state)
-        step = template.apply_to_step(step)
         field_schema = (step.schema or {}).get(field)
         if not isinstance(field_schema, dict):
             raise ValueError(f"Unknown field '{field}' on step '{step_id}'")
@@ -311,7 +282,7 @@ class WorldBuilder:
 
         if self._llm_service and self._llm_service.mode != "mock":
             context = self._build_chain_context(world_state, step_id)
-            framing = template.resolved_system_framing()
+            framing = self.system_framing_for(world_state)
             directive = _world_form.coverage_directive(world_state, step_id)
             if is_structured:
                 return await self._llm_gen.generate_structured_item(
@@ -370,21 +341,23 @@ class WorldBuilder:
         """The generator that draws a world's root map. The world's own
         designed structure (hierarchy_design levels) is authoritative when
         present; worlds without one (old worlds, junk design output) fall
-        back to the world_form "city" override over the template's declared
-        root, exactly as before the structure step existed."""
+        back to the world_form "city" override over the default overworld
+        generator, exactly as before the structure step existed."""
         designed = _hierarchy_design.designed_levels(world_state)
         if designed:
             return designed[0].get("generator_id") or "world_map"
-        levels = self.template_for(world_state).resolved_levels() or [{}]
-        return (_world_form.map_generator_override(world_state)
-                or levels[0].get("generator_id") or "world_map")
+        return _world_form.map_generator_override(world_state) or "world_map"
 
     def resolved_levels_for(self, world_state: dict) -> list:
         """A world's hierarchy levels: its own AI-designed structure when
-        present, else the template's declaration (default [world, interior])
-        so old worlds behave exactly as before."""
-        return (_hierarchy_design.designed_levels(world_state)
-                or self.template_for(world_state).resolved_levels())
+        present, else the default [world, interior] pair so old worlds
+        (including template-era worlds) behave exactly as the default
+        template did."""
+        designed = _hierarchy_design.designed_levels(world_state)
+        if designed:
+            return designed
+        from wbworldgen.worldgen.migrate import DEFAULT_LEVELS
+        return [dict(l) for l in DEFAULT_LEVELS]
 
     def compile_world(self, world_state: dict) -> dict:
         # The world's hierarchy levels (free text) ride into the compiled

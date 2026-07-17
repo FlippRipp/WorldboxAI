@@ -9,9 +9,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-#: Historical default framing; world templates may swap it (see
-#: wbworldgen.worldgen.templates.DEFAULT_SYSTEM_FRAMING, kept byte-identical).
-_DEFAULT_SYSTEM_FRAMING = "You are a world building AI for a tabletop roleplaying game."
+#: The neutral system-prompt framing; per-world genre voice is appended by
+#: the facade from the world design's world_kind (system_framing param).
+DEFAULT_SYSTEM_FRAMING = "You are a world building AI for a tabletop roleplaying game."
 
 
 async def json_retry_completion(
@@ -101,7 +101,7 @@ class LLMStepGenerator:
                 narrative = " Narrative style: " + ns
 
         system = (
-            f"{system_framing or _DEFAULT_SYSTEM_FRAMING}\n"
+            f"{system_framing or DEFAULT_SYSTEM_FRAMING}\n"
             f"Generate a structured {step.label} for a world based on the user's prompt.\n"
             f"Output only valid JSON matching the requested schema.{narrative}"
         )
@@ -160,7 +160,7 @@ and values appropriate to the world seed prompt above. Never output the schema's
         current = items[index] if 0 <= index < len(items) else ""
 
         system = (
-            f"{system_framing or _DEFAULT_SYSTEM_FRAMING}\n"
+            f"{system_framing or DEFAULT_SYSTEM_FRAMING}\n"
             f"You regenerate ONE entry of the '{field_label}' list for the world's {step.label}.\n"
             'Output only a JSON object of the form {"item": "<the single new entry>"}.'
         )
@@ -229,7 +229,7 @@ Respond with a single new '{field_label}' entry as JSON: {{"item": "..."}}"""
             sub_schema = item_schema.get(subfield, {})
             sub_label = sub_schema.get("label", subfield) if isinstance(sub_schema, dict) else subfield
             system = (
-                f"{system_framing or _DEFAULT_SYSTEM_FRAMING}\n"
+                f"{system_framing or DEFAULT_SYSTEM_FRAMING}\n"
                 f"You regenerate ONLY the '{sub_label}' field of one entry in the "
                 f"'{field_label}' list for the world's {step.label}.\n"
                 'Output only a JSON object of the form {"item": <the single new value>}.'
@@ -243,7 +243,7 @@ This field follows the schema: {json.dumps(sub_schema, indent=2) if isinstance(s
 Respond with the new value as JSON: {{"item": <value>}}"""
         else:
             system = (
-                f"{system_framing or _DEFAULT_SYSTEM_FRAMING}\n"
+                f"{system_framing or DEFAULT_SYSTEM_FRAMING}\n"
                 f"You regenerate ONE entry of the '{field_label}' list for the world's {step.label}.\n"
                 'Output only a JSON object of the form {"item": {<the single new entry>}}.'
             )

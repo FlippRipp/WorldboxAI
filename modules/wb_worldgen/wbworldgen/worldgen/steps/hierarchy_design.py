@@ -10,10 +10,10 @@ play-time expansion (interiors today; wider scales arrive with the unified
 generation rework — see docs/design/ai_world_structure_plan.md).
 
 ``designed_levels``/``contribute_to_compiled`` are the read seams: the facade
-resolves a world's levels through the former (falling back to the template
-declaration for old worlds), and the compiler picks up the AI-authored
-vocabulary through the latter, filling the same ``template_vocab`` seam the
-template snapshot uses.
+resolves a world's levels through the former (falling back to the default
+[world, interior] pair for old worlds), and the compiler picks up the
+AI-authored vocabulary through the latter, filling the same
+``template_vocab`` seam template-era worlds' snapshots still use.
 """
 
 import copy
@@ -83,7 +83,7 @@ def _step_data(world_state: dict) -> dict:
 
 def designed_levels(world_state: dict) -> list:
     """The world's own AI-authored hierarchy levels ([] when absent — old
-    worlds and pre-design step data keep their template/default levels)."""
+    worlds and pre-design step data keep the default levels)."""
     levels = _step_data(world_state).get("levels")
     if not isinstance(levels, list):
         return []
@@ -109,8 +109,8 @@ def normalize_hierarchy_design(data, implemented_generator_ids,
     generator ids from the implemented registry only (unknown ids land on the
     abstract fallback), an interior level guaranteed at the bottom, and a
     root generator aligned with the world design's "city" map style. Worst
-    case (junk output) degrades to ``fallback_levels`` (a template's declared
-    levels) or the default [world, interior] pair."""
+    case (junk output) degrades to ``fallback_levels`` (caller-provided) or
+    the default [world, interior] pair."""
     if not isinstance(data, dict):
         data = {}
     implemented = set(implemented_generator_ids or [])
@@ -144,14 +144,14 @@ def normalize_hierarchy_design(data, implemented_generator_ids,
         else:
             from wbworldgen.worldgen.migrate import DEFAULT_LEVELS
             levels = [dict(l) for l in DEFAULT_LEVELS]
-    else:
-        if all(l["generator_id"] != "interior" for l in levels):
-            levels = levels[:MAX_LEVELS - 1] + [dict(_INTERIOR_LEVEL)]
-        if (map_style == "city" and "city_roadnet" in implemented
-                and levels[0]["generator_id"] != "city_roadnet"):
-            # The (player-reviewed) world design declared the whole world one
-            # city — the root map is a street network, whatever the LLM said.
-            levels[0]["generator_id"] = "city_roadnet"
+    if all(l.get("generator_id") != "interior" for l in levels):
+        levels = levels[:MAX_LEVELS - 1] + [dict(_INTERIOR_LEVEL)]
+    if (map_style == "city" and "city_roadnet" in implemented
+            and levels[0].get("generator_id") != "city_roadnet"):
+        # The (player-reviewed) world design declared the whole world one
+        # city — the root map is a street network, whatever the LLM said
+        # (and whatever fallback the junk case landed on).
+        levels[0]["generator_id"] = "city_roadnet"
 
     parallel_maps = []
     for raw in data.get("parallel_maps") or []:
@@ -251,7 +251,6 @@ class HierarchyDesignStep(Step):
 
     async def generate(self, ctx) -> dict:
         services = ctx.services
-        template = services.template_for(ctx.world_state)
         from wbworldgen.worldgen.generation.registry import list_generators
         implemented = [g for g in list_generators() if g["implemented"]]
         implemented_ids = [g["id"] for g in implemented]
@@ -264,7 +263,7 @@ class HierarchyDesignStep(Step):
             from wbworldgen.worldgen.fixtures.mock_data import mock_hierarchy_design
             return normalize_hierarchy_design(
                 mock_hierarchy_design(ctx.user_prompt, ctx.user_note),
-                implemented_ids, map_style, fallback_levels=template.levels)
+                implemented_ids, map_style)
 
         catalog = "\n".join(
             f"- {g['id']}: {g['label']} — {g['description']}" for g in implemented)
@@ -276,32 +275,22 @@ class HierarchyDesignStep(Step):
                 + (f" — the FIRST level's generator_id must be {aligned}." if aligned
                    else " — no procedural terrain; give the FIRST level the generator that "
                         "best fits its scale."))
-        template_note = ""
-        if template.levels:
-            declared = "\n".join(
-                f"- {l.get('level_type')}: {l.get('guidance', l.get('label', ''))} "
-                f"[generator: {l.get('generator_id', 'interior')}]"
-                for l in template.levels)
-            template_note = (
-                f"\n\nThis world's template declares these levels — keep them unless the "
-                f"premise clearly demands otherwise:\n{declared}")
-        effective = copy.copy(template.apply_to_step(self))
+        effective = copy.copy(self)
         effective.guidance = (
             f"{effective.guidance}\n\nMap generator catalog (generator_id must be one of "
-            f"these ids):\n{catalog}{style_note}{template_note}"
+            f"these ids):\n{catalog}{style_note}"
         )
         context = services._build_chain_context(ctx.world_state, self.id)
         data = await services._llm_gen.generate(
             effective, context, ctx.user_prompt, ctx.user_note,
-            system_framing=template.resolved_system_framing(),
+            system_framing=services.system_framing_for(ctx.world_state),
             coverage_directive=_world_form.coverage_directive(ctx.world_state, self.id))
-        return normalize_hierarchy_design(data, implemented_ids, map_style,
-                                          fallback_levels=template.levels)
+        return normalize_hierarchy_design(data, implemented_ids, map_style)
 
     def contribute_to_compiled(self, steps_data: dict, compiled: dict):
-        # AI-authored world vocabulary fills the same seam the template
-        # snapshot uses; an explicit template snapshot wins until templates
-        # are removed (plan M2).
+        # AI-authored world vocabulary fills the same seam template-era
+        # worlds' snapshots use; an existing snapshot (old worlds) wins so
+        # their prompts never change under them.
         if compiled.get("template_vocab"):
             return
         data = (steps_data.get("hierarchy_design") or {}).get("data")

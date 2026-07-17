@@ -132,7 +132,7 @@ function WorldPromptField({ value, onChange, disabled, scenarioId }) {
   );
 }
 
-// The pre-generation form (prompt, template, scenario, skip-review) mirrored
+// The pre-generation form (prompt, scenario, skip-review) mirrored
 // to localStorage on every change: Android kills the backgrounded PWA, and a
 // prompt that was typed (or AI-written) but not yet generated exists nowhere
 // else. Cleared when the world is saved.
@@ -156,22 +156,12 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
   const [scenarios, setScenarios] = useState([]);
   const [scenarioId, setScenarioId] = useState(() => readSavedForm().scenarioId || null);
   const [started, setStarted] = useState(false);
-  const [templates, setTemplates] = useState([]);
-  const [templateId, setTemplateId] = useState(() => readSavedForm().templateId || 'ai_default');
   // The effective (post-skip) step order for the running session: the world's
   // own World Design step can turn steps off, which the statically-fetched
   // pipeline can't know. null until the server has told us.
   const [effectiveSteps, setEffectiveSteps] = useState(null);
 
   useEffect(() => {
-    api.getWorldTemplates()
-      .then((data) => {
-        const list = data.templates || [];
-        setTemplates(list);
-        // A template restored from localStorage may no longer exist.
-        setTemplateId((cur) => (list.length && !list.some((t) => t.id === cur) ? 'ai_default' : cur));
-      })
-      .catch(() => {});
     api.listScenarios()
       .then((data) => {
         const list = data.scenarios || [];
@@ -184,16 +174,15 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
   // Mirror the form so a relaunch before generation starts loses nothing.
   useEffect(() => {
     try {
-      localStorage.setItem(FORM_KEY, JSON.stringify({ seedPrompt, templateId, scenarioId, skipReview }));
+      localStorage.setItem(FORM_KEY, JSON.stringify({ seedPrompt, scenarioId, skipReview }));
     } catch { /* storage unavailable — the server draft still covers started runs */ }
-  }, [seedPrompt, templateId, scenarioId, skipReview]);
+  }, [seedPrompt, scenarioId, skipReview]);
 
-  // The pipeline (steps + schemas) depends on the chosen template.
   useEffect(() => {
-    api.getWorldPipeline(templateId)
+    api.getWorldPipeline()
       .then((data) => setPipeline(data.pipeline || []))
       .catch(() => {});
-  }, [templateId]);
+  }, []);
 
   useEffect(() => {
     // Check for an existing draft (or a generation still running server-side)
@@ -209,9 +198,6 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
         if (data.effective_steps) setEffectiveSteps(data.effective_steps);
         setStarted(true);
         setSkipReview(!!st.skip_review);
-        if (st.template_id) {
-          setTemplateId(st.template_id);
-        }
         if (st.steps?.lore?.data?.world_name) {
           setSeedPrompt(st.seed_prompt || '');
         }
@@ -272,7 +258,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
     if (!seedPrompt.trim()) return;
     setLoading(true);
     try {
-      const result = await api.generateWorld(seedPrompt.trim(), skipReview, templateId, scenarioId);
+      const result = await api.generateWorld(seedPrompt.trim(), skipReview, scenarioId);
       setWorldState(result.state);
       if (result.effective_steps) setEffectiveSteps(result.effective_steps);
       setStarted(true);
@@ -433,32 +419,6 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
                 modern city.
               </p>
             </div>
-
-            {templates.length > 1 && (
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-2">World Type</label>
-                <div className="grid gap-2">
-                  {templates.map((t) => (
-                    <button
-                      key={t.id}
-                      type="button"
-                      onClick={() => setTemplateId(t.id)}
-                      disabled={loading}
-                      className={`text-left px-3 py-2 rounded-lg border transition-colors ${
-                        templateId === t.id
-                          ? 'border-purple-500 bg-purple-900/30'
-                          : 'border-gray-700 bg-gray-800/40 hover:border-gray-500'
-                      }`}
-                    >
-                      <div className="text-sm font-medium text-gray-200">{t.label || t.id}</div>
-                      {t.description && (
-                        <div className="text-xs text-gray-500 mt-0.5">{t.description}</div>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
 
             {scenarios.length > 0 && (
               <div>

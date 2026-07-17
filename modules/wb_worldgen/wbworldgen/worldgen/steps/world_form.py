@@ -72,6 +72,13 @@ def dynamic_skips(world_state: dict) -> set:
     return skips
 
 
+def world_kind(world_state: dict) -> str:
+    """The design's one-line reading of what this world is ("" when absent).
+    The facade appends it to the system framing, giving every later
+    generation call a per-world genre voice."""
+    return str(_step_data(world_state).get("world_kind") or "").strip()
+
+
 def map_generator_override(world_state: dict) -> str:
     """Generator id the world's own design imposes on the root map ("" when
     the template's level default should stand). A "city" map style routes
@@ -158,27 +165,26 @@ class WorldFormStep(Step):
         },
     }
 
-    def _catalog(self, services, world_state, template) -> tuple[str, list]:
-        """Readable catalog of the steps this design pass governs, in the
-        template-effective view, plus their ids for output normalization."""
+    def _catalog(self, services, world_state) -> tuple[str, list]:
+        """Readable catalog of the steps this design pass governs, plus their
+        ids for output normalization."""
         lines, ids = [], []
         for sid in services.ordered_ids_for(world_state):
             if sid in _CATALOG_EXCLUDED:
                 continue
-            effective = template.apply_to_step(services._steps[sid])
+            step = services._steps[sid]
             note = ""
             if sid == "terrain_generation":
                 note = " [runs only when map_style is terrain]"
             elif sid in AI_SKIPPABLE:
                 note = " [skippable]"
-            lines.append(f"- {sid}: {effective.label} — {effective.description}{note}")
+            lines.append(f"- {sid}: {step.label} — {step.description}{note}")
             ids.append(sid)
         return "\n".join(lines), ids
 
     async def generate(self, ctx) -> dict:
         services = ctx.services
-        template = services.template_for(ctx.world_state)
-        catalog, known_ids = self._catalog(services, ctx.world_state, template)
+        catalog, known_ids = self._catalog(services, ctx.world_state)
 
         # Custom-generate steps bypass the facade's mock branch, so handle
         # mock mode here (precedent: terrain_generation does its own work).
@@ -187,14 +193,12 @@ class WorldFormStep(Step):
             from wbworldgen.worldgen.fixtures.mock_data import mock_world_form
             return normalize_world_form(mock_world_form(ctx.user_prompt, ctx.user_note), known_ids)
 
-        effective = copy.copy(template.apply_to_step(self))
+        effective = copy.copy(self)
         effective.guidance = (
             f"{effective.guidance}\n\nStep catalog (write one directive per step, "
             f"keyed by the id before the colon):\n{catalog}"
         )
-        data = await services._llm_gen.generate(
-            effective, {}, ctx.user_prompt, ctx.user_note,
-            system_framing=template.resolved_system_framing())
+        data = await services._llm_gen.generate(effective, {}, ctx.user_prompt, ctx.user_note)
         return normalize_world_form(data, known_ids)
 
     def contribute_to_compiled(self, steps_data: dict, compiled: dict):

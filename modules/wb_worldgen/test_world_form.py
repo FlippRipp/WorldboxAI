@@ -103,16 +103,17 @@ def test_normalize_world_form_clamps_junk():
 
 
 # ---------------------------------------------------------------------------
-# Effective order merges template + dynamic skips
+# Effective order applies the design's dynamic skips
 # ---------------------------------------------------------------------------
 
-def test_ordered_ids_merge_template_and_dynamic_skips(builder):
+def test_ordered_ids_apply_dynamic_skips(builder):
     plain = builder.ordered_ids_for({})
     assert plain[0] == "world_form"
     assert "terrain_generation" in plain
 
     state = _state_with_form({"map_style": "abstract", "skip_steps": ["natural_landmarks"]})
-    state["template_id"] = "single_city"  # template already skips terrain
+    # A leftover template_id from a template-era world changes nothing.
+    state["template_id"] = "single_city"
     effective = builder.ordered_ids_for(state)
     assert "terrain_generation" not in effective
     assert "natural_landmarks" not in effective
@@ -229,11 +230,11 @@ def test_city_map_style_routes_map_generation_to_roadnet(builder):
         return {"nodes": [], "edges": []}
 
     builder._map_gen.generate = fake_map_generate
-    # No template (ai_default-style world): the design's city style wins.
+    # No designed structure: the design's city style wins.
     state = _state_with_form({"map_style": "city"})
     asyncio.run(builder.generate_step("map_generation", state, "seed"))
     assert captured["generator_id"] == "city_roadnet"
-    # Terrain style leaves the template default in charge.
+    # Terrain style leaves the default overworld generator in charge.
     state = _state_with_form({"map_style": "terrain"})
     asyncio.run(builder.generate_step("map_generation", state, "seed"))
     assert captured["generator_id"] == "world_map"

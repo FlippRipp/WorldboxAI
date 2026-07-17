@@ -246,8 +246,10 @@ def compile_world(world_state: dict, steps: Optional[dict] = None) -> dict:
     if isinstance(sites, dict) and sites:
         compiled["site_maps"] = sites
 
-    # World template identity + vocabulary snapshot (additive; absent for
-    # pre-template worlds, which behave as the default fantasy template).
+    # Template-era identity + vocabulary snapshot (legacy: the template
+    # system is gone, but worlds created under one keep their snapshot so
+    # play-time prompts never change under them; hierarchy_design's
+    # contribution below fills the same seam for AI-designed worlds).
     if world_state.get("template_id"):
         compiled["template_id"] = world_state["template_id"]
     if isinstance(world_state.get("template_vocab"), dict) and world_state["template_vocab"]:

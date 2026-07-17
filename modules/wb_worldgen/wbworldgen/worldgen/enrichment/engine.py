@@ -51,8 +51,9 @@ _CONNECTION_LOOK = {
 def _connection_block(connection: dict, vocab: dict = None) -> str:
     """Multi-line note describing the inter-layer connection a node represents,
     so the LLM names/describes it as the right kind of passage. Empty when the
-    node is not a layer connection. A world template's vocabulary may add or
-    override connection looks (e.g. spaceport/jump_gate for sci-fi)."""
+    node is not a layer connection. The world's vocabulary (AI-authored, or a
+    template-era snapshot) may add or override connection looks (e.g.
+    spaceport/jump_gate for sci-fi)."""
     if not connection:
         return ""
     ctype = connection.get("type", "passage")

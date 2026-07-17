@@ -107,12 +107,11 @@ class WorldGenerateRequest(BaseModel):
     #: ``scenario_id`` wins when both are given).
     scenario: str = ""
     skip_review: bool = False
-    template_id: Optional[str] = None
 
 
 def _ordered_ids_for(state: dict) -> list[str]:
-    """Effective step order for a generation session (template + world_form
-    skip filters); tolerates fakes/legacy builders without template support."""
+    """Effective step order for a generation session (world_form skip
+    filters); tolerates fakes/legacy builders without the resolver."""
     resolver = getattr(world_builder, "ordered_ids_for", None)
     if callable(resolver):
         return resolver(state)
@@ -134,19 +133,14 @@ def _prune_dynamic_skips(state: dict):
 def _state_response(state: dict, **extra) -> dict:
     """A session-state payload plus the effective (post-skip) step order the
     client should render. Recomputed per response, never persisted — the
-    wizard fetches the full pipeline once per template, so this is how it
-    learns which steps the world's own design turned off."""
+    wizard fetches the full pipeline once, so this is how it learns which
+    steps the world's own design turned off."""
     return {"state": state, "effective_steps": _ordered_ids_for(state), **extra}
 
 
-@router.get("/api/world/templates")
-async def get_world_templates():
-    return {"templates": world_builder.list_templates()}
-
-
 @router.get("/api/world/pipeline")
-async def get_world_pipeline(template_id: Optional[str] = None):
-    return {"pipeline": world_builder.get_pipeline(template_id)}
+async def get_world_pipeline():
+    return {"pipeline": world_builder.get_pipeline()}
 
 
 async def _run_one_shot_generation(state: dict, session_id: str):
@@ -234,12 +228,6 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
             state["scenario"] = grounding
     elif request.scenario.strip():
         state["scenario"] = request.scenario.strip()
-    if request.template_id:
-        template = world_builder.get_template(request.template_id)
-        state["template_id"] = template.id
-        if template.vocabulary:
-            # Snapshot: a later template edit never changes this world.
-            state["template_vocab"] = template.vocabulary
     # Persisted so a relaunched client (Android kills the backgrounded PWA)
     # can restore the right screen and keep polling for progress. While a
     # generation is in flight, state["_generating"] names the running step

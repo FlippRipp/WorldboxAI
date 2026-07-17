@@ -1,10 +1,11 @@
 """Labeled map-generator registry.
 
 Each generator produces one map of the hierarchy in the standard per-map
-shape ({nodes, edges, config, ...}). Templates and the expansion engine pick
-generators by id via a level's ``generator_id``; unknown or unimplemented
-ids fail loudly so a template can never silently select a generator that
-does not exist.
+shape ({nodes, edges, config, ...}). The world's designed structure
+(hierarchy_design levels) and the expansion engine pick generators by id via
+a level's ``generator_id``; unknown or unimplemented ids fail loudly so a
+caller can never silently select a generator that does not exist. The
+descriptions double as the selection catalog the structure-design LLM reads.
 
 Shipped now: ``world_map`` (the procedural overworld generator),
 ``city_roadnet`` (planar street-network city) and ``interior``
