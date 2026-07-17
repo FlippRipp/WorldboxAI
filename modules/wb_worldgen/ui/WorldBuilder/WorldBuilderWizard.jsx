@@ -130,7 +130,11 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
   const [scenarioId, setScenarioId] = useState(null);
   const [started, setStarted] = useState(false);
   const [templates, setTemplates] = useState([]);
-  const [templateId, setTemplateId] = useState('overworld_fantasy');
+  const [templateId, setTemplateId] = useState('ai_default');
+  // The effective (post-skip) step order for the running session: the world's
+  // own World Design step can turn steps off, which the statically-fetched
+  // pipeline can't know. null until the server has told us.
+  const [effectiveSteps, setEffectiveSteps] = useState(null);
 
   useEffect(() => {
     api.getWorldTemplates()
@@ -157,6 +161,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
       const st = data.state;
       if (st?.steps && (Object.keys(st.steps).length > 0 || st._generating)) {
         setWorldState(st);
+        if (data.effective_steps) setEffectiveSteps(data.effective_steps);
         setStarted(true);
         setSkipReview(!!st.skip_review);
         if (st.template_id) {
@@ -188,6 +193,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
         const data = await api.getWorldState();
         if (!alive || !data.state?.steps) return;
         setWorldState(data.state);
+        if (data.effective_steps) setEffectiveSteps(data.effective_steps);
         // Only move the step pointer once the run has finished — mid-flight
         // current_step still names the previous step.
         if (!data.state._generating) {
@@ -205,11 +211,13 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
     try {
       const result = await api.generateWorld(seedPrompt.trim(), skipReview, templateId, scenarioId);
       setWorldState(result.state);
+      if (result.effective_steps) setEffectiveSteps(result.effective_steps);
       setStarted(true);
 
       if (skipReview) {
         api.getWorldState().then((data) => {
           setWorldState(data.state);
+          if (data.effective_steps) setEffectiveSteps(data.effective_steps);
         });
       } else {
         setCurrentStepId(result.current_step);
@@ -228,6 +236,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
     try {
       const result = await api.generateWorldStep(stepId, note, editedData);
       setWorldState(result.state);
+      if (result.effective_steps) setEffectiveSteps(result.effective_steps);
       if (result.state.current_step) {
         setCurrentStepId(result.state.current_step);
       }
@@ -243,6 +252,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
     try {
       const result = await api.approveWorldStep(stepId, editedData);
       setWorldState(result.state);
+      if (result.effective_steps) setEffectiveSteps(result.effective_steps);
 
       if (result.complete) {
         setCurrentStepId(null);
@@ -273,6 +283,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
     try {
       const result = await api.generateWorldStep(stepId, note);
       setWorldState(result.state);
+      if (result.effective_steps) setEffectiveSteps(result.effective_steps);
       if (result.state.current_step) {
         setCurrentStepId(result.state.current_step);
       }
@@ -305,6 +316,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
     try {
       const result = await api.approveWorldStep(stepId, editedData);
       setWorldState(result.state);
+      if (result.effective_steps) setEffectiveSteps(result.effective_steps);
 
       if (result.current_step) {
         setCurrentStepId(result.current_step);
@@ -352,7 +364,9 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
             <div>
               <h2 className="text-2xl font-bold text-gray-100 mb-2">World Generation</h2>
               <p className="text-gray-400 text-sm">
-                Describe the world you want to create. The AI will generate rules, lore, and regions based on your prompt.
+                Describe the world you want to create — any genre, any scale. The AI reads your
+                prompt and shapes the generation to fit, from a fantasy overworld to a single
+                modern city.
               </p>
             </div>
 
@@ -462,7 +476,13 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
   }
 
   const currentStep = pipeline.find((s) => s.id === currentStepId);
-  const approvedSteps = pipeline.filter((s) => worldState?.steps?.[s.id]?.approved);
+  // Steps the world's own design turned off (template-skipped steps never
+  // reach `pipeline` in the first place). Until the server has reported an
+  // effective order, everything counts as active.
+  const effectiveIds = effectiveSteps ?? pipeline.map((s) => s.id);
+  const skippedIds = new Set(pipeline.filter((s) => !effectiveIds.includes(s.id)).map((s) => s.id));
+  const visiblePipeline = pipeline.filter((s) => !skippedIds.has(s.id));
+  const approvedSteps = visiblePipeline.filter((s) => worldState?.steps?.[s.id]?.approved);
   const complete = worldState?.complete;
 
   return (
@@ -480,33 +500,46 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
           </button>
           <div className="text-sm text-gray-400">
             {!complete && (
-              <span>Step {approvedSteps.length + 1} of {pipeline.length}</span>
+              <span>Step {approvedSteps.length + 1} of {visiblePipeline.length}</span>
             )}
           </div>
         </div>
 
-        {approvedSteps.map((step) => (
-          <StepCard
-            key={step.id}
-            step={step}
-            state={worldState?.steps?.[step.id]}
-            onApprove={(data) => handleReApprove(step.id, data)}
-            onReroll={(data) => handleReroll(step.id, data)}
-            onAddNote={(note) => handleAddNote(step.id, note)}
-            onRerollItem={handleRerollItem}
-            onEnrichCommit={(stepId) => handleEnrichCommit(stepId)}
-            loading={loading || serverBusy}
-            worldId={worldState?._draft_id}
-            worldState={worldState}
-          />
-        ))}
+        {pipeline
+          .filter((step) => skippedIds.has(step.id) || worldState?.steps?.[step.id]?.approved)
+          .map((step) => (
+            skippedIds.has(step.id) ? (
+              <div
+                key={step.id}
+                title="Edit the World Design step to bring this step back"
+                className="bg-gray-800/30 border border-gray-800 rounded-xl px-6 py-3 flex items-center justify-between"
+              >
+                <span className="text-sm text-gray-500">{step.label}</span>
+                <span className="text-xs text-gray-600">Skipped by world design</span>
+              </div>
+            ) : (
+              <StepCard
+                key={step.id}
+                step={step}
+                state={worldState?.steps?.[step.id]}
+                onApprove={(data) => handleReApprove(step.id, data)}
+                onReroll={(data) => handleReroll(step.id, data)}
+                onAddNote={(note) => handleAddNote(step.id, note)}
+                onRerollItem={handleRerollItem}
+                onEnrichCommit={(stepId) => handleEnrichCommit(stepId)}
+                loading={loading || serverBusy}
+                worldId={worldState?._draft_id}
+                worldState={worldState}
+              />
+            )
+          ))}
 
         {complete ? (
           <div className="bg-gray-800/80 border border-purple-700 rounded-xl p-6 text-center space-y-4">
             <div className="text-4xl">🌍</div>
             <h3 className="text-2xl font-bold text-purple-300">World Complete</h3>
             <p className="text-gray-400">
-              Your world has been generated across {pipeline.length} stages. Review the details above, then save your world.
+              Your world has been generated across {visiblePipeline.length} stages. Review the details above, then save your world.
             </p>
             <button
               onClick={handleCompile}
