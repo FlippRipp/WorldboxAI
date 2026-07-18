@@ -103,6 +103,11 @@ const INTERLAYER_TYPES = new Set([
 // empty space around the map.
 const MAX_ZOOM = 40;
 
+// Screen-pixel multiplier for node markers and their labels: 1 reproduces the
+// pre-responsive desktop sizing (an importance-1 node = 3px radius, 8px label
+// text); 2 doubles everything for readability, especially on touch screens.
+const UI_SCALE = 2;
+
 export default function MapRenderer({ nodes, edges, regions, config, layers, connections, activeLayerId, onLayerChange, mapsById, activeMapId, onMapChange, rootMapId, playerMapId, fogOfWar, navigateToLayer, focusNodeId, worldId, roads, playerTravel }) {
   const [hoveredNode, setHoveredNode] = useState(null);
   const [hoveredRegion, setHoveredRegion] = useState(null);
@@ -119,6 +124,11 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
   // box the embedding view gives it (popup, builder step, fullscreen), and the
   // viewBox is derived from this so gesture math always matches what's visible.
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 });
+  // Node-info details visibility: collapsed by default in small views (where
+  // the description would crowd out the map), expanded when there's room.
+  // A manual toggle overrides the size-based default until unmounted.
+  const [infoExpandedOverride, setInfoExpandedOverride] = useState(null);
+  const infoExpanded = infoExpandedOverride ?? containerSize.h >= 300;
 
   // Normalize the map inputs: new-style callers pass `mapsById` (v2 MapRecords
   // keyed by map_id) + v2 `connections`; legacy callers pass `layers` (array of
@@ -728,10 +738,12 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
     return () => document.removeEventListener('fullscreenchange', onChange);
   }, []);
 
-  // Keep on-screen node size constant as the user zooms: the SVG scales the
-  // whole viewBox, so divide node radii/strokes by the current zoom factor
-  // (viewBox.w / defaultVB.w is 1 at default zoom, <1 when zoomed in).
-  const nodeScale = viewBox.w / defaultVB.w;
+  // Keep on-screen node size constant as the user zooms and across container
+  // sizes: a length of L*nodeScale viewBox units renders as L*UI_SCALE CSS
+  // pixels regardless of zoom level or how big the map is on screen (the old
+  // divisor was the default viewBox width, which made markers and labels
+  // shrink with the container — near-unreadable in the mobile popup).
+  const nodeScale = (viewBox.w / (containerSize.w || mapLayout.viewW)) * UI_SCALE;
 
   // Attach wheel listener with passive:false so preventDefault blocks page scroll
   useEffect(() => {
@@ -1245,7 +1257,13 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
           )}
           {selectedNode && (
             <>
-              <div className="flex items-center gap-2">
+              {/* Header row doubles as the expand/collapse toggle so the
+                  description doesn't crowd out the map in small views. */}
+              <button
+                type="button"
+                onClick={() => setInfoExpandedOverride(!infoExpanded)}
+                className="w-full flex items-center gap-2 text-left"
+              >
                 <span
                   className={`inline-block flex-shrink-0 ${isConnectionNode(selectedNode) ? 'rotate-45 w-2.5 h-2.5' : 'rounded-full w-2.5 h-2.5'}`}
                   style={{ backgroundColor: isConnectionNode(selectedNode) ? (CONNECTION_COLORS[selectedNode.type] || '#8b5cf6') : (TYPE_COLORS[selectedNode.type] || '#6b7280') }}
@@ -1264,14 +1282,17 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
                 <span className="text-xs text-purple-400 ml-auto">
                   Importance: {selectedNode.importance}/10
                 </span>
-              </div>
-              {selectedNode.description && (
+                <span className="text-gray-500 text-xs flex-shrink-0">
+                  {infoExpanded ? '▾' : '▸'}
+                </span>
+              </button>
+              {infoExpanded && selectedNode.description && (
                 <p className="text-xs text-gray-400 leading-relaxed">
                   {renderDescriptionWithLinks(selectedNode.description)}
                 </p>
               )}
               {/* Connection link info */}
-              {isConnectionNode(selectedNode) && (() => {
+              {infoExpanded && isConnectionNode(selectedNode) && (() => {
                 const conn = getNodeConnection(selectedNode);
                 if (!conn) return null;
                 const pairedNode = (Array.isArray(activeNodes) ? activeNodes : []).find((n) => n.id === conn.pairedNodeId);
