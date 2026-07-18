@@ -284,6 +284,127 @@ def test_legacy_site_position_migrates_to_interior_map():
 
 # --- play-time triggers ----------------------------------------------------
 
+# --- growing a child map on demand -----------------------------------------
+
+def test_grow_child_map_mock_adds_node_next_to_player(builder):
+    wid = _map_world(builder)
+    bundle = asyncio.run(builder.expand_node(wid, "root", "c1"))
+    map_id = bundle["map"]["map_id"]
+    start = bundle["map"]["nodes"][0]
+
+    grown = asyncio.run(builder.grow_child_map(
+        wid, map_id, "the storage building behind the gate",
+        near_node_id=start["id"]))
+
+    assert grown["created"] is True
+    node = grown["node"]
+    assert node["name"] == "The storage building behind the gate"
+    assert node["id"].startswith(map_id + ":g")
+    # Persisted onto the child-map bundle, wired to the player's node.
+    on_disk = builder._persistence.load_child_map(wid, map_id)
+    assert any(n["id"] == node["id"] for n in on_disk["map"]["nodes"])
+    assert any({e["from"], e["to"]} == {start["id"], node["id"]}
+               for e in on_disk["map"]["edges"])
+    # Positioned right beside its anchor: about one typical edge length away.
+    edge_dists = [e["distance"] for e in bundle["map"]["edges"] if e.get("distance")]
+    spacing = sum(edge_dists) / len(edge_dists)
+    dist = ((node["x"] - start["x"]) ** 2 + (node["y"] - start["y"]) ** 2) ** 0.5
+    assert dist <= spacing * 1.5
+
+
+def test_grow_child_map_live_prompt_and_existing_match(builder):
+    wid = _map_world(builder)
+    bundle = asyncio.run(builder.expand_node(wid, "root", "c1"))
+    map_id = bundle["map"]["map_id"]
+    nodes_by_name = {n["name"]: n for n in bundle["map"]["nodes"]}
+    start = bundle["map"]["nodes"][0]
+    hall = "Vessencia Hall 2"
+
+    payloads = [
+        {"name": "Storage Shed", "type": "outbuilding",
+         "description": "Crates and dust.", "adjacent": [hall]},
+        {"existing": "Storage Shed"},
+    ]
+    captured = []
+
+    async def fake_completion(messages=None, **kwargs):
+        captured.append(messages)
+        return json.dumps(payloads.pop(0))
+
+    builder._llm_service = types.SimpleNamespace(
+        mode="live", module_fast_model="fast-slot", reader_model="reader-slot",
+        simple_completion=fake_completion)
+
+    grown = asyncio.run(builder.grow_child_map(
+        wid, map_id, "a shed for the harvest tools", near_node_id=start["id"]))
+
+    assert grown["created"] is True
+    user = captured[0][1]["content"]
+    assert hall in user                                # existing locations listed
+    assert f"currently at: {start['name']}" in user    # player anchor present
+    assert "a shed for the harvest tools" in user
+    assert '"existing"' in user                        # duplicate guard offered
+    # The authored adjacency won: the shed adjoins the hall it named.
+    assert any({e["from"], e["to"]} == {nodes_by_name[hall]["id"], grown["node"]["id"]}
+               for e in grown["edges"])
+
+    # Asking again matches the now-existing shed instead of duplicating it.
+    count_before = len(builder._persistence.load_child_map(wid, map_id)["map"]["nodes"])
+    again = asyncio.run(builder.grow_child_map(
+        wid, map_id, "the tool shed", near_node_id=start["id"]))
+    assert again["created"] is False
+    assert again["node"]["id"] == grown["node"]["id"]
+    count_after = len(builder._persistence.load_child_map(wid, map_id)["map"]["nodes"])
+    assert count_after == count_before
+
+
+def test_schema_offers_new_sub_location_only_inside_child_maps(builder, tmpdir):
+    wid = _map_world(builder)
+    asyncio.run(builder.expand_node(wid, "root", "c1"))
+    sm, engine, state = _play_session(builder, tmpdir, wid)
+
+    # On the root map: no grow field.
+    schema = asyncio.run(wbg.on_mutation_schema(state, None))
+    assert "new_sub_location" not in schema
+
+    # Inside the child map: the grow field appears.
+    interior_id = child_map_id("root", "c1")
+    entrance = state["world_data"]["maps"][interior_id]["nodes"][0]
+    state["player_location_map_id"] = interior_id
+    state["player_location_node_id"] = entrance["id"]
+    schema = asyncio.run(wbg.on_mutation_schema(state, None))
+    assert "new_sub_location" in schema
+
+
+def test_travel_new_sub_location_grows_map_and_moves_player(builder, tmpdir):
+    wid = _map_world(builder)
+    asyncio.run(builder.expand_node(wid, "root", "c1"))
+    sm, engine, state = _play_session(builder, tmpdir, wid)
+    interior_id = child_map_id("root", "c1")
+    entrance = state["world_data"]["maps"][interior_id]["nodes"][0]
+    state["player_location_map_id"] = interior_id
+    state["player_location_node_id"] = entrance["id"]
+    state["revealed_node_ids"].append(entrance["id"])
+
+    result = asyncio.run(wbg.on_mutate_state(
+        {"new_sub_location": "the storage building behind the gate"}, state, None))
+
+    # The player moved to the freshly grown node (interior travel is instant).
+    new_id = result["player_location_node_id"]
+    assert new_id.startswith(interior_id + ":g")
+    # The session's world_data gained the node + its edge to the player.
+    session_map = state["world_data"]["maps"][interior_id]
+    assert any(n["id"] == new_id for n in session_map["nodes"])
+    assert any({e["from"], e["to"]} == {entrance["id"], new_id}
+               for e in session_map["edges"])
+    # Synced to the save file and embedded in the RAG index.
+    with open(sm.data_dir / "saves" / "save1" / "World" / "world_data.json",
+              encoding="utf-8") as f:
+        on_disk = json.load(f)
+    assert any(n["id"] == new_id for n in on_disk["maps"][interior_id]["nodes"])
+    assert any("storage building" in e["text"].lower() for e in engine.memory.entries)
+
+
 def test_travel_start_prefetches_destination_child_map(builder, tmpdir):
     wid = _map_world(builder)
     sm, engine, state = _play_session(builder, tmpdir, wid)

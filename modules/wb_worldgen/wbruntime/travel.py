@@ -368,6 +368,36 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
                 site_position_update = {"site_position": None}
                 new_node_id = None  # the passage decides the movement this turn
 
+    # --- A new place inside the current map (story-created sub-location) ---
+    # The Reader described somewhere inside this child map that isn't on it
+    # yet ("the storage building behind the school"): author it onto the map
+    # right where it belongs — anchored at the player — then move there like
+    # any declared destination.
+    grow_desc = str(mutation.get("new_sub_location") or "").strip()
+    if grow_desc and not new_node_id and not passage_id:
+        current_map_record = get_map(world_data, current_map) or {}
+        if current_map_record.get("anchor_node_id"):
+            grown = None
+            try:
+                grown = await host.world_builder.grow_child_map(
+                    state.get("world_id"), current_map, grow_desc,
+                    near_node_id=current_node)
+            except Exception:
+                grown = None
+            if grown and (grown.get("node") or {}).get("id"):
+                node = grown["node"]
+                # Mirror the growth onto the session's own world_data copy
+                # (the facade grew the world-level bundle, not this dict).
+                session_nodes = current_map_record.setdefault("nodes", [])
+                if not any(n.get("id") == node["id"] for n in session_nodes):
+                    session_nodes.append(dict(node))
+                    current_map_record.setdefault("edges", []).extend(
+                        dict(e) for e in grown.get("edges") or [])
+                    persist_world()
+                    await _sync.embed_backfilled_nodes(
+                        host, state.get("world_id"), [node["id"]])
+                new_node_id = node["id"]
+
     # --- A Reader-declared same-map destination ---------------------------
     wants_move = new_node_id and new_node_id != current_node
     if wants_move and not (travel or {}).get("pending_connection_id"):

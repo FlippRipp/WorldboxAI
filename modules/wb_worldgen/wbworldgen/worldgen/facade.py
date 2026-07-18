@@ -734,6 +734,36 @@ class WorldBuilder:
             compiled.pop("_terrain_layers", None)
         return bundle
 
+    async def grow_child_map(self, world_id: str, map_id: str, description: str,
+                             near_node_id: str = None) -> dict | None:
+        """Author ONE new location onto an existing child map — the story
+        walked somewhere inside a site that isn't on its map yet ("the
+        storage building behind the school"). ``near_node_id`` (the player's
+        current node) anchors the placement and the fallback adjacency.
+
+        Returns ``{"node", "edges", "created"}`` — ``created`` is False when
+        the request matched an already-existing location — or None when the
+        map isn't a persisted child map or authoring failed."""
+        bundle = self._persistence.load_child_map(world_id, map_id)
+        if not bundle:
+            return None
+        compiled = self._enrichment._load_compiled(world_id)
+        try:
+            grown = await self._maps_expand.grow(
+                compiled, bundle["map"], description, near_node_id=near_node_id,
+                template_vocab=compiled.get("template_vocab"))
+        except Exception:
+            logger.exception("child-map grow failed for %s/%s", world_id, map_id)
+            return None
+        if not grown:
+            return None
+        if grown.get("created"):
+            self._persistence.save_child_map(world_id, bundle)
+            # The bundle's record is a fresh read, not the cached compiled's —
+            # drop the cache so the next load sees the grown map.
+            self._enrichment.invalidate_compiled(world_id)
+        return grown
+
     async def pregenerate_planned_maps(self, world_id: str, on_event=None) -> dict:
         """Build the child maps hierarchy_design planned for upfront creation
         (seed-central locations). One full-attention call per map, serialized.

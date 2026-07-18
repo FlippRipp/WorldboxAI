@@ -215,6 +215,188 @@ class MapExpansionEngine:
             None, lambda: self._build_procedural_map(
                 compiled, parent_map_id, node, parsed, chosen, total_nodes, world_id))
 
+    async def grow(self, compiled: dict, map_record: dict, description: str,
+                   near_node_id: str = None, template_vocab: dict = None) -> dict | None:
+        """Author ONE new location onto an existing child map — the play-time
+        "the story went somewhere inside this place that isn't on its map yet"
+        path (an NPC leads the player to the school's storage building).
+
+        The new node adjoins the locations the LLM says it does (falling back
+        to the player's current node) and is positioned right beside them, so
+        places that belong together stay together by construction. A request
+        matching an existing location returns that location instead of
+        creating a duplicate.
+
+        Returns ``{"node", "edges", "created"}`` — the map record is mutated
+        in place when ``created`` — or None on unusable output. Raises on LLM
+        failure (callers decide the fallback).
+        """
+        description = str(description or "").strip()
+        if not description:
+            return None
+        nodes = map_record.setdefault("nodes", [])
+        named = [n for n in nodes if n.get("name")]
+        near_node = next((n for n in nodes if n.get("id") == near_node_id), None)
+
+        if not self._llm or self._llm.mode == "mock":
+            cleaned = description.rstrip(".")
+            parsed = {
+                "name": cleaned[:1].upper() + cleaned[1:],
+                "type": "place",
+                "description": f"{cleaned}.",
+                "adjacent": [near_node["name"]] if near_node and near_node.get("name") else [],
+            }
+        else:
+            parsed = await self._live_grow(compiled, map_record, named, description,
+                                           near_node, template_vocab)
+
+        by_name = {str(n.get("name", "")).strip().lower(): n for n in named}
+        existing_ref = str(parsed.get("existing", "")).strip().lower()
+        if existing_ref and existing_ref in by_name:
+            return {"node": by_name[existing_ref], "edges": [], "created": False}
+
+        name = str(parsed.get("name", "")).strip()
+        if not name:
+            return None
+        if name.lower() in by_name:
+            # The LLM authored a place that already exists — treat as a match.
+            return {"node": by_name[name.lower()], "edges": [], "created": False}
+
+        # Anchors: the locations the new place adjoins. They both wire the
+        # edges and position the node, so resolution failures fall back to
+        # where the story is (the player's node), never to "anywhere".
+        raw_adjacent = parsed.get("adjacent") if isinstance(parsed.get("adjacent"), list) else []
+        anchors = []
+        for ref in raw_adjacent[:3]:
+            hit = by_name.get(str(ref).strip().lower())
+            if hit is not None and hit not in anchors:
+                anchors.append(hit)
+        if not anchors and near_node is not None:
+            anchors = [near_node]
+        if not anchors and nodes:
+            anchors = [max(nodes, key=lambda n: n.get("importance", 0) or 0)]
+
+        map_id = map_record.get("map_id", "")
+        k = len(nodes) + 1
+        taken = {n.get("id") for n in nodes}
+        while f"{map_id}:g{k}" in taken:
+            k += 1
+        node = {
+            "id": f"{map_id}:g{k}",
+            "name": name,
+            "type": str(parsed.get("type", "place")).strip() or "place",
+            "description": str(parsed.get("description", "")).strip(),
+            "label_description": "",
+            "importance": min(10, max(1, 3 + len(anchors))),
+        }
+        node["x"], node["y"] = self._grow_position(map_record, anchors)
+
+        edges = []
+        for anchor in anchors:
+            dist = ((node["x"] - anchor.get("x", 0.0)) ** 2
+                    + (node["y"] - anchor.get("y", 0.0)) ** 2) ** 0.5
+            edges.append({"from": anchor.get("id"), "to": node["id"],
+                          "distance": round(max(dist, 1.0), 2)})
+        nodes.append(node)
+        map_record.setdefault("edges", []).extend(edges)
+        return {"node": node, "edges": edges, "created": True}
+
+    @staticmethod
+    def _grow_position(map_record: dict, anchors: list) -> tuple:
+        """Deterministic spot for a grown node: one typical-edge-length step
+        away from its anchors' centroid, in whichever direction keeps it
+        farthest from the existing nodes (so it doesn't land on one)."""
+        import math
+        nodes = map_record.get("nodes") or []
+        cfg = map_record.get("config") or {}
+        width = float(cfg.get("map_width", 100.0) or 100.0)
+        height = float(cfg.get("map_height", 100.0) or 100.0)
+        if not anchors:
+            return round(width / 2, 2), round(height / 2, 2)
+        cx = sum(a.get("x", 0.0) for a in anchors) / len(anchors)
+        cy = sum(a.get("y", 0.0) for a in anchors) / len(anchors)
+        distances = [e.get("distance") for e in map_record.get("edges", []) if e.get("distance")]
+        spacing = (sum(distances) / len(distances)) if distances else min(width, height) / 8
+        best = (cx, cy)
+        best_score = -1.0
+        for i in range(12):
+            angle = 2 * math.pi * i / 12
+            x = min(width * 0.95, max(width * 0.05, cx + spacing * math.cos(angle)))
+            y = min(height * 0.95, max(height * 0.05, cy + spacing * math.sin(angle)))
+            score = min((math.hypot(x - n.get("x", 0.0), y - n.get("y", 0.0))
+                         for n in nodes), default=spacing)
+            if score > best_score:
+                best_score = score
+                best = (x, y)
+        return round(best[0], 2), round(best[1], 2)
+
+    async def _live_grow(self, compiled: dict, map_record: dict, named_nodes: list,
+                         description: str, near_node: dict = None,
+                         template_vocab: dict = None) -> dict:
+        host = self._host
+        enrichment = host._enrichment
+        lore = compiled.get("lore", {}) or {}
+        rules = compiled.get("rules", {}) or {}
+        label = map_record.get("label", map_record.get("map_id", ""))
+
+        locations_block = "\n".join(
+            f"- {n['name']} ({n.get('type', 'place')}): "
+            f"{n.get('description') or n.get('label_description', '')}"
+            for n in named_nodes) or "- (none yet)"
+        near_line = (f"The player is currently at: {near_node['name']}.\n"
+                     if near_node and near_node.get("name") else "")
+
+        system = host._get_prompt(
+            "map_grow_system",
+            "You are a world-building AI adding ONE new location to an existing map "
+            "because the story needs it. Keep it consistent with the place it is part "
+            "of and the locations already there. Output ONLY valid JSON.",
+        )
+        user_msg = host._get_prompt(
+            "map_grow_user",
+            f"""World: {lore.get('world_name', 'Unknown')} ({rules.get('genre', '')}, {rules.get('tone', '')})
+
+Map: {label} ({map_record.get('level_type', 'interior')}) — {map_record.get('description', '')}
+
+Existing locations on this map:
+{locations_block}
+
+{near_line}The story needs this place: "{description}"
+
+If one of the existing locations above already IS this place, return {{"existing": "<its exact name>"}} and nothing else.
+Otherwise author it: a unique name, a short type, a 1-2 sentence description, and "adjacent" — 1-3 existing
+location names it directly adjoins. Unless the request implies otherwise, it should adjoin the player's
+current location or somewhere right next to it.
+
+Output ONLY valid JSON:
+{{"name": "...", "type": "...", "description": "...", "adjacent": ["..."]}}""",
+            map_label=label,
+            map_description=map_record.get("description", ""),
+            world_name=lore.get("world_name", "Unknown"),
+            request=description,
+        )
+
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ]
+        await enrichment._wait_for_backoff()
+        async with host._enrichment_semaphore:
+            try:
+                return await json_retry_completion(
+                    self._llm,
+                    messages=messages,
+                    model=self._llm.reader_model,
+                    temperature=host._world_builder_temperature or 0.9,
+                    inspector_ctx={"call_type": "world_build", "step": "map:grow"},
+                    step_label=f"map:grow:{map_record.get('map_id', '')}",
+                    retry_attempts=host._json_retry_attempts,
+                )
+            except Exception as e:
+                enrichment._note_rate_limit(e)
+                logger.error("Map grow failed for %s: %s", map_record.get("map_id"), e)
+                raise
+
     # --- authored root map (root-as-first-expansion) ------------------------
 
     def mock_root_map(self, world_state: dict, level: dict,

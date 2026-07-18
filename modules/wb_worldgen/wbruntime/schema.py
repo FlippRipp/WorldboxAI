@@ -234,6 +234,25 @@ def build_location_mutation_schema(world_data: dict, state: dict = None) -> dict
                 ),
             }
 
+    # Growing the current map: inside a child map (a site's interior, a city)
+    # the story may need a place that isn't on the map yet — it gets authored
+    # onto this map right where it belongs, and the player moves there.
+    if state:
+        current = get_map(world_data, player_map_id(state)) or {}
+        if current.get("anchor_node_id"):
+            schema["new_sub_location"] = {
+                "type": "string",
+                "label": f"NEW place inside {current.get('label', 'this location')} the story went to",
+                "description": (
+                    "ONLY when the story takes the player to a spot inside this location "
+                    "that no listed destination covers (e.g. 'the storage building behind "
+                    "the school'). Describe it in one short sentence — it is added to this "
+                    "map beside the places it belongs to and the player moves there. If a "
+                    "listed destination fits, use player_location_node_id instead. Leave "
+                    "empty otherwise."
+                ),
+            }
+
     # Intra-site movement: when the player's current location has an expanded
     # interior, offer its sub-locations as instant moves within the place.
     if state:
