@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { Delaunay } from 'd3-delaunay';
-import { normalizeWorldData, connectionsByNode, breadcrumb } from '../lib/mapspace';
+import { normalizeWorldData, connectionsByNode, breadcrumb, childrenByAnchor } from '../lib/mapspace';
 
 const TYPE_COLORS = {
   settlement: '#f59e0b',
@@ -404,6 +404,19 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
     onLayerChange?.(mapId);
   }, [onMapChange, navigateToLayer, onLayerChange]);
 
+  // Child hierarchies: maps anchored to a node of the active map. Nodes with
+  // one get an enter badge; double-clicking the node also descends.
+  const childAnchors = useMemo(() => childrenByAnchor(normalized?.mapsById), [normalized]);
+  const childMapForNode = useCallback((nodeId) => {
+    if (!hasMaps || !activeMap) return null;
+    const ids = childAnchors[`${activeMap.map_id}:${nodeId}`];
+    return ids && ids.length ? normalized.mapsById[ids[0]] : null;
+  }, [childAnchors, hasMaps, activeMap, normalized]);
+
+  const parentMap = hasMaps && activeMap?.parent_map_id
+    ? normalized.mapsById[activeMap.parent_map_id]
+    : null;
+
   // Tab strip: the current map's "family" — root + parallel siblings (maps
   // not anchored to a node), plus the active map when it's a child.
   const tabMaps = useMemo(() => {
@@ -480,15 +493,24 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
   // to the default view after the zoom is applied.
   const mapIdentityKey = `${activeMap?.map_id || 'single'}:${activeNodes.length}`;
   const prevMapIdentityRef = useRef(null);
+  // Once-per-node guard for the focus effect below. Cleared on map change:
+  // after navigating away and back, re-focusing the same node id is a real
+  // request again (e.g. the up-button landing on the same anchor node).
+  const focusAppliedRef = useRef(null);
   useEffect(() => {
     if (prevMapIdentityRef.current !== mapIdentityKey) {
       prevMapIdentityRef.current = mapIdentityKey;
-      if (!focusNodeId) {
+      focusAppliedRef.current = null;
+      // Keep the current view only when a pending focus targets a node on the
+      // newly displayed map (traveling through a connection); otherwise the
+      // old map's viewBox is meaningless here — reset to the default view.
+      const focusTargetHere = !!focusNodeId && activeNodes.some((n) => n.id === focusNodeId);
+      if (!focusTargetHere) {
         setViewBox(defaultVB);
         setSelectedNode(null);
       }
     }
-  }, [mapIdentityKey, defaultVB, focusNodeId]);
+  }, [mapIdentityKey, defaultVB, focusNodeId, activeNodes]);
 
   // Center + zoom in on a specific node when focusNodeId changes (e.g. after
   // traveling through a layer connection point — land zoomed in on the paired
@@ -499,7 +521,6 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
   // game-state polling produces fresh `activeNodes` references, and the
   // container height wobbles a few px when hover rows toggle in the info bar —
   // both used to snap the view back to the focus zoom mid-gesture.
-  const focusAppliedRef = useRef(null);
   useEffect(() => {
     if (!focusNodeId) {
       focusAppliedRef.current = null;
@@ -528,6 +549,12 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
       const playerId = fogOfWar.playerNodeId;
       const radius = fogOfWar.radiusSteps || 1;
       if (!playerId) return new Set();
+      // The radius only means anything on the map the player is standing on;
+      // for any other map (e.g. browsing a child hierarchy) fall back to the
+      // explicitly revealed set instead of hiding everything.
+      if (!activeNodes.some((n) => n.id === playerId)) {
+        return new Set(fogOfWar.revealedNodeIds || []);
+      }
 
       const adj = {};
       (activeEdges || []).forEach((e) => {
@@ -558,7 +585,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
 
     // manual mode
     return new Set(fogOfWar.revealedNodeIds || []);
-  }, [fogEnabled, fogOfWar, activeEdges]);
+  }, [fogEnabled, fogOfWar, activeEdges, activeNodes]);
 
   const isNodeRevealed = useCallback((nodeId) => {
     if (!fogEnabled) return true;
@@ -701,9 +728,47 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
         changeMap(conn.targetMapId, conn.pairedNodeId);
         return;
       }
+      // No connection: descend into the node's child hierarchy if it has one.
+      const child = childMapForNode(hoveredNode.id);
+      if (child && !(fogEnabled && !isNodeRevealed(hoveredNode.id))) {
+        changeMap(child.map_id);
+        return;
+      }
     }
     setViewBox(defaultVB);
-  }, [defaultVB, hoveredNode, canNavigate, changeMap, getNodeConnection, fogEnabled, isNodeRevealed]);
+  }, [defaultVB, hoveredNode, canNavigate, changeMap, getNodeConnection, childMapForNode, fogEnabled, isNodeRevealed]);
+
+  // Center the view back on the player: zoom to their marker on the current
+  // map, or — when a different map is being browsed — jump to the player's
+  // map focused on their node.
+  const playerNodeId = fogOfWar?.playerNodeId || null;
+  // Legacy saves carry only the node id, not the map id; node ids are globally
+  // unique, so the player's map can be recovered by searching every map.
+  const playerHomeMapId = useMemo(() => {
+    if (playerMapId) return playerMapId;
+    if (!hasMaps || !playerNodeId) return null;
+    const rec = Object.values(normalized.mapsById)
+      .find((m) => (m.nodes || []).some((n) => n.id === playerNodeId));
+    return rec ? rec.map_id : null;
+  }, [playerMapId, hasMaps, normalized, playerNodeId]);
+  const centerOnPlayer = useCallback(() => {
+    if (playerMarker) {
+      const cx = sx(playerMarker.x);
+      const cy = sy(playerMarker.y);
+      const halfW = defaultVB.w / 6;
+      const halfH = defaultVB.h / 6;
+      setViewBox(clampViewBox({ x: cx - halfW, y: cy - halfH, w: halfW * 2, h: halfH * 2 }));
+      return;
+    }
+    if (playerNodeId && playerHomeMapId && canNavigate && hasMaps
+        && activeMap && playerHomeMapId !== activeMap.map_id) {
+      changeMap(playerHomeMapId, playerNodeId);
+    }
+  }, [playerMarker, playerNodeId, playerHomeMapId, canNavigate, hasMaps, activeMap,
+    changeMap, defaultVB, clampViewBox, sx, sy]);
+  const canCenterOnPlayer = !!(playerMarker
+    || (playerNodeId && playerHomeMapId && canNavigate && hasMaps && activeMap
+      && playerHomeMapId !== activeMap.map_id && normalized?.mapsById?.[playerHomeMapId]));
 
   const handleZoomButton = useCallback((dir) => {
     setViewBox((prev) => {
@@ -809,6 +874,24 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
           {activeNodes.length} nodes &middot; {activeRoads?.length || 0} routes &middot; {activeRegions?.length || 0} regions
         </span>
         <div className="flex items-center gap-2">
+          {canCenterOnPlayer && (
+            <button
+              onClick={centerOnPlayer}
+              className="text-amber-400 hover:text-amber-300 text-sm px-1"
+              title="Center on your location"
+            >
+              {'\u2316'}
+            </button>
+          )}
+          {parentMap && canNavigate && (
+            <button
+              onClick={() => changeMap(parentMap.map_id, activeMap.anchor_node_id || undefined)}
+              className="text-purple-400 hover:text-purple-300 text-sm px-1"
+              title={`Up to ${parentMap.label || parentMap.map_id}`}
+            >
+              {'\u2191'}
+            </button>
+          )}
           <button
             onClick={() => handleZoomButton(-1)}
             className="text-gray-400 hover:text-gray-200 text-sm px-1"
@@ -1180,6 +1263,43 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
                     )}
                   </>
                 )}
+              </g>
+            );
+          })}
+
+          {/* Enter badges for nodes anchoring a child hierarchy — drawn as a
+              separate layer above every node so a neighboring node rendered
+              later can't cover the tap target. */}
+          {canNavigate && activeNodes.map((node) => {
+            const child = childMapForNode(node.id);
+            if (!child || !isNodeRevealed(node.id)) return null;
+            const r = getImportanceRadius(node.importance, nodeScale);
+            const bx = sx(node.x) + r + 3 * nodeScale;
+            const by = sy(node.y) - r - 3 * nodeScale;
+            return (
+              <g
+                key={`enter-${node.id}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  changeMap(child.map_id);
+                }}
+                style={{ cursor: 'pointer' }}
+              >
+                <title>{`Enter ${child.label || child.map_id}`}</title>
+                <circle
+                  cx={bx}
+                  cy={by}
+                  r={3.4 * nodeScale}
+                  fill="rgba(17,24,39,0.95)"
+                  stroke="#a78bfa"
+                  strokeWidth={0.7 * nodeScale}
+                />
+                <path
+                  d={`M ${bx - 1.6 * nodeScale} ${by} H ${bx + 1.6 * nodeScale} M ${bx} ${by - 1.6 * nodeScale} V ${by + 1.6 * nodeScale}`}
+                  stroke="#a78bfa"
+                  strokeWidth={0.8 * nodeScale}
+                  strokeLinecap="round"
+                />
               </g>
             );
           })}
