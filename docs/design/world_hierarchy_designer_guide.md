@@ -15,7 +15,7 @@ Everything else is built from these two pieces.
 
 ## Levels: the scale vocabulary
 
-Each world template declares an ordered list of **levels** — plain-text labels like `solar system → planet → region → city → interior`. These are *vocabulary, not code*: the AI reads the label and its guidance text and decides what it means for this world. A "planet" level in one template could be "realm" in another and "dream layer" in a third.
+Every world carries an ordered list of **levels** — plain-text labels like `solar system → planet → region → city → interior` — designed by the AI *for that world* when it is created: the World Structure step reads the seed prompt, rules and lore, decides which scales this world actually needs, and binds each level to one of the registered map generators by reading the generator catalog (falling back to an abstract node graph when nothing fits). Levels are *vocabulary, not code*: a "planet" level in one world could be "realm" in another and "dream layer" in a third. Levels that span natural geography (a planet's surface) are flagged for **terrain**: their maps get generated elevation, biomes and rivers of their own. The proposed structure is shown as a normal reviewable step — edit it before generation proceeds.
 
 Rules of thumb:
 - A location can open into a map of **any smaller scale**, not just the next one down. A space station on the solar-system map goes straight to an interior; the planet next to it gets a full planetary map.
@@ -24,7 +24,7 @@ Rules of thumb:
 
 ## How a world is born
 
-1. The player writes a seed prompt and picks a template (or none — default fantasy).
+1. The player writes a seed prompt — free text, any genre, any scale.
    They can also **link a saved Scenario** (from the scenarios library): every
    generation step then grounds itself in the scenario's setting description
    and opening scene — the world is built to contain the places, people and
@@ -64,15 +64,23 @@ Cost consequence for designers: creating a world is fast, and depth appears exac
 
 **Fog of war** reveals the world as it's explored, per map. Entering a new map lights up the arrival point and its surroundings.
 
-## What a designer can author (templates)
+## Where the structure comes from
 
-A template is a single JSON file — no code:
-- the **level vocabulary** (labels + guidance per level, which generator draws each level)
-- the framing voice ("you are a world building AI for a hard sci-fi setting…")
-- vocabulary for connections ("spaceport", "jump gate") and sub-locations ("decks, domes, installations")
-- form tweaks per generation step, pinned values, map density defaults
+There are no templates. Everything a template used to declare is authored
+per world by the AI design passes, and the player can review and edit all of
+it before generation spends a token:
 
-Drop the file in `data/world_templates/` and it appears in the world creation wizard. The generator palette is also open-ended: world-scale terrain maps and room-scale interiors ship now; star-system and region generators are labeled slots waiting to be filled.
+- the **level vocabulary** (labels + guidance per level, which generator
+  draws each level, which levels get real terrain) — the World Structure step
+- the framing voice — the World Design step's one-line reading of what this
+  world is, appended to every later generation call
+- vocabulary for connections ("spaceport", "jump gate") and sub-locations
+  ("decks, domes, installations") — the World Structure step
+
+The generator palette is open-ended: world-scale terrain maps, city street
+networks and room-scale interiors ship now. Registering a new generator is
+one file — its catalog description is what the structure-design AI reads, so
+new generators start being picked for fitting worlds the moment they exist.
 
 ## Persistent-world guarantees
 
@@ -84,4 +92,5 @@ Drop the file in `data/world_templates/` and it appears in the world creation wi
 
 - New *parallel planes* can't appear mid-play (a story-invented Feywild needs to be in the world's structure at creation; locations and interiors CAN appear mid-play).
 - Off-screen NPCs cross between maps abstractly (they don't obey passage requirements or journey durations).
-- A world's level vocabulary is fixed at creation.
+- A world's level vocabulary is designed by the AI at creation (and
+  player-editable there); it does not change mid-play.

@@ -1,20 +1,28 @@
 # WorldBox World Building System — Design Document
 
 > **Implementation note (kept current).** The shipped pipeline differs from
-> this original design in two ways. (1) The step list is now: `world_form`
-> (World Design) → `world_rules` → `lore` → `hierarchy_design` →
-> `terrain_generation` → `natural_landmarks` → `society_factions` →
-> `map_generation` → enrichment (`node_labeling`, `node_descriptions`); there
-> is no Key Characters stage, and regions were deprecated
-> (`docs/systems/DEPRECATED_regions.md`). (2) The pipeline is **AI-shaped**:
-> the first step, `world_form`, reads the seed prompt and decides per world
-> whether procedural terrain runs at all (`map_style` terrain/abstract),
-> which optional steps to skip, and what every generic step should cover for
-> THIS world (a modern city's "Origins" is its founding, not a creation myth;
-> its "Groups" are workplaces and circles, not armies). Templates are
-> optional hints (`ai_default`, the empty default, defers everything to the
-> AI). See `wbworldgen/worldgen/steps/world_form.py` and
-> `docs/systems/hierarchy.md`.
+> this original design in three ways. (1) The step list is now: `world_form`
+> (World Design) → `world_rules` → `lore` → `hierarchy_design`
+> (World Structure) → `terrain_generation` → `natural_landmarks` →
+> `society_factions` → `map_generation` → enrichment (`node_labeling`,
+> `node_descriptions`); there is no Key Characters stage, and regions were
+> deprecated (`docs/systems/DEPRECATED_regions.md`). (2) The pipeline is
+> **AI-shaped**: `world_form` reads the seed prompt and decides per world
+> whether procedural terrain runs at all (`map_style`
+> terrain/abstract/city), which optional steps to skip, and what every
+> generic step should cover for THIS world (a modern city's "Origins" is its
+> founding, not a creation myth; its "Groups" are workplaces and circles,
+> not armies); its `world_kind` line becomes the per-world genre voice in
+> every later call. (3) The world's **structure is AI-designed**:
+> `hierarchy_design` authors the map-level ladder (e.g. star_system →
+> planet → city → interior), binds each level to a registered map generator
+> by reading the generator catalog, flags geography-spanning levels for
+> terrain, and authors the play-time vocabulary. There are no world
+> templates — the design passes replaced them (worlds created under the old
+> template system keep working via their stored snapshots). See
+> `wbworldgen/worldgen/steps/world_form.py`,
+> `wbworldgen/worldgen/steps/hierarchy_design.py`,
+> `docs/systems/hierarchy.md` and `docs/design/ai_world_structure_plan.md`.
 
 ## Overview
 

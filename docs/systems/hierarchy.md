@@ -12,7 +12,7 @@ A compiled world dict (`world_data`) carries:
 {
   "world_format": 2,
   "root_map_id": "root",
-  "hierarchy": {"levels": [{"level_type", "label", "generator_id", "guidance", "nestable"?}], "notes": "..."},
+  "hierarchy": {"levels": [{"level_type", "label", "generator_id", "guidance", "nestable"?, "terrain"?}], "notes": "..."},
   "maps": { "<map_id>": MapRecord },
   "connections": [ ConnectionRecord ],
   "rules": {...}, "lore": {...}, "regions": {...(legacy only)}, ...
@@ -29,10 +29,12 @@ A compiled world dict (`world_data`) carries:
   "description": "...",
   "parent_map_id": null,             // null ONLY on the root map
   "anchor_node_id": null,            // null = parallel sibling (underworld); set = child of that node
-  "generator_id": "world_map" | "interior",
+  "generator_id": "world_map" | "city_roadnet" | "interior",
   "nodes": [...], "edges": [...],    // same per-map shapes as ever
   "regions": [...], "roads": [...],  // optional geometry extras
-  "config": { "map_width", "map_height", "instant_travel"?, ... },
+  "config": { "map_width", "map_height", "instant_travel"?, ...,
+              "terrain"? },          // terrain marker: child map has its own
+                                     // rasters under terrain/<map_id>/
   "legacy_layer_id": "surface",      // migrated worlds only; terrain raster URLs key on it
   "landmarks": [...], "factions": [...],  // scope-attached authored content
   "rules": [...],                    // migrated per-layer rules
@@ -96,17 +98,22 @@ A compiled world dict (`world_data`) carries:
 
 ## What future edits touch
 
-- **New map generator** (e.g. `star_system`): one file registering a
-  `MapGeneratorSpec` in `generation/registry.py`; add it to a template
-  level's `generator_id`. To make it usable for *child* expansion, widen the
-  filter in `maps_expand.allowed_child_levels`.
-- **New genre/scale**: usually nothing — the `world_form` step reads the seed
-  prompt and shapes the pipeline per world (terrain vs abstract map, optional
-  steps, per-step coverage directives). For a reusable preset, one JSON file
-  in `data/world_templates/` (levels, framing, vocabulary, overrides). No code.
-- **New level type**: template text only.
-- **New connection kind**: data only — write it into a connection record or a
-  template's `connection_looks` vocabulary.
+- **New map generator** (e.g. a real `star_system` orbit layout): one file
+  registering a `MapGeneratorSpec` in `generation/registry.py` — that's all.
+  The registry's descriptions are the selection catalog the structure-design
+  LLM reads, so a newly registered generator starts getting picked for
+  fitting levels immediately; implemented generators are automatically
+  offered for child expansion too.
+- **New genre/scale**: nothing — the `world_form` step reads the seed prompt
+  and shapes the pipeline per world (terrain vs abstract vs city map,
+  optional steps, per-step coverage directives), and `hierarchy_design`
+  authors the level ladder, generator bindings, terrain flags and vocabulary
+  for that world.
+- **New level type**: AI-authored text — it appears when a world's structure
+  design calls for it (or the player edits the structure step).
+- **New connection kind**: data only — write it into a connection record or
+  the world's `connection_looks` vocabulary (authored by `hierarchy_design`;
+  template-era worlds keep their snapshot).
 - **New travel mode**: one branch in `wbruntime/travel.py`
   (`_connection_turns` / `begin_transit`) plus the schema description.
 - **New movement trigger**: a handler block in `wbruntime/travel.py`'s

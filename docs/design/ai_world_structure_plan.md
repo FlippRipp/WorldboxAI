@@ -1,13 +1,14 @@
 # AI-Designed World Structure — Plan
 
-*Status: M1 (AI-designed structure), M2 (templates deleted) and M3 (unified
-generation: procedural children, authored roots, generalized parallel planes)
-are implemented; M4 (docs + polish) is pending. Implementation deviations are
-noted inline under each milestone. This document records the decisions made
-with Filip (2026-07-17) and the milestone plan. The technical background is
-`docs/systems/hierarchy.md`; the player-facing vision is
-`docs/design/world_hierarchy_designer_guide.md` (parts of which this plan
-supersedes — see "Docs to update").*
+*Status: fully implemented (2026-07-18) — M1 (AI-designed structure), M2
+(templates deleted), M3 (unified generation: procedural children, authored
+roots, generalized parallel planes), M4 (docs), plus the terrain follow-up
+(terrain-flagged levels give child maps their own rasters). Implementation
+deviations are noted inline under each milestone. This document records the
+decisions made with Filip (2026-07-17) and the milestone plan, and stays as
+the reference for why the system is shaped this way. The technical contract
+is `docs/systems/hierarchy.md`; the player-facing description is
+`docs/design/world_hierarchy_designer_guide.md`.*
 
 ## The goal
 
@@ -224,6 +225,17 @@ recurse into what the design marks upfront.*
   defaults per generator, wizard copy for the structure review step.
 - Remove any leftover template references (`wbruntime/backfill.py`, module
   backends) found by a final grep.
+
+## Follow-ups landed after M3
+
+- **Terrain rasters on child maps** (was deferred from M3, implemented
+  2026-07-18): `hierarchy_design` flags geography-spanning `world_map`
+  levels with `terrain: yes`; expansion then builds the child's own raster
+  stack (256 default resolution, `world.child_terrain_resolution` setting)
+  under `terrain/<map_id>/`, places nodes terrain-aware, and enrichment
+  samples the child's biomes. The map screen picks up the painted
+  background with no frontend changes (it already fetches terrain by map
+  id).
 
 ## Deferred / out of scope (revisit later)
 
