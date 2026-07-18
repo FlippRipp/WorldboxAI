@@ -402,10 +402,14 @@ def test_build_world_questions_messages():
     )
     assert msgs[0]["role"] == "system"
     assert "questions" in msgs[0]["content"]
+    # World-scoped: the interview must never drift into story territory.
+    assert "ONLY about the world itself" in msgs[0]["content"]
+    assert "Never ask about protagonists" in msgs[0]["content"]
     user = msgs[1]["content"]
     assert "A drowned city of rival guilds." in user
     assert "The Sunken Court" in user
     assert "already decided" in user
+    assert "never about the scenario's people or plot" in user
     assert "What era?" in user and "Late medieval." in user
     # Skipped answers are rendered as skipped, not blank.
     assert "Any magic?" in user and "skipped" in user

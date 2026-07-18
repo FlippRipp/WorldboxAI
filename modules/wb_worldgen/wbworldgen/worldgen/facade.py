@@ -163,11 +163,15 @@ def build_world_questions_messages(current_text: str = "",
         "they want an AI world generator to create. Read their seed prompt draft and "
         "ask 3-5 short, concrete questions about important details it leaves open — "
         "the things that would most change the generated world (tone, scale, conflict, "
-        "magic or technology, factions, geography, what makes it distinct). Each "
-        "question must be answerable in a sentence or two. Never ask anything the "
-        "prompt, the scenario, or a previous answer already settles, and never repeat "
-        "a question from a previous round — a skipped question means the player wants "
-        "to leave it open, so move on to something else. "
+        "magic or technology, factions, geography, cultures, history, what makes it "
+        "distinct). Ask ONLY about the world itself — the setting the generator will "
+        "build. Never ask about protagonists, individual characters, their goals or "
+        "relationships, or how the story's plot unfolds: those belong to the scenario "
+        "and the story, not to world generation. Each question must be answerable in "
+        "a sentence or two. Never ask anything the prompt, the scenario, or a "
+        "previous answer already settles, and never repeat a question from a previous "
+        "round — a skipped question means the player wants to leave it open, so move "
+        "on to something else. "
         'Return only valid JSON: {"questions": ["...", "..."]}.'
     )
     parts = []
@@ -175,7 +179,10 @@ def build_world_questions_messages(current_text: str = "",
     if grounding:
         parts.append(
             "The world must fit this scenario the player has chosen — treat "
-            "everything in it as already decided, not something to ask about:\n"
+            "everything in it as already decided, not something to ask about. Its "
+            "characters and events are story material, not open questions: ask "
+            "about the wider world the scenario takes place in, never about the "
+            "scenario's people or plot:\n"
             f"<scenario>\n{grounding}\n</scenario>")
     current_text = (current_text or "").strip()
     if current_text:
