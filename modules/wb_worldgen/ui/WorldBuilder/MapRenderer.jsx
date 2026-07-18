@@ -162,11 +162,6 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
     return activeMap?.nodes || [];
   }, [hasMaps, activeMap, nodes]);
 
-  const activeEdges = useMemo(() => {
-    if (!hasMaps) return edges || [];
-    return activeMap?.edges || [];
-  }, [hasMaps, activeMap, edges]);
-
   const activeRegions = useMemo(() => {
     if (!hasMaps) return regions || [];
     return activeMap?.regions || [];
@@ -540,52 +535,17 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
     }
   }, [focusNodeId, activeNodes, containerSize, defaultVB, clampViewBox, sx, sy]);
 
-  // Fog of war
+  // Fog of war: the map art itself is fully visible; unknown nodes (and any
+  // road missing a known endpoint) are simply not rendered. The backend owns
+  // the revealed set — it grows as the player travels and via the story-start
+  // known-locations pass. The player's own node is always visible.
   const fogEnabled = !!(fogOfWar && activeNodes.length);
   const effectiveRevealedIds = useMemo(() => {
     if (!fogEnabled) return new Set();
-
-    if (fogOfWar.mode === 'radius') {
-      const playerId = fogOfWar.playerNodeId;
-      const radius = fogOfWar.radiusSteps || 1;
-      if (!playerId) return new Set();
-      // The radius only means anything on the map the player is standing on;
-      // for any other map (e.g. browsing a child hierarchy) fall back to the
-      // explicitly revealed set instead of hiding everything.
-      if (!activeNodes.some((n) => n.id === playerId)) {
-        return new Set(fogOfWar.revealedNodeIds || []);
-      }
-
-      const adj = {};
-      (activeEdges || []).forEach((e) => {
-        if (e.from && e.to) {
-          if (!adj[e.from]) adj[e.from] = [];
-          if (!adj[e.to]) adj[e.to] = [];
-          adj[e.from].push(e.to);
-          adj[e.to].push(e.from);
-        }
-      });
-
-      const visited = new Set([playerId]);
-      let frontier = [playerId];
-      for (let step = 0; step < radius && frontier.length > 0; step++) {
-        const next = [];
-        for (const nid of frontier) {
-          for (const nb of (adj[nid] || [])) {
-            if (!visited.has(nb)) {
-              visited.add(nb);
-              next.push(nb);
-            }
-          }
-        }
-        frontier = next;
-      }
-      return visited;
-    }
-
-    // manual mode
-    return new Set(fogOfWar.revealedNodeIds || []);
-  }, [fogEnabled, fogOfWar, activeEdges, activeNodes]);
+    const ids = new Set(fogOfWar.revealedNodeIds || []);
+    if (fogOfWar.playerNodeId) ids.add(fogOfWar.playerNodeId);
+    return ids;
+  }, [fogEnabled, fogOfWar]);
 
   const isNodeRevealed = useCallback((nodeId) => {
     if (!fogEnabled) return true;
@@ -594,12 +554,8 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
 
   const isEdgeRevealed = useCallback((fromId, toId) => {
     if (!fogEnabled) return true;
-    return effectiveRevealedIds.has(fromId) || effectiveRevealedIds.has(toId);
+    return effectiveRevealedIds.has(fromId) && effectiveRevealedIds.has(toId);
   }, [fogEnabled, effectiveRevealedIds]);
-
-  // Fog mask overlay: dark rect with cutouts for revealed nodes
-  const fogMaskId = 'fog-mask';
-  const fogCutoutRadius = fogEnabled ? 28 : 0;
 
   // Zoom/pan handlers
   const handleWheel = useCallback((e) => {
@@ -1010,23 +966,6 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
                 <feMergeNode in="SourceGraphic" />
               </feMerge>
             </filter>
-            {fogEnabled && (
-              <mask id={fogMaskId}>
-                <rect x={0} y={0} width={mapLayout.mapW} height={mapLayout.mapH} fill="white" />
-                {activeNodes.map((n) => {
-                  if (!effectiveRevealedIds.has(n.id)) return null;
-                  return (
-                    <circle
-                      key={`mask-${n.id}`}
-                      cx={sx(n.x)}
-                      cy={sy(n.y)}
-                      r={fogCutoutRadius}
-                      fill="black"
-                    />
-                  );
-                })}
-              </mask>
-            )}
           </defs>
 
           {/* Terrain background (biome raster) for the active layer — surface
@@ -1183,23 +1122,22 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
             );
           })}
 
-          {/* Nodes */}
+          {/* Nodes (fog of war: unknown nodes are not rendered at all) */}
           {activeNodes.map((node) => {
+            if (!isNodeRevealed(node.id)) return null;
             const r = getImportanceRadius(node.importance, nodeScale);
             const color = TYPE_COLORS[node.type] || '#6b7280';
             const isHovered = hoveredNode?.id === node.id;
             const isPopulated = !!node.name;
             const isConn = isConnectionNode(node);
             const nodeConn = isConn ? getNodeConnection(node) : null;
-            const revealed = isNodeRevealed(node.id);
 
             return (
               <g
                 key={node.id}
-                onMouseEnter={() => { if (revealed) setHoveredNode(node); }}
+                onMouseEnter={() => setHoveredNode(node)}
                 onMouseLeave={() => setHoveredNode(null)}
                 onClick={() => {
-                  if (!revealed) return;
                   // Clicking a connection glyph travels to the far map.
                   if (nodeConn && nodeConn.targetMapId && nodeConn.targetMapId !== activeMap?.map_id
                       && canNavigate && !(fogEnabled && !isNodeRevealed(nodeConn.pairedNodeId))) {
@@ -1208,9 +1146,9 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
                   }
                   setSelectedNode(node);
                 }}
-                style={{ cursor: revealed ? 'pointer' : 'default', opacity: revealed ? 1 : 0.08, transition: 'opacity 0.3s' }}
+                style={{ cursor: 'pointer' }}
               >
-                {nodeConn && revealed && (
+                {nodeConn && (
                   <title>
                     {`${nodeConn.name || node.name || 'Connection'} (${nodeConn.kind || 'link'})${
                       nodeConn.targetMapId
@@ -1219,7 +1157,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
                     }`}
                   </title>
                 )}
-                {isPopulated && revealed && (
+                {isPopulated && (
                   <circle
                     cx={sx(node.x)}
                     cy={sy(node.y)}
@@ -1239,7 +1177,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
                   connectionType={node.type}
                   scale={nodeScale}
                 />
-                {isPopulated && revealed && (
+                {isPopulated && (
                   <>
                     <text
                       x={sx(node.x)}
@@ -1304,20 +1242,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
             );
           })}
 
-          {/* Fog of war overlay */}
-          {fogEnabled && (
-            <rect
-              x={0}
-              y={0}
-              width={mapLayout.mapW}
-              height={mapLayout.mapH}
-              fill="rgba(0,0,0,0.55)"
-              mask={`url(#${fogMaskId})`}
-              style={{ pointerEvents: 'none' }}
-            />
-          )}
-
-          {/* Player marker (drawn above the fog so a mid-edge position stays visible) */}
+          {/* Player marker (drawn last so a mid-edge position stays on top) */}
           {playerMarker && (
             <g pointerEvents="none">
               {playerMarker.traveling && (

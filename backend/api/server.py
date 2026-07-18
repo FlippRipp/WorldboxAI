@@ -2262,6 +2262,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
                 state["history"] = [intro_text]
                 state["chat_messages"] = [ai_message]
+                # One-shot post-opening pass: modules may extend state now
+                # that the opening message exists (wb_worldgen reveals the
+                # map locations the character would already know about).
+                # Runs before save_turn so turn 0 persists the result.
+                state = await engine.run_intro_complete_hooks(state)
                 session_manager.save_manager.save_turn(
                     session_manager.active_save_id, state, 0
                 )

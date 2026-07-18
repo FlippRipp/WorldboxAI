@@ -35,6 +35,7 @@ import terrain_routes as _terrain_routes  # noqa: E402  (experimental terrain la
 from wbruntime import backfill as _rt_backfill  # noqa: E402
 from wbruntime import context as _rt_context  # noqa: E402
 from wbruntime import expansion as _rt_expansion  # noqa: E402
+from wbruntime import known_locations as _rt_known  # noqa: E402
 from wbruntime import schema as _rt_schema  # noqa: E402
 from wbruntime import sync as _rt_sync  # noqa: E402
 from wbruntime import travel as _rt_travel  # noqa: E402
@@ -300,6 +301,7 @@ def set_services(services: dict):
 # and the underscore names tests exercise, threading _HOST for state access.
 #   * on_gather_context   -> per-turn <current_location> context_string
 #   * on_intro_context     -> richer world block for the opening scene
+#   * on_intro_complete    -> one-shot reveal of locations the character knows
 #   * on_mutation_schema   -> dynamic movement schema offered to the Reader
 #   * on_mutate_state      -> apply a move + fog-of-war reveal
 # ---------------------------------------------------------------------------
@@ -407,6 +409,10 @@ async def on_gather_context(state: dict, sdk) -> dict:
 
 async def on_intro_context(state: dict, sdk) -> dict:
     return await _rt_context.on_intro_context(_HOST, state, sdk)
+
+
+async def on_intro_complete(state: dict, sdk) -> dict:
+    return await _rt_known.on_intro_complete(_HOST, state, sdk)
 
 
 async def on_mutation_schema(state: dict, sdk) -> dict:

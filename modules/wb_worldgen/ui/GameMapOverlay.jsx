@@ -162,10 +162,8 @@ export default function GameMapOverlay({ state = {} }) {
                 focusNodeId={focusNodeId}
                 playerTravel={playerTravel}
                 fogOfWar={{
-                  mode: 'radius',
                   playerNodeId,
                   revealedNodeIds: revealedNodeIds || [],
-                  radiusSteps: 1,
                 }}
               />
             )}

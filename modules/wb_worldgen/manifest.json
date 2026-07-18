@@ -4,8 +4,8 @@
   "version": "1.0.0",
   "dependencies": [],
   "consumes": {
-    "state": ["world_id", "player_location_node_id", "player_location_region", "player_location_map_id", "revealed_node_ids"],
-    "module_data": [],
+    "state": ["world_id", "player_location_node_id", "player_location_region", "player_location_map_id", "revealed_node_ids", "characters", "history"],
+    "module_data": ["wb_core_rpg"],
     "module_configs": [],
     "world_data": true
   },

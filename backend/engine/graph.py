@@ -507,6 +507,31 @@ class EngineGraph:
             inspector_ctx={"call_type": "storyteller", "step": "generate_intro"},
             reasoning_callback=self.sdk.ui.emit_reasoning_token)
 
+    async def run_intro_complete_hooks(self, state: dict) -> dict:
+        """One-shot module pass after the opening message exists.
+
+        Modules expose ``on_intro_complete(state, sdk)`` and may return an
+        update for the sanctioned fog-of-war key (``revealed_node_ids``);
+        anything else is ignored. Best-effort: a failing module must never
+        break story start.
+        """
+        active = state.get("module_configs", {}).get("__active_modules__")
+        active_set = set(active) if isinstance(active, list) else None
+        for mod_id, mod_data in self.registry.get_modules().items():
+            if active_set is not None and mod_id not in active_set:
+                continue
+            hook = getattr(mod_data["backend"], "on_intro_complete", None)
+            if hook is None:
+                continue
+            try:
+                module_state = self._build_module_state(state, mod_id, mod_data["manifest"].get("consumes", {}))
+                res = await hook(module_state, self.sdk)
+                if isinstance(res, dict) and "revealed_node_ids" in res:
+                    state["revealed_node_ids"] = res["revealed_node_ids"]
+            except Exception as e:
+                print(f"Error in {mod_id} on_intro_complete: {e}")
+        return state
+
     async def _rewrite_scenario_description(self, scenario_data: dict, request_text: str) -> dict:
         """Apply a player's modification request to the save's scenario copy.
 
