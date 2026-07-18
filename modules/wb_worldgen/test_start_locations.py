@@ -300,6 +300,8 @@ def test_generate_prompt_carries_distance_tiers_and_named_places(builder):
     assert "about 10 map units" in user  # mean of the two 10-unit edges
     assert "ONE route leg" in user and "TWO route legs" in user
     assert '"node_id": "NEW"' in user and "near_node_id" in user
+    # And the cross-boundary redirect for places inside an existing site.
+    assert '"belongs_inside"' in user and "without leaving" in user
 
 
 def test_no_slot_fits_founds_new_node_beside_anchor(builder):
@@ -375,6 +377,52 @@ def test_author_location_returns_founded_node_mirror_data(builder):
     assert result["map_id"] == "root"
     assert result["new_node"]["name"] == "The Harbor Light"
     assert result["new_edges"][0]["from"] == "s1"
+
+
+def test_belongs_inside_answer_starts_at_the_parent_place(builder):
+    # A start request for a place inside an existing site starts AT that site
+    # (the scene plays out in its part of it) — nothing is authored.
+    wid = _start_world(builder)
+    llm = ScriptedLLM([
+        {"node_id": "NONE", "wanted": "the harbor master's office"},
+        {"belongs_inside": "s1"},
+    ])
+
+    location = asyncio.run(builder.llm_pick_start_location(
+        wid, "the harbor master's office in Havenport", llm))
+
+    assert location["node_id"] == "s1"
+    assert not location.get("generated")
+    data = builder.load_world(wid)["steps"]["map_generation"]["data"]
+    assert not any(n["id"].startswith("root:g") for n in data["nodes"])
+    nodes = {n["id"]: n for n in data["nodes"]}
+    assert not nodes["w1"]["name"] and not nodes["w2"]["name"]
+
+
+def test_invalid_belongs_inside_falls_back(builder):
+    wid = _start_world(builder)
+    llm = ScriptedLLM([
+        {"node_id": "NONE", "wanted": "an office"},
+        {"belongs_inside": "nope"},
+        {"node_id": "s1", "name": "Havenport", "reason": "fallback"},
+    ])
+
+    location = asyncio.run(builder.llm_pick_start_location(wid, "an office", llm))
+
+    assert location["node_id"] == "s1"
+    assert not location.get("generated")
+
+
+def test_author_location_passes_belongs_inside_through(builder):
+    # Play-time authoring hands the redirect to the caller (travel grows the
+    # site's interior) instead of claiming a map position.
+    wid = _start_world(builder)
+    builder._llm_service = ScriptedLLM([{"belongs_inside": "s1"}])
+
+    result = asyncio.run(builder.author_location(
+        wid, "the harbor master's office", anchor_node_id="s1"))
+
+    assert result == {"belongs_inside": "s1"}
 
 
 def test_append_map_node_dispatches_to_layer_and_child_bundle(builder):

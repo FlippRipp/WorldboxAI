@@ -172,6 +172,22 @@ def _connection_turns(connection: dict) -> int:
     return 0
 
 
+def _ancestry_anchor(world_data: dict, map_id: str) -> str | None:
+    """The overworld node ultimately anchoring a (chain of) child map(s):
+    standing inside the school's gym, an outside placement anchors at the
+    school's node on the wider map — so "across the road" lands beside the
+    school, not wherever the region vaguely fits."""
+    anchor = None
+    record = get_map(world_data, map_id)
+    seen = set()
+    while record is not None and record.get("anchor_node_id") \
+            and record.get("map_id") not in seen:
+        seen.add(record.get("map_id"))
+        anchor = record["anchor_node_id"]
+        record = get_map(world_data, record.get("parent_map_id") or "")
+    return anchor
+
+
 async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
     """Apply player movement (same-map moves, passages, journey advance)."""
     from .worldspace import ensure_v2
@@ -259,6 +275,54 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
         if sm is not None and sm.state.get("world_data") is world_data:
             _sync.write_session_world_data(sm)
 
+    async def absorb_authored(authored):
+        """Make an author_location result visible in this session: mirror a
+        NEW-founded node (+ link edges) into the session's world_data, or
+        sync a claimed slot's fresh fields onto its existing node."""
+        new_node = authored.get("new_node")
+        if new_node is not None:
+            target_record = get_map(world_data, authored.get("map_id")) or {}
+            session_nodes = target_record.setdefault("nodes", [])
+            if not any(n.get("id") == new_node.get("id") for n in session_nodes):
+                session_nodes.append(dict(new_node))
+                target_record.setdefault("edges", []).extend(
+                    dict(e) for e in authored.get("new_edges") or [])
+                persist_world()
+                await _sync.embed_backfilled_nodes(
+                    host, state.get("world_id"), [new_node["id"]])
+        else:
+            _sync.sync_enriched_nodes(host, state.get("world_id"), [authored["node_id"]])
+
+    async def grow_inside(parent_node_id, desc):
+        """Author ``desc`` as a place inside a site's interior map, creating
+        the interior first when it doesn't exist yet (the expansion is told
+        it must include this place). Mirrors the growth into the session and
+        returns (map_id, node_id) to land at, or None."""
+        child = await _expansion.ensure_child_map(
+            host, state, parent_node_id, must_include=desc)
+        if child is None:
+            return None
+        map_id = child.get("map_id")
+        try:
+            grown = await host.world_builder.grow_child_map(
+                state.get("world_id"), map_id, desc)
+        except Exception:
+            grown = None
+        # A belongs_outside veto here would bounce back across the boundary —
+        # the request already crossed it once; give up instead of ping-ponging.
+        if not grown or not (grown.get("node") or {}).get("id"):
+            return None
+        node = grown["node"]
+        session_nodes = child.setdefault("nodes", [])
+        if not any(n.get("id") == node["id"] for n in session_nodes):
+            session_nodes.append(dict(node))
+            child.setdefault("edges", []).extend(
+                dict(e) for e in grown.get("edges") or [])
+            persist_world()
+            await _sync.embed_backfilled_nodes(
+                host, state.get("world_id"), [node["id"]])
+        return map_id, node["id"]
+
     # --- Secret discovery: an earned find unhides a connection (no move) ---
     discover_id = clean_option(mutation.get("discover_passage"))
     if discover_id and discover_id not in ("none", "None", ""):
@@ -289,23 +353,16 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
                 anchor_node_id=current_node)
         except Exception:
             authored = None
+        if authored and authored.get("belongs_inside"):
+            # Cross-boundary redirect: the destination is really a spot
+            # INSIDE an existing site — grow that site's interior and land
+            # there instead of founding a map node of its own.
+            landed = await grow_inside(authored["belongs_inside"], new_location_desc)
+            if landed:
+                return land_at(*landed)
+            authored = None
         if authored and authored.get("node_id"):
-            new_node = authored.get("new_node")
-            if new_node is not None:
-                # No free slot fit, so a brand-new node was founded beside a
-                # named place — it doesn't exist in this session's world_data
-                # yet; mirror the node and its link edges in.
-                target_record = get_map(world_data, authored.get("map_id")) or {}
-                session_nodes = target_record.setdefault("nodes", [])
-                if not any(n.get("id") == new_node.get("id") for n in session_nodes):
-                    session_nodes.append(dict(new_node))
-                    target_record.setdefault("edges", []).extend(
-                        dict(e) for e in authored.get("new_edges") or [])
-                    persist_world()
-                    await _sync.embed_backfilled_nodes(
-                        host, state.get("world_id"), [new_node["id"]])
-            else:
-                _sync.sync_enriched_nodes(host, state.get("world_id"), [authored["node_id"]])
+            await absorb_authored(authored)
             custom_target = authored["node_id"]
 
     if custom_desc and custom_target:
@@ -399,7 +456,23 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
                     near_node_id=current_node)
             except Exception:
                 grown = None
-            if grown and (grown.get("node") or {}).get("id"):
+            if grown and grown.get("belongs_outside"):
+                # The engine vetoed: this is its own destination in the wider
+                # world. Author it out there, anchored at the site's overworld
+                # node (map ancestry), and step outside to it.
+                authored = None
+                try:
+                    authored = await host.world_builder.author_location(
+                        state.get("world_id"), grow_desc,
+                        anchor_node_id=_ancestry_anchor(world_data, current_map))
+                except Exception:
+                    authored = None
+                if authored and authored.get("node_id"):
+                    await absorb_authored(authored)
+                    target_map = map_of_node(world_data, authored["node_id"])
+                    if target_map is not None:
+                        return land_at(target_map, authored["node_id"])
+            elif grown and (grown.get("node") or {}).get("id"):
                 node = grown["node"]
                 # Mirror the growth onto the session's own world_data copy
                 # (the facade grew the world-level bundle, not this dict).
@@ -412,6 +485,12 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
                     await _sync.embed_backfilled_nodes(
                         host, state.get("world_id"), [node["id"]])
                 new_node_id = node["id"]
+        elif current_node:
+            # On the overworld at an expandable (or already expanded) site:
+            # the spot belongs inside it — grow the interior and step in.
+            landed = await grow_inside(current_node, grow_desc)
+            if landed:
+                return land_at(*landed)
 
     # --- A Reader-declared same-map destination ---------------------------
     wants_move = new_node_id and new_node_id != current_node

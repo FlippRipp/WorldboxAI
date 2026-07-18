@@ -179,7 +179,7 @@ def test_expand_node_validates_llm_output_and_entrance(builder):
     wid = _map_world(builder)
     builder._llm_service.mode = "live"
 
-    async def fake_live(node, context, parent_map, levels, max_locations, template_vocab=None):
+    async def fake_live(node, context, parent_map, levels, max_locations, template_vocab=None, must_include=None):
         return {
             "label": "The Harbor Rings",
             "level_type": "bogus-level",  # falls back to the first allowed level
@@ -344,6 +344,8 @@ def test_grow_child_map_live_prompt_and_existing_match(builder):
     assert f"currently at: {start['name']}" in user    # player anchor present
     assert "a shed for the harvest tools" in user
     assert '"existing"' in user                        # duplicate guard offered
+    assert "belongs_outside" in user                   # boundary veto offered
+    assert "without leaving" in user
     # The authored adjacency won: the shed adjoins the hall it named.
     assert any({e["from"], e["to"]} == {nodes_by_name[hall]["id"], grown["node"]["id"]}
                for e in grown["edges"])
@@ -358,22 +360,95 @@ def test_grow_child_map_live_prompt_and_existing_match(builder):
     assert count_after == count_before
 
 
-def test_schema_offers_new_sub_location_only_inside_child_maps(builder, tmpdir):
+def test_grow_child_map_belongs_outside_veto(builder):
+    # The interior author may veto: the request is its own destination in the
+    # wider world — nothing is created and the marker flows to the caller.
+    wid = _map_world(builder)
+    bundle = asyncio.run(builder.expand_node(wid, "root", "c1"))
+    map_id = bundle["map"]["map_id"]
+    count_before = len(bundle["map"]["nodes"])
+
+    async def fake_completion(messages=None, **kwargs):
+        return json.dumps({"belongs_outside": True})
+
+    builder._llm_service = types.SimpleNamespace(
+        mode="live", module_fast_model="fast-slot", reader_model="reader-slot",
+        simple_completion=fake_completion)
+    grown = asyncio.run(builder.grow_child_map(
+        wid, map_id, "the lonely lighthouse across the bay"))
+
+    assert grown == {"belongs_outside": True}
+    on_disk = builder._persistence.load_child_map(wid, map_id)
+    assert len(on_disk["map"]["nodes"]) == count_before
+
+
+def test_expand_must_include_reaches_the_authoring_prompt(builder):
+    # Folding a pending sub-location request into a site's first expansion:
+    # the interior author is told the map must include that place.
+    wid = _map_world(builder)
+    captured = []
+
+    async def fake_completion(messages=None, **kwargs):
+        captured.append(messages)
+        return json.dumps({
+            "label": "Inside Vessencia", "level_type": "interior",
+            "entrance_kind": "gate", "entrance_name": "Harbor Gate",
+            "entrance_description": "",
+            "locations": [{"name": "Saltmarket Row", "type": "market",
+                           "description": "Fish and rope.", "adjacent": [],
+                           "is_entrance": True}],
+            "connections": []})
+
+    builder._llm_service = types.SimpleNamespace(
+        mode="live", module_fast_model="fast-slot", reader_model="reader-slot",
+        simple_completion=fake_completion)
+    asyncio.run(builder.expand_node(
+        wid, "root", "c1", must_include="the storage building behind the gate"))
+
+    user = captured[0][1]["content"]
+    assert 'MUST include a location for it: "the storage building behind the gate"' in user
+
+
+def test_ancestry_anchor_resolves_through_nested_maps():
+    from wbruntime.travel import _ancestry_anchor
+    wd = {"maps": {
+        "root": {"map_id": "root", "nodes": [{"id": "c1", "name": "School"}]},
+        "m_int": {"map_id": "m_int", "parent_map_id": "root",
+                  "anchor_node_id": "c1", "nodes": [{"id": "m_int:n1", "name": "Gym"}]},
+        "m_deep": {"map_id": "m_deep", "parent_map_id": "m_int",
+                   "anchor_node_id": "m_int:n1", "nodes": []},
+    }}
+    assert _ancestry_anchor(wd, "m_deep") == "c1"
+    assert _ancestry_anchor(wd, "m_int") == "c1"
+    assert _ancestry_anchor(wd, "root") is None
+
+
+def test_schema_offers_new_sub_location_inside_and_at_sites(builder, tmpdir):
     wid = _map_world(builder)
     asyncio.run(builder.expand_node(wid, "root", "c1"))
     sm, engine, state = _play_session(builder, tmpdir, wid)
 
-    # On the root map: no grow field.
+    # On the root map at a site: the grow field targets the site's interior,
+    # and both boundary fields carry the discriminating rule + cross-hints.
+    schema = asyncio.run(wbg.on_mutation_schema(state, None))
+    assert "inside Vessencia" in schema["new_sub_location"]["label"]
+    assert "without leaving" in schema["new_sub_location"]["description"]
+    assert "custom_transition_new_location" in schema["new_sub_location"]["description"]
+    assert "new_sub_location" in schema["custom_transition_new_location"]["description"]
+
+    # At an unnamed node: nothing to grow into.
+    state["player_location_node_id"] = "w2"
     schema = asyncio.run(wbg.on_mutation_schema(state, None))
     assert "new_sub_location" not in schema
 
-    # Inside the child map: the grow field appears.
+    # Inside the child map: the grow field targets the current map.
     interior_id = child_map_id("root", "c1")
     entrance = state["world_data"]["maps"][interior_id]["nodes"][0]
     state["player_location_map_id"] = interior_id
     state["player_location_node_id"] = entrance["id"]
     schema = asyncio.run(wbg.on_mutation_schema(state, None))
     assert "new_sub_location" in schema
+    assert "without leaving" in schema["new_sub_location"]["description"]
 
 
 def test_travel_new_sub_location_grows_map_and_moves_player(builder, tmpdir):
@@ -403,6 +478,84 @@ def test_travel_new_sub_location_grows_map_and_moves_player(builder, tmpdir):
         on_disk = json.load(f)
     assert any(n["id"] == new_id for n in on_disk["maps"][interior_id]["nodes"])
     assert any("storage building" in e["text"].lower() for e in engine.memory.entries)
+
+
+def test_travel_new_sub_location_at_site_creates_interior_and_enters(builder, tmpdir):
+    # On the overworld, standing AT a site with no interior yet: the request
+    # creates the interior (folding the place into its first expansion),
+    # grows the requested spot onto it, and the player steps inside to it.
+    wid = _map_world(builder)
+    sm, engine, state = _play_session(builder, tmpdir, wid)
+
+    result = asyncio.run(wbg.on_mutate_state(
+        {"new_sub_location": "the storage building behind the gate"}, state, None))
+
+    interior_id = child_map_id("root", "c1")
+    new_id = result["player_location_node_id"]
+    assert result["player_location_map_id"] == interior_id
+    assert new_id.startswith(interior_id + ":g")
+    session_map = state["world_data"]["maps"][interior_id]
+    assert any(n["id"] == new_id for n in session_map["nodes"])
+    # Save file carries the fresh interior and the grown node.
+    with open(sm.data_dir / "saves" / "save1" / "World" / "world_data.json",
+              encoding="utf-8") as f:
+        on_disk = json.load(f)
+    assert any(n["id"] == new_id for n in on_disk["maps"][interior_id]["nodes"])
+
+
+def test_travel_grow_belongs_outside_lands_on_the_overworld(builder, tmpdir, monkeypatch):
+    # Inside a site, the Reader asks for a "sub-location" that is really its
+    # own destination out in the world: grow vetoes with belongs_outside and
+    # the place is authored outside, anchored at the site's overworld node.
+    wid = _map_world(builder)
+    asyncio.run(builder.expand_node(wid, "root", "c1"))
+    sm, engine, state = _play_session(builder, tmpdir, wid)
+    interior_id = child_map_id("root", "c1")
+    entrance = state["world_data"]["maps"][interior_id]["nodes"][0]
+    state["player_location_map_id"] = interior_id
+    state["player_location_node_id"] = entrance["id"]
+
+    captured = {}
+
+    async def fake_grow(world_id, map_id, desc, near_node_id=None):
+        return {"belongs_outside": True}
+
+    async def fake_author(world_id, description, anchor_node_id=None):
+        captured["anchor"] = anchor_node_id
+        return {"node_id": "w1", "name": "Old Mill", "type": "landmark",
+                "map_id": "root", "generated": True}
+
+    monkeypatch.setattr(builder, "grow_child_map", fake_grow)
+    monkeypatch.setattr(builder, "author_location", fake_author)
+    result = asyncio.run(wbg.on_mutate_state(
+        {"new_sub_location": "the lonely lighthouse across the bay"}, state, None))
+
+    assert captured["anchor"] == "c1"  # resolved through map ancestry
+    assert result["player_location_map_id"] == "root"
+    assert result["player_location_node_id"] == "w1"
+
+
+def test_travel_authored_belongs_inside_grows_the_site_interior(builder, tmpdir, monkeypatch):
+    # The wider-world authoring path may redirect the other way: the named
+    # destination is really a spot inside an existing site — its interior is
+    # created/grown and the player lands in there.
+    wid = _map_world(builder)
+    sm, engine, state = _play_session(builder, tmpdir, wid)
+
+    async def fake_author(world_id, description, anchor_node_id=None):
+        return {"belongs_inside": "c1"}
+
+    monkeypatch.setattr(builder, "author_location", fake_author)
+    result = asyncio.run(wbg.on_mutate_state({
+        "custom_transition": "slipped through the harbor gate",
+        "custom_transition_new_location": "the fish-gutting hall of Vessencia",
+    }, state, None))
+
+    interior_id = child_map_id("root", "c1")
+    assert result["player_location_map_id"] == interior_id
+    new_id = result["player_location_node_id"]
+    session_map = state["world_data"]["maps"][interior_id]
+    assert any(n["id"] == new_id for n in session_map["nodes"])
 
 
 def test_travel_authors_new_root_node_when_no_slot_fits(builder, tmpdir):

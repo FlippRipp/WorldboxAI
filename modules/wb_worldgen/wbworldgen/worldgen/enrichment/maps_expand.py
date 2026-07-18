@@ -173,7 +173,7 @@ class MapExpansionEngine:
     async def expand(self, compiled: dict, parent_map_id: str, node: dict, *,
                      max_locations: int = 10, template_vocab: dict = None,
                      level_type: str = None, total_nodes: int = None,
-                     world_id: str = None) -> dict:
+                     world_id: str = None, must_include: str = None) -> dict:
         """Generate {"map": MapRecord, "connections": [ConnectionRecord]} for
         one anchor node. Raises on LLM failure or a violated entrance
         contract — nothing is persisted here.
@@ -182,7 +182,9 @@ class MapExpansionEngine:
         explicit caller choice); otherwise the LLM picks from the allowed
         levels. ``total_nodes`` sizes procedurally generated children.
         ``world_id`` enables terrain rasters for terrain-flagged levels (they
-        persist under the world's terrain directory)."""
+        persist under the world's terrain directory). ``must_include`` is a
+        place the story already went to inside this location — the authored
+        interior is told to include it."""
         from wbworldgen.worldgen import mapspace as _ms
         max_locations = max(4, min(int(max_locations or 10), 16))
         parent_map = _ms.get_map(compiled, parent_map_id) or {}
@@ -200,7 +202,8 @@ class MapExpansionEngine:
             all_nodes, _ = collect_nodes_by_layer(compiled)
             context = build_enrichment_context(node, all_nodes, compiled, include_descriptions=True)
             parsed = await self._live_expand(node, context, parent_map, levels,
-                                             max_locations, template_vocab)
+                                             max_locations, template_vocab,
+                                             must_include=must_include)
 
         chosen = next((l for l in levels
                        if l.get("level_type") == str(parsed.get("level_type", "")).strip()),
@@ -228,8 +231,11 @@ class MapExpansionEngine:
         creating a duplicate.
 
         Returns ``{"node", "edges", "created"}`` — the map record is mutated
-        in place when ``created`` — or None on unusable output. Raises on LLM
-        failure (callers decide the fallback).
+        in place when ``created`` — or ``{"belongs_outside": True}`` when the
+        LLM vetoes the request as not an interior place at all (its own
+        destination in the wider world; the caller falls through to overworld
+        authoring), or None on unusable output. Raises on LLM failure
+        (callers decide the fallback).
         """
         description = str(description or "").strip()
         if not description:
@@ -249,6 +255,9 @@ class MapExpansionEngine:
         else:
             parsed = await self._live_grow(compiled, map_record, named, description,
                                            near_node, template_vocab)
+
+        if parsed.get("belongs_outside"):
+            return {"belongs_outside": True}
 
         by_name = {str(n.get("name", "")).strip().lower(): n for n in named}
         existing_ref = str(parsed.get("existing", "")).strip().lower()
@@ -364,6 +373,9 @@ Existing locations on this map:
 {near_line}The story needs this place: "{description}"
 
 If one of the existing locations above already IS this place, return {{"existing": "<its exact name>"}} and nothing else.
+If this place does NOT belong inside {label} at all — you could not walk there without leaving
+{label}; it is its own destination out in the wider world that merely happens to be close —
+return {{"belongs_outside": true}} and nothing else, and it will be placed outside instead.
 Otherwise author it: a unique name, a short type, a 1-2 sentence description, and "adjacent" — 1-3 existing
 location names it directly adjoins. Unless the request implies otherwise, it should adjoin the player's
 current location or somewhere right next to it.
@@ -744,7 +756,8 @@ Output ONLY valid JSON:
 
     async def _live_expand(self, node: dict, context: dict, parent_map: dict,
                            levels: list, max_locations: int,
-                           template_vocab: dict = None) -> dict:
+                           template_vocab: dict = None,
+                           must_include: str = None) -> dict:
         host = self._host
         enrichment = host._enrichment
         node_id = node.get("id", "")
@@ -761,6 +774,11 @@ Output ONLY valid JSON:
         sub_noun = "rooms, halls, courts and notable places"
         if isinstance(template_vocab, dict) and template_vocab.get("site_sub_noun"):
             sub_noun = str(template_vocab["site_sub_noun"])
+        must_include_line = ""
+        if must_include:
+            must_include_line = (
+                f"\nThe story has already gone to this place inside {node_name} — the map "
+                f'MUST include a location for it: "{must_include}"\n')
 
         levels_block = "\n".join(
             f"- {l.get('level_type')}: {l.get('guidance', l.get('label', ''))}"
@@ -793,7 +811,7 @@ Region context:
 {factions_line}{neighbors_line}
 Location to expand: {node_name} ({node_type})
 Description: {node.get('description', '') or node.get('label_description', '')}
-
+{must_include_line}
 Choose the level_type for this new map from:
 {levels_block}
 {procedural_note}

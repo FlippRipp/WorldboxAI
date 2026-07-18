@@ -252,7 +252,10 @@ async def generate_start_location(compiled: dict, preference: str, wanted: str, 
     The prompt carries distance limits (in the map's typical route-leg unit):
     when no offered position is close enough or fitting, the LLM may answer
     ``{"node_id": "NEW", "near_node_id": ...}`` and a brand-new node is built
-    one route leg beside that named place instead of claiming a slot.
+    one route leg beside that named place instead of claiming a slot. A place
+    that is really INSIDE an existing site may be redirected across the
+    boundary with ``{"belongs_inside": "<node id>"}`` — returned as-is for
+    the caller to grow that site's interior instead.
 
     Returns ``{"node_id", "name", "type", "label_description", "description",
     "reason"}`` — plus ``{"map_id", "new_node", "new_edges"}`` when a NEW node
@@ -352,7 +355,12 @@ async def generate_start_location(compiled: dict, preference: str, wanted: str, 
         "If NO listed position qualifies, do not force a distant or unfitting one: return "
         '{"node_id": "NEW", "near_node_id": "<id of the named place it belongs beside>"} '
         "with the other fields as usual, and a brand-new position will be created "
-        "directly beside that place."
+        "directly beside that place.\n"
+        "If the requested place is actually INSIDE one of the existing named places — on "
+        "its premises, somewhere you could walk to without leaving it (a room, hall, "
+        "rooftop, cellar, courtyard building...) — do not place it on this map at all: "
+        'return {"belongs_inside": "<that named place\'s id>"} and nothing else, and it '
+        "will be created inside that place instead."
     )
     user_msg = f"""World premise: {lore.get('premise', '')}
 Genre: {rules.get('genre', '')} | Tone: {rules.get('tone', '')}
@@ -392,6 +400,16 @@ Found a new location matching the request at the best-fitting position. Return J
         return None
 
     slot_ids = {str(s.get("id")) for s in slots}
+    inside_ref = str(authored.get("belongs_inside", "")).strip()
+    if inside_ref:
+        # The place is a sub-location of an existing site, not a map position
+        # of its own — hand the caller the redirect (it grows that interior).
+        from wbworldgen.worldgen import mapspace as _ms3
+        parent = next((n for n in _ms3.all_nodes(compiled)
+                       if n.get("id") == inside_ref), None)
+        if parent is not None and parent.get("name"):
+            return {"belongs_inside": inside_ref}
+        logger.warning("belongs_inside answer names no known place (%r); ignoring", inside_ref)
     node_id = str(authored.get("node_id", ""))
     if node_id.upper() == "NEW":
         return _found_new_node(compiled, authored, fallback_anchor_id=anchor_node_id)

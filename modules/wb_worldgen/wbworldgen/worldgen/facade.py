@@ -698,7 +698,8 @@ class WorldBuilder:
             world_id, _maps_expand.child_map_id(parent_map_id, node_id))
 
     async def expand_node(self, world_id: str, map_id: str, node_id: str,
-                          force: bool = False, level_type: str = None) -> dict:
+                          force: bool = False, level_type: str = None,
+                          must_include: str = None) -> dict:
         """Generate (or return the cached) child map for one anchor node.
 
         One full-attention LLM call, cached under the world's ``maps/``
@@ -720,7 +721,8 @@ class WorldBuilder:
         bundle = await self._maps_expand.expand(
             compiled, map_id, node, max_locations=max_locations,
             template_vocab=compiled.get("template_vocab"),
-            level_type=level_type, total_nodes=child_nodes, world_id=world_id)
+            level_type=level_type, total_nodes=child_nodes, world_id=world_id,
+            must_include=must_include)
         self._persistence.save_child_map(world_id, bundle)
         # Keep the cached compiled world truthful without a full invalidation
         # (a reload would also re-read maps/ via load_world).
@@ -742,8 +744,10 @@ class WorldBuilder:
         current node) anchors the placement and the fallback adjacency.
 
         Returns ``{"node", "edges", "created"}`` — ``created`` is False when
-        the request matched an already-existing location — or None when the
-        map isn't a persisted child map or authoring failed."""
+        the request matched an already-existing location — or the engine's
+        ``{"belongs_outside": True}`` veto (the place is its own destination
+        in the wider world; the caller authors it outside instead), or None
+        when the map isn't a persisted child map or authoring failed."""
         bundle = self._persistence.load_child_map(world_id, map_id)
         if not bundle:
             return None
@@ -835,6 +839,14 @@ class WorldBuilder:
 
         authored = await _start.generate_start_location(
             compiled, preference, result.get("wanted", ""), llm)
+        if authored and authored.get("belongs_inside"):
+            # The requested start is inside an existing place — start at that
+            # place itself (the scene plays out in its part of it).
+            inside = next((c for c in candidates
+                           if c.get("node_id") == authored["belongs_inside"]), None)
+            if inside is not None:
+                return inside
+            authored = None
         if not authored:
             # Generation failed — settle for the best existing candidate.
             return await _start.llm_pick_start_location(compiled, candidates, preference, llm)
@@ -862,6 +874,10 @@ class WorldBuilder:
             return None
         if not authored:
             return None
+        if authored.get("belongs_inside"):
+            # Cross-boundary redirect: the place lives inside an existing
+            # site, not on the overworld — the caller grows that interior.
+            return {"belongs_inside": authored["belongs_inside"]}
         result = self._persist_generated_start(world_id, authored)
         self._enrichment.invalidate_compiled(world_id)
         return result

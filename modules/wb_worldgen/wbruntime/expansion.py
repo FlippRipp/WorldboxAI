@@ -68,9 +68,11 @@ def maybe_expand_node(host, state: dict, node_id: str, on_request: bool = False)
         expand_node_task(host, state.get("world_id"), map_id, node_id))
 
 
-async def expand_node_task(host, world_id: str, map_id: str, node_id: str):
+async def expand_node_task(host, world_id: str, map_id: str, node_id: str,
+                           must_include: str = None):
     try:
-        bundle = await host.world_builder.expand_node(world_id, map_id, node_id)
+        bundle = await host.world_builder.expand_node(
+            world_id, map_id, node_id, must_include=must_include)
         _sync.sync_child_map(host, world_id, bundle)
         await _sync.embed_child_map(host, world_id, bundle)
     except FileNotFoundError:
@@ -82,11 +84,14 @@ async def expand_node_task(host, world_id: str, map_id: str, node_id: str):
         host._site_tasks.pop(node_id, None)
 
 
-async def ensure_child_map(host, state: dict, node_id: str, timeout: float = 20):
+async def ensure_child_map(host, state: dict, node_id: str, timeout: float = 20,
+                           must_include: str = None):
     """Await-on-enter: the player walks into an unmapped place — wait
     (bounded) for its child map so the entrance narration has real rooms. On
     timeout the generation keeps running and lands next turn; returns the
-    child map record or None."""
+    child map record or None. ``must_include`` folds a place the story
+    already went to into a first expansion (ignored when the map exists or
+    an expansion is already running)."""
     wd = state.get("world_data")
     if not wd or not node_id:
         return None
@@ -100,7 +105,8 @@ async def ensure_child_map(host, state: dict, node_id: str, timeout: float = 20)
     task = host._site_tasks.get(node_id)
     if task is None or task.done():
         task = asyncio.create_task(
-            expand_node_task(host, state.get("world_id"), map_id, node_id))
+            expand_node_task(host, state.get("world_id"), map_id, node_id,
+                             must_include=must_include))
         host._site_tasks[node_id] = task
     try:
         await asyncio.wait_for(asyncio.shield(task), timeout=timeout)

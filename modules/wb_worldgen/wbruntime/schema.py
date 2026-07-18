@@ -234,24 +234,53 @@ def build_location_mutation_schema(world_data: dict, state: dict = None) -> dict
                 ),
             }
 
-    # Growing the current map: inside a child map (a site's interior, a city)
-    # the story may need a place that isn't on the map yet — it gets authored
-    # onto this map right where it belongs, and the player moves there.
+    # Growing into the current place: the story may need a spot inside a
+    # location that isn't mapped yet — inside a child map it is authored onto
+    # this map; on the overworld, standing at an expandable site, it grows
+    # (or first creates) that site's interior. The discriminating rule in
+    # both descriptions: could you walk there without leaving the place?
     if state:
         current = get_map(world_data, player_map_id(state)) or {}
         if current.get("anchor_node_id"):
+            place = current.get("label", "this location")
             schema["new_sub_location"] = {
                 "type": "string",
-                "label": f"NEW place inside {current.get('label', 'this location')} the story went to",
+                "label": f"NEW place inside {place} the story went to",
                 "description": (
-                    "ONLY when the story takes the player to a spot inside this location "
-                    "that no listed destination covers (e.g. 'the storage building behind "
-                    "the school'). Describe it in one short sentence — it is added to this "
-                    "map beside the places it belongs to and the player moves there. If a "
-                    "listed destination fits, use player_location_node_id instead. Leave "
-                    "empty otherwise."
+                    f"ONLY when the story takes the player to a spot inside {place} — "
+                    "somewhere you could walk to without leaving it (e.g. 'the storage "
+                    "building behind the school') — that no listed destination covers. "
+                    "Describe it in one short sentence — it is added to this map beside "
+                    "the places it belongs to and the player moves there. If a listed "
+                    "destination fits, use player_location_node_id instead. Leave empty "
+                    "otherwise."
                 ),
             }
+        elif node is not None and node.get("name") and (
+                expandable or children_by_anchor(world_data).get(
+                    (player_map_id(state), state.get("player_location_node_id")))):
+            place = node.get("name", "this place")
+            schema["new_sub_location"] = {
+                "type": "string",
+                "label": f"NEW place inside {place} the story went to",
+                "description": (
+                    f"ONLY when the story takes the player to a spot inside {place} — on "
+                    "its premises, somewhere you could walk to without leaving it (e.g. "
+                    "'the storage building behind the school'). Describe it in one short "
+                    f"sentence — {place}'s interior gains that place and the player moves "
+                    "inside to it. Leave empty otherwise."
+                ),
+            }
+        if "new_sub_location" in schema and "custom_transition_new_location" in schema:
+            schema["custom_transition_new_location"]["description"] += (
+                " Only for a place that is its OWN destination in the wider world — a "
+                "spot inside the location the player is at belongs in new_sub_location "
+                "instead."
+            )
+            schema["new_sub_location"]["description"] += (
+                " A destination of its own that merely happens to be close belongs in "
+                "custom_transition_new_location instead."
+            )
 
     # Intra-site movement: when the player's current location has an expanded
     # interior, offer its sub-locations as instant moves within the place.
