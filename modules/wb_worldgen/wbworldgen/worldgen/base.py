@@ -59,6 +59,14 @@ class Step:
         procedural steps (raster metadata, structured summaries, ...)."""
         return data
 
+    def view_for(self, world_state: dict) -> "Step":
+        """The step as it applies to *this* world. Override to return a clone
+        with a trimmed schema/guidance when a field only makes sense under
+        certain world designs (the class-level schema stays the maximal one
+        the frontend sees). The orchestrator applies this view to generation
+        and per-item rerolls; the default is the step itself."""
+        return self
+
 
 #: Ordered list of registered step classes (registration order preserved).
 STEP_REGISTRY: list[type] = []

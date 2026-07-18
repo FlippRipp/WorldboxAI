@@ -198,6 +198,14 @@ export function StepField({ fieldKey, fieldSchema, value, onChange, disabled, on
   if (type === 'list' && fieldSchema.item_schema) {
     const items = Array.isArray(value) ? value : [];
     const schema = fieldSchema.item_schema;
+    // Conditional sub-fields only apply to some worlds (the backend trims them
+    // from generation there); hide them whenever no entry carries a value.
+    const hiddenKeys = new Set(
+      Object.keys(schema).filter((k) => {
+        const s = schema[k];
+        return typeof s === 'object' && s.conditional && !items.some((it) => it?.[k]);
+      })
+    );
     const canReroll = fieldSchema.rerollable && typeof onRerollItem === 'function';
     const anyRerolling = canReroll && !!rerollingKey;
     const entryLabel = fieldSchema.label?.replace(/s$/i, '') || 'entry';
@@ -230,6 +238,7 @@ export function StepField({ fieldKey, fieldSchema, value, onChange, disabled, on
               </div>
             )}
             {Object.keys(schema).map((subKey) => {
+              if (hiddenKeys.has(subKey)) return null;
               const sub = schema[subKey];
               const subType = typeof sub === 'object' ? sub.type : sub;
               if (subType === 'list') {
@@ -329,6 +338,7 @@ export function StepField({ fieldKey, fieldSchema, value, onChange, disabled, on
             onClick={() => {
               const empty = {};
               Object.keys(schema).forEach((k) => {
+                if (hiddenKeys.has(k)) return;
                 const s = schema[k];
                 const st = typeof s === 'object' ? s.type : s;
                 empty[k] = st === 'list' ? [] : '';

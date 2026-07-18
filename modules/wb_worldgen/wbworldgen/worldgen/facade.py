@@ -398,6 +398,10 @@ class WorldBuilder:
             return await loop.run_in_executor(
                 None, lambda: self._map_gen.generate(world_state, config, root_gen))
 
+        # Duck-typed steps (tests, legacy) may predate the per-world view hook.
+        view = getattr(step, "view_for", None)
+        if callable(view):
+            step = view(world_state)
         if self._llm_service and self._llm_service.mode != "mock":
             context = self._build_chain_context(world_state, step_id)
             data = await self._llm_gen.generate(
@@ -425,6 +429,9 @@ class WorldBuilder:
         step = self._steps.get(step_id)
         if not step:
             raise ValueError(f"Unknown step: {step_id}")
+        view = getattr(step, "view_for", None)
+        if callable(view):
+            step = view(world_state)
         user_prompt = seed_with_scenario(world_state, user_prompt)
         field_schema = (step.schema or {}).get(field)
         if not isinstance(field_schema, dict):
