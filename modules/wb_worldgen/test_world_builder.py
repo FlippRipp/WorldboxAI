@@ -391,6 +391,55 @@ def test_build_world_prompt_messages():
     assert "seed prompt from the scenario" in msgs3[1]["content"]
 
 
+def test_build_world_questions_messages():
+    from wbworldgen.worldgen.facade import build_world_questions_messages
+    # Draft + scenario + history: everything appears, scenario marked decided.
+    msgs = build_world_questions_messages(
+        "A drowned city of rival guilds.",
+        history=[{"question": "What era?", "answer": "Late medieval."},
+                 {"question": "Any magic?", "answer": ""}],
+        scenario={"name": "The Sunken Court"},
+    )
+    assert msgs[0]["role"] == "system"
+    assert "questions" in msgs[0]["content"]
+    user = msgs[1]["content"]
+    assert "A drowned city of rival guilds." in user
+    assert "The Sunken Court" in user
+    assert "already decided" in user
+    assert "What era?" in user and "Late medieval." in user
+    # Skipped answers are rendered as skipped, not blank.
+    assert "Any magic?" in user and "skipped" in user
+    assert "do not repeat" in user
+
+    # Empty prompt is allowed: the interview starts from scratch.
+    msgs2 = build_world_questions_messages("")
+    user2 = msgs2[1]["content"]
+    assert "empty" in user2 and "from scratch" in user2
+    assert "previous_rounds" not in user2
+
+
+def test_build_world_prompt_fold_messages():
+    from wbworldgen.worldgen.facade import build_world_prompt_fold_messages
+    msgs = build_world_prompt_fold_messages(
+        "A drowned city of rival guilds.",
+        [{"question": "What era?", "answer": "Late medieval."}],
+        scenario={"name": "The Sunken Court"},
+    )
+    # Conservative-edit framing: nothing changed unnecessarily.
+    assert "conservative edit" in msgs[0]["content"]
+    user = msgs[1]["content"]
+    assert "A drowned city of rival guilds." in user
+    assert "The Sunken Court" in user
+    assert "What era?" in user and "Late medieval." in user
+    assert "changing nothing" in user
+
+    # Empty draft: the answers become the first version.
+    msgs2 = build_world_prompt_fold_messages(
+        "", [{"question": "Genre?", "answer": "Grim fantasy."}])
+    assert "write the first draft from the answers" in msgs2[1]["content"]
+    assert "Grim fantasy." in msgs2[1]["content"]
+
+
 def test_compile_world_carries_scenario(builder_with_steps):
     wb = builder_with_steps
     with_scn = wb.compile_world({"steps": {}, "seed_prompt": "p", "scenario": "src material"})

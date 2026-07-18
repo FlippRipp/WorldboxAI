@@ -170,6 +170,11 @@ export const api = {
   // LLM-as-author: write/rewrite the World Prompt from the player's notes
   // (instruction), the current draft, and an optional linked scenario.
   rewriteWorldPrompt:     ({ instruction = '', currentText = null, scenarioId = null }) => request('/api/world/rewrite-prompt', { method: 'POST', body: JSON.stringify({ instruction, current_text: currentText, scenario_id: scenarioId }) }),
+  // World-prompt interview: one round of clarifying questions about the draft
+  // (history = prior rounds so questions never repeat), then fold the answers
+  // back into the prompt with a conservative rewrite.
+  worldPromptQuestions:   ({ currentText = null, history = [], scenarioId = null }) => request('/api/world/prompt-questions', { method: 'POST', body: JSON.stringify({ current_text: currentText, history, scenario_id: scenarioId }) }),
+  foldWorldAnswers:       ({ currentText = null, answers = [], scenarioId = null }) => request('/api/world/fold-answers', { method: 'POST', body: JSON.stringify({ current_text: currentText, answers, scenario_id: scenarioId }) }),
   generateWorldStep:      (stepId, note = '', data = null) => {
     const body = { note };
     if (data) body.data = data;

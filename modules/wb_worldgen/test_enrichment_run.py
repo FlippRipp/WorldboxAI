@@ -504,3 +504,75 @@ def test_rewrite_world_prompt_route():
         assert getattr(exc.value, "status_code", None) == 400
     finally:
         world_routes.engine = old_engine
+
+
+def test_world_prompt_questions_route():
+    import routes as world_routes
+
+    captured = {}
+
+    async def fake_completion(messages, model=None, response_format=None, inspector_ctx=None):
+        captured["messages"] = messages
+        captured["model"] = model
+        return json.dumps({"questions": ["What era is it?", "  ", "Who holds power?"]})
+
+    fake_engine = types.SimpleNamespace(
+        llm=types.SimpleNamespace(storyteller_model="fake/model",
+                                  simple_completion=fake_completion))
+    old_engine = world_routes.engine
+    world_routes.engine = fake_engine
+    try:
+        # Empty prompt is allowed — the interview works from scratch. Blank
+        # questions are dropped from the response.
+        resp = asyncio.run(world_routes.world_prompt_questions(
+            world_routes.WorldPromptQuestionsRequest()))
+        assert resp["questions"] == ["What era is it?", "Who holds power?"]
+        assert captured["model"] == "fake/model"
+
+        # History rides along so the model never repeats itself.
+        asyncio.run(world_routes.world_prompt_questions(
+            world_routes.WorldPromptQuestionsRequest(
+                current_text="A drowned city.",
+                history=[{"question": "What era is it?", "answer": "Late medieval."}])))
+        user = captured["messages"][1]["content"]
+        assert "A drowned city." in user
+        assert "What era is it?" in user and "Late medieval." in user
+    finally:
+        world_routes.engine = old_engine
+
+
+def test_fold_world_answers_route():
+    import routes as world_routes
+
+    captured = {}
+
+    async def fake_completion(messages, model=None, response_format=None, inspector_ctx=None):
+        captured["messages"] = messages
+        return json.dumps({"text": "A late-medieval drowned city of rival guilds."})
+
+    fake_engine = types.SimpleNamespace(
+        llm=types.SimpleNamespace(storyteller_model="fake/model",
+                                  simple_completion=fake_completion))
+    old_engine = world_routes.engine
+    world_routes.engine = fake_engine
+    try:
+        resp = asyncio.run(world_routes.fold_world_answers(
+            world_routes.FoldWorldAnswersRequest(
+                current_text="A drowned city of rival guilds.",
+                answers=[{"question": "What era?", "answer": "Late medieval."},
+                         {"question": "Any magic?", "answer": "  "}])))
+        assert resp["text"] == "A late-medieval drowned city of rival guilds."
+        user = captured["messages"][1]["content"]
+        assert "A drowned city of rival guilds." in user
+        assert "Late medieval." in user
+        # The blank answer was dropped before it reached the LLM.
+        assert "Any magic?" not in user
+
+        # All answers skipped → 400, no LLM call.
+        with pytest.raises(Exception) as exc:
+            asyncio.run(world_routes.fold_world_answers(
+                world_routes.FoldWorldAnswersRequest(
+                    current_text="x", answers=[{"question": "Q?", "answer": ""}])))
+        assert getattr(exc.value, "status_code", None) == 400
+    finally:
+        world_routes.engine = old_engine

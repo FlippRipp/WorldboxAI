@@ -132,6 +132,116 @@ def build_world_prompt_messages(instruction: str, current_text: str = "",
     ]
 
 
+def _interview_history_text(history: list[dict] | None) -> str:
+    """Render prior interview rounds (question/answer pairs) as plain text for
+    the LLM. Skipped questions are shown as such — the player saw them and
+    chose not to answer. Never truncated."""
+    lines = []
+    for pair in history or []:
+        question = str(pair.get("question") or "").strip()
+        if not question:
+            continue
+        answer = str(pair.get("answer") or "").strip()
+        lines.append(f"Q: {question}\nA: {answer or '(skipped — the player left this open)'}")
+    return "\n\n".join(lines)
+
+
+def build_world_questions_messages(current_text: str = "",
+                                   history: list[dict] | None = None,
+                                   scenario: dict | None = None) -> list[dict]:
+    """LLM messages for the world-prompt interview: ask the player a short
+    round of clarifying questions about details the seed prompt leaves open.
+
+    Works from an empty prompt too — the first round then asks foundational
+    questions (genre, tone, scale, central conflict). Prior rounds are passed
+    in `history` so the model never repeats itself, and a linked scenario is
+    grounding so it never asks what the scenario already answers. Pure (no
+    I/O) so it is unit-testable; the route feeds the result to the LLM.
+    """
+    system = (
+        "You are a world-building assistant interviewing the player about the world "
+        "they want an AI world generator to create. Read their seed prompt draft and "
+        "ask 3-5 short, concrete questions about important details it leaves open — "
+        "the things that would most change the generated world (tone, scale, conflict, "
+        "magic or technology, factions, geography, what makes it distinct). Each "
+        "question must be answerable in a sentence or two. Never ask anything the "
+        "prompt, the scenario, or a previous answer already settles, and never repeat "
+        "a question from a previous round — a skipped question means the player wants "
+        "to leave it open, so move on to something else. "
+        'Return only valid JSON: {"questions": ["...", "..."]}.'
+    )
+    parts = []
+    grounding = scenario_grounding_text(scenario) if scenario else ""
+    if grounding:
+        parts.append(
+            "The world must fit this scenario the player has chosen — treat "
+            "everything in it as already decided, not something to ask about:\n"
+            f"<scenario>\n{grounding}\n</scenario>")
+    current_text = (current_text or "").strip()
+    if current_text:
+        parts.append(f"<current_world_prompt>\n{current_text}\n</current_world_prompt>")
+    else:
+        parts.append(
+            "<current_world_prompt>\n(empty — the player hasn't written anything yet; "
+            "ask foundational questions that help them shape the world from scratch)\n"
+            "</current_world_prompt>")
+    history_text = _interview_history_text(history)
+    if history_text:
+        parts.append(
+            "Questions already asked in previous rounds — do not repeat or rephrase "
+            f"any of these:\n<previous_rounds>\n{history_text}\n</previous_rounds>")
+    parts.append("Ask the next round of questions. Return only the JSON.")
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": "\n\n".join(parts)},
+    ]
+
+
+def build_world_prompt_fold_messages(current_text: str,
+                                     answers: list[dict],
+                                     scenario: dict | None = None) -> list[dict]:
+    """LLM messages for folding a round of interview answers into the seed
+    prompt.
+
+    A conservative rewrite: the current prompt is the player's text and must
+    survive intact wherever the answers don't touch it — the model only weaves
+    in what the answers add or change. With an empty current prompt the
+    answers become the first draft. Pure (no I/O) so it is unit-testable.
+    """
+    system = (
+        "You are a world-building assistant maintaining the SEED PROMPT for an AI "
+        "world generator — a short, vivid paragraph of creative direction the "
+        "generator expands into a full world. The player has answered interview "
+        "questions about their world; fold their answers into the prompt. This is a "
+        "conservative edit, not a rewrite: keep the current prompt's wording, "
+        "structure and details unchanged wherever the answers don't touch them, and "
+        "only add or adjust what the answers actually say. Do not pad, embellish, or "
+        "drop anything the player wrote. If the current prompt is empty, write a "
+        "first draft from the answers alone. "
+        'Return only valid JSON: {"text": "..."}.'
+    )
+    parts = []
+    grounding = scenario_grounding_text(scenario) if scenario else ""
+    if grounding:
+        parts.append(
+            "The world must fit this scenario the player has chosen — keep the "
+            f"prompt consistent with it:\n<scenario>\n{grounding}\n</scenario>")
+    current_text = (current_text or "").strip()
+    if current_text:
+        parts.append(f"<current_world_prompt>\n{current_text}\n</current_world_prompt>")
+    else:
+        parts.append("<current_world_prompt>\n(empty — write the first draft from the answers)\n</current_world_prompt>")
+    answers_text = _interview_history_text(answers)
+    parts.append(f"The player's answers this round:\n<answers>\n{answers_text}\n</answers>")
+    parts.append(
+        "Update the seed prompt to incorporate the answers, changing nothing "
+        "unnecessarily. Return only the seed prompt text.")
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": "\n\n".join(parts)},
+    ]
+
+
 def seed_with_scenario(world_state: dict, user_prompt: str) -> str:
     """The effective seed text for generation: the user's prompt, plus the
     optional scenario document supplied at world creation.

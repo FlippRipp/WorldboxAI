@@ -132,6 +132,160 @@ function WorldPromptField({ value, onChange, disabled, scenarioId }) {
   );
 }
 
+// Iterative interview that digs unmentioned details out of the player before
+// generation: the AI reads the prompt (empty is fine — then it interviews from
+// scratch) and asks a round of clarifying questions; answered ones are folded
+// back into the prompt with a conservative rewrite that changes nothing
+// unnecessarily. Repeatable until the player is happy — accepting is simply
+// generating. Prior rounds are sent along so questions never repeat, and the
+// in-flight round survives a relaunch (Android kills the backgrounded PWA).
+const INTERVIEW_KEY = 'wb_worldgen_interview';
+
+function readSavedInterview() {
+  try {
+    return JSON.parse(localStorage.getItem(INTERVIEW_KEY) || 'null') || {};
+  } catch {
+    return {};
+  }
+}
+
+function WorldPromptInterview({ promptText, onPromptChange, scenarioId, disabled }) {
+  const [questions, setQuestions] = useState(() => readSavedInterview().questions || null);
+  const [answers, setAnswers] = useState(() => readSavedInterview().answers || []);
+  const [history, setHistory] = useState(() => readSavedInterview().history || []);
+  const [busy, setBusy] = useState(null); // 'ask' | 'fold' | null
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    try {
+      if (questions || history.length) {
+        localStorage.setItem(INTERVIEW_KEY, JSON.stringify({ questions, answers, history }));
+      } else {
+        localStorage.removeItem(INTERVIEW_KEY);
+      }
+    } catch { /* storage unavailable */ }
+  }, [questions, answers, history]);
+
+  const ask = async () => {
+    if (busy) return;
+    setBusy('ask');
+    setError('');
+    try {
+      const res = await api.worldPromptQuestions({
+        currentText: (promptText || '').trim() || null,
+        history,
+        scenarioId: scenarioId || null,
+      });
+      setQuestions(res.questions);
+      setAnswers(res.questions.map(() => ''));
+    } catch (e) {
+      setError(e.message || 'Failed to get questions.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const closeRound = (roundPairs) => {
+    setHistory((h) => [...h, ...roundPairs]);
+    setQuestions(null);
+    setAnswers([]);
+  };
+
+  const fold = async () => {
+    if (busy) return;
+    const pairs = questions.map((q, i) => ({ question: q, answer: (answers[i] || '').trim() }));
+    if (!pairs.some((p) => p.answer)) return;
+    setBusy('fold');
+    setError('');
+    try {
+      const res = await api.foldWorldAnswers({
+        currentText: (promptText || '').trim() || null,
+        answers: pairs.filter((p) => p.answer),
+        scenarioId: scenarioId || null,
+      });
+      onPromptChange(res.text);
+      closeRound(pairs);
+    } catch (e) {
+      setError(e.message || 'Failed to update the prompt.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const dismiss = () => {
+    if (busy) return;
+    // The whole round counts as skipped — typed-but-not-folded answers never
+    // reached the prompt, so they must not read as settled next round.
+    closeRound(questions.map((q) => ({ question: q, answer: '' })));
+    setError('');
+  };
+
+  const hasAnswer = answers.some((a) => (a || '').trim());
+
+  if (!questions) {
+    return (
+      <div className="space-y-1">
+        <button
+          type="button"
+          onClick={ask}
+          disabled={disabled || !!busy}
+          title="The AI asks about details your prompt leaves open, then works your answers into it"
+          className="px-3 py-1.5 rounded-lg text-xs border border-gray-700 text-gray-400 hover:bg-gray-700 disabled:opacity-50 transition-colors"
+        >
+          {busy === 'ask'
+            ? 'Thinking of questions…'
+            : history.length ? '❓ Ask more questions' : '❓ Refine with questions'}
+        </button>
+        {error && <p className="text-xs text-red-400">{error}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-purple-800/50 bg-purple-950/20 p-3 space-y-3">
+      <p className="text-xs text-gray-400">
+        Answer the questions you care about and skip the rest — skipped ones are left
+        for the generator to decide.
+      </p>
+      {questions.map((q, i) => (
+        <div key={i}>
+          <p className="text-sm text-gray-300 mb-1">{q}</p>
+          <AutoTextarea
+            value={answers[i] || ''}
+            onChange={(e) => {
+              const next = answers.slice();
+              next[i] = e.target.value;
+              setAnswers(next);
+            }}
+            disabled={disabled || !!busy}
+            minRows={1}
+            placeholder="(leave blank to skip)"
+          />
+        </div>
+      ))}
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={fold}
+          disabled={disabled || !!busy || !hasAnswer}
+          className="px-3 py-1.5 rounded-lg text-xs bg-purple-700 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed text-white transition-colors"
+        >
+          {busy === 'fold' ? 'Updating prompt…' : 'Add answers to prompt'}
+        </button>
+        <button
+          type="button"
+          onClick={dismiss}
+          disabled={disabled || !!busy}
+          className="px-3 py-1.5 rounded-lg text-xs border border-gray-700 text-gray-400 hover:bg-gray-700 disabled:opacity-50 transition-colors"
+        >
+          Skip these
+        </button>
+      </div>
+      {error && <p className="text-xs text-red-400">{error}</p>}
+    </div>
+  );
+}
+
 // The pre-generation form (prompt, scenario, skip-review) mirrored
 // to localStorage on every change: Android kills the backgrounded PWA, and a
 // prompt that was typed (or AI-written) but not yet generated exists nowhere
@@ -384,7 +538,10 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
     try {
       const worldId = worldState?.steps?.lore?.data?.world_name || 'world_gen';
       await api.saveWorld(worldId);
-      try { localStorage.removeItem(FORM_KEY); } catch { /* ignore */ }
+      try {
+        localStorage.removeItem(FORM_KEY);
+        localStorage.removeItem(INTERVIEW_KEY);
+      } catch { /* ignore */ }
       setWorldState(null);
       setStarted(false);
       setCurrentStepId(null);
@@ -468,6 +625,13 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
               onChange={setSeedPrompt}
               disabled={loading}
               scenarioId={scenarioId}
+            />
+
+            <WorldPromptInterview
+              promptText={seedPrompt}
+              onPromptChange={setSeedPrompt}
+              scenarioId={scenarioId}
+              disabled={loading}
             />
 
             <div className="flex items-center gap-3">

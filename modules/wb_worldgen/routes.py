@@ -337,47 +337,131 @@ class RewriteWorldPromptRequest(BaseModel):
     scenario_id: Optional[str] = None
 
 
+def _load_scenario_or_404(scenario_id: Optional[str]) -> Optional[dict]:
+    if not scenario_id:
+        return None
+    from backend.engine.scenario import ScenarioStore
+    try:
+        return ScenarioStore(session_manager.data_dir).load_scenario(scenario_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(status_code=404, detail=f"Scenario '{scenario_id}' not found.")
+
+
+async def _seed_prompt_completion(messages: list[dict], call_type: str, what: str) -> str:
+    """Run a seed-prompt authoring call ({"text": ...} JSON) with the shared
+    error handling; `what` names the operation in error details."""
+    try:
+        from backend.engine.llm import LLMProviderError
+    except ImportError:  # isolated module-test context: core pkg not on path
+        LLMProviderError = RuntimeError
+    try:
+        content = await engine.llm.simple_completion(
+            messages,
+            model=engine.llm.storyteller_model,
+            response_format={"type": "json_object"},
+            inspector_ctx={"call_type": call_type, "step": "world_build:seed_prompt"},
+        )
+        text = str(json.loads(content).get("text") or "").strip()
+    except LLMProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=502, detail=f"{what} returned unusable output: {exc}")
+    if not text:
+        raise HTTPException(status_code=502, detail=f"{what} returned no text.")
+    return text
+
+
 @router.post("/api/world/rewrite-prompt")
 async def rewrite_world_prompt(request: RewriteWorldPromptRequest):
     """LLM-as-author for the World Prompt: turns the player's notes (the enrich
     field), the current draft, and an optional linked scenario into a world
     seed prompt. Mirrors the scenario editor's prompt rewrite."""
     from wbworldgen.worldgen.facade import build_world_prompt_messages
-    try:
-        from backend.engine.llm import LLMProviderError
-    except ImportError:  # isolated module-test context: core pkg not on path
-        LLMProviderError = RuntimeError
 
     instruction = (request.instruction or "").strip()
     current_text = (request.current_text or "").strip()
-
-    scenario = None
-    if request.scenario_id:
-        from backend.engine.scenario import ScenarioStore
-        try:
-            scenario = ScenarioStore(session_manager.data_dir).load_scenario(request.scenario_id)
-        except (FileNotFoundError, ValueError):
-            raise HTTPException(status_code=404, detail=f"Scenario '{request.scenario_id}' not found.")
+    scenario = _load_scenario_or_404(request.scenario_id)
 
     if not instruction and not current_text and scenario is None:
         raise HTTPException(status_code=400,
                             detail="Enter some direction or link a scenario to write a world prompt.")
 
     messages = build_world_prompt_messages(instruction, current_text, scenario)
+    text = await _seed_prompt_completion(
+        messages, "world_prompt_rewrite", "World prompt rewrite")
+    return {"text": text}
+
+
+class WorldPromptQuestionsRequest(BaseModel):
+    #: The current World Prompt draft — may be empty (interview from scratch).
+    current_text: Optional[str] = None
+    #: Question/answer pairs from previous interview rounds, oldest first.
+    #: Each item: {"question": str, "answer": str} (empty answer = skipped).
+    history: list[dict] = []
+    #: Optional linked scenario: its content counts as already decided.
+    scenario_id: Optional[str] = None
+
+
+@router.post("/api/world/prompt-questions")
+async def world_prompt_questions(request: WorldPromptQuestionsRequest):
+    """One round of the world-prompt interview: the LLM reads the draft (and
+    any previous rounds) and asks a few clarifying questions about details the
+    prompt leaves open. An empty draft is fine — the questions then help the
+    player shape the world from scratch."""
+    from wbworldgen.worldgen.facade import build_world_questions_messages
+    try:
+        from backend.engine.llm import LLMProviderError
+    except ImportError:  # isolated module-test context: core pkg not on path
+        LLMProviderError = RuntimeError
+
+    scenario = _load_scenario_or_404(request.scenario_id)
+    messages = build_world_questions_messages(
+        (request.current_text or "").strip(), request.history, scenario)
     try:
         content = await engine.llm.simple_completion(
             messages,
             model=engine.llm.storyteller_model,
             response_format={"type": "json_object"},
-            inspector_ctx={"call_type": "world_prompt_rewrite", "step": "world_build:seed_prompt"},
+            inspector_ctx={"call_type": "world_prompt_questions", "step": "world_build:seed_prompt"},
         )
-        text = str(json.loads(content).get("text") or "").strip()
+        raw = json.loads(content).get("questions")
+        questions = [str(q).strip() for q in raw if str(q).strip()] if isinstance(raw, list) else []
     except LLMProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     except (ValueError, TypeError, AttributeError) as exc:
-        raise HTTPException(status_code=502, detail=f"World prompt rewrite returned unusable output: {exc}")
-    if not text:
-        raise HTTPException(status_code=502, detail="World prompt rewrite returned no text.")
+        raise HTTPException(status_code=502, detail=f"World prompt interview returned unusable output: {exc}")
+    if not questions:
+        raise HTTPException(status_code=502, detail="World prompt interview returned no questions.")
+    return {"questions": questions}
+
+
+class FoldWorldAnswersRequest(BaseModel):
+    #: The current World Prompt draft — may be empty (answers become the draft).
+    current_text: Optional[str] = None
+    #: This round's question/answer pairs: {"question": str, "answer": str}.
+    answers: list[dict] = []
+    #: Optional linked scenario the prompt must stay consistent with.
+    scenario_id: Optional[str] = None
+
+
+@router.post("/api/world/fold-answers")
+async def fold_world_answers(request: FoldWorldAnswersRequest):
+    """Fold a round of interview answers into the World Prompt: a conservative
+    rewrite that only weaves in what the answers add or change, leaving the
+    rest of the player's text untouched."""
+    from wbworldgen.worldgen.facade import build_world_prompt_fold_messages
+
+    answered = [a for a in request.answers or []
+                if str(a.get("answer") or "").strip()]
+    if not answered:
+        raise HTTPException(status_code=400,
+                            detail="Answer at least one question to update the prompt.")
+
+    scenario = _load_scenario_or_404(request.scenario_id)
+    messages = build_world_prompt_fold_messages(
+        (request.current_text or "").strip(), answered, scenario)
+    text = await _seed_prompt_completion(
+        messages, "world_prompt_fold", "World prompt update")
     return {"text": text}
 
 
