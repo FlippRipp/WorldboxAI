@@ -346,12 +346,16 @@ class EnrichmentEngine:
 
     # --- retry wrappers -------------------------------------------------------
 
-    async def _label_with_retries(self, node, context, used_names=None) -> tuple:
+    async def _label_with_retries(self, node, context, used_names=None,
+                                  problem_note: str = None) -> tuple:
         """Label one node with transient-error retries. (None, None) on failure."""
         for attempt in range(3):
             try:
                 await self._wait_for_backoff()
                 async with self._host._enrichment_semaphore:
+                    if problem_note:
+                        return await self._live_label(node, context, used_names,
+                                                      problem_note=problem_note)
                     return await self._live_label(node, context, used_names)
             except (asyncio.TimeoutError, ConnectionError, OSError) as e:
                 logger.warning("Transient error labeling node %s (attempt %d): %s", node.get("id"), attempt + 1, e)
@@ -487,7 +491,11 @@ class EnrichmentEngine:
             "standalone place: only name a location as a part of another place (its "
             "rooftop, gate, courtyard, storage, annex, district and the like) if that "
             "place appears in that location's own near list. Never name one batch entry "
-            "as a part of another batch entry unless they are listed as near each other."
+            "as a part of another batch entry unless they are listed as near each other. "
+            "This includes implied ownership: do not invent a place that plainly belongs "
+            "to a specific kind of institution or site (an office of a council, a ward "
+            "of a hospital, a dock of a harbor) unless a fitting parent is in that "
+            "location's near list — otherwise pick a place that stands on its own."
         )
         user_msg = host._get_prompt(
             "enrich_label_batch_user",
@@ -763,6 +771,27 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
                 if world_id in self._cancel_flags:
                     summary["cancelled"] = True
                     break
+
+                if ph == "label" and summary["labeled"]:
+                    # Coherence review, once per map: when this run finished a
+                    # map's naming, one reviewer call checks every name against
+                    # what it actually sits near, and flagged nodes are
+                    # relabeled. Best-effort — a review failure never fails
+                    # the run.
+                    def _mkey(n):
+                        return n.get("map_id", n.get("layer_id", ""))
+                    touched = {_mkey(n) for n in pending}
+                    completed = [mid for mid in touched if all(
+                        n.get("name") for n in all_nodes if _mkey(n) == mid)]
+                    if completed:
+                        try:
+                            review = await self.review_labels(
+                                world_id, map_ids=completed, on_event=on_event,
+                                compiled=compiled, all_nodes=all_nodes)
+                            summary["review"] = review
+                        except Exception:
+                            logger.warning("Label coherence review failed for %s",
+                                           world_id, exc_info=True)
         finally:
             if flush_pending:
                 self._host._flush_enrichment_cache(world_id)
@@ -774,9 +803,167 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
         await emit({"type": "done", **summary})
         return summary
 
+    # --- label coherence review ----------------------------------------------
+
+    async def review_labels(self, world_id: str, layer_filter: str = None,
+                            map_ids: list = None, on_event=None,
+                            compiled: dict = None, all_nodes: list = None) -> dict:
+        """One coherence pass over a map's names: an LLM reviews every named
+        node against what it is actually near and flags names that don't make
+        sense in place (a place implying it belongs to an institution that
+        sits across the map, duplicates, names contradicting the map). Each
+        flagged node is relabeled with the reviewer's objection as steering,
+        and its description (when present) is reworked to match.
+
+        Runs automatically when an enrichment run completes a map's naming;
+        also callable directly (manual review of a map or the whole world).
+        ``compiled``/``all_nodes`` let the batch runner share its in-memory
+        state; standalone calls load fresh."""
+        if not self._llm or self._llm.mode == "mock":
+            raise RuntimeError("Enrichment requires an LLM service. The mock enrichment has been removed.")
+        from wbworldgen.worldgen import mapspace as _ms
+        if compiled is None:
+            compiled = self._load_compiled(world_id)
+        if all_nodes is None:
+            all_nodes, _ = collect_nodes_by_layer(compiled)
+
+        maps = _ms.maps_by_id(compiled)
+        wanted = {str(m) for m in map_ids} if map_ids else None
+        summary = {"reviewed_maps": 0, "flagged": 0, "relabeled": []}
+
+        async def emit(evt: dict):
+            if on_event is None:
+                return
+            try:
+                await on_event(evt)
+            except Exception:
+                logger.warning("review event callback failed", exc_info=True)
+
+        for mid, rec in maps.items():
+            if wanted is not None and mid not in wanted:
+                continue
+            if layer_filter and mid != layer_filter:
+                continue
+            named = [n for n in rec.get("nodes", []) if n.get("name")]
+            if len(named) < 2:
+                continue
+            try:
+                issues = await self._live_review_map(rec, compiled)
+            except Exception as e:
+                self._note_rate_limit(e)
+                logger.warning("Label review failed for map %s: %s", mid, e)
+                continue
+            summary["reviewed_maps"] += 1
+            by_id = {str(n.get("id")): n for n in named}
+            for issue in issues:
+                node = by_id.get(str(issue.get("id", "")))
+                problem = str(issue.get("problem", "")).strip()
+                if node is None or not problem:
+                    continue
+                summary["flagged"] += 1
+                old_name = node.get("name", "")
+                context = build_enrichment_context(node, all_nodes, compiled,
+                                                   include_descriptions=False)
+                used = [n["name"] for n in all_nodes if n.get("name")]
+                name, snippet = await self._label_with_retries(
+                    node, context, used, problem_note=problem)
+                if name is None:
+                    continue
+                node_id = node.get("id")
+                self._host._save_node_enrichment(world_id, node_id, "name", name)
+                self._update_cached_node(compiled, node_id, "name", name)
+                node["name"] = name
+                if snippet:
+                    self._host._save_node_enrichment(world_id, node_id, "label_description", snippet)
+                    self._update_cached_node(compiled, node_id, "label_description", snippet)
+                    node["label_description"] = snippet
+                if node.get("description"):
+                    # The old description narrates the rejected name — rework
+                    # it with the fresh one so the two never disagree.
+                    dctx = build_enrichment_context(node, all_nodes, compiled,
+                                                    include_descriptions=True)
+                    desc_links = await self._describe_with_retries(
+                        node, dctx, node.get("description", ""))
+                    if desc_links is not None:
+                        desc = postprocess_links(desc_links, node, all_nodes)
+                        self._host._save_node_enrichment(world_id, node_id, "description", desc)
+                        self._update_cached_node(compiled, node_id, "description", desc)
+                        node["description"] = desc
+                summary["relabeled"].append(
+                    {"node_id": node_id, "map_id": mid, "old": old_name,
+                     "new": name, "problem": problem})
+                await emit({"type": "review_fix", "map_id": mid, "node_id": node_id,
+                            "old": old_name, "new": name, "problem": problem})
+        if summary["relabeled"]:
+            self._host._flush_enrichment_cache(world_id)
+        return summary
+
+    async def _live_review_map(self, rec: dict, compiled: dict) -> list:
+        """One review call for one map. Returns [{"id", "problem"}, ...]."""
+        host = self._host
+        adjacency: dict = {}
+        for e in rec.get("edges", []) or []:
+            a, b = e.get("from"), e.get("to")
+            if a and b:
+                adjacency.setdefault(a, []).append(b)
+                adjacency.setdefault(b, []).append(a)
+        by_id = {n.get("id"): n for n in rec.get("nodes", [])}
+        lines = []
+        for n in rec.get("nodes", []):
+            if not n.get("name"):
+                continue
+            near = [by_id[nb]["name"] for nb in adjacency.get(n.get("id"), [])
+                    if nb in by_id and by_id[nb].get("name")]
+            near_str = ", ".join(near[:6]) if near else "nothing named yet"
+            lines.append(f'- id {n.get("id")}: "{n["name"]}" ({n.get("type", "place")}) — near: {near_str}')
+        world = (compiled.get("lore") or {})
+        premise = world.get("premise", "") if isinstance(world, dict) else ""
+
+        system = host._get_prompt(
+            "enrich_review_system",
+            "You are reviewing the location names on one finished map of a game world. "
+            "Flag ONLY real coherence problems; an empty list is the normal, expected outcome. "
+            "Output ONLY valid JSON.",
+        )
+        user_msg = host._get_prompt(
+            "enrich_review_user",
+            f"""Map: {rec.get('label', rec.get('map_id', ''))} ({rec.get('level_type', 'map')})
+Map description: {rec.get('description', '')}
+World premise: {premise}
+
+Named locations and what each is actually near on the map:
+{chr(10).join(lines)}
+
+Flag locations whose NAME does not make sense where it sits:
+- a name implying it is part of, or belongs to, a specific place or institution that exists on this map but is NOT in its near list (e.g. a school's office far from the school)
+- duplicates or trivial variations of another location's name
+- a name that contradicts the map or its neighbors outright
+
+Do NOT flag names for style, quality or taste. Output ONLY valid JSON:
+{{"issues": [{{"id": "...", "problem": "one sentence on what is wrong"}}, ...]}} — empty "issues" if all names make sense.""",
+            map_label=rec.get("label", ""),
+            map_level=rec.get("level_type", ""),
+        )
+        await self._wait_for_backoff()
+        async with self._host._enrichment_semaphore:
+            parsed = await json_retry_completion(
+                self._llm,
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": user_msg}],
+                model=self._llm.reader_model,
+                temperature=0.3,
+                inspector_ctx={"call_type": "world_build", "step": "enrich:review"},
+                step_label=f"enrich:review:{rec.get('map_id', '')}",
+                retry_attempts=host._json_retry_attempts,
+            )
+        issues = parsed.get("issues") if isinstance(parsed, dict) else None
+        return [i for i in (issues if isinstance(issues, list) else [])
+                if isinstance(i, dict)]
+
     # --- live LLM calls -----------------------------------------------------
 
-    async def _live_label(self, node: dict, context: dict, used_names=None) -> tuple:
+    async def _live_label(self, node: dict, context: dict, used_names=None,
+                          problem_note: str = None) -> tuple:
         node_type = node.get("type", "waypoint")
         node_id = node.get("id", "")
         importance = node.get("importance", 0)
@@ -813,7 +1000,20 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
             "another location (its rooftop, gate, courtyard, storage, annex, "
             "district and the like) if that location appears in the Nearby nodes "
             "list — anything else on the map may be far away from here.",
+            # Implied membership is containment too: a "Student Council Office"
+            # belongs to a school even without naming one, and reads as absurd
+            # if the school is across the map.
+            "The same applies to implied ownership: do not invent a place that "
+            "plainly belongs to a specific kind of institution or site (an "
+            "office of a council, a ward of a hospital, a dock of a harbor) "
+            "unless a fitting parent is in the Nearby nodes list. Otherwise "
+            "pick a place that stands on its own.",
         ]
+        if problem_note:
+            guidance.append(
+                f'This node was previously named "{node.get("name", "")}" but that '
+                f"name was rejected on review: {problem_note} Author a different "
+                "name that does not have this problem.")
         named_elsewhere = [str(n) for n in (used_names or []) if n]
         if named_elsewhere:
             guidance.append(

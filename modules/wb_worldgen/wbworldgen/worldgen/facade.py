@@ -627,6 +627,12 @@ class WorldBuilder:
     async def enrich_next_description(self, world_id: str, labeled_node_ids: list = None, layer_filter: str = None, rework: bool = False) -> dict:
         return await self._enrichment.describe_next(world_id, labeled_node_ids, layer_filter, rework=rework)
 
+    async def review_enrichment_labels(self, world_id: str, layer_filter: str = None) -> dict:
+        """Coherence-review the enriched names (one map, or every map when no
+        filter): flag names that don't make sense where they sit and relabel
+        them. Runs automatically when an enrichment run completes a map."""
+        return await self._enrichment.review_labels(world_id, layer_filter=layer_filter)
+
     def _resolve_enrichment_setting(self, key: str, current: int, lo: int, hi: int) -> int:
         """Live-read an integer enrichment setting; clamp to a sane range."""
         value = current

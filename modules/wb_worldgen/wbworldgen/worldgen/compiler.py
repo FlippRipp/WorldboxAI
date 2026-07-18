@@ -8,14 +8,32 @@ depending on the orchestrator.
 from typing import Any, Optional
 
 
+def _norm_name(name) -> str:
+    """Case/whitespace-tolerant key for joining authored names."""
+    return str(name or "").strip().lower()
+
+
 def merge_geography_steps(steps_data: dict) -> dict:
-    """Merge terrain_regions + natural_landmarks + society_factions into a
-    single unified region list."""
+    """Merge the authored areas + natural_landmarks + society_factions into a
+    single unified region list.
+
+    The region list comes from the deprecated ``terrain_regions`` step when
+    its data exists (legacy worlds keep their exact join), else from the
+    ``areas`` the Notable Features step authors — the same shape, minus
+    per-layer scoping (areas divide the main map only)."""
     terrain_data = steps_data.get("terrain_regions", {}).get("data", {})
     landmarks_data = steps_data.get("natural_landmarks", {}).get("data", {})
     society_data = steps_data.get("society_factions", {}).get("data", {})
 
     region_list = terrain_data.get("regions", [])
+    if not region_list:
+        region_list = [
+            {"layer_id": "", "name": str(a.get("name", "")).strip(),
+             "terrain": str(a.get("terrain", "")).strip(), "climate": "",
+             "description": str(a.get("description", "")).strip()}
+            for a in landmarks_data.get("areas", []) or []
+            if isinstance(a, dict) and str(a.get("name", "")).strip()
+        ]
     all_landmarks = landmarks_data.get("landmarks", [])
     all_factions = society_data.get("factions", [])
 
@@ -31,7 +49,8 @@ def merge_geography_steps(steps_data: dict) -> dict:
         seen_names: set[str] = set()
 
         def _add_location(name: str, category: str, description: str = "",
-                          environment: str = ""):
+                          environment: str = "", part_of: str = "",
+                          relation: str = ""):
             name = (name or "").strip()
             if not name:
                 return
@@ -46,21 +65,38 @@ def merge_geography_steps(steps_data: dict) -> dict:
             }
             if environment:
                 loc["environment"] = environment
+            if part_of:
+                loc["part_of"] = part_of
+                loc["relation"] = relation if relation in ("adjacent", "inside") else "adjacent"
             named_locations.append(loc)
+
+        def _in_region(entry):
+            # Tolerant join: v2 entries carry no layer_id (scope replaced it),
+            # so the layer condition only applies when both sides have one.
+            # Entries scoped to a parallel map never join main-map areas —
+            # they are placed on their own map via collect_scope_content.
+            if _norm_name(entry.get("region", "")) != _norm_name(rname):
+                return False
+            if not rlayer and str(entry.get("scope", "") or "").strip():
+                return False
+            e_layer = entry.get("layer_id", "")
+            return not rlayer or not e_layer or e_layer == rlayer
 
         natural_lm_names = []
         for lm in all_landmarks:
-            if lm.get("region") == rname and (not rlayer or lm.get("layer_id") == rlayer):
+            if _in_region(lm):
                 lm_name = lm.get("name", "")
                 natural_lm_names.append(lm_name)
                 _add_location(lm_name, "landmark", lm.get("description", ""),
-                              environment=lm.get("environment", ""))
+                              environment=lm.get("environment", ""),
+                              part_of=(lm.get("part_of") or "").strip(),
+                              relation=(lm.get("relation") or "").strip())
 
         region_factions = []
         faction_details = []
         society_lm_names = []
         for faction in all_factions:
-            if faction.get("region") == rname and (not rlayer or faction.get("layer_id") == rlayer):
+            if _in_region(faction):
                 fname = faction.get("name", "")
                 region_factions.append(fname)
                 # Preserve full faction data for RAG embedding (name-only list kept for compat).
@@ -76,9 +112,14 @@ def merge_geography_steps(steps_data: dict) -> dict:
                     # enrichment step treat it as already-described, permanently
                     # skipping the real flavor text it's supposed to generate.
                     _add_location(settlement, "settlement", "")
+                seat = next((s.strip() for s in faction.get("settlements", [])
+                             if s and s.strip()), "")
                 for slm in faction.get("significant_landmarks", []):
                     society_lm_names.append(slm)
-                    _add_location(slm, "landmark", "")
+                    # A group's landmarks belong with the group: anchor them
+                    # beside its first settlement so they stay together.
+                    _add_location(slm, "landmark", "", part_of=seat,
+                                  relation="adjacent")
 
         merged_regions.append({
             "name": rname,
@@ -116,7 +157,8 @@ def collect_scope_content(steps_data: dict) -> dict:
         return scopes[key]
 
     def _add_location(scope: dict, name: str, category: str,
-                      description: str = "", environment: str = ""):
+                      description: str = "", environment: str = "",
+                      region: str = "", part_of: str = "", relation: str = ""):
         name = (name or "").strip()
         if not name or name.lower() in scope["_seen"]:
             return
@@ -124,6 +166,11 @@ def collect_scope_content(steps_data: dict) -> dict:
         loc = {"name": name, "category": category, "description": description or ""}
         if environment:
             loc["environment"] = environment
+        if region:
+            loc["region"] = region
+        if part_of:
+            loc["part_of"] = part_of
+            loc["relation"] = relation if relation in ("adjacent", "inside") else "adjacent"
         scope["named_locations"].append(loc)
 
     for lm in landmarks_data.get("landmarks", []) or []:
@@ -135,7 +182,10 @@ def collect_scope_content(steps_data: dict) -> dict:
             "environment": lm.get("environment", ""),
         })
         _add_location(scope, lm.get("name", ""), "landmark",
-                      lm.get("description", ""), lm.get("environment", ""))
+                      lm.get("description", ""), lm.get("environment", ""),
+                      region=(lm.get("region") or "").strip(),
+                      part_of=(lm.get("part_of") or "").strip(),
+                      relation=(lm.get("relation") or "").strip())
 
     for faction in society_data.get("factions", []) or []:
         scope = _scope(faction.get("scope", ""))
@@ -145,12 +195,18 @@ def collect_scope_content(steps_data: dict) -> dict:
             "description": faction.get("description", ""),
             "settlements": faction.get("settlements", []),
         })
+        region = (faction.get("region") or "").strip()
         for settlement in faction.get("settlements", []) or []:
-            _add_location(scope, settlement, "settlement", "")
+            _add_location(scope, settlement, "settlement", "", region=region)
+        seat = next((s.strip() for s in faction.get("settlements", []) or []
+                     if s and s.strip()), "")
         for slm in faction.get("significant_landmarks", []) or []:
             scope["landmarks"].append({"name": slm, "type": "landmark",
                                        "description": "", "environment": ""})
-            _add_location(scope, slm, "landmark", "")
+            # A group's landmarks belong with the group: anchor them beside
+            # its first settlement so they stay together on the map.
+            _add_location(scope, slm, "landmark", "", region=region,
+                          part_of=seat, relation="adjacent")
 
     for scope in scopes.values():
         scope.pop("_seen", None)

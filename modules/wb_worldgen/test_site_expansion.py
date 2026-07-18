@@ -406,7 +406,8 @@ def test_expand_must_include_reaches_the_authoring_prompt(builder):
         wid, "root", "c1", must_include="the storage building behind the gate"))
 
     user = captured[0][1]["content"]
-    assert 'MUST include a location for it: "the storage building behind the gate"' in user
+    assert "MUST include a location for each" in user
+    assert '- "the storage building behind the gate"' in user
 
 
 def test_ancestry_anchor_resolves_through_nested_maps():
@@ -466,7 +467,10 @@ def test_travel_new_sub_location_grows_map_and_moves_player(builder, tmpdir):
 
     # The player moved to the freshly grown node (interior travel is instant).
     new_id = result["player_location_node_id"]
-    assert new_id.startswith(interior_id + ":g")
+    assert new_id.startswith(interior_id + ":")
+    grown = next(n for n in state["world_data"]["maps"][interior_id]["nodes"]
+                 if n["id"] == new_id)
+    assert grown["name"].lower() == "the storage building behind the gate"
     # The session's world_data gained the node + its edge to the player.
     session_map = state["world_data"]["maps"][interior_id]
     assert any(n["id"] == new_id for n in session_map["nodes"])
@@ -482,8 +486,9 @@ def test_travel_new_sub_location_grows_map_and_moves_player(builder, tmpdir):
 
 def test_travel_new_sub_location_at_site_creates_interior_and_enters(builder, tmpdir):
     # On the overworld, standing AT a site with no interior yet: the request
-    # creates the interior (folding the place into its first expansion),
-    # grows the requested spot onto it, and the player steps inside to it.
+    # creates the interior with the place folded into its first expansion
+    # (an authored location, not an afterthought grown node), and the player
+    # steps inside to it.
     wid = _map_world(builder)
     sm, engine, state = _play_session(builder, tmpdir, wid)
 
@@ -493,7 +498,10 @@ def test_travel_new_sub_location_at_site_creates_interior_and_enters(builder, tm
     interior_id = child_map_id("root", "c1")
     new_id = result["player_location_node_id"]
     assert result["player_location_map_id"] == interior_id
-    assert new_id.startswith(interior_id + ":g")
+    assert new_id.startswith(interior_id + ":")
+    grown = next(n for n in state["world_data"]["maps"][interior_id]["nodes"]
+                 if n["id"] == new_id)
+    assert grown["name"].lower() == "the storage building behind the gate"
     session_map = state["world_data"]["maps"][interior_id]
     assert any(n["id"] == new_id for n in session_map["nodes"])
     # Save file carries the fresh interior and the grown node.

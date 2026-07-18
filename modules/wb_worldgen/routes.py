@@ -1011,6 +1011,22 @@ async def enrich_describe_next(world_id: str, request: EnrichRequest = None, ses
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@router.post("/api/world/{world_id}/enrich/review")
+async def enrich_review(world_id: str, request: EnrichRequest = None):
+    """Coherence-review enriched names (one map via layer_id, or all maps):
+    an LLM flags names that don't make sense where they sit (e.g. a place
+    implying membership of an institution far across the map) and each
+    flagged node is relabeled. Also runs automatically whenever an
+    enrichment run completes a map's naming."""
+    try:
+        layer_filter = request.layer_id if request else None
+        result = await world_builder.review_enrichment_labels(
+            world_id, layer_filter=layer_filter)
+        return {"world_id": world_id, **result}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
 class EnrichRunRequest(BaseModel):
     phase: str = "all"  # "label" | "describe" | "all"
     count: Optional[int] = None

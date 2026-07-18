@@ -112,11 +112,19 @@ def mock_natural_landmarks(prompt: str, note: str = "") -> dict:
             ],
         }
     return {
+        "areas": [
+            {"name": "The Spirewood", "terrain": "towering fungal forests with caps that scrape the cavern ceiling", "description": "A vast underground biome of giant fungi, glowing spores, and mycelial networks that hum with ancient memories."},
+            {"name": "The Deep Mycelium", "terrain": "dense root networks stretching for miles, bioluminescent veins", "description": "The heart of the fungal civilization, where ancient root systems form the infrastructure of subterranean society."},
+            {"name": "The Ash Wastes", "terrain": "barren surface deadlands, petrified forests, toxic soil", "description": "The ruined surface of the world, scorched by an ancient cataclysm."},
+        ],
         "landmarks": [
             {"layer_id": "", "region": "The Spirewood", "name": "The Mother Cap", "type": "giant_fungus", "description": "The largest known fungal cap, its gills spanning half a mile and dripping with luminous nectar."},
-            {"layer_id": "", "region": "The Spirewood", "name": "Sporefall Basin", "type": "basin", "description": "A depression where spores collect in drifts like snow, creating a hallucinogenic mist."},
+            # part_of exercises anchored placement: adjacent binds beside the
+            # parent; inside becomes contained_locations on the parent's node.
+            {"layer_id": "", "region": "The Spirewood", "name": "Sporefall Basin", "type": "basin", "part_of": "The Mother Cap", "relation": "adjacent", "description": "A depression where spores collect in drifts like snow, creating a hallucinogenic mist."},
             {"layer_id": "", "region": "The Spirewood", "name": "Glowworm Grotto", "type": "cavern", "description": "A vast cave illuminated by millions of bioluminescent worms that paint the walls in shifting patterns."},
             {"layer_id": "", "region": "The Deep Mycelium", "name": "The Heartroot", "type": "mycelial_node", "description": "A massive pulsing root nexus believed to be the origin of fungal sentience."},
+            {"layer_id": "", "region": "The Deep Mycelium", "name": "The Memory Vault", "type": "chamber", "part_of": "The Heartroot", "relation": "inside", "description": "A sealed chamber within the Heartroot where the oldest memories crystallize."},
             {"layer_id": "", "region": "The Deep Mycelium", "name": "Memory Caverns", "type": "cavern", "description": "A network of caves where the mycelium preserves ancestral memories in crystalline formations."},
             {"layer_id": "", "region": "The Ash Wastes", "name": "The Great Husk", "type": "petrified_forest", "description": "A sprawling forest turned to stone, its branches reaching skyward like skeletal fingers."},
         ],

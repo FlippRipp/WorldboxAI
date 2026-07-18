@@ -614,13 +614,14 @@ def build_city_map(spec: dict) -> dict:
             landmarks = [l for l in named if l.get("category") != "settlement"]
             # Faction seats may claim the plaza; landmarks keep off it so the
             # district center stays settlement-typed.
-            bind_named_locations(members, settlements)
+            bind_named_locations(members, settlements, edges)
             bind_named_locations(
-                [n for n in members if n.get("city_kind") != "plaza"], landmarks)
+                [n for n in members if n.get("city_kind") != "plaza"], landmarks,
+                edges)
     stray = [loc for name, e in entry_by_name.items() if name not in names
              for loc in (e.get("named_locations") or [])]
     if stray:
-        bind_named_locations(nodes, stray)
+        bind_named_locations(nodes, stray, edges)
 
     config = {
         "total_nodes": budget,

@@ -163,10 +163,10 @@ class MapStepGenerator:
         steps_data = world_state.get("steps", {})
         scope_content = collect_scope_content(steps_data)
 
-        def _bind_scope(nodes, scope_label):
+        def _bind_scope(nodes, scope_label, edges=None):
             content = scope_content.get(scope_label)
             if content and content.get("named_locations"):
-                _bind_named_locations(nodes, content["named_locations"])
+                _bind_named_locations(nodes, content["named_locations"], edges)
 
         # hierarchy_design parallel maps become sibling maps of the root; the
         # output keeps the legacy multilayer shape, which compile_world
@@ -183,7 +183,8 @@ class MapStepGenerator:
                     total_nodes, seed)
                 for layer in result.get("layers", []):
                     scope_label = "" if layer.get("layer_id") == "root" else layer.get("name", "")
-                    _bind_scope(layer.get("map", {}).get("nodes", []), scope_label)
+                    lmap = layer.get("map", {})
+                    _bind_scope(lmap.get("nodes", []), scope_label, lmap.get("edges"))
                 return result
             from wbworldgen.worldgen.generation.registry import get_generator
             result = get_generator(generator_id).build({
@@ -192,7 +193,7 @@ class MapStepGenerator:
                 "seed": seed,
                 "id_prefix": "",
             })
-            _bind_scope(result.get("nodes", []), "")
+            _bind_scope(result.get("nodes", []), "", result.get("edges"))
             return result
 
         if parallel_maps:
@@ -230,7 +231,8 @@ class MapStepGenerator:
             for layer in result.get("layers", []):
                 label = layer.get("name", "")
                 scope_label = "" if layer.get("layer_id") == "root" else label
-                _bind_scope(layer.get("map", {}).get("nodes", []), scope_label)
+                lmap = layer.get("map", {})
+                _bind_scope(lmap.get("nodes", []), scope_label, lmap.get("edges"))
             return result
 
         layer_design_data = steps_data.get("layer_design", {}).get("data", {})
@@ -269,5 +271,5 @@ class MapStepGenerator:
         terrain = self._load_terrain(world_id, "main")
         result = _generate_map_static(compiled, total_nodes=total_nodes,
                                       terrain=terrain).to_dict()
-        _bind_scope(result.get("nodes", []), "")
+        _bind_scope(result.get("nodes", []), "", result.get("edges"))
         return result

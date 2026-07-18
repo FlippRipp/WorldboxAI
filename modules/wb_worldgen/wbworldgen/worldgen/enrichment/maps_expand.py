@@ -196,19 +196,48 @@ class MapExpansionEngine:
         if pinned is not None:
             levels = [pinned]
 
+        # Places established as being inside this node (authored with
+        # relation "inside", or visited by the story) MUST appear on the
+        # child map.
+        must_list = [
+            {"name": str(c.get("name", "")).strip(),
+             "description": str(c.get("description", "")).strip()}
+            for c in (node.get("contained_locations") or [])
+            if isinstance(c, dict) and str(c.get("name", "")).strip()
+        ]
+        mi = str(must_include or "").strip()
+        if mi and mi.lower() not in {c["name"].lower() for c in must_list}:
+            must_list.append({"name": mi, "description": ""})
+
         if not self._llm or self._llm.mode == "mock":
-            parsed = self._mock_content(node, levels, max_locations)
+            parsed = self._mock_content(node, levels, max_locations, must_list)
         else:
             all_nodes, _ = collect_nodes_by_layer(compiled)
             context = build_enrichment_context(node, all_nodes, compiled, include_descriptions=True)
             parsed = await self._live_expand(node, context, parent_map, levels,
                                              max_locations, template_vocab,
-                                             must_include=must_include)
+                                             must_include=must_list)
 
         chosen = next((l for l in levels
                        if l.get("level_type") == str(parsed.get("level_type", "")).strip()),
                       levels[0])
         if _is_authored(chosen):
+            # Contract, not a hope: any established place the LLM left out is
+            # merged in, adjoining the entrance.
+            locs = parsed.get("locations") if isinstance(parsed.get("locations"), list) else []
+            have = {str(l.get("name", "")).strip().lower()
+                    for l in locs if isinstance(l, dict)}
+            missing = [m for m in must_list if m["name"].lower() not in have]
+            if missing:
+                entrance = next((str(l.get("name", "")).strip() for l in locs
+                                 if isinstance(l, dict) and l.get("is_entrance")), "")
+                for m in missing:
+                    locs.append({"name": m["name"], "type": "room",
+                                 "description": m["description"],
+                                 "adjacent": [entrance] if entrance else [],
+                                 "is_entrance": False})
+                parsed["locations"] = locs
+                max_locations = max(max_locations, len(locs))
             return self._build_map(compiled, parent_map_id, node, parsed, chosen, max_locations)
         # Procedural builds are CPU-bound (terrain rasters take seconds) —
         # keep the event loop free.
@@ -659,6 +688,18 @@ Output ONLY valid JSON:
             if generated.get(key):
                 record[key] = generated[key]
 
+        # Places established as inside this node become named locations of the
+        # procedural child (a capital the lore already promised the planet).
+        contained = [
+            {"name": str(c.get("name", "")).strip(), "category": "landmark",
+             "description": str(c.get("description", "")).strip()}
+            for c in (node.get("contained_locations") or [])
+            if isinstance(c, dict) and str(c.get("name", "")).strip()
+        ]
+        if contained:
+            from wbworldgen.world_map import bind_named_locations
+            bind_named_locations(record["nodes"], contained, record["edges"])
+
         # Arrival point: the map's most important node — its natural hub.
         arrival = max(record["nodes"], key=lambda n: n.get("importance", 0) or 0)
         digest = hashlib.sha1(f"{map_id}/entrance/{arrival['id']}".encode()).hexdigest()[:8]
@@ -713,7 +754,8 @@ Output ONLY valid JSON:
                 "seed": entry.get("seed"), "summary": entry.get("summary", "")}
         return layers, meta
 
-    def _mock_content(self, node: dict, levels: list, max_locations: int) -> dict:
+    def _mock_content(self, node: dict, levels: list, max_locations: int,
+                      must_list: list = None) -> dict:
         """Deterministic offline content — expansion runs at play time, so it
         must work without a live provider.
 
@@ -743,6 +785,14 @@ Output ONLY valid JSON:
                 "adjacent": [f"{name} Hall {i - 1}" if i - 1 > 1 else f"{name} Gate"] if i > 1 else [],
                 "is_entrance": i == 1,
             })
+        have = {l["name"].lower() for l in locations}
+        for m in must_list or []:
+            if m.get("name") and m["name"].lower() not in have:
+                locations.append({
+                    "name": m["name"], "type": "room",
+                    "description": m.get("description", "") or f"Mock room inside {name}.",
+                    "adjacent": [f"{name} Gate"], "is_entrance": False,
+                })
         return {
             "label": f"Inside {name}",
             "level_type": level.get("level_type", "interior"),
@@ -757,7 +807,7 @@ Output ONLY valid JSON:
     async def _live_expand(self, node: dict, context: dict, parent_map: dict,
                            levels: list, max_locations: int,
                            template_vocab: dict = None,
-                           must_include: str = None) -> dict:
+                           must_include: list = None) -> dict:
         host = self._host
         enrichment = host._enrichment
         node_id = node.get("id", "")
@@ -776,9 +826,13 @@ Output ONLY valid JSON:
             sub_noun = str(template_vocab["site_sub_noun"])
         must_include_line = ""
         if must_include:
+            entries = "\n".join(
+                f'- "{m.get("name", "")}"'
+                + (f" — {m['description']}" if m.get("description") else "")
+                for m in must_include)
             must_include_line = (
-                f"\nThe story has already gone to this place inside {node_name} — the map "
-                f'MUST include a location for it: "{must_include}"\n')
+                f"\nThese places are already established INSIDE {node_name} — the map MUST "
+                f"include a location for each:\n{entries}\n")
 
         levels_block = "\n".join(
             f"- {l.get('level_type')}: {l.get('guidance', l.get('label', ''))}"
