@@ -119,6 +119,9 @@ def test_no_match_generates_start_on_unnamed_slot(builder):
 
     location = asyncio.run(builder.llm_pick_start_location(wid, "start in a cave", llm))
 
+    # The pick prompt teaches that a request for a PART of a listed location
+    # (its rooftop, storage...) matches the location itself, never a no-match.
+    assert "NOT a no-match" in llm.calls[0][1]["content"]
     assert location["node_id"] == "w1"
     assert location["name"] == "Gloamdeep Cave"
     assert location["type"] == "landmark"  # unknown type coerced
@@ -255,3 +258,46 @@ def test_unnamed_slots_prefers_important_nodes():
     }
     slots = start_locs._unnamed_slots(compiled)
     assert [s["id"] for s in slots] == ["b", "a"]  # named nodes never offered
+
+
+def test_unnamed_slots_anchor_ordering_and_near_names():
+    compiled = {
+        "map": {"nodes": [
+            {"id": "s1", "name": "Havenport", "x": 0.0, "y": 0.0, "importance": 8},
+            {"id": "w_far", "name": "", "x": 100.0, "y": 0.0, "importance": 9},
+            {"id": "w_near", "name": "", "x": 10.0, "y": 0.0, "importance": 1},
+        ]},
+    }
+    # Without an anchor: importance order, but every slot still knows its
+    # nearest named places.
+    slots = start_locs._unnamed_slots(compiled)
+    assert [s["id"] for s in slots] == ["w_far", "w_near"]
+    assert slots[0]["near_named"][0]["name"] == "Havenport"
+    # With an anchor: closest to the anchor first, tagged with the distance.
+    anchored = start_locs._unnamed_slots(compiled, anchor_node_id="s1")
+    assert [s["id"] for s in anchored] == ["w_near", "w_far"]
+    assert anchored[0]["anchor_distance"] == pytest.approx(10.0)
+
+
+def test_generate_start_location_prompt_is_anchor_aware(builder):
+    # Authoring "the school's storage building" from the player's position:
+    # slots come annotated with nearest named places and player distance, and
+    # the prompt carries the place-it-close placement rules.
+    wid = _start_world(builder)
+    llm = ScriptedLLM([
+        {"node_id": "w1", "name": "Harbor Storage", "type": "landmark",
+         "label_description": "l", "description": "A cramped storage outbuilding.",
+         "reason": "right by the harbor"},
+    ])
+    compiled = builder.compile_world(builder.load_world(wid))
+
+    location = asyncio.run(start_locs.generate_start_location(
+        compiled, "the storage building by Havenport", "a storage building", llm,
+        anchor_node_id="s1"))
+
+    assert location["node_id"] == "w1"
+    user = llm.calls[0][1]["content"]
+    assert "currently at: Havenport" in user
+    assert "near Havenport" in user
+    assert "distance from player" in user
+    assert "CLOSEST" in user

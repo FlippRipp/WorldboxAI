@@ -342,6 +342,28 @@ def test_improvised_conditional_passage_carries_requirements():
     assert c["requirements"] == "pried open the sewer grate"
 
 
+def test_new_location_authoring_is_anchored_at_player(monkeypatch):
+    # A destination that doesn't exist yet is authored with the player's
+    # current node as placement anchor, so "the school's storage building"
+    # lands next to where the story is, not across the map.
+    state = make_state(make_world())
+    captured = {}
+
+    class FakeBuilder:
+        async def author_location(self, world_id, description, anchor_node_id=None):
+            captured["description"] = description
+            captured["anchor_node_id"] = anchor_node_id
+            return None  # authoring outcome doesn't matter here — the anchor does
+
+    monkeypatch.setattr(wbg, "world_builder", FakeBuilder())
+    run_turn(state, {
+        "custom_transition": "walked over to the storage building",
+        "custom_transition_new_location": "the school's storage building",
+    })
+    assert captured["description"] == "the school's storage building"
+    assert captured["anchor_node_id"] == "n_a"
+
+
 def test_teleport_to_visited_node_on_another_map():
     state = _two_map_state()
     state["revealed_node_ids"].append("u_1")

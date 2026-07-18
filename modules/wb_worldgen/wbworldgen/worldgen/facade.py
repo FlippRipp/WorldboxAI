@@ -810,19 +810,23 @@ class WorldBuilder:
             return await _start.llm_pick_start_location(compiled, candidates, preference, llm)
         return self._persist_generated_start(world_id, authored)
 
-    async def author_location(self, world_id: str, description: str) -> dict | None:
+    async def author_location(self, world_id: str, description: str,
+                              anchor_node_id: str = None) -> dict | None:
         """Author a brand-new named location matching a free-text description
         onto one of the world's unnamed map positions (one full-attention
         call) — used when the story needs a place that doesn't exist yet
-        (e.g. a teleport to a named-but-unmapped destination). Returns the
-        candidate-shaped entry (node_id, map_id, ...) or None when no slot
-        fits or the call fails."""
+        (e.g. a teleport to a named-but-unmapped destination).
+        ``anchor_node_id`` (the player's current node) makes the placement
+        spatially aware: slots are offered nearest-first so a place described
+        relative to here lands nearby. Returns the candidate-shaped entry
+        (node_id, map_id, ...) or None when no slot fits or the call fails."""
         if not self._llm_service or self._llm_service.mode == "mock":
             return None
         compiled = self._enrichment._load_compiled(world_id)
         try:
             authored = await _start.generate_start_location(
-                compiled, description, description, self._llm_service)
+                compiled, description, description, self._llm_service,
+                anchor_node_id=anchor_node_id)
         except Exception:
             logger.exception("on-demand location authoring failed")
             return None

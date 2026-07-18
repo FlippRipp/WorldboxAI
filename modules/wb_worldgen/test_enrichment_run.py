@@ -58,7 +58,7 @@ def test_run_all_labels_then_describes(builder):
     calls = {"label": [], "desc": []}
     active = {"now": 0, "max": 0}
 
-    async def fake_label(node, context):
+    async def fake_label(node, context, used_names=None):
         active["now"] += 1
         active["max"] = max(active["max"], active["now"])
         await asyncio.sleep(0.01)
@@ -103,7 +103,7 @@ def test_run_partial_failure_continues(builder):
     wid = _map_world(builder, 4)
     builder._enrichment_batch_size = 1
 
-    async def fake_label(node, context):
+    async def fake_label(node, context, used_names=None):
         if node["id"] == "n1":
             raise ValueError("boom")
         return f"Name {node['id']}", ""
@@ -128,7 +128,7 @@ def test_run_cancel_stops_midway(builder):
     builder._enrichment_batch_size = 1
     builder._enrichment_concurrency = 1
 
-    async def fake_label(node, context):
+    async def fake_label(node, context, used_names=None):
         await asyncio.sleep(0.005)
         return f"Name {node['id']}", ""
 
@@ -157,7 +157,7 @@ def test_run_flushes_every_ten_not_every_node(builder, monkeypatch):
     wid = _map_world(builder, 25)
     builder._enrichment_batch_size = 1
 
-    async def fake_label(node, context):
+    async def fake_label(node, context, used_names=None):
         return f"Name {node['id']}", ""
 
     builder._enrichment._live_label = fake_label
@@ -183,7 +183,7 @@ def test_run_respects_count_and_exclude(builder):
     wid = _map_world(builder, 6)
     builder._enrichment_batch_size = 1
 
-    async def fake_label(node, context):
+    async def fake_label(node, context, used_names=None):
         return f"Name {node['id']}", ""
 
     builder._enrichment._live_label = fake_label
@@ -264,6 +264,60 @@ def test_run_batched_labels_end_to_end(builder):
     assert len({n["name"] for n in nodes}) == 10
 
 
+def test_live_label_prompt_carries_containment_rule(builder):
+    # A single labeling call must know (a) part-of names require the parent to
+    # be an actual neighbor, and (b) which names exist elsewhere on the map —
+    # otherwise "School Rooftop" gets invented far from the school.
+    wid = _map_world(builder, 3)
+    captured = {}
+
+    async def fake_completion(messages=None, **kwargs):
+        captured["messages"] = messages
+        return json.dumps({"name": "Mill Row", "label_description": "d"})
+
+    builder._llm_service.simple_completion = fake_completion
+    compiled = builder._enrichment._load_compiled(wid)
+    all_nodes, _ = collect_nodes_by_layer(compiled)
+    from wbworldgen.worldgen.enrichment.context import build_enrichment_context
+    node = all_nodes[0]
+    ctx = build_enrichment_context(node, all_nodes, compiled)
+
+    name, _snippet = asyncio.run(
+        builder._enrichment._live_label(node, ctx, ["Northgate School"]))
+
+    assert name == "Mill Row"
+    system = captured["messages"][0]["content"]
+    assert "standalone place" in system
+    assert "Nearby nodes" in system
+    assert "Northgate School" in system
+    assert "part or sub-location" in system
+
+
+def test_live_label_batch_prompt_far_apart_rule_and_full_avoid_list(builder):
+    wid = _map_world(builder, 4)
+    captured = {}
+
+    async def fake_completion(messages=None, **kwargs):
+        captured["messages"] = messages
+        return json.dumps({"nodes": []})
+
+    builder._llm_service.simple_completion = fake_completion
+    compiled = builder._enrichment._load_compiled(wid)
+    all_nodes, _ = collect_nodes_by_layer(compiled)
+    contexts = {n["id"]: {} for n in all_nodes}
+    # 45 used names: the old prompt truncated to the last 40, hiding the first.
+    used = [f"Oldtown {i}" for i in range(45)]
+
+    asyncio.run(builder._enrichment._live_label_batch(all_nodes, contexts, used))
+
+    system = captured["messages"][0]["content"]
+    assert "far apart on the map" in system
+    assert "standalone place" in system
+    user = captured["messages"][1]["content"]
+    assert "Oldtown 0" in user and "Oldtown 44" in user  # no truncation
+    assert "part or sub-location" in user
+
+
 # ---------------------------------------------------------------------------
 # Compiled-world cache (legacy per-node endpoints)
 # ---------------------------------------------------------------------------
@@ -273,7 +327,7 @@ def test_label_next_reuses_compiled_and_sees_prior_labels(builder):
     names = iter(["Alpha", "Beta", "Gamma"])
     labeled = []
 
-    async def fake_label(node, context):
+    async def fake_label(node, context, used_names=None):
         labeled.append(node["id"])
         return next(names), ""
 
@@ -301,7 +355,7 @@ def test_label_next_reuses_compiled_and_sees_prior_labels(builder):
 def test_save_step_invalidates_compiled_cache(builder):
     wid = _map_world(builder, 2)
 
-    async def fake_label(node, context):
+    async def fake_label(node, context, used_names=None):
         return f"Name {node['id']}", ""
 
     builder._enrichment._live_label = fake_label

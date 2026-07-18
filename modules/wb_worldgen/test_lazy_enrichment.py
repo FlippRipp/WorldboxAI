@@ -71,7 +71,7 @@ def _mixed_world(builder, world_id="lazy_world"):
 
 
 def _fake_enrichment(builder):
-    async def fake_label(node, context):
+    async def fake_label(node, context, used_names=None):
         return f"Name {node['id']}", f"snippet {node['id']}"
 
     async def fake_desc(node, context, existing_description=""):

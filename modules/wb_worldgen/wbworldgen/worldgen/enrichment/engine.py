@@ -245,7 +245,8 @@ class EnrichmentEngine:
 
         node = unlabeled[0]
         context = build_enrichment_context(node, all_nodes, compiled, include_descriptions=False)
-        name, snippet = await self._label_with_retries(node, context)
+        used_names = [n["name"] for n in all_nodes_full if n.get("name")]
+        name, snippet = await self._label_with_retries(node, context, used_names)
 
         if name is None:
             return {"node_id": node.get("id"), "label": None, "label_description": None,
@@ -345,13 +346,13 @@ class EnrichmentEngine:
 
     # --- retry wrappers -------------------------------------------------------
 
-    async def _label_with_retries(self, node, context) -> tuple:
+    async def _label_with_retries(self, node, context, used_names=None) -> tuple:
         """Label one node with transient-error retries. (None, None) on failure."""
         for attempt in range(3):
             try:
                 await self._wait_for_backoff()
                 async with self._host._enrichment_semaphore:
-                    return await self._live_label(node, context)
+                    return await self._live_label(node, context, used_names)
             except (asyncio.TimeoutError, ConnectionError, OSError) as e:
                 logger.warning("Transient error labeling node %s (attempt %d): %s", node.get("id"), attempt + 1, e)
             except Exception as e:
@@ -464,9 +465,10 @@ class EnrichmentEngine:
             lines.append(" | ".join(parts))
         nodes_block = "\n".join(lines)
 
-        avoid = [str(n) for n in used_names if n][-40:]
+        avoid = [str(n) for n in used_names if n]
         avoid_block = (
-            "Already-used names (do NOT reuse or lightly vary these):\n" + ", ".join(avoid) + "\n\n"
+            "Already-used names (do NOT reuse or lightly vary these, and do NOT name any "
+            "location below as a part or sub-location of them):\n" + ", ".join(avoid) + "\n\n"
         ) if avoid else ""
 
         system = host._get_prompt(
@@ -475,6 +477,17 @@ class EnrichmentEngine:
             "evocative name and a one-line label description. Names must be distinct from each other "
             "and from the already-used names; vary naming styles across the batch. Never begin a name "
             "with the word \"The\".",
+        )
+        # The batch is importance-ordered, i.e. spatially scattered: two entries
+        # are usually nowhere near each other, and neither are the already-used
+        # names. Without this rule the model happily builds name families
+        # ("Northgate School" + "School Rooftop") across distant nodes.
+        system += (
+            "\n\nThe locations in one batch may be far apart on the map. Name each as a "
+            "standalone place: only name a location as a part of another place (its "
+            "rooftop, gate, courtyard, storage, annex, district and the like) if that "
+            "place appears in that location's own near list. Never name one batch entry "
+            "as a part of another batch entry unless they are listed as near each other."
         )
         user_msg = host._get_prompt(
             "enrich_label_batch_user",
@@ -723,7 +736,7 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
                         node = item
                         if ph == "label":
                             context = build_enrichment_context(node, all_nodes, compiled, include_descriptions=False)
-                            name, snippet = await self._label_with_retries(node, context)
+                            name, snippet = await self._label_with_retries(node, context, used_names)
                             if name is None:
                                 await record_failure(node)
                                 continue
@@ -763,7 +776,7 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
 
     # --- live LLM calls -----------------------------------------------------
 
-    async def _live_label(self, node: dict, context: dict) -> tuple:
+    async def _live_label(self, node: dict, context: dict, used_names=None) -> tuple:
         node_type = node.get("type", "waypoint")
         node_id = node.get("id", "")
         importance = node.get("importance", 0)
@@ -790,7 +803,24 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
             "enrich_label_system",
             "You are a world-building AI. Generate a concise, evocative name and a one-line label description for a map node.",
         )
-        guidance = ["Do not begin the name with the word \"The\"."]
+        guidance = [
+            "Do not begin the name with the word \"The\".",
+            # Containment rule: independent labeling calls know nothing about
+            # where other named places sit on the map, so a name that presents
+            # this node as part of another place is only safe when that place
+            # is verifiably right here (in the node's neighbor list).
+            "Name this location as a standalone place. Only name it as a part of "
+            "another location (its rooftop, gate, courtyard, storage, annex, "
+            "district and the like) if that location appears in the Nearby nodes "
+            "list — anything else on the map may be far away from here.",
+        ]
+        named_elsewhere = [str(n) for n in (used_names or []) if n]
+        if named_elsewhere:
+            guidance.append(
+                "Places that already exist elsewhere on this map — do not reuse "
+                "these names, and do not name this node as a part or sub-location "
+                "of any of them (unless listed as nearby): "
+                + ", ".join(named_elsewhere))
         connection_str = _connection_block(context.get("connection", {}), context.get("vocab"))
         if connection_str:
             guidance.append(connection_str)

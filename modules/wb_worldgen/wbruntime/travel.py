@@ -279,10 +279,14 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
 
     if custom_desc and not custom_target and new_location_desc:
         # The destination doesn't exist yet — author it onto a fitting
-        # unnamed spot (one full-attention call), then land there.
+        # unnamed spot (one full-attention call), then land there. The
+        # player's current node anchors the placement: a destination
+        # described relative to here ("the school's storage building")
+        # must end up nearby, not wherever the region vaguely fits.
         try:
             authored = await host.world_builder.author_location(
-                state.get("world_id"), new_location_desc)
+                state.get("world_id"), new_location_desc,
+                anchor_node_id=current_node)
         except Exception:
             authored = None
         if authored and authored.get("node_id"):

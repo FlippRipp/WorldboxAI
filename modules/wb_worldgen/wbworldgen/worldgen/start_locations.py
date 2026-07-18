@@ -86,6 +86,9 @@ async def llm_pick_start_location(compiled: dict, candidates: list[dict], prefer
         no_match_instruction = (
             "\nIf NONE of the locations genuinely fits the preference, do not force a poor match: "
             'return {"node_id": "NONE", "wanted": "one short phrase describing the kind of place the player wants"}.'
+            "\nBut a preference naming a PART of a listed location (its rooftop, storage building, "
+            "courtyard, a room inside it) is NOT a no-match — pick that location; the scene simply "
+            "plays out in that part of it."
         )
     else:
         no_match_instruction = ""
@@ -118,28 +121,63 @@ Pick the single best matching location. Return JSON: {{"node_id": "...", "name":
         return random.choice(candidates)
 
 
-def _unnamed_slots(compiled: dict, limit: int = 60) -> list[dict]:
+def _distance(a: dict, b: dict) -> float:
+    return ((a.get("x", 0.0) - b.get("x", 0.0)) ** 2
+            + (a.get("y", 0.0) - b.get("y", 0.0)) ** 2) ** 0.5
+
+
+def _unnamed_slots(compiled: dict, limit: int = 60, anchor_node_id: str = None) -> list[dict]:
     """Unnamed map nodes that a brand-new start location could be founded on,
-    tagged with their layer id. Most important (best-connected) first."""
+    tagged with their layer id and annotated with the nearest named places
+    (``near_named``: name + map-unit distance) so the picker knows what each
+    spot is actually close to.
+
+    With an ``anchor_node_id`` (the player's position, or the place a request
+    is relative to) slots on the anchor's map come first, closest to the
+    anchor first, and carry ``anchor_distance``; otherwise most important
+    (best-connected) first."""
     from wbworldgen.worldgen import mapspace as _ms
     slots = []
+    named_by_map = {}
+    anchor = None
     for mid, m in _ms.maps_by_id(compiled).items():
         for n in m.get("nodes", []):
-            if not n.get("name"):
+            if n.get("name"):
+                named_by_map.setdefault(mid, []).append(n)
+            else:
                 slots.append({**n, "map_id": mid, "map_label": m.get("label", mid)})
-    slots.sort(key=lambda n: -n.get("importance", 0))
+            if anchor_node_id and n.get("id") == anchor_node_id:
+                anchor = {**n, "map_id": mid}
+    for slot in slots:
+        by_dist = sorted(named_by_map.get(slot["map_id"], []), key=lambda n: _distance(slot, n))
+        slot["near_named"] = [
+            {"name": n["name"], "distance": _distance(slot, n)} for n in by_dist[:3]
+        ]
+        if anchor and slot["map_id"] == anchor["map_id"]:
+            slot["anchor_distance"] = _distance(slot, anchor)
+    if anchor:
+        slots.sort(key=lambda s: (0, s["anchor_distance"]) if "anchor_distance" in s
+                   else (1, -s.get("importance", 0)))
+    else:
+        slots.sort(key=lambda n: -n.get("importance", 0))
     return slots[:limit]
 
 
-async def generate_start_location(compiled: dict, preference: str, wanted: str, llm) -> Optional[dict]:
-    """Author a brand-new start location matching the player's request on one of
+async def generate_start_location(compiled: dict, preference: str, wanted: str, llm,
+                                  anchor_node_id: str = None) -> Optional[dict]:
+    """Author a brand-new location matching the player's request on one of
     the world's unnamed map positions (one full-attention LLM call).
+
+    ``anchor_node_id`` is where the request is being made from (the player's
+    current node during play): slots are then offered nearest-first with
+    distances, so a place described relative to somewhere ("the school's
+    storage building") lands next to it instead of across the map.
 
     Returns ``{"node_id", "name", "type", "label_description", "description",
     "reason"}`` or None when the world has no free slot or the call fails —
     the caller then falls back to picking the best existing candidate.
     """
-    slots = _unnamed_slots(compiled)
+    slots = _unnamed_slots(compiled, anchor_node_id=anchor_node_id)
     if not slots:
         return None
 
@@ -165,15 +203,41 @@ async def generate_start_location(compiled: dict, preference: str, wanted: str, 
             parts.append(f"region {n['region']}")
         if n.get("map_id") and n.get("map_id") != "root":
             parts.append(f"map {n['map_id']}")
+        near = n.get("near_named") or []
+        if near:
+            parts.append("near " + ", ".join(
+                f"{e['name']} ({e['distance']:.0f})" for e in near))
+        if "anchor_distance" in n:
+            parts.append(f"distance from player {n['anchor_distance']:.0f}")
         return ", ".join(parts)
 
     slots_block = "\n".join(_slot_line(n) for n in slots)
     world_name = lore.get("world_name", "the world")
 
+    anchor_name = ""
+    if anchor_node_id:
+        from wbworldgen.worldgen import mapspace as _ms2
+        anchor_node = next((n for n in _ms2.all_nodes(compiled)
+                            if n.get("id") == anchor_node_id), None)
+        if anchor_node is not None:
+            anchor_name = anchor_node.get("name") or anchor_node_id
+    anchor_line = (
+        f'\nThe player is currently at: {anchor_name}. Distances are map units.\n'
+        if anchor_name else "")
+
     system = (
-        f"You are helping set up the starting location for a player's story in the world of {world_name}. "
-        "No existing named location matches their request, so you will found a brand-new location at one of "
+        f"You are helping place a new location for a player's story in the world of {world_name}. "
+        "No existing named location matches the request, so you will found a brand-new location at one of "
         "the available unnamed map positions. Output only valid JSON."
+    )
+    placement_rules = (
+        "Placement matters — pick the position whose surroundings fit the request:\n"
+        "- If the request is a part of, or right by, an existing named place (its storage "
+        "building, rooftop, gate, outskirts...), pick the position CLOSEST to that place — "
+        "check each position's near list.\n"
+        "- Otherwise, if the player's current position is given, prefer a position near them "
+        "unless the request implies somewhere farther away.\n"
+        "- Otherwise pick the position whose region/layer/type fits the request best."
     )
     user_msg = f"""World premise: {lore.get('premise', '')}
 Genre: {rules.get('genre', '')} | Tone: {rules.get('tone', '')}
@@ -181,11 +245,13 @@ Genre: {rules.get('genre', '')} | Tone: {rules.get('tone', '')}
 Regions:
 {regions_block}
 {layers_section}
-Player's starting location request: "{preference}"
+Player's location request: "{preference}"
 What they want: {wanted or preference}
-
-Available unnamed map positions (pick the one whose region/layer/type fits the request best):
+{anchor_line}
+Available unnamed map positions:
 {slots_block}
+
+{placement_rules}
 
 Found a new location matching the request at the best-fitting position. Return JSON:
 {{"node_id": "<one of the ids above>", "name": "...", "type": "settlement" or "landmark",
