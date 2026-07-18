@@ -194,6 +194,36 @@ def _connection_itinerary(connection: dict, near: dict, far: dict) -> dict:
     }
 
 
+def _mirror_grown_node(map_record: dict, grown: dict) -> str | None:
+    """Mirror a grow result into the session's copy of its map.
+
+    A missing node is appended together with its edges. An already-present
+    node is HEALED instead: world-level fields (name, description, …) that
+    never reached this session are merged on — the old append-only guard
+    left such nodes permanently unnamed here, so the Reader could never
+    offer them as destinations. Missing edges are wired in either way (an
+    existing-match from another session's growth arrives with the edges it
+    has at world level). Returns "added", "named" (a nameless session node
+    just gained its identity), "updated" (details refreshed), or None when
+    the session copy already matched."""
+    node = grown["node"]
+    nodes = map_record.setdefault("nodes", [])
+    edges = map_record.setdefault("edges", [])
+    known = {(e.get("from"), e.get("to")) for e in edges}
+    known |= {(b, a) for a, b in known}
+    new_edges = [dict(e) for e in grown.get("edges") or []
+                 if (e.get("from"), e.get("to")) not in known]
+    edges.extend(new_edges)
+    existing = next((n for n in nodes if n.get("id") == node.get("id")), None)
+    if existing is None:
+        nodes.append(dict(node))
+        return "added"
+    had_name = bool(existing.get("name"))
+    if _sync.merge_node_fields(existing, node):
+        return "updated" if had_name else "named"
+    return "updated" if new_edges else None
+
+
 def _convert_legacy_travel(host, state: dict, world_data: dict, travel: dict):
     """Re-plan a pre-time-based travel record (route/leg or turn transit)
     from the player's current position. Returns a plan_journey result or
@@ -261,6 +291,7 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
     passage_id = clean_option(mutation.get("player_passage"))
     if passage_id in ("none", "None", ""):
         passage_id = None
+    grow_desc = str(mutation.get("new_sub_location") or "").strip()
     interrupted = bool(mutation.get("travel_interrupted"))
     completed = bool(mutation.get("travel_completed"))
     try:
@@ -382,14 +413,12 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
         if not grown or not (grown.get("node") or {}).get("id"):
             return None
         node = grown["node"]
-        session_nodes = child.setdefault("nodes", [])
-        if not any(n.get("id") == node["id"] for n in session_nodes):
-            session_nodes.append(dict(node))
-            child.setdefault("edges", []).extend(
-                dict(e) for e in grown.get("edges") or [])
+        outcome = _mirror_grown_node(child, grown)
+        if outcome:
             persist_world()
-            await _sync.embed_backfilled_nodes(
-                host, state.get("world_id"), [node["id"]])
+            if outcome in ("added", "named"):
+                await _sync.embed_backfilled_nodes(
+                    host, state.get("world_id"), [node["id"]])
         return map_id, node["id"]
 
     # --- Secret discovery: an earned find unhides a connection (no move) ---
@@ -464,6 +493,30 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
                 persist_world()
             return land_at(target_map, custom_target)
 
+    # --- Entering the current node's own interior AND a specific new place
+    # inside it was declared ("I enter the school's pool through a side
+    # entrance"): resolve the two together. Processed separately, the passage
+    # runs first and lands (or starts a journey) at the generic entrance,
+    # returning before the declared place is ever created — the player ends
+    # up in the entrance hall instead of the pool. grow_inside creates the
+    # interior when needed (told it must include the place), grows or
+    # matches the place, and the player lands there directly.
+    if grow_desc and current_node and passage_id:
+        entering_own_interior = passage_id == f"enter:{current_node}"
+        if not entering_own_interior:
+            for v in connections_from(world_data, current_map, include_hidden=True):
+                if v["connection"].get("id") == passage_id:
+                    far_record = get_map(world_data, v["far"].get("map_id") or "") or {}
+                    entering_own_interior = far_record.get("anchor_node_id") == current_node
+                    break
+        if entering_own_interior:
+            landed = await grow_inside(current_node, grow_desc)
+            if landed:
+                return land_at(*landed)
+            # Interior generation timed out or vetoed the place — fall
+            # through to the plain entrance so the player still gets inside;
+            # the place lands on a later turn.
+
     # --- Entering an unmapped place: its child map is created on demand ----
     if passage_id and passage_id.startswith("enter:"):
         target = passage_id.split(":", 1)[1]
@@ -531,7 +584,6 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
     # yet ("the storage building behind the school"): author it onto the map
     # right where it belongs — anchored at the player — then move there like
     # any declared destination.
-    grow_desc = str(mutation.get("new_sub_location") or "").strip()
     if grow_desc and not new_node_id and not passage_id:
         current_map_record = get_map(world_data, current_map) or {}
         if current_map_record.get("anchor_node_id"):
@@ -562,14 +614,14 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
                 node = grown["node"]
                 # Mirror the growth onto the session's own world_data copy
                 # (the facade grew the world-level bundle, not this dict).
-                session_nodes = current_map_record.setdefault("nodes", [])
-                if not any(n.get("id") == node["id"] for n in session_nodes):
-                    session_nodes.append(dict(node))
-                    current_map_record.setdefault("edges", []).extend(
-                        dict(e) for e in grown.get("edges") or [])
+                # An existing-match can still heal a stale session copy whose
+                # node never received its world-level name.
+                outcome = _mirror_grown_node(current_map_record, grown)
+                if outcome:
                     persist_world()
-                    await _sync.embed_backfilled_nodes(
-                        host, state.get("world_id"), [node["id"]])
+                    if outcome in ("added", "named"):
+                        await _sync.embed_backfilled_nodes(
+                            host, state.get("world_id"), [node["id"]])
                 new_node_id = node["id"]
         elif current_node:
             # On the overworld at an expandable (or already expanded) site:

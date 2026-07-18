@@ -358,6 +358,11 @@ def test_grow_child_map_live_prompt_and_existing_match(builder):
     assert again["node"]["id"] == grown["node"]["id"]
     count_after = len(builder._persistence.load_child_map(wid, map_id)["map"]["nodes"])
     assert count_after == count_before
+    # The match carries the node's real edges, so a caller with a stale map
+    # copy (node missing entirely) can wire it in routably instead of as an
+    # unreachable island.
+    assert again["edges"], "an existing match must carry the node's edges"
+    assert all(grown["node"]["id"] in (e["from"], e["to"]) for e in again["edges"])
 
 
 def test_grow_child_map_belongs_outside_veto(builder):
@@ -509,6 +514,93 @@ def test_travel_new_sub_location_at_site_creates_interior_and_enters(builder, tm
               encoding="utf-8") as f:
         on_disk = json.load(f)
     assert any(n["id"] == new_id for n in on_disk["maps"][interior_id]["nodes"])
+
+
+def test_travel_existing_match_heals_stale_session_node(builder, tmpdir):
+    # A place grown at world level (e.g. from another save of the same world)
+    # exists NAMED in the world bundle, but the session's copy carries the
+    # same node id unnamed — so the Reader can never offer it and the old
+    # append-only mirror never fixed it. Growing toward it must heal the
+    # session node (world fields merged on) and move the player there, with
+    # the reveal, in the same turn.
+    wid = _map_world(builder)
+    bundle = asyncio.run(builder.expand_node(wid, "root", "c1"))
+    map_id = bundle["map"]["map_id"]
+    entrance = bundle["map"]["nodes"][0]
+    grown = asyncio.run(builder.grow_child_map(
+        wid, map_id, "the pool changing room", near_node_id=entrance["id"]))
+    pool_id = grown["node"]["id"]
+
+    sm, engine, state = _play_session(builder, tmpdir, wid)
+    wbg._services["settings"].values["world.travel_minutes_per_edge"] = 0
+    session_map = state["world_data"]["maps"][map_id]
+    stale = next(n for n in session_map["nodes"] if n["id"] == pool_id)
+    stale["name"] = ""
+    stale["description"] = ""
+    state["player_location_map_id"] = map_id
+    state["player_location_node_id"] = entrance["id"]
+
+    result = asyncio.run(wbg.on_mutate_state(
+        {"new_sub_location": "the pool changing room"}, state, None))
+
+    # Moved and revealed in the same turn, no duplicate node created.
+    assert result["player_location_node_id"] == pool_id
+    assert pool_id in result["revealed_node_ids"]
+    assert sum(1 for n in session_map["nodes"]
+               if n.get("name", "").lower() == "the pool changing room") == 1
+    # The session copy healed, in memory and on disk, and entered the RAG index.
+    healed = next(n for n in session_map["nodes"] if n["id"] == pool_id)
+    assert healed["name"] == "The pool changing room"
+    assert healed["description"]
+    with open(sm.data_dir / "saves" / "save1" / "World" / "world_data.json",
+              encoding="utf-8") as f:
+        on_disk = json.load(f)
+    assert next(n for n in on_disk["maps"][map_id]["nodes"]
+                if n["id"] == pool_id)["name"] == "The pool changing room"
+    assert any("pool changing room" in e["text"].lower()
+               for e in engine.memory.entries)
+
+
+def test_enter_with_declared_place_lands_at_the_place(builder, tmpdir):
+    # "I enter the school's pool through a side entrance" from the overworld:
+    # the enter: passage and the declared interior place resolve together —
+    # the interior is created with the place folded in and the player lands
+    # AT the place. The passage alone used to run first and return early at
+    # the generic entrance, dropping the declared place entirely.
+    wid = _map_world(builder)
+    sm, engine, state = _play_session(builder, tmpdir, wid)
+
+    result = asyncio.run(wbg.on_mutate_state(
+        {"player_passage": "enter:c1",
+         "new_sub_location": "the pool changing room"}, state, None))
+
+    interior_id = child_map_id("root", "c1")
+    assert result["player_location_map_id"] == interior_id
+    landed = next(n for n in state["world_data"]["maps"][interior_id]["nodes"]
+                  if n["id"] == result["player_location_node_id"])
+    assert "pool changing room" in landed["name"].lower()
+    # Landing is direct — no journey record left behind.
+    assert result["module_data"]["wb_worldgen"]["travel"] is None
+
+
+def test_passage_with_declared_place_lands_at_the_place(builder, tmpdir):
+    # The same combination through a LISTED connection into the site's
+    # already-existing interior: the declared place wins over the generic
+    # far-side entrance.
+    wid = _map_world(builder)
+    bundle = asyncio.run(builder.expand_node(wid, "root", "c1"))
+    interior_id = bundle["map"]["map_id"]
+    conn = bundle["connections"][0]
+    sm, engine, state = _play_session(builder, tmpdir, wid)
+
+    result = asyncio.run(wbg.on_mutate_state(
+        {"player_passage": conn["id"],
+         "new_sub_location": "the pool changing room"}, state, None))
+
+    assert result["player_location_map_id"] == interior_id
+    landed = next(n for n in state["world_data"]["maps"][interior_id]["nodes"]
+                  if n["id"] == result["player_location_node_id"])
+    assert "pool changing room" in landed["name"].lower()
 
 
 def test_travel_grow_belongs_outside_lands_on_the_overworld(builder, tmpdir, monkeypatch):

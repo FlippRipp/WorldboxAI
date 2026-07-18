@@ -27,6 +27,22 @@ def write_session_world_data(sm):
         _logger.exception("failed to persist world_data for save %s", save_id)
 
 
+NODE_SYNC_FIELDS = ("name", "label_description", "description", "type", "importance")
+
+
+def merge_node_fields(target: dict, source: dict) -> bool:
+    """Copy world-level node fields onto a session node (the heal primitive
+    for session copies that diverged from the world bundle). Returns True
+    when anything changed."""
+    changed = False
+    for field in NODE_SYNC_FIELDS:
+        value = source.get(field)
+        if value and value != target.get(field):
+            target[field] = value
+            changed = True
+    return changed
+
+
 def sync_enriched_nodes(host, world_id: str, node_ids: list):
     """Merge freshly generated node fields into the live session's world_data
     and rewrite the save's World/world_data.json so a reload sees them."""
@@ -45,11 +61,8 @@ def sync_enriched_nodes(host, world_id: str, node_ids: list):
         enriched = host.world_builder.get_map_node(world_id, nid)
         if not enriched:
             continue
-        for field in ("name", "label_description", "description", "type", "importance"):
-            value = enriched.get(field)
-            if value and value != target.get(field):
-                target[field] = value
-                changed = True
+        if merge_node_fields(target, enriched):
+            changed = True
     if changed:
         write_session_world_data(sm)
 

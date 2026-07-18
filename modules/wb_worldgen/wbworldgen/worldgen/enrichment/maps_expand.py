@@ -256,8 +256,8 @@ class MapExpansionEngine:
         The new node adjoins the locations the LLM says it does (falling back
         to the player's current node) and is positioned right beside them, so
         places that belong together stay together by construction. A request
-        matching an existing location returns that location instead of
-        creating a duplicate.
+        matching an existing location returns that location (with the edges
+        it already has) instead of creating a duplicate.
 
         Returns ``{"node", "edges", "created"}`` — the map record is mutated
         in place when ``created`` — or ``{"belongs_outside": True}`` when the
@@ -288,17 +288,25 @@ class MapExpansionEngine:
         if parsed.get("belongs_outside"):
             return {"belongs_outside": True}
 
+        def _match(hit: dict) -> dict:
+            # An existing match carries the node's real edges so a caller with
+            # a stale/partial copy of this map can wire the node in routably.
+            hit_id = hit.get("id")
+            edges = [dict(e) for e in map_record.get("edges") or []
+                     if e.get("from") == hit_id or e.get("to") == hit_id]
+            return {"node": hit, "edges": edges, "created": False}
+
         by_name = {str(n.get("name", "")).strip().lower(): n for n in named}
         existing_ref = str(parsed.get("existing", "")).strip().lower()
         if existing_ref and existing_ref in by_name:
-            return {"node": by_name[existing_ref], "edges": [], "created": False}
+            return _match(by_name[existing_ref])
 
         name = str(parsed.get("name", "")).strip()
         if not name:
             return None
         if name.lower() in by_name:
             # The LLM authored a place that already exists — treat as a match.
-            return {"node": by_name[name.lower()], "edges": [], "created": False}
+            return _match(by_name[name.lower()])
 
         # Anchors: the locations the new place adjoins. They both wire the
         # edges and position the node, so resolution failures fall back to
