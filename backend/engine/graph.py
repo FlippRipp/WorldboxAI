@@ -974,36 +974,84 @@ class EngineGraph:
         await self.sdk.ui.emit_status("reader", "Updating the world…")
 
         latest_story = state["history"][-1]
-        
+
         reader_active = state.get("module_configs", {}).get("__active_modules__")
         reader_active_set = set(reader_active) if isinstance(reader_active, list) else None
 
-        schema = {}
+        # Per-module extraction schema: the static manifest mutation_schema
+        # merged with the dynamic on_mutation_schema hook (e.g. wb_worldgen
+        # movement, whose options depend on the loaded world).
+        schemas = {}
         for mod_id, mod_data in self.registry.get_modules().items():
             if reader_active_set is not None and mod_id not in reader_active_set:
                 continue
-            mutation_schema = mod_data["manifest"].get("mutation_schema", {})
-            if mutation_schema:
-                schema[mod_id] = mutation_schema
-
-        # Modules may offer a dynamic mutation schema (e.g. wb_worldgen movement,
-        # whose options depend on the loaded world). Respect the active set.
-        for mod_id, mod_data in self.registry.get_modules().items():
-            if reader_active_set is not None and mod_id not in reader_active_set:
-                continue
+            merged = dict(mod_data["manifest"].get("mutation_schema", {}) or {})
             dyn_hook = getattr(mod_data["backend"], "on_mutation_schema", None)
-            if dyn_hook is None:
-                continue
-            try:
-                module_state = self._build_module_state(state, mod_id, mod_data["manifest"].get("consumes", {}))
-                dyn_schema = await dyn_hook(module_state, self.sdk)
-                if isinstance(dyn_schema, dict) and dyn_schema:
-                    schema[mod_id] = {**schema.get(mod_id, {}), **dyn_schema}
-            except Exception as e:
-                print(f"Error in {mod_id} on_mutation_schema: {e}")
+            if dyn_hook is not None:
+                try:
+                    module_state = self._build_module_state(state, mod_id, mod_data["manifest"].get("consumes", {}))
+                    dyn_schema = await dyn_hook(module_state, self.sdk)
+                    if isinstance(dyn_schema, dict) and dyn_schema:
+                        merged.update(dyn_schema)
+                except Exception as e:
+                    print(f"Error in {mod_id} on_mutation_schema: {e}")
+            if merged:
+                schemas[mod_id] = merged
 
-        mutations = await self.llm.extract_mutations(latest_story, schema,
-            inspector_ctx={"call_type": "reader", "step": "reader_node"}) if schema else {}
+        # A module flagged dedicated_reader in its manifest gets its own
+        # extraction call instead of sharing the combined one: its schema
+        # (often large and domain-specific, like wb_worldgen movement) stops
+        # drowning out the simple schemas, and the call carries richer input —
+        # the player's declared action plus whatever the module's optional
+        # on_reader_context hook supplies (guidance + pre-turn world state).
+        shared_schema, dedicated_schemas = {}, {}
+        for mod_id, mod_schema in schemas.items():
+            manifest = self.registry.get_modules()[mod_id]["manifest"]
+            target = dedicated_schemas if manifest.get("dedicated_reader") else shared_schema
+            target[mod_id] = mod_schema
+
+        input_text = state.get("input_text", "")
+
+        async def _dedicated_extraction(mod_id, mod_schema):
+            mod_data = self.registry.get_modules()[mod_id]
+            context_parts = []
+            if input_text:
+                context_parts.append(f"The player's declared action this turn:\n{input_text}")
+            ctx_hook = getattr(mod_data["backend"], "on_reader_context", None)
+            if ctx_hook is not None:
+                try:
+                    module_state = self._build_module_state(state, mod_id, mod_data["manifest"].get("consumes", {}))
+                    extra = await ctx_hook(module_state, self.sdk)
+                    if extra:
+                        context_parts.append(str(extra))
+                except Exception as e:
+                    print(f"Error in {mod_id} on_reader_context: {e}")
+            return await self.llm.extract_mutations(
+                latest_story, {mod_id: mod_schema}, context="\n\n".join(context_parts),
+                inspector_ctx={"call_type": "reader", "step": f"reader_node:{mod_id}",
+                               "module_source": mod_id})
+
+        # The shared call and every dedicated call depend only on the story
+        # text, so they run concurrently — dedicating a call costs no latency.
+        calls, call_ids = [], []
+        if shared_schema:
+            calls.append(self.llm.extract_mutations(latest_story, shared_schema,
+                inspector_ctx={"call_type": "reader", "step": "reader_node"}))
+            call_ids.append(None)
+        for mod_id, mod_schema in dedicated_schemas.items():
+            calls.append(_dedicated_extraction(mod_id, mod_schema))
+            call_ids.append(mod_id)
+
+        mutations = {}
+        gathered = await asyncio.gather(*calls, return_exceptions=True) if calls else []
+        for call_id, result in zip(call_ids, gathered):
+            if isinstance(result, BaseException):
+                print(f"Error in reader extraction ({call_id or 'shared'}): {result}")
+            elif isinstance(result, dict):
+                if call_id is None:
+                    mutations.update(result)
+                else:
+                    mutations[call_id] = result.get(call_id, {})
         print(f"[Node: Reader] Extracted mutations: {mutations}")
         
         state_update = {"module_data": dict(state.get("module_data", {}))}

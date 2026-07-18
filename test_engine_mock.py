@@ -141,6 +141,47 @@ def test_reader_fallback_on_malformed_json():
     asyncio.run(_reader_fallback_on_malformed_json())
 
 
+async def _reader_context_is_included_in_prompt():
+    # A dedicated reader call passes pre-turn context; it must land in the
+    # extraction prompt, before the story text it is meant to disambiguate.
+    previous_mode = os.getenv("LLM_MODE")
+    original_acompletion = llm_module.acompletion
+    captured = {}
+
+    class Message:
+        content = "{}"
+
+    class Choice:
+        message = Message()
+
+    class Response:
+        choices = [Choice()]
+
+    async def fake_acompletion(**kwargs):
+        captured["messages"] = kwargs.get("messages")
+        return Response()
+
+    try:
+        os.environ["LLM_MODE"] = "live"
+        llm_module.acompletion = fake_acompletion
+
+        service = LLMService()
+        await service.extract_mutations(
+            "The hero walks north.", {"wb_test": {"moved": "boolean"}},
+            context="PRE-TURN CONTEXT")
+        prompt = captured["messages"][-1]["content"]
+        assert "PRE-TURN CONTEXT" in prompt
+        assert prompt.index("PRE-TURN CONTEXT") < prompt.index("The hero walks north.")
+        print("Reader context in prompt test passed.")
+    finally:
+        llm_module.acompletion = original_acompletion
+        set_env("LLM_MODE", previous_mode)
+
+
+def test_reader_context_is_included_in_prompt():
+    asyncio.run(_reader_context_is_included_in_prompt())
+
+
 async def _storyteller_stream_failure_uses_non_stream_fallback():
     previous_mode = os.getenv("LLM_MODE")
     previous_retry_delay = os.getenv("LLM_PROVIDER_RETRY_DELAY_SECONDS")

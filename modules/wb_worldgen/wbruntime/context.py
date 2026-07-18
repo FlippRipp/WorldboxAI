@@ -283,6 +283,30 @@ async def on_gather_context(host, state: dict, sdk) -> dict:
     return {"context_string": location_context}
 
 
+async def on_reader_context(host, state: dict, sdk) -> str:
+    """Context for the module's dedicated reader call: movement-extraction
+    guidance plus the player's pre-turn <current_location> block, so the
+    extractor knows where the player stood when the story began."""
+    world_data = state.get("world_data")
+    if not world_data:
+        return ""
+    ensure_v2(state)
+    guidance = (
+        "You are extracting the player's MOVEMENT through the world from this "
+        "turn's story. The schema lists every way the player can move: "
+        "destinations on the current map, passages to other maps, improvised "
+        "transitions, and places inside the current location. Report only "
+        "movement that actually happened or clearly began in the story — a "
+        "place merely mentioned, remembered, or planned for later is not "
+        "movement. The location below is where the player was BEFORE this "
+        "turn's story."
+    )
+    location_context = build_location_context(host, state, world_data)
+    if location_context:
+        return f"{guidance}\n\n{location_context}"
+    return guidance
+
+
 async def on_intro_context(host, state: dict, sdk) -> dict:
     """Opening-scene world block: rules + premise + navigation primer +
     current location."""

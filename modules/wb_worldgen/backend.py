@@ -304,6 +304,8 @@ def set_services(services: dict):
 #   * on_intro_complete    -> one-shot reveal of locations the character knows
 #   * on_command_recall    -> /recall: same reveal pass, on demand mid-story
 #   * on_mutation_schema   -> dynamic movement schema offered to the Reader
+#   * on_reader_context    -> guidance + location block for the module's
+#                             dedicated reader call (manifest dedicated_reader)
 #   * on_mutate_state      -> apply a move + fog-of-war reveal
 # ---------------------------------------------------------------------------
 
@@ -437,6 +439,10 @@ async def on_command_recall(args, state: dict, sdk) -> dict:
 
 async def on_mutation_schema(state: dict, sdk) -> dict:
     return await _rt_schema.on_mutation_schema(_HOST, state, sdk)
+
+
+async def on_reader_context(state: dict, sdk) -> str:
+    return await _rt_context.on_reader_context(_HOST, state, sdk)
 
 
 async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:

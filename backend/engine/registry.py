@@ -218,6 +218,9 @@ class ModuleRegistry:
         if not isinstance(mutation_schema, dict):
             raise ManifestValidationError("mutation_schema must be an object.")
 
+        if not isinstance(manifest.get("dedicated_reader", False), bool):
+            raise ManifestValidationError("dedicated_reader must be a boolean.")
+
         prompt_blocks = manifest.get("prompt_blocks", [])
         if not isinstance(prompt_blocks, list):
             raise ManifestValidationError("prompt_blocks must be a list.")

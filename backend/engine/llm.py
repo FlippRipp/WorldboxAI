@@ -402,7 +402,7 @@ class LLMService:
 
         return await self._complete_story_with_fallbacks(messages, streaming_callback, inspector_ctx, reasoning_callback)
 
-    async def extract_mutations(self, story_text: str, schema: dict, inspector_ctx: dict = None) -> dict:
+    async def extract_mutations(self, story_text: str, schema: dict, inspector_ctx: dict = None, context: str = "") -> dict:
         ctx = inspector_ctx or {}
         if self.mode == "mock":
             result = self._mock_mutations(schema)
@@ -413,13 +413,19 @@ class LLMService:
 
         ctx = inspector_ctx or {}
         schema_str = json.dumps(schema, indent=2)
+        context_block = ""
+        if context:
+            context_block = f"""
+Context (the game state BEFORE this turn's story — use it to interpret the story):
+{context}
+"""
         prompt = f"""
-Given the following story text, extract any game state mutations into a strict JSON format matching the schema provided. 
+Given the following story text, extract any game state mutations into a strict JSON format matching the schema provided.
 If there are no mutations, return an empty JSON object {{}}.
 
 Schema:
 {schema_str}
-
+{context_block}
 Story Text:
 {story_text}
 

@@ -396,3 +396,17 @@ def test_hidden_connection_is_not_offered_until_discovered():
     assert state["world_data"]["connections"][0]["hidden"] is False
     schema2 = asyncio.run(wbg.on_mutation_schema(state, None))
     assert any(p.startswith("c_secret") for p in schema2["player_passage"]["options"])
+
+
+def test_reader_context_carries_guidance_and_location():
+    # The dedicated reader call's context: movement-extraction guidance plus
+    # the player's pre-turn <current_location> block.
+    state = make_state(make_world())
+    context = asyncio.run(wbg.on_reader_context(state, None))
+    assert "MOVEMENT" in context
+    assert "<current_location>" in context
+    assert "Aldern" in context
+
+
+def test_reader_context_without_world_is_empty():
+    assert asyncio.run(wbg.on_reader_context({}, None)) == ""

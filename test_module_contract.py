@@ -14,7 +14,8 @@ class FakeLLM:
         return {"wb_core_rpg": {"hp_change": -7}}
 
 
-def create_test_module(root: str, folder_name: str, manifest: dict):
+def create_test_module(root: str, folder_name: str, manifest: dict,
+                       backend_source: str = "backend_marker = True\n"):
     module_path = os.path.join(root, folder_name)
     os.makedirs(module_path)
 
@@ -34,7 +35,7 @@ def create_test_module(root: str, folder_name: str, manifest: dict):
         json.dump(manifest, f)
 
     with open(os.path.join(module_path, "backend.py"), "w") as f:
-        f.write("backend_marker = True\n")
+        f.write(backend_source)
 
 
 def test_dependency_order_and_invalid_manifests():
@@ -149,6 +150,69 @@ async def _module_owned_mutation_dispatch():
     print("Module-owned mutation dispatch test passed.")
 
 
+async def _dedicated_reader_gets_own_extraction_call():
+    # A module flagged dedicated_reader in its manifest is pulled out of the
+    # shared reader extraction into its own call, which carries the player's
+    # declared action and the module's on_reader_context block as context.
+    with tempfile.TemporaryDirectory() as temp_dir:
+        create_test_module(temp_dir, "shared", {
+            "id": "wb_shared",
+            "name": "Shared",
+            "version": "1.0.0",
+            "mutation_schema": {"hp_change": {"type": "integer"}},
+        })
+        create_test_module(temp_dir, "dedicated", {
+            "id": "wb_ded",
+            "name": "Dedicated",
+            "version": "1.0.0",
+            "dedicated_reader": True,
+            "mutation_schema": {"moved": {"type": "boolean"}},
+        }, backend_source=(
+            "async def on_reader_context(state, sdk):\n"
+            "    return 'WORLD CONTEXT BLOCK'\n"
+        ))
+
+        registry = ModuleRegistry(temp_dir)
+        registry.load_all_modules()
+        assert sorted(registry.get_modules().keys()) == ["wb_ded", "wb_shared"]
+
+        engine = EngineGraph(registry)
+        calls = []
+
+        class RecordingLLM:
+            async def extract_mutations(self, story_text, schema, inspector_ctx=None, context=""):
+                calls.append({"schema": schema, "context": context})
+                if "wb_ded" in schema:
+                    return {"wb_ded": {"moved": True}}
+                return {"wb_shared": {"hp_change": -3}}
+
+        engine.llm = RecordingLLM()
+
+        state = {
+            "active_save_id": "test",
+            "input_text": "I walk to the gate",
+            "module_data": {},
+            "module_configs": {},
+            "characters": {},
+            "current_context": [],
+            "history": ["You stride toward the gate."],
+            "chat_messages": [],
+            "turn": 0,
+        }
+        result = await engine.reader_node(state)
+
+        assert len(calls) == 2
+        shared_call = next(c for c in calls if "wb_shared" in c["schema"])
+        dedicated_call = next(c for c in calls if "wb_ded" in c["schema"])
+        assert "wb_ded" not in shared_call["schema"]
+        assert shared_call["context"] == ""
+        assert list(dedicated_call["schema"].keys()) == ["wb_ded"]
+        assert "I walk to the gate" in dedicated_call["context"]
+        assert "WORLD CONTEXT BLOCK" in dedicated_call["context"]
+        assert result["turn"] == 1
+        print("Dedicated reader partition test passed.")
+
+
 async def _librarian_skill_removal_survives_merge():
     # The hook runner deep-merges returned module_data, which is additive and
     # can't delete a dict entry. A skill removed by wb_core_rpg's on_librarian
@@ -193,6 +257,7 @@ async def _librarian_skill_removal_survives_merge():
 async def run_all_tests():
     test_dependency_order_and_invalid_manifests()
     await _module_owned_mutation_dispatch()
+    await _dedicated_reader_gets_own_extraction_call()
     await _librarian_skill_removal_survives_merge()
 
 
@@ -224,6 +289,10 @@ def test_build_module_state_injects_module_instructions():
 
 def test_module_owned_mutation_dispatch():
     asyncio.run(_module_owned_mutation_dispatch())
+
+
+def test_dedicated_reader_gets_own_extraction_call():
+    asyncio.run(_dedicated_reader_gets_own_extraction_call())
 
 
 def test_librarian_skill_removal_survives_merge():

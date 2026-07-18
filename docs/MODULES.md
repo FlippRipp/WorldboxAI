@@ -25,6 +25,7 @@ Optional fields:
 - `ui_slots`: List of frontend slots where `widget.jsx` may render.
 - `settings_schema`: Settings rendered by the frontend settings modal and persisted into save state.
 - `mutation_schema`: Per-module schema sent to the Reader LLM for state mutation extraction.
+- `dedicated_reader`: Boolean. When true, this module's mutation schema is extracted by its own Reader LLM call (run concurrently with the shared one) instead of the combined call. The dedicated call also receives the player's declared action and the module's optional `on_reader_context` block as context.
 - `prompt_blocks`: Prompt blocks injected into the Storyteller prompt pipeline.
 - `commands`: Slash command routing table.
 - `modes`: Alternative game mode definitions.
@@ -192,6 +193,13 @@ async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict | None:
 ```
 
 Called after the Reader LLM extracts mutations. `mutation` is this module's extracted mutation object from `mutation_schema`. Runs in dependency-leveled parallel with state merging between levels. Return a partial state update.
+
+```python
+async def on_reader_context(state: dict, sdk) -> str | None:
+    ...
+```
+
+Called when the module is flagged `dedicated_reader` in its manifest, before its dedicated Reader extraction call. Return a text block (extraction guidance, pre-turn world state) injected into that call's prompt as context ahead of the story text.
 
 ```python
 async def on_render_prompt_block(block: dict, state: dict, sdk) -> str | dict | None:
