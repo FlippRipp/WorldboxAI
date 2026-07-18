@@ -172,14 +172,17 @@ class MapExpansionEngine:
 
     async def expand(self, compiled: dict, parent_map_id: str, node: dict, *,
                      max_locations: int = 10, template_vocab: dict = None,
-                     level_type: str = None, total_nodes: int = None) -> dict:
+                     level_type: str = None, total_nodes: int = None,
+                     world_id: str = None) -> dict:
         """Generate {"map": MapRecord, "connections": [ConnectionRecord]} for
         one anchor node. Raises on LLM failure or a violated entrance
         contract — nothing is persisted here.
 
         ``level_type`` pins the child's level (a pregenerate plan or an
         explicit caller choice); otherwise the LLM picks from the allowed
-        levels. ``total_nodes`` sizes procedurally generated children."""
+        levels. ``total_nodes`` sizes procedurally generated children.
+        ``world_id`` enables terrain rasters for terrain-flagged levels (they
+        persist under the world's terrain directory)."""
         from wbworldgen.worldgen import mapspace as _ms
         max_locations = max(4, min(int(max_locations or 10), 16))
         parent_map = _ms.get_map(compiled, parent_map_id) or {}
@@ -204,8 +207,13 @@ class MapExpansionEngine:
                       levels[0])
         if _is_authored(chosen):
             return self._build_map(compiled, parent_map_id, node, parsed, chosen, max_locations)
-        return self._build_procedural_map(compiled, parent_map_id, node, parsed,
-                                          chosen, total_nodes)
+        # Procedural builds are CPU-bound (terrain rasters take seconds) —
+        # keep the event loop free.
+        import asyncio
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, lambda: self._build_procedural_map(
+                compiled, parent_map_id, node, parsed, chosen, total_nodes, world_id))
 
     # --- authored root map (root-as-first-expansion) ------------------------
 
@@ -400,12 +408,16 @@ Output ONLY valid JSON:
         return {"map": record, "connections": connections}
 
     def _build_procedural_map(self, compiled: dict, parent_map_id: str, node: dict,
-                              parsed: dict, level: dict, total_nodes: int = None) -> dict:
+                              parsed: dict, level: dict, total_nodes: int = None,
+                              world_id: str = None) -> dict:
         """Procedural child map (world_map/city_roadnet levels): the level's
         generator builds the geography offline with a deterministic seed; the
         play-time enrichment engine names and describes its nodes later,
         closest-to-the-story first. The LLM authored only the map's identity
-        (label, description, entrance)."""
+        (label, description, entrance). Terrain-flagged world_map levels get
+        their own raster stack first (a planet with real elevation/biomes),
+        persisted per map id — the map screen and enrichment sampling pick it
+        up by that key."""
         from wbworldgen.worldgen.generation.registry import get_generator
         node_id = node.get("id", "")
         map_id = child_map_id(parent_map_id, node_id)
@@ -418,14 +430,21 @@ Output ONLY valid JSON:
             "regions": {"regions": []},
         }
         seed = int(hashlib.sha1(map_id.encode("utf-8")).hexdigest()[:8], 16) or 1
+        terrain_layers, terrain_meta = None, None
+        if level.get("terrain") and level.get("generator_id", "world_map") == "world_map":
+            terrain_layers, terrain_meta = self._build_child_terrain(
+                map_id, seed, parsed.get("label") or node.get("name") or map_id, world_id)
         generated = get_generator(level.get("generator_id", "world_map")).build({
             "compiled_world": scoped,
             "total_nodes": max(20, min(int(total_nodes or CHILD_MAP_TOTAL_NODES), 200)),
             "seed": seed,
             "id_prefix": f"{map_id}:",
+            "terrain": terrain_layers,
         })
         if not generated.get("nodes"):
             raise ValueError(f"Procedural expansion for {node_id} produced no nodes")
+        if terrain_meta:
+            generated.setdefault("config", {})["terrain"] = terrain_meta
 
         record = {
             "map_id": map_id,
@@ -463,6 +482,42 @@ Output ONLY valid JSON:
             "origin": "generated",
         }
         return {"map": record, "connections": [connection]}
+
+    def _build_child_terrain(self, map_id: str, seed: int, name: str,
+                             world_id: str = None):
+        """Raster stack for one terrain-flagged child map, persisted under the
+        world's terrain directory keyed by the child map id — the same key the
+        terrain-image route and enrichment sampling use. Returns
+        (layers, config_meta); (None, None) when the world can't persist
+        terrain (no world id yet) — the map degrades to abstract."""
+        persistence = getattr(self._host, "_persistence", None)
+        if persistence is None or not world_id:
+            return None, None
+        from wbworldgen.worldgen.steps.terrain_generation import _build_layer_terrain
+        from wbworldgen.worldgen import terrain_store as _ts
+        # 256 keeps a lazy planet expansion under ~10s of CPU; the root map's
+        # creation-time rasters stay at 1024. Raise the setting for
+        # root-quality planets at the cost of slower expansions.
+        resolution = 256
+        resolver = getattr(self._host, "_resolve_enrichment_setting", None)
+        if callable(resolver):
+            resolution = resolver("world.child_terrain_resolution", 256, 128, 2048)
+        try:
+            entry = _build_layer_terrain(
+                world_id,
+                {"layer_id": map_id, "name": name, "layer_type": "surface",
+                 "index": seed % 1000},
+                resolution, "realistic", persistence)
+            layers = _ts.load_terrain(str(persistence.terrain_dir(world_id, map_id)))
+        except Exception as e:
+            logger.warning("child terrain failed for %s (%s): %s — map degrades "
+                           "to abstract", map_id, world_id, e)
+            return None, None
+        if not layers:
+            return None, None
+        meta = {"layer_id": map_id, "resolution": entry.get("resolution"),
+                "seed": entry.get("seed"), "summary": entry.get("summary", "")}
+        return layers, meta
 
     def _mock_content(self, node: dict, levels: list, max_locations: int) -> dict:
         """Deterministic offline content — expansion runs at play time, so it

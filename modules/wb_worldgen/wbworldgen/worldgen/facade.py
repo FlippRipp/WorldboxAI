@@ -577,7 +577,7 @@ class WorldBuilder:
         bundle = await self._maps_expand.expand(
             compiled, map_id, node, max_locations=max_locations,
             template_vocab=compiled.get("template_vocab"),
-            level_type=level_type, total_nodes=child_nodes)
+            level_type=level_type, total_nodes=child_nodes, world_id=world_id)
         self._persistence.save_child_map(world_id, bundle)
         # Keep the cached compiled world truthful without a full invalidation
         # (a reload would also re-read maps/ via load_world).
@@ -585,6 +585,10 @@ class WorldBuilder:
         compiled.setdefault("maps", {})[record["map_id"]] = record
         compiled.setdefault("connections", []).extend(bundle["connections"])
         compiled.pop("_node_by_id", None)
+        # A terrain-flagged child brings its own rasters — drop the attached
+        # terrain cache so enrichment re-loads with the new map included.
+        if (record.get("config") or {}).get("terrain"):
+            compiled.pop("_terrain_layers", None)
         return bundle
 
     async def pregenerate_planned_maps(self, world_id: str, on_event=None) -> dict:

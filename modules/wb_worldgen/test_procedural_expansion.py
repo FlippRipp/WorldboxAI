@@ -238,6 +238,78 @@ def test_procedural_roots_keep_the_procedural_path(builder):
     assert level and level["level_type"] == "interior"
 
 
+def test_terrain_flag_normalization():
+    from wbworldgen.worldgen.steps.hierarchy_design import normalize_hierarchy_design
+    out = normalize_hierarchy_design({"levels": [
+        {"level_type": "planet", "generator_id": "world_map", "terrain": "yes"},
+        {"level_type": "belt", "generator_id": "world_map", "terrain": "no"},
+        {"level_type": "city", "generator_id": "city_roadnet", "terrain": "yes"},
+        {"level_type": "interior", "generator_id": "interior", "terrain": True},
+    ]}, ["world_map", "city_roadnet", "interior"])
+    by_type = {l["level_type"]: l for l in out["levels"]}
+    assert by_type["planet"].get("terrain") is True
+    assert "terrain" not in by_type["belt"]
+    # Terrain is a world_map capability — dropped on other generators.
+    assert "terrain" not in by_type["city"]
+    assert "terrain" not in by_type["interior"]
+
+
+def test_terrain_planet_child_gets_rasters(builder):
+    import os
+
+    class Settings:
+        def get(self, key, default=None):
+            return {"world.child_terrain_resolution": 128}.get(key, default)
+
+    builder.set_settings(Settings())
+    state = {"seed_prompt": "space opera", "steps": {
+        "hierarchy_design": {"data": {"levels": [
+            {"level_type": "star_system", "label": "Star System", "generator_id": "world_map",
+             "guidance": "Planets and stations."},
+            {"level_type": "planet", "label": "Planet", "generator_id": "world_map",
+             "terrain": True, "guidance": "One planet's surface."},
+            {"level_type": "interior", "label": "Interior", "generator_id": "interior",
+             "nestable": True, "guidance": "Rooms."}]},
+            "approved": True}}}
+    map_data = asyncio.run(builder.generate_step(
+        "map_generation", state, "space opera", config={"total_nodes": 40}))
+    map_data["nodes"][0]["name"] = "Planet Kestrel"
+    state["steps"]["map_generation"] = {"data": map_data, "approved": True}
+    builder.save_world("terra", state)
+
+    compiled = builder.compile_world(builder.load_world("terra"))
+    root_id = compiled["root_map_id"]
+    anchor = next(n for n in compiled["maps"][root_id]["nodes"] if n.get("name"))
+    planet = asyncio.run(builder.expand_node("terra", root_id, anchor["id"],
+                                             level_type="planet"))["map"]
+    # Raster stack + rendered map images persisted under the child map's id —
+    # the same key the terrain-image route serves and the map screen fetches.
+    tdir = builder._persistence.terrain_dir("terra", planet["map_id"])
+    assert {"biome.png", "hillshade.png", "layers.npz"} <= set(os.listdir(tdir))
+    meta = planet["config"]["terrain"]
+    assert meta["layer_id"] == planet["map_id"]
+    assert meta["resolution"] == 128
+    assert meta["summary"]
+    # Enrichment attaches the child's terrain and samples biome per node.
+    compiled2 = builder._enrichment._load_compiled("terra")
+    assert planet["map_id"] in compiled2["_terrain_layers"]
+    from wbworldgen.worldgen.enrichment.context import (
+        build_enrichment_context, collect_nodes_by_layer)
+    all_nodes, _ = collect_nodes_by_layer(compiled2)
+    child_node = next(n for n in all_nodes if n["map_id"] == planet["map_id"])
+    ctx = build_enrichment_context(child_node, all_nodes, compiled2,
+                                   include_descriptions=False)
+    assert ctx.get("terrain", {}).get("biome")
+
+
+def test_unflagged_levels_expand_without_terrain(solar):
+    compiled, root_id, root = _root(solar)
+    anchor = _node_named(root, "Planet Kestrel")
+    planet = asyncio.run(solar.expand_node("solar", root_id, anchor["id"],
+                                           level_type="planet"))["map"]
+    assert "terrain" not in (planet["config"] or {})
+
+
 def test_parallel_plane_with_non_world_map_root(builder):
     # Generalized parallel maps (M3c): a city street-network root joined to
     # an abstract undercity plane by border crossings.

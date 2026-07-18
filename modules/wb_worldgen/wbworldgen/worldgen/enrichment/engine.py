@@ -186,6 +186,16 @@ class EnrichmentEngine:
                     # with their map's legacy_layer_id, and the single-entry
                     # fallback in _terrain_for_node covers any mismatch.
                     terrain_by_layer[lid] = layers
+            # Terrain-flagged child maps (a planet opened from a star system)
+            # carry a terrain marker in their config, keyed by their map id —
+            # the same id their nodes are tagged with.
+            from wbworldgen.worldgen import mapspace as _ms
+            for mid, m in _ms.maps_by_id(compiled).items():
+                if mid in terrain_by_layer or not (m.get("config") or {}).get("terrain"):
+                    continue
+                layers = _ts.load_terrain(str(persistence.terrain_dir(world_id, mid)))
+                if layers:
+                    terrain_by_layer[mid] = layers
             if terrain_by_layer:
                 compiled["_terrain_layers"] = terrain_by_layer
         except Exception as e:

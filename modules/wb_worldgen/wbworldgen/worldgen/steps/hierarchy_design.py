@@ -52,8 +52,11 @@ later AI what ONE map of this level contains, written in this world's own
 voice; generator_id picks which registered map generator draws maps of this
 level — read the catalog below and choose the best fit for the scale, and
 when nothing fits use world_map (without terrain it degrades to a clean
-abstract node graph). The LAST level must use the interior generator so
-locations can always open into enterable rooms.
+abstract node graph); terrain is "yes" ONLY when one map of this level spans
+natural geography (a planet's surface, a continent-scale realm) and should
+get generated elevation, biomes and rivers — "no" for star systems, cities,
+interiors and abstract planes. The LAST level must use the interior
+generator so locations can always open into enterable rooms.
 
 parallel_maps declares maps that exist SIDE BY SIDE with the root map at the
 very top of the hierarchy, joined by a handful of crossings — a D&D
@@ -135,6 +138,12 @@ def normalize_hierarchy_design(data, implemented_generator_ids,
         }
         if generator_id == "interior":
             level["nestable"] = True
+        # Terrain rasters are a world_map capability; the flag is meaningless
+        # (and dropped) on other generators.
+        terrain = raw.get("terrain")
+        if generator_id == "world_map" and (
+                terrain is True or str(terrain or "").strip().lower() in ("yes", "y", "true", "1")):
+            level["terrain"] = True
         levels.append(level)
     levels = levels[:MAX_LEVELS]
 
@@ -216,6 +225,7 @@ class HierarchyDesignStep(Step):
             "label": {"type": "string", "label": "Name"},
             "guidance": {"type": "text", "label": "What one map of this level contains"},
             "generator_id": {"type": "string", "label": "Map Generator"},
+            "terrain": {"type": "string", "label": "Physical terrain (yes/no)"},
         }},
         "parallel_maps": {"type": "list", "label": "Parallel Maps", "rerollable": True, "item_schema": {
             "label": {"type": "string", "label": "Name"},
