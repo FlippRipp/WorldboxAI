@@ -135,10 +135,12 @@ def test_no_match_generates_start_on_unnamed_slot(builder):
     assert "deep cave" in nodes["w1"]["description"]
     candidates = builder.get_start_locations(wid)
     assert {c["node_id"] for c in candidates} == {"s1", "w1"}
-    # The generation prompt offered only unnamed slots.
+    # The generation prompt offers only unnamed slots as claimable positions
+    # (named nodes appear separately, as founding anchors for NEW).
     gen_user_msg = llm.calls[1][1]["content"]
-    assert "w1" in gen_user_msg and "w2" in gen_user_msg
-    assert "s1:" not in gen_user_msg
+    positions = gen_user_msg.split("Available unnamed map positions:")[1]
+    assert "w1" in positions and "w2" in positions
+    assert "s1" not in positions
 
 
 def test_generation_failure_falls_back_to_best_existing(builder):
@@ -277,6 +279,148 @@ def test_unnamed_slots_anchor_ordering_and_near_names():
     anchored = start_locs._unnamed_slots(compiled, anchor_node_id="s1")
     assert [s["id"] for s in anchored] == ["w_near", "w_far"]
     assert anchored[0]["anchor_distance"] == pytest.approx(10.0)
+
+
+def test_generate_prompt_carries_distance_tiers_and_named_places(builder):
+    # The authoring prompt states the map's typical route leg, the tiered
+    # distance limits, the NEW escape hatch, and the named places (with ids)
+    # a NEW node could be founded beside.
+    wid = _start_world(builder)
+    llm = ScriptedLLM([
+        {"node_id": "w1", "name": "Somewhere", "type": "landmark",
+         "label_description": "l", "description": "d", "reason": "r"},
+    ])
+    compiled = builder.compile_world(builder.load_world(wid))
+
+    asyncio.run(start_locs.generate_start_location(compiled, "a cave", "a cave", llm))
+
+    user = llm.calls[0][1]["content"]
+    assert "Existing named places:" in user
+    assert "- s1: Havenport (settlement)" in user
+    assert "about 10 map units" in user  # mean of the two 10-unit edges
+    assert "ONE route leg" in user and "TWO route legs" in user
+    assert '"node_id": "NEW"' in user and "near_node_id" in user
+
+
+def test_no_slot_fits_founds_new_node_beside_anchor(builder):
+    # A NEW answer founds a brand-new node one route leg beside the named
+    # anchor: persisted into the map step data with a real edge, region
+    # membership inherited, and offered as a start candidate.
+    wid = _start_world(builder)
+    llm = ScriptedLLM([
+        {"node_id": "NONE", "wanted": "a lighthouse"},
+        {"node_id": "NEW", "near_node_id": "s1", "name": "The Harbor Light",
+         "type": "landmark", "label_description": "A lighthouse on the point.",
+         "description": "A salt-bleached lighthouse guarding Havenport's approach.",
+         "reason": "no free position sits close enough to Havenport"},
+    ])
+
+    location = asyncio.run(builder.llm_pick_start_location(wid, "a lighthouse by Havenport", llm))
+
+    assert location["generated"] is True
+    assert location["name"] == "The Harbor Light"
+    assert location["map_id"] == "root"
+    new_id = location["node_id"]
+    assert new_id.startswith("root:g")
+    assert location["new_node"]["id"] == new_id
+    assert location["new_edges"][0]["from"] == "s1"
+
+    # Persisted: the step data gained the node and its link edge to s1.
+    data = builder.load_world(wid)["steps"]["map_generation"]["data"]
+    node = next(n for n in data["nodes"] if n["id"] == new_id)
+    assert node["name"] == "The Harbor Light"
+    assert node["importance"] >= 6
+    assert node["region"] == "Coast"  # inherited from the anchor
+    edge = next(e for e in data["edges"] if new_id in (e["from"], e["to"]))
+    assert {edge["from"], edge["to"]} == {"s1", new_id}
+    # Placed about one typical route leg (10 units) from the anchor.
+    assert 5.0 <= edge["distance"] <= 20.0
+    assert {c["node_id"] for c in builder.get_start_locations(wid)} == {"s1", new_id}
+
+
+def test_new_node_with_unknown_anchor_falls_back(builder):
+    # A NEW answer naming no usable anchor is invalid output: nothing is
+    # created and the pick falls back to the best existing candidate.
+    wid = _start_world(builder)
+    llm = ScriptedLLM([
+        {"node_id": "NONE", "wanted": "a lighthouse"},
+        {"node_id": "NEW", "near_node_id": "nope", "name": "The Harbor Light",
+         "type": "landmark"},
+        {"node_id": "s1", "name": "Havenport", "reason": "fallback"},
+    ])
+
+    location = asyncio.run(builder.llm_pick_start_location(wid, "a lighthouse", llm))
+
+    assert location["node_id"] == "s1"
+    assert not location.get("generated")
+    data = builder.load_world(wid)["steps"]["map_generation"]["data"]
+    assert not any(n["id"].startswith("root:g") for n in data["nodes"])
+
+
+def test_author_location_returns_founded_node_mirror_data(builder):
+    # Play-time authoring: a NEW answer without near_node_id falls back to
+    # the anchor (the player's node), and the returned candidate carries the
+    # node + edges for the caller to mirror into the session.
+    wid = _start_world(builder)
+    builder._llm_service = ScriptedLLM([
+        {"node_id": "NEW", "name": "The Harbor Light", "type": "landmark",
+         "label_description": "A lighthouse.", "description": "A lighthouse on the point.",
+         "reason": "belongs right by Havenport"},
+    ])
+
+    result = asyncio.run(builder.author_location(
+        wid, "the lighthouse by Havenport", anchor_node_id="s1"))
+
+    assert result["generated"] is True
+    assert result["map_id"] == "root"
+    assert result["new_node"]["name"] == "The Harbor Light"
+    assert result["new_edges"][0]["from"] == "s1"
+
+
+def test_append_map_node_dispatches_to_layer_and_child_bundle(builder):
+    # The persistence append helper writes into the right store: the matching
+    # layer of the map_generation step data (with region membership), or a
+    # persisted child-map bundle.
+    wid = "layered_world"
+    builder.save_world(wid, {
+        "seed_prompt": "test",
+        "steps": {
+            "lore": {"data": {"world_name": "Layered", "premise": "p"}, "approved": True},
+            "map_generation": {"data": {"layers": [
+                {"layer_id": "root", "name": "Surface",
+                 "map": {"nodes": [{"id": "r1", "name": "Topside", "x": 0, "y": 0}],
+                         "edges": []}},
+                {"layer_id": "underdark", "name": "Underdark",
+                 "map": {"nodes": [{"id": "u1", "name": "Deepgate", "x": 0, "y": 0}],
+                         "edges": [],
+                         "regions": [{"region_name": "The Deep", "node_ids": ["u1"]}]}},
+            ]}, "approved": True},
+        },
+    })
+    node = {"id": "underdark:g2", "name": "Fungal Grove", "type": "landmark",
+            "x": 5.0, "y": 5.0}
+    edges = [{"from": "u1", "to": "underdark:g2", "distance": 7.0}]
+    assert builder._persistence.append_map_node(wid, "underdark", node, edges)
+
+    layers = builder.load_world(wid)["steps"]["map_generation"]["data"]["layers"]
+    under = layers[1]["map"]
+    assert any(n["id"] == "underdark:g2" for n in under["nodes"])
+    assert edges[0] in under["edges"]
+    assert "underdark:g2" in under["regions"][0]["node_ids"]
+    assert all(n["id"] != "underdark:g2" for n in layers[0]["map"]["nodes"])
+
+    # Child bundle dispatch: a map_id persisted under maps/ goes to its bundle.
+    bundle = {"map": {"map_id": "root:c1", "nodes": [{"id": "root:c1:n1", "name": "Hall"}],
+                      "edges": []}, "connections": []}
+    builder._persistence.save_child_map(wid, bundle)
+    child_node = {"id": "root:c1:g2", "name": "Cellar", "type": "place"}
+    assert builder._persistence.append_map_node(
+        wid, "root:c1", child_node, [{"from": "root:c1:n1", "to": "root:c1:g2", "distance": 1.0}])
+    on_disk = builder._persistence.load_child_map(wid, "root:c1")
+    assert any(n["id"] == "root:c1:g2" for n in on_disk["map"]["nodes"])
+
+    # Unknown map: refused, nothing written.
+    assert not builder._persistence.append_map_node(wid, "nowhere", dict(node), [])
 
 
 def test_generate_start_location_prompt_is_anchor_aware(builder):

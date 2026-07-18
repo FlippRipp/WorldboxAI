@@ -348,6 +348,84 @@ class WorldPersistence:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(bundle, f, indent=2)
 
+    def append_map_node(self, world_id: str, map_id: str, node: dict, edges: list) -> bool:
+        """Append a play-time-founded node (and its link edges) to the map that
+        owns ``map_id``: a lazily-expanded child map's bundle when one exists,
+        else the matching root/parallel map inside the ``map_generation`` step
+        data. The node also joins the region of its edge partner. Writes
+        through to disk; returns False when no such map is stored."""
+        bundle = self.load_child_map(world_id, map_id)
+        if bundle is not None:
+            record = bundle["map"]
+            nodes = record.setdefault("nodes", [])
+            if not any(n.get("id") == node.get("id") for n in nodes):
+                nodes.append(node)
+                record.setdefault("edges", []).extend(edges)
+                self._append_to_partner_region(record.get("regions"), node, edges)
+                self.save_child_map(world_id, bundle)
+            return True
+        return self._append_root_map_node(world_id, map_id, node, edges)
+
+    def _append_root_map_node(self, world_id: str, map_id: str, node: dict, edges: list) -> bool:
+        step_path = self._dir / world_id / "step_map_generation.json"
+        if not step_path.exists():
+            return False
+        # Go through the enrichment write cache so a pending cached state and
+        # this append never clobber each other.
+        step_data = self._enrichment_cache.get(world_id)
+        if step_data is None:
+            if len(self._enrichment_cache) >= self._enrichment_cache_max:
+                oldest = next(iter(self._enrichment_cache))
+                self.write_enrichment_to_disk(oldest, evict=True)
+            with open(step_path, "r", encoding="utf-8") as f:
+                step_data = json.load(f)
+            self._enrichment_cache[world_id] = step_data
+        target = self._step_map_for_id(step_data.get("data", {}), map_id)
+        if target is None:
+            return False
+        nodes = target.setdefault("nodes", [])
+        if not any(n.get("id") == node.get("id") for n in nodes):
+            nodes.append(node)
+            target.setdefault("edges", []).extend(edges)
+            self._append_to_partner_region(target.get("regions"), node, edges)
+            index = step_data.get("_node_index")
+            if index is not None:
+                index[node["id"]] = node
+        self.write_enrichment_to_disk(world_id)
+        return True
+
+    @staticmethod
+    def _step_map_for_id(map_data: dict, map_id: str) -> dict | None:
+        """The step-data map dict a compiled map_id refers to, mirroring the
+        migrate rule: layer 0 is 'root', later layers keep their layer_id."""
+        if not isinstance(map_data, dict):
+            return None
+        if "layers" in map_data:
+            for i, layer in enumerate(map_data.get("layers") or []):
+                lid = layer.get("layer_id") or ("root" if i == 0 else f"layer_{i}")
+                mid = "root" if i == 0 else lid
+                if map_id in (mid, lid):
+                    return layer.setdefault("map", {})
+            return None
+        if "nodes" in map_data and map_id in ("root", ""):
+            return map_data
+        return None
+
+    @staticmethod
+    def _append_to_partner_region(regions, node: dict, edges: list):
+        """Add the new node to the region membership of its edge partner, so
+        region lookups see it where its anchor lives."""
+        if not isinstance(regions, list):
+            return
+        partners = {e.get("from") for e in edges} | {e.get("to") for e in edges}
+        partners.discard(node.get("id"))
+        for region in regions:
+            ids = region.get("node_ids")
+            if isinstance(ids, list) and partners & set(ids):
+                if node.get("id") not in ids:
+                    ids.append(node["id"])
+                return
+
     def flush_enrichment_cache(self, world_id: str = None):
         if world_id:
             self.write_enrichment_to_disk(world_id)

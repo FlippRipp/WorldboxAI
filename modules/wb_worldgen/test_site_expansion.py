@@ -405,6 +405,51 @@ def test_travel_new_sub_location_grows_map_and_moves_player(builder, tmpdir):
     assert any("storage building" in e["text"].lower() for e in engine.memory.entries)
 
 
+def test_travel_authors_new_root_node_when_no_slot_fits(builder, tmpdir):
+    # An improvised destination that fits no free map position: authoring
+    # answers NEW and founds a brand-new node beside its named anchor. Travel
+    # mirrors the node + link edge into the session's world_data, the save
+    # file, and the RAG index, then lands the player there.
+    wid = _map_world(builder)
+    sm, engine, state = _play_session(builder, tmpdir, wid)
+    # Landing on the new node must not prefetch its interior mid-test (the
+    # scripted LLM below only answers the authoring call).
+    wbg._services["settings"].values["world.site_expansion_mode"] = "manual"
+
+    class ScriptedLLM:
+        mode = "live"
+        reader_model = "reader-slot"
+
+        async def simple_completion(self, messages=None, **kwargs):
+            return json.dumps({
+                "node_id": "NEW", "near_node_id": "c1", "name": "The Salt Shrine",
+                "type": "landmark", "label_description": "A shrine on the point.",
+                "description": "A brine-crusted shrine at the city's edge.",
+                "reason": "no free position sits close enough to Vessencia"})
+
+    builder._llm_service = ScriptedLLM()
+    result = asyncio.run(wbg.on_mutate_state({
+        "custom_transition": "followed the pilgrim path",
+        "custom_transition_new_location": "the salt shrine by Vessencia",
+    }, state, None))
+
+    new_id = result["player_location_node_id"]
+    assert new_id.startswith("root:g")
+    session_map = state["world_data"]["maps"]["root"]
+    node = next(n for n in session_map["nodes"] if n["id"] == new_id)
+    assert node["name"] == "The Salt Shrine"
+    assert any({e["from"], e["to"]} == {"c1", new_id} for e in session_map["edges"])
+    # Persisted into the world itself...
+    data = builder.load_world(wid)["steps"]["map_generation"]["data"]
+    assert any(n["id"] == new_id for n in data["nodes"])
+    # ...the save file, and the RAG index.
+    with open(sm.data_dir / "saves" / "save1" / "World" / "world_data.json",
+              encoding="utf-8") as f:
+        on_disk = json.load(f)
+    assert any(n["id"] == new_id for n in on_disk["maps"]["root"]["nodes"])
+    assert any("salt shrine" in e["text"].lower() for e in engine.memory.entries)
+
+
 def test_travel_start_prefetches_destination_child_map(builder, tmpdir):
     wid = _map_world(builder)
     sm, engine, state = _play_session(builder, tmpdir, wid)

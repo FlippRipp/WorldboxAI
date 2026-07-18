@@ -126,6 +126,82 @@ def _distance(a: dict, b: dict) -> float:
             + (a.get("y", 0.0) - b.get("y", 0.0)) ** 2) ** 0.5
 
 
+def _typical_leg(map_record: dict) -> float:
+    """The map's typical route-leg length (mean edge distance) — the distance
+    unit the placement rules reason in. Matches the spacing rule used when
+    positioning grown nodes (maps_expand._grow_position)."""
+    distances = [e.get("distance") for e in (map_record.get("edges") or [])
+                 if e.get("distance")]
+    if distances:
+        return sum(distances) / len(distances)
+    cfg = map_record.get("config") or {}
+    width = float(cfg.get("map_width", 100.0) or 100.0)
+    height = float(cfg.get("map_height", 100.0) or 100.0)
+    return min(width, height) / 8
+
+
+def _found_new_node(compiled: dict, authored: dict,
+                    fallback_anchor_id: str = None) -> Optional[dict]:
+    """Resolve a ``{"node_id": "NEW", "near_node_id": ...}`` answer into a
+    fully-built map node placed one typical route leg beside its named anchor,
+    plus the edge linking them. Pure computation — nothing is persisted and
+    ``compiled`` is not mutated. Returns None on unusable output (unknown or
+    unnamed anchor, missing name) so callers fall back to existing behavior."""
+    from wbworldgen.worldgen import mapspace as _ms
+    near_id = str(authored.get("near_node_id", "")).strip() or (fallback_anchor_id or "")
+    anchor = anchor_map = anchor_map_id = None
+    for mid, m in _ms.maps_by_id(compiled).items():
+        for n in m.get("nodes", []):
+            if n.get("id") == near_id:
+                anchor, anchor_map, anchor_map_id = n, m, mid
+                break
+        if anchor is not None:
+            break
+    if anchor is None or not anchor.get("name"):
+        logger.warning("NEW location answer names no usable anchor (near_node_id=%r)", near_id)
+        return None
+    name = str(authored.get("name", "")).strip()
+    if not name:
+        logger.warning("NEW location answer carries no name; falling back")
+        return None
+    loc_type = str(authored.get("type", "")).strip().lower()
+    if loc_type not in ("settlement", "landmark"):
+        loc_type = "landmark"
+    description = (str(authored.get("description", "")).strip()
+                   or str(authored.get("label_description", "")).strip())
+
+    from wbworldgen.worldgen.enrichment.maps_expand import MapExpansionEngine
+    x, y = MapExpansionEngine._grow_position(anchor_map, [anchor])
+    taken = {n.get("id") for n in _ms.all_nodes(compiled)}
+    k = len(anchor_map.get("nodes") or []) + 1
+    while f"{anchor_map_id}:g{k}" in taken:
+        k += 1
+    node = {
+        "id": f"{anchor_map_id}:g{k}",
+        "name": name,
+        "type": loc_type,
+        "description": description,
+        "label_description": str(authored.get("label_description", "")).strip(),
+        "x": x,
+        "y": y,
+    }
+    if anchor.get("region"):
+        node["region"] = anchor["region"]
+    edge = {"from": anchor["id"], "to": node["id"],
+            "distance": round(max(_distance(node, anchor), 1.0), 2)}
+    return {
+        "node_id": node["id"],
+        "name": name,
+        "type": loc_type,
+        "label_description": node["label_description"],
+        "description": description,
+        "reason": str(authored.get("reason", "")).strip(),
+        "map_id": anchor_map_id,
+        "new_node": node,
+        "new_edges": [edge],
+    }
+
+
 def _unnamed_slots(compiled: dict, limit: int = 60, anchor_node_id: str = None) -> list[dict]:
     """Unnamed map nodes that a brand-new start location could be founded on,
     tagged with their layer id and annotated with the nearest named places
@@ -173,9 +249,16 @@ async def generate_start_location(compiled: dict, preference: str, wanted: str, 
     distances, so a place described relative to somewhere ("the school's
     storage building") lands next to it instead of across the map.
 
+    The prompt carries distance limits (in the map's typical route-leg unit):
+    when no offered position is close enough or fitting, the LLM may answer
+    ``{"node_id": "NEW", "near_node_id": ...}`` and a brand-new node is built
+    one route leg beside that named place instead of claiming a slot.
+
     Returns ``{"node_id", "name", "type", "label_description", "description",
-    "reason"}`` or None when the world has no free slot or the call fails —
-    the caller then falls back to picking the best existing candidate.
+    "reason"}`` — plus ``{"map_id", "new_node", "new_edges"}`` when a NEW node
+    was founded (nothing persisted; the caller appends it) — or None when the
+    world has no free slot or the call fails, in which case the caller falls
+    back to picking the best existing candidate.
     """
     slots = _unnamed_slots(compiled, anchor_node_id=anchor_node_id)
     if not slots:
@@ -214,6 +297,24 @@ async def generate_start_location(compiled: dict, preference: str, wanted: str, 
     slots_block = "\n".join(_slot_line(n) for n in slots)
     world_name = lore.get("world_name", "the world")
 
+    # Named places (with ids) double as founding anchors for the NEW answer;
+    # the typical route leg is the unit the distance rules speak in.
+    slot_maps = {s.get("map_id") for s in slots}
+    named_lines = []
+    for mid, m in world_maps.items():
+        for n in m.get("nodes", []):
+            if n.get("name"):
+                line = f"- {n['id']}: {n['name']} ({n.get('type', 'place')})"
+                if len(world_maps) > 1:
+                    line += f", map {mid}"
+                named_lines.append(line)
+    named_block = "\n".join(named_lines) or "- (none yet)"
+    leg_lines = [
+        f"- {m.get('label', mid)}: about {_typical_leg(m):.0f} map units"
+        for mid, m in world_maps.items() if mid in slot_maps
+    ]
+    leg_block = "\n".join(leg_lines)
+
     anchor_name = ""
     if anchor_node_id:
         from wbworldgen.worldgen import mapspace as _ms2
@@ -237,7 +338,21 @@ async def generate_start_location(compiled: dict, preference: str, wanted: str, 
         "check each position's near list.\n"
         "- Otherwise, if the player's current position is given, prefer a position near them "
         "unless the request implies somewhere farther away.\n"
-        "- Otherwise pick the position whose region/layer/type fits the request best."
+        "- Otherwise pick the position whose region/layer/type fits the request best.\n"
+        "Distance limits — a position only qualifies when it is genuinely close enough "
+        "(a typical route leg is the average distance between neighboring places):\n"
+        "- A part of a named place (its rooftop, storage building, gate...): within about "
+        "ONE route leg of that place.\n"
+        "- Right by / just outside a named place, or somewhere near the player: within "
+        "about TWO route legs.\n"
+        "- Somewhere in a region: any position in that region.\n"
+        "- No stated whereabouts: whichever position fits the place's nature best.\n"
+        "Within those limits the best-FITTING position wins — closeness qualifies a "
+        "position, fit ranks it.\n"
+        "If NO listed position qualifies, do not force a distant or unfitting one: return "
+        '{"node_id": "NEW", "near_node_id": "<id of the named place it belongs beside>"} '
+        "with the other fields as usual, and a brand-new position will be created "
+        "directly beside that place."
     )
     user_msg = f"""World premise: {lore.get('premise', '')}
 Genre: {rules.get('genre', '')} | Tone: {rules.get('tone', '')}
@@ -248,13 +363,20 @@ Regions:
 Player's location request: "{preference}"
 What they want: {wanted or preference}
 {anchor_line}
+Existing named places:
+{named_block}
+
+Typical route leg:
+{leg_block}
+
 Available unnamed map positions:
 {slots_block}
 
 {placement_rules}
 
 Found a new location matching the request at the best-fitting position. Return JSON:
-{{"node_id": "<one of the ids above>", "name": "...", "type": "settlement" or "landmark",
+{{"node_id": "<one of the ids above, or NEW>", "near_node_id": "<only with NEW: a named place id>",
+"name": "...", "type": "settlement" or "landmark",
 "label_description": "one-line label", "description": "2-3 sentence flavor description",
 "reason": "one sentence why this position fits"}}"""
     try:
@@ -271,6 +393,8 @@ Found a new location matching the request at the best-fitting position. Return J
 
     slot_ids = {str(s.get("id")) for s in slots}
     node_id = str(authored.get("node_id", ""))
+    if node_id.upper() == "NEW":
+        return _found_new_node(compiled, authored, fallback_anchor_id=anchor_node_id)
     name = str(authored.get("name", "")).strip()
     if node_id not in slot_ids or not name:
         logger.warning("Start location generation returned invalid node_id/name; falling back")

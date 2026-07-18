@@ -867,21 +867,32 @@ class WorldBuilder:
         return result
 
     def _persist_generated_start(self, world_id: str, authored: dict) -> dict:
-        """Write an on-demand start location onto its map node (name, type,
-        description, importance bump) and return it in candidate shape."""
+        """Write an on-demand location into the world — onto its claimed map
+        node (name, type, description, importance bump), or, for a NEW-founded
+        node, appended wholesale to its map — and return it in candidate
+        shape (NEW results additionally carry ``new_node``/``new_edges``/
+        ``map_id`` so play-time callers can mirror them into the session)."""
         node_id = authored["node_id"]
-        writes = {
-            "name": authored["name"],
-            "type": authored["type"],
-            "importance": self.MAJOR_IMPORTANCE_FLOOR if authored["type"] == "landmark" else 8,
-        }
-        if authored.get("label_description"):
-            writes["label_description"] = authored["label_description"]
-        if authored.get("description"):
-            writes["description"] = authored["description"]
-        for field, value in writes.items():
-            self._save_node_enrichment(world_id, node_id, field, value)
-        self._flush_enrichment_cache(world_id)
+        importance = self.MAJOR_IMPORTANCE_FLOOR if authored["type"] == "landmark" else 8
+        new_node = authored.get("new_node")
+        if new_node is not None:
+            new_node["importance"] = importance
+            self._persistence.append_map_node(
+                world_id, authored.get("map_id", ""), new_node,
+                authored.get("new_edges") or [])
+        else:
+            writes = {
+                "name": authored["name"],
+                "type": authored["type"],
+                "importance": importance,
+            }
+            if authored.get("label_description"):
+                writes["label_description"] = authored["label_description"]
+            if authored.get("description"):
+                writes["description"] = authored["description"]
+            for field, value in writes.items():
+                self._save_node_enrichment(world_id, node_id, field, value)
+            self._flush_enrichment_cache(world_id)
         self._enrichment.invalidate_compiled(world_id)
 
         compiled = self.compile_world(self.load_world(world_id))
@@ -889,6 +900,9 @@ class WorldBuilder:
             if entry.get("node_id") == node_id:
                 entry["reason"] = authored.get("reason", "")
                 entry["generated"] = True
+                if new_node is not None:
+                    entry["new_node"] = dict(new_node)
+                    entry["new_edges"] = [dict(e) for e in authored.get("new_edges") or []]
                 return entry
         # Node fell outside the candidate filter (shouldn't happen) — return
         # the authored fields directly so the caller still gets a start.

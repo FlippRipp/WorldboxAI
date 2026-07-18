@@ -290,7 +290,22 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
         except Exception:
             authored = None
         if authored and authored.get("node_id"):
-            _sync.sync_enriched_nodes(host, state.get("world_id"), [authored["node_id"]])
+            new_node = authored.get("new_node")
+            if new_node is not None:
+                # No free slot fit, so a brand-new node was founded beside a
+                # named place — it doesn't exist in this session's world_data
+                # yet; mirror the node and its link edges in.
+                target_record = get_map(world_data, authored.get("map_id")) or {}
+                session_nodes = target_record.setdefault("nodes", [])
+                if not any(n.get("id") == new_node.get("id") for n in session_nodes):
+                    session_nodes.append(dict(new_node))
+                    target_record.setdefault("edges", []).extend(
+                        dict(e) for e in authored.get("new_edges") or [])
+                    persist_world()
+                    await _sync.embed_backfilled_nodes(
+                        host, state.get("world_id"), [new_node["id"]])
+            else:
+                _sync.sync_enriched_nodes(host, state.get("world_id"), [authored["node_id"]])
             custom_target = authored["node_id"]
 
     if custom_desc and custom_target:
