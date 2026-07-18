@@ -81,9 +81,7 @@ best-existing behavior. New-node edges carry no road geometry (plain
 link) — acceptable while NEW stays the escape hatch, which the slot-first
 prompt ordering enforces.
 
-## Remaining
-
-### M5 — Interior-vs-adjacent boundary
+### M5 — Interior-vs-adjacent boundary (`51508f0`)
 
 Who decides whether a story-created place is a sub-location inside a site or
 an adjacent node in the wider world:
@@ -91,25 +89,25 @@ an adjacent node in the wider world:
 - **The Reader decides first** (it knows the fiction) by which schema field
   it fills. Both field descriptions carry the discriminating rule:
   *could you walk there without leaving {place} / is it on its premises →
-  inside; is it its own destination that happens to be close → adjacent.*
-- **Offer `new_sub_location` on the overworld too**, whenever the current
-  node is expandable — "a place inside {node name}". If the site has no
-  interior map yet, fold the request into its first expansion (the expand
-  call is told the interior must include this place).
-- **Resolve anchors through map ancestry**: authoring an outside place while
+  inside; is it its own destination that happens to be close → adjacent* —
+  plus cross-hints pointing at each other whenever both are offered.
+- **`new_sub_location` is offered on the overworld too**, whenever the
+  current node is an expandable (or already expanded) site — "a place inside
+  {node name}". If the site has no interior map yet, the request is folded
+  into its first expansion (the expand call is told the interior must
+  include this place), then grown onto the fresh map, and the player steps
+  inside to it.
+- **Anchors resolve through map ancestry**: authoring an outside place while
   standing inside the school anchors at the school's overworld node, so
   "across the road" lands beside the school.
 - **Cross-redirect escape hatches** so a wrong field choice self-corrects:
   the overworld author may answer `{"belongs_inside": "<named node>"}` → the
-  engine grows that node's interior instead; `grow` may answer
+  engine grows that node's interior instead (at game start it simply starts
+  the player at the site itself); `grow` may answer
   `{"belongs_outside": true}` → the engine falls through to the overworld
-  path.
+  path. Each redirect is one hop — a bounce-back gives up instead of
+  ping-ponging.
 
 Decision cascade: Reader picks the field by the containment rule → the
 authoring LLM may veto across the boundary → the engine owns placement
 (slot vs NEW by the distance tiers, exact coordinates, edges, persistence).
-
-## Order
-
-M4 first (NEW nodes + distance tiers), then M5 (boundary work) on top — M5's
-redirects need M4's overworld append path to exist.
