@@ -44,7 +44,8 @@ export default function MapStepView({ step, editedData, onFieldChange, disabled,
       />
 
       {hasMap && (
-        <div className="pt-2">
+        // Explicit height: the renderer fills whatever box it's given.
+        <div className="pt-2 h-[560px]">
           {hasMaps ? (
             <MapRenderer
               mapsById={normalized.mapsById}

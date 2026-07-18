@@ -93,7 +93,8 @@ export default function EnrichmentStepView({
   return (
     <div className="space-y-4">
       {hasMapData && (
-        <div className="pt-2">
+        // Explicit height: the renderer fills whatever box it's given.
+        <div className="pt-2 h-[560px]">
           {hasMaps ? (
             <MapRenderer
               mapsById={getEnrichedMapsById()}

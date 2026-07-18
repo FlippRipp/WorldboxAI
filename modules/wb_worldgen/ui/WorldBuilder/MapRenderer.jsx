@@ -98,6 +98,11 @@ const INTERLAYER_TYPES = new Set([
   'cave_mouth', 'rift', 'staircase', 'bridge',
 ]);
 
+// Deepest zoom-in as a multiple of the fitted whole-map view. Zoom-out is
+// capped at 1 (the whole map exactly fits) — zooming further out only shows
+// empty space around the map.
+const MAX_ZOOM = 40;
+
 export default function MapRenderer({ nodes, edges, regions, config, layers, connections, activeLayerId, onLayerChange, mapsById, activeMapId, onMapChange, rootMapId, playerMapId, fogOfWar, navigateToLayer, focusNodeId, worldId, roads, playerTravel }) {
   const [hoveredNode, setHoveredNode] = useState(null);
   const [hoveredRegion, setHoveredRegion] = useState(null);
@@ -110,6 +115,10 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
   const wrapperRef = useRef(null);
   // Active touch gesture: {mode:'pan', lastX, lastY} or {mode:'pinch', lastDist}.
   const touchStateRef = useRef(null);
+  // Measured on-screen size of the map container. The container fills whatever
+  // box the embedding view gives it (popup, builder step, fullscreen), and the
+  // viewBox is derived from this so gesture math always matches what's visible.
+  const [containerSize, setContainerSize] = useState({ w: 0, h: 0 });
 
   // Normalize the map inputs: new-style callers pass `mapsById` (v2 MapRecords
   // keyed by map_id) + v2 `connections`; legacy callers pass `layers` (array of
@@ -401,18 +410,55 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
     [normalized, activeMap],
   );
 
-  // Reset viewBox when map data changes
-  const defaultVB = useMemo(() => ({ x: 0, y: 0, w: mapLayout.viewW, h: mapLayout.viewH }), [mapLayout]);
+  // Default (fully zoomed-out) viewBox: the smallest rect that contains the
+  // whole 800x500 content frame while matching the container's aspect ratio,
+  // centered on the content. Matching aspect ratios means the SVG never
+  // letterboxes, so screen-pixel <-> viewBox math in the gesture handlers is
+  // exact for any container shape.
+  const defaultVB = useMemo(() => {
+    const { viewW, viewH } = mapLayout;
+    const contentAspect = viewW / viewH;
+    const aspect = containerSize.w > 0 && containerSize.h > 0
+      ? containerSize.w / containerSize.h
+      : contentAspect;
+    let w = viewW;
+    let h = viewH;
+    if (aspect >= contentAspect) {
+      w = viewH * aspect;
+    } else {
+      h = viewW / aspect;
+    }
+    return { x: (viewW - w) / 2, y: (viewH - h) / 2, w, h };
+  }, [mapLayout, containerSize]);
+
+  // Zooming in shrinks the viewBox, so the *minimum* width is the deep-zoom
+  // limit and the *maximum* is the whole-map default view.
+  const clampWidth = useCallback(
+    (w) => Math.max(defaultVB.w / MAX_ZOOM, Math.min(defaultVB.w, w)),
+    [defaultVB],
+  );
 
   const clampViewBox = useCallback((vb) => {
-    const minZoom = 0.3;
-    const maxZoom = 5;
-    const w = Math.max(defaultVB.w * minZoom, Math.min(defaultVB.w * maxZoom, vb.w));
+    const w = clampWidth(vb.w);
     const h = w * (defaultVB.h / defaultVB.w);
-    const x = Math.max(0, Math.min(defaultVB.w - w, vb.x));
-    const y = Math.max(0, Math.min(defaultVB.h - h, vb.y));
+    const x = Math.max(defaultVB.x, Math.min(defaultVB.x + defaultVB.w - w, vb.x));
+    const y = Math.max(defaultVB.y, Math.min(defaultVB.y + defaultVB.h - h, vb.y));
     return { x, y, w, h };
-  }, [defaultVB]);
+  }, [defaultVB, clampWidth]);
+
+  // Keep the view legal when the container is resized (rotation, fullscreen
+  // toggle, panels opening): re-fit around the same center point so whatever
+  // the user was looking at stays in the middle. At full zoom-out this snaps
+  // exactly to the new default view.
+  useEffect(() => {
+    setViewBox((prev) => {
+      const cx = prev.x + prev.w / 2;
+      const cy = prev.y + prev.h / 2;
+      const w = clampWidth(prev.w);
+      const h = w * (defaultVB.h / defaultVB.w);
+      return clampViewBox({ x: cx - w / 2, y: cy - h / 2, w, h });
+    });
+  }, [clampViewBox, clampWidth, defaultVB]);
 
   // Reset the view only when the actual displayed map changes (a different
   // layer, or the node set size changes e.g. on first load) — not on every
@@ -437,10 +483,23 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
   // Center + zoom in on a specific node when focusNodeId changes (e.g. after
   // traveling through a layer connection point — land zoomed in on the paired
   // node on the destination layer rather than the default full-map view).
+  // Applied exactly once per focus node, and only after the container has been
+  // measured (so the zoom is computed against the real on-screen frame, not
+  // the unmeasured fallback). Re-running on anything else is actively harmful:
+  // game-state polling produces fresh `activeNodes` references, and the
+  // container height wobbles a few px when hover rows toggle in the info bar —
+  // both used to snap the view back to the focus zoom mid-gesture.
+  const focusAppliedRef = useRef(null);
   useEffect(() => {
-    if (!focusNodeId || !activeNodes.length) return;
+    if (!focusNodeId) {
+      focusAppliedRef.current = null;
+      return;
+    }
+    if (!activeNodes.length || containerSize.w <= 0) return;
+    if (focusAppliedRef.current === focusNodeId) return;
     const target = activeNodes.find((n) => n.id === focusNodeId);
     if (target) {
+      focusAppliedRef.current = focusNodeId;
       const cx = sx(target.x);
       const cy = sy(target.y);
       const halfW = defaultVB.w / 6;
@@ -448,7 +507,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
       setViewBox(clampViewBox({ x: cx - halfW, y: cy - halfH, w: halfW * 2, h: halfH * 2 }));
       setSelectedNode(target);
     }
-  }, [focusNodeId, activeNodes, defaultVB, clampViewBox, sx, sy]);
+  }, [focusNodeId, activeNodes, containerSize, defaultVB, clampViewBox, sx, sy]);
 
   // Fog of war
   const fogEnabled = !!(fogOfWar && activeNodes.length);
@@ -518,15 +577,18 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
       const worldX = prev.x + mx * scaleX;
       const worldY = prev.y + my * scaleY;
 
+      // Clamp the width *before* deriving the position: computing x/y from an
+      // out-of-range width and clamping afterwards translates the view on
+      // every zoom attempt at the limit instead of doing nothing.
       const factor = e.deltaY < 0 ? 0.85 : 1.15;
-      const newW = prev.w * factor;
+      const newW = clampWidth(prev.w * factor);
       const newH = newW * (defaultVB.h / defaultVB.w);
       const newX = worldX - mx * (newW / rect.width);
       const newY = worldY - my * (newH / rect.height);
 
       return clampViewBox({ x: newX, y: newY, w: newW, h: newH });
     });
-  }, [clampViewBox, defaultVB]);
+  }, [clampViewBox, clampWidth, defaultVB]);
 
   // Touch pan (one finger) + pinch-zoom (two fingers). Mirrors the mouse-drag
   // and wheel-zoom math but reads the live view from the setViewBox updater's
@@ -560,15 +622,11 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
       const pxDY = st.lastY - t.clientY;
       st.lastX = t.clientX;
       st.lastY = t.clientY;
-      setViewBox((prev) => {
-        const newX = prev.x + pxDX * (prev.w / rect.width);
-        const newY = prev.y + pxDY * (prev.h / rect.height);
-        return {
-          ...prev,
-          x: Math.max(0, Math.min(defaultVB.w - prev.w, newX)),
-          y: Math.max(0, Math.min(defaultVB.h - prev.h, newY)),
-        };
-      });
+      setViewBox((prev) => clampViewBox({
+        ...prev,
+        x: prev.x + pxDX * (prev.w / rect.width),
+        y: prev.y + pxDY * (prev.h / rect.height),
+      }));
     } else if (st.mode === 'pinch' && e.touches.length === 2) {
       const [a, b] = [e.touches[0], e.touches[1]];
       const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
@@ -579,14 +637,15 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
       setViewBox((prev) => {
         const worldX = prev.x + mx * (prev.w / rect.width);
         const worldY = prev.y + my * (prev.h / rect.height);
-        const newW = prev.w * factor;
+        // Width clamped first — see handleWheel for why.
+        const newW = clampWidth(prev.w * factor);
         const newH = newW * (defaultVB.h / defaultVB.w);
         const newX = worldX - mx * (newW / rect.width);
         const newY = worldY - my * (newH / rect.height);
         return clampViewBox({ x: newX, y: newY, w: newW, h: newH });
       });
     }
-  }, [clampViewBox, defaultVB]);
+  }, [clampViewBox, clampWidth, defaultVB]);
 
   const handleTouchEnd = useCallback((e) => {
     // Fingers lifted: end the gesture, or fall back to panning with the finger
@@ -613,12 +672,8 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
     const dx = (dragStart.x - e.clientX) * (viewBox.w / rect.width);
     const dy = (dragStart.y - e.clientY) * (viewBox.h / rect.height);
     setDragStart({ x: e.clientX, y: e.clientY });
-    setViewBox((prev) => {
-      const newX = prev.x + dx;
-      const newY = prev.y + dy;
-      return { ...prev, x: Math.max(0, Math.min(defaultVB.w - prev.w, newX)), y: Math.max(0, Math.min(defaultVB.h - prev.h, newY)) };
-    });
-  }, [dragging, dragStart, viewBox.w, viewBox.h, defaultVB]);
+    setViewBox((prev) => clampViewBox({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+  }, [dragging, dragStart, viewBox.w, viewBox.h, clampViewBox]);
 
   const handleMouseUp = useCallback((e) => {
     setDragging(false);
@@ -645,7 +700,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
       const factor = dir > 0 ? 0.75 : 1.333;
       const cx = prev.x + prev.w / 2;
       const cy = prev.y + prev.h / 2;
-      const newW = prev.w * factor;
+      const newW = clampWidth(prev.w * factor);
       const newH = newW * (defaultVB.h / defaultVB.w);
       return clampViewBox({
         x: cx - newW / 2,
@@ -654,7 +709,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
         h: newH,
       });
     });
-  }, [clampViewBox, defaultVB]);
+  }, [clampViewBox, clampWidth, defaultVB]);
 
   const toggleFullscreen = useCallback(() => {
     const el = wrapperRef.current;
@@ -686,6 +741,27 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
     return () => el.removeEventListener('wheel', handleWheel);
   }, [handleWheel]);
 
+  // Track the container's on-screen size. The container only mounts once there
+  // are nodes to show (see the empty-state return below), hence the hasNodes
+  // dependency to re-attach the observer when data arrives.
+  const hasNodes = !!(activeNodes && activeNodes.length);
+  useEffect(() => {
+    const el = mapContainerRef.current;
+    if (!el || !hasNodes) return undefined;
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) {
+        setContainerSize((prev) => (
+          prev.w === r.width && prev.h === r.height ? prev : { w: r.width, h: r.height }
+        ));
+      }
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [hasNodes]);
+
   // Touch listeners must be native + non-passive so touchmove can preventDefault
   // (React attaches these as passive, where preventDefault is a no-op).
   useEffect(() => {
@@ -714,7 +790,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
   return (
     <div
       ref={wrapperRef}
-      className={`border border-gray-700 bg-gray-900/50 overflow-hidden ${isFullscreen ? 'flex flex-col w-screen h-screen rounded-none' : 'rounded-lg'}`}
+      className={`border border-gray-700 bg-gray-900/50 overflow-hidden flex flex-col ${isFullscreen ? 'w-screen h-screen rounded-none' : 'w-full h-full rounded-lg'}`}
     >
       <div className="flex items-center justify-between px-3 py-2 border-b border-gray-700 bg-gray-900/80">
         <span className="text-xs text-gray-400">
@@ -803,15 +879,13 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
 
       <div
         ref={mapContainerRef}
-        className={`relative ${isFullscreen ? 'flex-1 min-h-0' : ''}`}
-        style={isFullscreen
-          ? { width: '100%', overflow: 'hidden', touchAction: 'none' }
-          : { width: mapLayout.viewW, height: mapLayout.viewH, overflow: 'hidden', touchAction: 'none' }}
+        className="relative flex-1 min-h-0 w-full"
+        style={{ overflow: 'hidden', touchAction: 'none' }}
       >
         <svg
           viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`}
-          width={isFullscreen ? '100%' : mapLayout.viewW}
-          height={isFullscreen ? '100%' : mapLayout.viewH}
+          width="100%"
+          height="100%"
           preserveAspectRatio="xMidYMid meet"
           className="block select-none"
           onMouseDown={handleMouseDown}
