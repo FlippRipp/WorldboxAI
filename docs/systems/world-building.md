@@ -427,21 +427,28 @@ Nearby factions: Children of the Spore
 ### 3. Location Tracking
 The world system tracks the player's current region via a `player_location` field. Moving between regions triggers context refreshes and potential encounters.
 
-### 4. Gradual Travel
-Movement between map nodes is gradual rather than instant. When the Reader detects the player set out toward a destination, `wb_worldgen` computes the shortest route over the edge graph (Dijkstra on edge `distance`) and stores a journey record in `module_data.wb_worldgen.travel`:
+### 4. Time-Based Travel
+Movement is measured in in-world minutes and planned across the whole map hierarchy. A journey starts from either of two places:
+
+- **The travel-intent call** (pre-storyteller, in `on_gather_context`): a fast LLM call reads the player's input and decides whether they are setting out somewhere. If so it resolves the destination to a map node, estimates the trip's total duration in in-world minutes, and starts the journey *before* the storyteller writes — the storyteller receives a `<travel_plan>` block (destination, ETA, route legs) and is told to narrate at whatever pace feels natural. Destination resolution is switchable via `world.destination_resolution`: `semantic` (embed the spoken destination, shortlist via the world RAG index, confirm with a small LLM call) or `roster` (show the LLM every revealed named node grouped by map hierarchy and let it pick).
+- **The Reader** (post-storyteller): declared destinations, passages, and improvised transitions still start or redirect journeys as before.
+
+Either way, `wbruntime/routing.py` plans a cross-map itinerary — Dijkstra over a world-level graph whose vertices are `(map_id, node_id)` and whose edges are each map's routes plus the connections between maps — so "the school", three maps away, becomes one plan: leave the interior, cross the city, board the train, walk the last stretch. Costs are in *edge-equivalents* (an average map route = 1; `instant_travel` maps and instant connections = 0; journey-mode connections = their `turns`), which only distribute the ETA along the route. The record in `module_data.wb_worldgen.travel`:
 
 ```json
 {
-  "route": ["n_12", "n_7", "n_31"],
-  "leg_index": 0,
-  "leg_progress": 12.5,
-  "leg_distance": 38.2,
+  "phase": "journey",
+  "itinerary": {"segments": ["..."], "ee_total": 3.0},
+  "eta_minutes": 60,
+  "minutes_traveled": 25,
+  "waypoint_cursor": 1,
   "destination_node_id": "n_31",
-  "destination_region": "The Spore Wastes"
+  "destination_map_id": "root",
+  "transport": "train"
 }
 ```
 
-Each turn the journey advances by `avg_edge_distance / world.travel_turns_per_edge` map units (setting under World Building; `0` restores classic instant teleports). Waypoints reached along the way update `player_location_node_id`, reveal fog-of-war, and set the region from the node. While en route, the `<current_location>` context block switches to an EN ROUTE variant telling the storyteller the player has not yet arrived, with a turns-remaining estimate. The Reader can pause a journey (`travel_interrupted`, e.g. camping or a fight) or redirect it mid-way (a new destination reroutes from the last reached node). Inter-layer moves, unreachable destinations, and instant mode keep the old teleport behavior. The in-game map overlay shows the player marker interpolated along the current edge.
+Each turn the dedicated reader call reports `travel_minutes_covered` — the in-world minutes the narration actually spent moving — and the journey advances proportionally; waypoints passed update `player_location_node_id`, reveal fog-of-war, and set the region. When the narration covers the whole remaining trip (an uneventful train ride told in one scene), the reader sets `travel_completed` and the player arrives immediately. `travel_interrupted` pauses; a new destination reroutes from the last reached node. `world.travel_minutes_per_edge` supplies the ETA when no LLM estimate exists, and `0` restores classic instant teleports (finishing any in-flight journey). Pre-time-based records from old saves are re-planned on first contact. The in-game map overlay interpolates the player marker along the itinerary.
 
 ---
 

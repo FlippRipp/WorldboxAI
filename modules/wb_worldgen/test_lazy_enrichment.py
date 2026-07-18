@@ -187,7 +187,7 @@ def _play_session(builder, tmpdir, wid):
         "engine": engine,
         "session_manager": sm,
         "settings": FakeSettings({
-            "world.travel_turns_per_edge": 2,
+            "world.travel_minutes_per_edge": 20,
             "world.backfill_per_turn": 2,
         }),
     }
@@ -259,7 +259,7 @@ def test_reveal_queues_backfill_on_teleport(builder, tmpdir):
     wid = _mixed_world(builder)
     _fake_enrichment(builder)
     sm, engine, state = _play_session(builder, tmpdir, wid)
-    wbg._services["settings"].values["world.travel_turns_per_edge"] = 0  # instant moves
+    wbg._services["settings"].values["world.travel_minutes_per_edge"] = 0  # instant moves
     wbg._services["settings"].values["world.backfill_per_turn"] = 0
 
     async def main():

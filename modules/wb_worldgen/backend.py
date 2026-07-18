@@ -35,7 +35,9 @@ import terrain_routes as _terrain_routes  # noqa: E402  (experimental terrain la
 from wbruntime import backfill as _rt_backfill  # noqa: E402
 from wbruntime import context as _rt_context  # noqa: E402
 from wbruntime import expansion as _rt_expansion  # noqa: E402
+from wbruntime import intent as _rt_intent  # noqa: E402
 from wbruntime import known_locations as _rt_known  # noqa: E402
+from wbruntime import routing as _rt_routing  # noqa: E402
 from wbruntime import schema as _rt_schema  # noqa: E402
 from wbruntime import sync as _rt_sync  # noqa: E402
 from wbruntime import travel as _rt_travel  # noqa: E402
@@ -220,12 +222,20 @@ def set_services(services: dict):
                 min=1, max=10,
             )
             settings.register(
-                "world.travel_turns_per_edge", "slider", 2,
-                label="Travel Pace",
+                "world.travel_minutes_per_edge", "slider", 60,
+                label="Travel Pace (Minutes per Map Leg)",
                 category="World Building",
-                description="How many story turns it takes to cross one average map route between locations. Journeys to distant places take proportionally longer. 0 = instant travel (the player jumps straight to the destination).",
+                description="How many in-world minutes it takes to cross one average map route between locations, used when no better estimate exists (the travel-intent call usually supplies one). Journeys to distant places take proportionally longer. 0 = instant travel (the player jumps straight to the destination).",
                 is_global=True,
-                min=0, max=8,
+                min=0, max=480,
+            )
+            settings.register(
+                "world.destination_resolution", "select", "semantic",
+                label="Travel Destination Resolution",
+                category="World Building",
+                description="How the travel-intent call matches a spoken destination ('the school') to a map location. 'semantic' embeds the destination and searches the world index, then confirms with a small LLM call; 'roster' shows the LLM every known named location and lets it pick directly.",
+                is_global=True,
+                options=["semantic", "roster"],
             )
             settings.register(
                 "world.upfront_detail", "select", "major_locations",
@@ -299,7 +309,9 @@ def set_services(services: dict):
 # Turn-time contributions: location context + movement. Implemented in
 # wbruntime; these wrappers keep the module-hook names the engine discovers
 # and the underscore names tests exercise, threading _HOST for state access.
-#   * on_gather_context   -> per-turn <current_location> context_string
+#   * on_gather_context   -> per-turn <current_location> context_string,
+#                             plus the pre-storyteller travel-intent pass
+#                             (may start a time-based journey)
 #   * on_intro_context     -> richer world block for the opening scene
 #   * on_intro_complete    -> one-shot reveal of locations the character knows
 #   * on_command_recall    -> /recall: same reveal pass, on demand mid-story
@@ -322,7 +334,9 @@ _node_needs_detail = _rt_worldspace.node_needs_detail
 _weighted_adjacency = _rt_travel.weighted_adjacency
 _find_route = _rt_travel.find_route
 _edge_length = _rt_travel.edge_length
-_remaining_travel = _rt_travel.remaining_travel
+_journey_progress = _rt_travel.journey_progress
+_plan_itinerary = _rt_routing.plan_itinerary
+_advance_position = _rt_routing.advance_position
 _resolve_sub_location_move = _rt_travel.resolve_sub_location_move
 _build_location_mutation_schema = _rt_schema.build_location_mutation_schema
 _write_session_world_data = _rt_sync.write_session_world_data
@@ -330,8 +344,14 @@ _write_session_world_data = _rt_sync.write_session_world_data
 
 # Host-bound wrappers (read world_builder/_services/_backfill/_site_tasks live).
 
-def _travel_speed(world_data: dict) -> float | None:
-    return _rt_travel.travel_speed(_HOST, world_data)
+def _travel_minutes_per_edge() -> int:
+    return _rt_travel.travel_minutes_per_edge(_HOST)
+
+
+def _plan_journey(state: dict, world_data: dict, destination_node_id: str,
+                  eta_minutes: int = None, transport: str = ""):
+    return _rt_travel.plan_journey(_HOST, state, world_data, destination_node_id,
+                                   eta_minutes=eta_minutes, transport=transport)
 
 
 def _backfill_reset():
@@ -443,6 +463,10 @@ async def on_mutation_schema(state: dict, sdk) -> dict:
 
 async def on_reader_context(state: dict, sdk) -> str:
     return await _rt_context.on_reader_context(_HOST, state, sdk)
+
+
+async def _evaluate_travel_intent(state: dict, sdk=None) -> dict:
+    return await _rt_intent.evaluate_travel_intent(_HOST, state, sdk)
 
 
 async def on_mutate_state(mutation: dict, state: dict, sdk) -> dict:

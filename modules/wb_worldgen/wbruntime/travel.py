@@ -1,21 +1,24 @@
-"""Movement: within-map journeys plus passages between maps.
+"""Movement: time-based journeys across the whole map hierarchy.
 
-Within one map a Reader-declared destination starts a gradual journey along
-the edge graph (a `travel` record in module_data tracks route + leg progress;
-pace from `world.travel_turns_per_edge`, 0 = instant). Between maps the
-Reader uses `player_passage` — a connection id. If the player isn't standing
-at the passage's near end, a normal journey to it starts first with
-`pending_connection_id` set; on arrival the transit fires. Instant
-connections land immediately; journey-mode connections become a "transit"
-phase counted down in turns (a shuttle crossing, a long descent). Layer
-teleports are gone — crossing maps ALWAYS goes through a connection (or an
-improvised/custom transition, which is a later phase).
+A declared destination — from the pre-storyteller travel-intent call or the
+Reader — is planned as a cross-map itinerary (``routing.plan_itinerary``):
+route legs on each map plus the connections between maps, measured in
+edge-equivalents. The journey's duration is in-world **minutes**: an ETA
+from the intent call's estimate (or ``world.travel_minutes_per_edge`` as a
+fallback), advanced each turn by the Reader-extracted
+``travel_minutes_covered`` — so the story's own pacing moves the player.
+The Reader can also declare ``travel_completed`` when the narration covered
+the whole trip (an uneventful train ride told in one scene), finishing the
+journey early. ``travel_interrupted`` pauses it. Fog-of-war reveal fires
+for every waypoint actually passed. ``world.travel_minutes_per_edge`` 0 and
+``config.instant_travel`` maps keep their instant semantics.
 """
 
 import hashlib
 import heapq
 
 from . import backfill as _backfill_rt
+from . import routing as _routing
 from . import sync as _sync
 from . import expansion as _expansion
 from .worldspace import (
@@ -99,43 +102,108 @@ def edge_length(adjacency: dict, a: str, b: str) -> float:
     return 1.0
 
 
-def travel_speed(host, world_data: dict, map_id: str = None) -> float | None:
-    """Map-units covered per turn, or None when travel is instant.
+def travel_minutes_per_edge(host) -> int:
+    """In-world minutes an average map route takes; 0 = travel is instant.
 
-    Interior-style maps mark ``config.instant_travel`` — movement inside them
-    is always instant regardless of the pace setting."""
-    if map_id:
-        m = get_map(world_data, map_id)
-        if m is not None and (m.get("config") or {}).get("instant_travel"):
-            return None
-    turns_per_edge = 2
+    Used as the ETA fallback when no LLM estimate is available, and as the
+    global instant-travel switch."""
     try:
         if host._services is not None and host._services.get("settings") is not None:
-            turns_per_edge = int(host._services["settings"].get("world.travel_turns_per_edge"))
+            return int(host._services["settings"].get("world.travel_minutes_per_edge"))
     except Exception:
-        turns_per_edge = 2
-    if turns_per_edge <= 0:
-        return None
-    if map_id:
-        edges = map_edges(world_data, map_id)
-    else:
-        from .worldspace import all_map_edges
-        edges = all_map_edges(world_data)
-    distances = [e.get("distance") for e in edges if e.get("distance")]
-    if not distances:
-        return None
-    avg = sum(distances) / len(distances)
-    return avg / turns_per_edge
+        pass
+    return 60
 
 
-def remaining_travel(travel: dict, adjacency: dict) -> float:
-    """Total map-distance left from the player's position to the destination."""
-    route = travel.get("route", [])
-    leg_index = travel.get("leg_index", 0)
-    remaining = travel.get("leg_distance", 0.0) - travel.get("leg_progress", 0.0)
-    for i in range(leg_index + 1, len(route) - 1):
-        remaining += edge_length(adjacency, route[i], route[i + 1])
-    return max(remaining, 0.0)
+def journey_progress(travel: dict) -> dict:
+    """Minutes elapsed/remaining and the traveler's computed position for an
+    active journey record (context builders share this)."""
+    eta = max(1, int(travel.get("eta_minutes", 1)))
+    minutes = max(0, int(travel.get("minutes_traveled", 0)))
+    itinerary = travel.get("itinerary") or {}
+    ee_total = itinerary.get("ee_total", 0.0)
+    fraction = min(1.0, minutes / eta)
+    position = _routing.advance_position(itinerary, ee_total * fraction)
+    return {
+        "eta_minutes": eta,
+        "minutes_traveled": minutes,
+        "minutes_remaining": max(0, eta - minutes),
+        "fraction": fraction,
+        "position": position,
+    }
+
+
+def plan_journey(host, state: dict, world_data: dict, destination_node_id: str,
+                 eta_minutes: int = None, transport: str = "",
+                 destination_region: str = None):
+    """Plan travel from the player's position to ``destination_node_id``.
+
+    Returns ("instant", map_id, node_id) when the move needs no journey
+    (instant pace, zero-cost route, or unreachable — never trap the player),
+    ("journey", record) for a started journey, or None when the destination
+    doesn't exist."""
+    target_map = map_of_node(world_data, destination_node_id)
+    if target_map is None:
+        return None
+    current_map = player_map_id(state)
+    current_node = state.get("player_location_node_id")
+    if destination_node_id == current_node:
+        return None
+    minutes_per_edge = travel_minutes_per_edge(host)
+    itinerary = _routing.plan_itinerary(
+        world_data, current_map, current_node, destination_node_id)
+    if itinerary is None:
+        return ("instant", target_map, destination_node_id)
+    if minutes_per_edge <= 0 or itinerary["ee_total"] <= 0:
+        return ("instant", itinerary["destination_map_id"], destination_node_id)
+    eta = None
+    try:
+        eta = int(eta_minutes) if eta_minutes else None
+    except (TypeError, ValueError):
+        eta = None
+    if not eta or eta <= 0:
+        eta = max(1, round(itinerary["ee_total"] * minutes_per_edge))
+    record = {
+        "phase": "journey",
+        "itinerary": itinerary,
+        "eta_minutes": eta,
+        "minutes_traveled": 0,
+        "waypoint_cursor": 0,
+        "destination_node_id": destination_node_id,
+        "destination_map_id": itinerary["destination_map_id"],
+        "destination_region": destination_region,
+        "transport": transport or "",
+        "map_id": current_map,
+    }
+    return ("journey", record)
+
+
+def _connection_itinerary(connection: dict, near: dict, far: dict) -> dict:
+    """A one-segment itinerary that just crosses ``connection``."""
+    ee = _routing.connection_ee(connection)
+    return {
+        "segments": [{
+            "kind": "connection",
+            "connection_id": connection.get("id"),
+            "from": {"map_id": near.get("map_id"), "node_id": near.get("node_id")},
+            "to": {"map_id": far.get("map_id"), "node_id": far.get("node_id")},
+            "ee": ee,
+        }],
+        "ee_total": ee,
+        "destination_map_id": far.get("map_id"),
+        "destination_node_id": far.get("node_id"),
+    }
+
+
+def _convert_legacy_travel(host, state: dict, world_data: dict, travel: dict):
+    """Re-plan a pre-time-based travel record (route/leg or turn transit)
+    from the player's current position. Returns a plan_journey result or
+    None when nothing sensible remains."""
+    destination = travel.get("destination_node_id") or travel.get("final_node_id")
+    if not destination:
+        return None
+    return plan_journey(host, state, world_data, destination,
+                        destination_region=travel.get("destination_region"))
 
 
 def resolve_sub_location_move(mutation: dict, state: dict, world_data: dict) -> dict:
@@ -161,17 +229,6 @@ def resolve_sub_location_move(mutation: dict, state: dict, world_data: dict) -> 
     return {"site_position": {"parent_node_id": current_node, "sub_location_id": raw}}
 
 
-def _connection_turns(connection: dict) -> int:
-    """Turns a journey-mode connection takes to transit (0 = instant)."""
-    travel = connection.get("travel") or {}
-    if travel.get("mode") == "journey":
-        try:
-            return max(1, int(travel.get("turns", 1)))
-        except (TypeError, ValueError):
-            return 1
-    return 0
-
-
 def _ancestry_anchor(world_data: dict, map_id: str) -> str | None:
     """The overworld node ultimately anchoring a (chain of) child map(s):
     standing inside the school's gym, an outside placement anchors at the
@@ -189,7 +246,7 @@ def _ancestry_anchor(world_data: dict, map_id: str) -> str | None:
 
 
 async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
-    """Apply player movement (same-map moves, passages, journey advance)."""
+    """Apply player movement (journeys, passages, improvised transitions)."""
     from .worldspace import ensure_v2
     world_data = state.get("world_data")
     if not world_data:
@@ -199,7 +256,6 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
     travel = get_travel(state)
     current_node = state.get("player_location_node_id")
     current_map = player_map_id(state)
-    speed = travel_speed(host, world_data, current_map)
 
     new_node_id = clean_option(mutation.get("player_location_node_id"))
     new_region = clean_option(mutation.get("player_location_region"))
@@ -207,6 +263,11 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
     if passage_id in ("none", "None", ""):
         passage_id = None
     interrupted = bool(mutation.get("travel_interrupted"))
+    completed = bool(mutation.get("travel_completed"))
+    try:
+        minutes_covered = max(0, int(mutation.get("travel_minutes_covered", 0)))
+    except (TypeError, ValueError):
+        minutes_covered = 0
 
     # Intra-site movement (instant, inside the current node's interior).
     # Any real node move clears the position — the player walked out.
@@ -251,24 +312,25 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
             "player_location_region": new_region or region_of(node_id),
             "revealed_node_ids": revealed,
             "module_data": {"wb_worldgen": {"travel": None, "site_position": None}},
+            "module_data_replace": ["travel", "site_position"],
         }
 
-    def begin_transit(connection, far):
-        turns = _connection_turns(connection)
-        if turns <= 0:
-            return land_at(far.get("map_id"), far.get("node_id"))
-        transit = {
-            "phase": "transit",
-            "connection_id": connection.get("id"),
-            "transit_turns_left": turns - 1,  # this turn counts as the first
-            "final_map_id": far.get("map_id"),
-            "final_node_id": far.get("node_id"),
-            "map_id": current_map,
-        }
-        if transit["transit_turns_left"] <= 0:
-            return land_at(far.get("map_id"), far.get("node_id"))
-        queue_revealed_backfill()
-        return {"module_data": {"wb_worldgen": {"travel": transit, "site_position": None}}}
+    def start_journey(planned):
+        """Adopt a plan_journey result: land instantly or set the record."""
+        nonlocal travel, site_position_update
+        if planned is None:
+            return False
+        if planned[0] == "instant":
+            return land_at(planned[1], planned[2])
+        travel = planned[1]
+        if new_region:
+            travel["destination_region"] = new_region
+        site_position_update = {"site_position": None}  # walked out
+        if _expansion.site_mode(host) == "prefetch":
+            # Start the destination's interior now — the journey's minutes
+            # hide the generation latency.
+            _expansion.maybe_expand_node(host, state, travel["destination_node_id"])
+        return True
 
     def persist_world():
         sm = host._services.get("session_manager") if host._services else None
@@ -404,13 +466,42 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
                 entry_views = [v for v in connections_from(world_data, current_map, target)
                                if v["far"].get("map_id") == child.get("map_id")]
                 if entry_views:
-                    return begin_transit(entry_views[0]["connection"], entry_views[0]["far"])
-                nodes = child.get("nodes") or []
-                if nodes:
-                    return land_at(child.get("map_id"), nodes[0]["id"])
-        passage_id = None
+                    view = entry_views[0]
+                    itinerary = _connection_itinerary(
+                        view["connection"], view["near"], view["far"])
+                    if travel_minutes_per_edge(host) <= 0 or itinerary["ee_total"] <= 0:
+                        return land_at(view["far"]["map_id"], view["far"]["node_id"])
+                    started = start_journey(("journey", {
+                        "phase": "journey",
+                        "itinerary": itinerary,
+                        "eta_minutes": max(1, round(
+                            itinerary["ee_total"] * travel_minutes_per_edge(host))),
+                        "minutes_traveled": 0,
+                        "waypoint_cursor": 0,
+                        "destination_node_id": view["far"]["node_id"],
+                        "destination_map_id": view["far"]["map_id"],
+                        "destination_region": new_region,
+                        "transport": view["connection"].get("kind", "passage"),
+                        "map_id": current_map,
+                    }))
+                    if started is not True:
+                        return started
+                    passage_id = None
+                    new_node_id = None
+                else:
+                    nodes = child.get("nodes") or []
+                    if nodes:
+                        return land_at(child.get("map_id"), nodes[0]["id"])
+                    passage_id = None
+            else:
+                passage_id = None
+        else:
+            passage_id = None
 
     # --- A passage through a connection to another map --------------------
+    # The itinerary planner routes to the connection's far side: walking to
+    # the near end first, crossing, all in one journey. Zero-cost plans
+    # (instant door at the player's node) land immediately.
     if passage_id:
         connection = find_connection(world_data, passage_id)
         if connection is not None:
@@ -418,26 +509,14 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
                      if v["connection"].get("id") == passage_id]
             if views:
                 near, far = views[0]["near"], views[0]["far"]
-                if near.get("node_id") == current_node or speed is None:
-                    return begin_transit(connection, far)
-                # Walk to the passage first, then transit on arrival.
-                adjacency = weighted_adjacency(world_data, current_map)
-                route = find_route(adjacency, current_node, near.get("node_id")) if current_node else None
-                if not route or len(route) < 2:
-                    return begin_transit(connection, far)
-                travel = {
-                    "route": route,
-                    "leg_index": 0,
-                    "leg_progress": 0.0,
-                    "leg_distance": edge_length(adjacency, route[0], route[1]),
-                    "destination_node_id": near.get("node_id"),
-                    "destination_region": new_region,
-                    "map_id": current_map,
-                    "phase": "approach",
-                    "pending_connection_id": passage_id,
-                }
-                interrupted = False
-                site_position_update = {"site_position": None}
+                planned = plan_journey(host, state, world_data, far.get("node_id"),
+                                       transport=connection.get("kind", "passage"),
+                                       destination_region=new_region)
+                if planned is None:
+                    return land_at(far.get("map_id"), far.get("node_id"))
+                started = start_journey(planned)
+                if started is not True:
+                    return started
                 new_node_id = None  # the passage decides the movement this turn
 
     # --- A new place inside the current map (story-created sub-location) ---
@@ -492,40 +571,30 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
             if landed:
                 return land_at(*landed)
 
-    # --- A Reader-declared same-map destination ---------------------------
+    # --- Legacy record: re-plan a turn-based journey in time terms ---------
+    if travel and "itinerary" not in travel:
+        converted = _convert_legacy_travel(host, state, world_data, travel)
+        if converted is None:
+            travel = None
+        elif converted[0] == "instant":
+            return land_at(converted[1], converted[2])
+        else:
+            travel = converted[1]
+
+    # --- A Reader-declared destination (anywhere in the world) ------------
     wants_move = new_node_id and new_node_id != current_node
-    if wants_move and not (travel or {}).get("pending_connection_id"):
-        target_map = map_of_node(world_data, new_node_id)
-        if target_map is not None and target_map != current_map:
-            # Not offered by the schema, but never trap the player: land there.
-            return land_at(target_map, new_node_id)
-        if speed is None:
-            return land_at(current_map, new_node_id)
-        if not travel or travel.get("destination_node_id") != new_node_id:
-            # (Re)route from the last node the player actually reached; any
-            # partial progress on the current leg is abandoned.
-            adjacency = weighted_adjacency(world_data, current_map)
-            route = find_route(adjacency, current_node, new_node_id) if current_node else None
-            if not route or len(route) < 2:
-                # Unknown or unreachable destination — fall back to an
-                # instant arrival rather than trap the player.
+    if wants_move:
+        if travel and travel.get("destination_node_id") == new_node_id:
+            pass  # already journeying there — keep the clock running
+        else:
+            planned = plan_journey(host, state, world_data, new_node_id,
+                                   destination_region=new_region)
+            if planned is None:
+                # Unknown destination — land rather than trap the player.
                 return land_at(current_map, new_node_id)
-            travel = {
-                "route": route,
-                "leg_index": 0,
-                "leg_progress": 0.0,
-                "leg_distance": edge_length(adjacency, route[0], route[1]),
-                "destination_node_id": new_node_id,
-                "destination_region": new_region,
-                "map_id": current_map,
-                "phase": "approach",
-            }
-            interrupted = False  # setting out counts as traveling this turn
-            site_position_update = {"site_position": None}  # walked out of the interior
-            if _expansion.site_mode(host) == "prefetch":
-                # Start the destination's interior now — the journey's turns
-                # hide the generation latency.
-                _expansion.maybe_expand_node(host, state, new_node_id)
+            started = start_journey(planned)
+            if started is not True:
+                return started
 
     if not travel:
         if site_position_update:
@@ -535,70 +604,50 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
             return {"revealed_node_ids": revealed}
         return {}
 
-    # --- Advance a transit (aboard a journey-mode connection) --------------
-    if travel.get("phase") == "transit":
-        if not interrupted:
-            travel["transit_turns_left"] = travel.get("transit_turns_left", 1) - 1
-            if travel["transit_turns_left"] <= 0:
-                return land_at(travel.get("final_map_id"), travel.get("final_node_id"))
-        return {"module_data": {"wb_worldgen": {"travel": travel, **site_position_update}}}
+    # --- Travel switched off mid-journey: the trip completes instantly -----
+    if travel_minutes_per_edge(host) <= 0:
+        destination = travel.get("destination_node_id")
+        if not destination:
+            return {"module_data": {"wb_worldgen": {"travel": None, **site_position_update}},
+                    "module_data_replace": ["travel"]}
+        new_region = new_region or travel.get("destination_region")
+        return land_at(travel.get("destination_map_id")
+                       or map_of_node(world_data, destination) or current_map,
+                       destination)
 
-    if speed is None:
-        # Travel was switched off mid-journey; the player simply stays at the
-        # last reached node and the journey record is dropped.
-        return {"module_data": {"wb_worldgen": {"travel": None, **site_position_update}}}
+    # --- Advance the journey by the minutes the story spent traveling ------
+    eta = max(1, int(travel.get("eta_minutes", 1)))
+    if completed:
+        travel["minutes_traveled"] = eta
+    elif not interrupted and minutes_covered > 0:
+        travel["minutes_traveled"] = travel.get("minutes_traveled", 0) + minutes_covered
 
-    # --- Advance the journey ----------------------------------------------
+    moved = (completed or (not interrupted and minutes_covered > 0))
     location_update = {}
-    arrived_pending_connection = None
-    if not interrupted:
-        adjacency = weighted_adjacency(world_data, travel.get("map_id") or current_map)
-        route = travel["route"]
-        budget = speed
-        while budget > 0:
-            need = travel["leg_distance"] - travel["leg_progress"]
-            if budget < need:
-                travel["leg_progress"] += budget
-                break
-            budget -= need
-            travel["leg_index"] += 1
-            reached_id = travel["route"][travel["leg_index"]]
-            reveal_around(reached_id, travel.get("map_id"))
-            reached_node = node_index(world_data).get(reached_id, {})
+    if moved:
+        progress = journey_progress(travel)
+        position = progress["position"]
+        cursor = travel.get("waypoint_cursor", 0)
+        waypoints = position.get("waypoints") or []
+        for wp_map, wp_node in waypoints[cursor:]:
+            reveal_around(wp_node, wp_map)
+        travel["waypoint_cursor"] = max(cursor, len(waypoints))
+
+        if position.get("arrived") or travel["minutes_traveled"] >= eta:
+            new_region = new_region or travel.get("destination_region")
+            return land_at(travel.get("destination_map_id"),
+                           travel.get("destination_node_id"))
+
+        spot = position.get("position") or {}
+        if spot.get("node_id") and spot["node_id"] != current_node:
             location_update = {
-                "player_location_node_id": reached_id,
-                "player_location_map_id": travel.get("map_id") or current_map,
-                "player_location_region": reached_node.get("region") or state.get("player_location_region"),
+                "player_location_node_id": spot["node_id"],
+                "player_location_map_id": spot.get("map_id") or current_map,
+                "player_location_region": region_of(spot["node_id"]),
             }
-            if travel["leg_index"] >= len(route) - 1:
-                # Arrived at the end of the route.
-                if travel.get("destination_region"):
-                    location_update["player_location_region"] = travel["destination_region"]
-                arrived_pending_connection = travel.get("pending_connection_id")
-                travel = None
-                break
-            travel["leg_progress"] = 0.0
-            travel["leg_distance"] = edge_length(adjacency, route[travel["leg_index"]], route[travel["leg_index"] + 1])
 
-    if arrived_pending_connection:
-        # The approach completed — roll straight into the transit.
-        connection = find_connection(world_data, arrived_pending_connection)
-        if connection is not None:
-            arrived_node = location_update.get("player_location_node_id")
-            views = [v for v in connections_from(world_data, current_map, arrived_node, include_hidden=True)
-                     if v["connection"].get("id") == arrived_pending_connection]
-            if views:
-                # Update position bookkeeping before the hop so region history
-                # is consistent, then transit.
-                state = {**state, **location_update}
-                result = begin_transit(connection, views[0]["far"])
-                result.setdefault("revealed_node_ids", revealed)
-                for key, value in location_update.items():
-                    result.setdefault(key, value)
-                queue_revealed_backfill()
-                return result
-
-    result = {"module_data": {"wb_worldgen": {"travel": travel, **site_position_update}}}
+    result = {"module_data": {"wb_worldgen": {"travel": travel, **site_position_update}},
+              "module_data_replace": ["travel"]}
     if location_update:
         # The player physically moved to another node — they are no longer
         # inside the previous location's interior.

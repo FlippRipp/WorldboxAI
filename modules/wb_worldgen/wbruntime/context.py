@@ -5,7 +5,8 @@ connections, so the storyteller can surface the ways in and out naturally."""
 
 from . import backfill as _backfill_rt
 from . import expansion as _expansion
-from .travel import remaining_travel, travel_speed, weighted_adjacency
+from . import routing as _routing
+from .travel import journey_progress
 from .worldspace import (
     all_map_nodes,
     breadcrumb,
@@ -38,80 +39,74 @@ discover_passage when the story genuinely uncovers one.
 When the player arrives somewhere, looks around, or asks where they can go,
 weave the listed adjoining places and exits naturally into the narration.
 Never invent geography that contradicts them.
+Journeys are measured in in-world time, not turns: when the player travels,
+narrate at whatever pace feels natural — a passing line or a whole scene,
+including the arrival when the trip passes uneventfully. The world tracks
+the minutes your narration spends on the road.
 </world_navigation>"""
 
 
-def _transit_context(host, travel: dict, state: dict, world_data: dict) -> str:
-    """<current_location> variant while aboard a journey-mode connection."""
-    from .worldspace import find_connection
-    connection = find_connection(world_data, travel.get("connection_id", "")) or {}
-    by_id = node_index(world_data)
-    final_node = by_id.get(travel.get("final_node_id")) or {}
-    final_map = get_map(world_data, travel.get("final_map_id", "")) or {}
-    dest = final_node.get("name") or final_map.get("label") or "the destination"
-    kind = connection.get("kind", "passage")
-    name = connection.get("name") or kind
-    turns = travel.get("transit_turns_left", 1)
-    parts = ["<current_location>"]
-    parts.append(
-        f"Status: IN TRANSIT — the player is passing through '{name}' ({kind}) "
-        f"toward {dest} ({final_map.get('label', '')}).")
-    if connection.get("description"):
-        parts.append(f"The way: {connection['description'][:300]}")
-    parts.append(f"About {max(1, turns)} turn(s) remain until arrival at {dest}.")
-    parts.append(
-        f"The player has NOT yet arrived. Narrate the crossing itself — the "
-        f"passage, the vessel, fellow travelers, incidents along the way. Do "
-        f"not narrate arrival at {dest} this turn; the transit completes on its own.")
-    parts.append("</current_location>")
-    return "\n".join(parts)
-
-
 def build_travel_context(host, travel: dict, state: dict, world_data: dict) -> str:
-    """<current_location> variant for a player who is on the road between nodes."""
-    if travel.get("phase") == "transit":
-        return _transit_context(host, travel, state, world_data)
-    nodes_by_id = node_index(world_data)
-    route = travel.get("route", [])
-    leg_index = travel.get("leg_index", 0)
-    if len(route) < 2 or leg_index >= len(route) - 1:
-        return ""
-    from_node = nodes_by_id.get(route[leg_index], {})
-    to_node = nodes_by_id.get(route[leg_index + 1], {})
-    dest_node = nodes_by_id.get(travel.get("destination_node_id"), {})
+    """<current_location> variant for a player who is on the road.
 
-    def _label(node, fallback):
-        return node.get("name") or node.get("id") or fallback
+    Time-based: reports minutes elapsed/remaining and where along the
+    itinerary the traveler is (mid-leg or aboard a connection), and invites
+    the storyteller to narrate at any pace — the journey advances by the
+    minutes the narration spends on the road."""
+    from .worldspace import find_connection
+    by_id = node_index(world_data)
+    if "itinerary" not in travel:
+        # Legacy turn-based record; it re-plans on the next state mutation.
+        dest = by_id.get(travel.get("destination_node_id")
+                         or travel.get("final_node_id")) or {}
+        return ("<current_location>\nStatus: EN ROUTE toward "
+                f"{dest.get('name', 'the destination')}.\n</current_location>")
 
-    from_name = _label(from_node, "the last waypoint")
-    to_name = _label(to_node, "the next waypoint")
-    dest_name = _label(dest_node, "the destination")
-
-    leg_distance = travel.get("leg_distance") or 1.0
-    pct = int(round(100 * min(travel.get("leg_progress", 0.0) / leg_distance, 1.0)))
-    speed = travel_speed(host, world_data, travel.get("map_id"))
-    turns_left = None
-    if speed:
-        adjacency = weighted_adjacency(world_data, travel.get("map_id"))
-        turns_left = max(1, int(-(-remaining_travel(travel, adjacency) // speed)))
+    progress = journey_progress(travel)
+    position = progress["position"]
+    dest_node = by_id.get(travel.get("destination_node_id")) or {}
+    dest_map = get_map(world_data, travel.get("destination_map_id", "")) or {}
+    dest_name = dest_node.get("name") or dest_map.get("label") or "the destination"
 
     parts = ["<current_location>"]
-    parts.append(f"Status: EN ROUTE — the player is traveling from {from_name} toward {to_name}, about {pct}% of the way along this stretch.")
-    if dest_name != to_name:
-        parts.append(f"Final destination: {dest_name}.")
-    if travel.get("pending_connection_id"):
-        from .worldspace import find_connection
-        pc = find_connection(world_data, travel["pending_connection_id"]) or {}
-        if pc:
-            parts.append(
-                f"At {dest_name} the player will pass through '{pc.get('name') or pc.get('kind', 'the way onward')}' "
-                f"({pc.get('kind', 'passage')}) and continue beyond this map.")
-    if turns_left is not None:
-        parts.append(f"Estimated travel remaining: about {turns_left} turn(s) until arrival at {dest_name}.")
-    to_desc = to_node.get("description") or to_node.get("label_description")
-    if to_desc:
-        parts.append(f"Ahead lies {to_name} ({to_node.get('type', 'location')}) — {to_desc[:300]}")
-    region_name = from_node.get("region") or state.get("player_location_region")
+    header = f"Status: EN ROUTE — the player is traveling toward {dest_name}"
+    if travel.get("transport"):
+        header += f" by {travel['transport']}"
+    header += (f". About {progress['minutes_traveled']} in-world minutes into a "
+               f"roughly {progress['eta_minutes']}-minute journey; "
+               f"~{progress['minutes_remaining']} minutes remain.")
+    parts.append(header)
+
+    transit = position.get("transit")
+    leg = position.get("leg")
+    if transit:
+        connection = find_connection(world_data, transit.get("connection_id", "")) or {}
+        name = connection.get("name") or connection.get("kind", "passage")
+        parts.append(
+            f"Right now the player is aboard/passing through '{name}' "
+            f"({connection.get('kind', 'passage')}), about "
+            f"{int(round(100 * transit.get('fraction', 0.0)))}% across.")
+        if connection.get("description"):
+            parts.append(f"The way: {connection['description'][:300]}")
+    elif leg:
+        from_node = by_id.get(leg.get("from")) or {}
+        to_node = by_id.get(leg.get("to")) or {}
+        from_name = from_node.get("name") or "the last waypoint"
+        to_name = to_node.get("name") or "the next waypoint"
+        pct = int(round(100 * min(leg.get("fraction", 0.0), 1.0)))
+        parts.append(f"Right now the player is between {from_name} and {to_name}, "
+                     f"about {pct}% of the way along this stretch.")
+        to_desc = to_node.get("description") or to_node.get("label_description")
+        if to_desc:
+            parts.append(f"Ahead lies {to_name} ({to_node.get('type', 'location')}) — {to_desc[:300]}")
+
+    remaining_legs = _routing.describe_itinerary(world_data, travel.get("itinerary") or {})
+    if remaining_legs:
+        parts.append("The route: " + "; then ".join(remaining_legs) + ".")
+
+    spot = position.get("position") or {}
+    region_name = ((by_id.get(spot.get("node_id")) or {}).get("region")
+                   or state.get("player_location_region"))
     if region_name:
         regions = world_data.get("regions", {}).get("regions", [])
         current_region = next((r for r in regions if r.get("name") == region_name), None)
@@ -119,7 +114,12 @@ def build_travel_context(host, travel: dict, state: dict, world_data: dict) -> s
         if current_region:
             parts.append(f"Terrain: {current_region.get('terrain', 'N/A')[:400]}")
             parts.append(f"Climate: {current_region.get('climate', 'N/A')[:200]}")
-    parts.append(f"The player has NOT yet arrived at {dest_name}. Narrate the journey itself — the road, terrain, weather, fellow travelers, or incidents along the way. Do not narrate arrival at {dest_name} this turn; travel completes on its own.")
+    parts.append(
+        f"Narrate the journey at whatever pace feels natural — a passing line, a "
+        f"scene on the road, or the entire remaining trip including the arrival at "
+        f"{dest_name} if it passes uneventfully. The world advances the journey by "
+        f"the in-world minutes your narration spends traveling and completes it "
+        f"when you narrate the full trip.")
     parts.append("</current_location>")
     return "\n".join(parts)
 
@@ -266,7 +266,9 @@ def build_location_context(host, state: dict, world_data: dict) -> str:
 
 
 async def on_gather_context(host, state: dict, sdk) -> dict:
-    """Per-turn world context: the player's current location block."""
+    """Per-turn world context: the player's current location block, plus the
+    pre-storyteller travel-intent pass (which may start a journey and add a
+    <travel_plan> block)."""
     world_data = state.get("world_data")
     if not world_data:
         return {}
@@ -277,10 +279,23 @@ async def on_gather_context(host, state: dict, sdk) -> dict:
         # Arrived (or standing) somewhere expandable whose interior is still
         # missing (prefetch missed / on_arrival mode) — start it now.
         _expansion.maybe_expand_node(host, state, state.get("player_location_node_id"))
+
+    intent_result = {}
+    try:
+        from . import intent as _intent
+        intent_result = await _intent.evaluate_travel_intent(host, state, sdk) or {}
+    except Exception as e:
+        print(f"[wb_worldgen] travel intent failed: {e}")
+
     location_context = build_location_context(host, state, world_data)
-    if not location_context:
-        return {}
-    return {"context_string": location_context}
+    blocks = [b for b in (location_context, intent_result.get("context_string")) if b]
+    result = {}
+    if blocks:
+        result["context_string"] = "\n".join(blocks)
+    for key in ("module_data", "module_data_replace"):
+        if intent_result.get(key):
+            result[key] = intent_result[key]
+    return result
 
 
 async def on_reader_context(host, state: dict, sdk) -> str:
@@ -301,6 +316,21 @@ async def on_reader_context(host, state: dict, sdk) -> str:
         "movement. The location below is where the player was BEFORE this "
         "turn's story."
     )
+    travel = get_travel(state)
+    if travel and "itinerary" in travel:
+        progress = journey_progress(travel)
+        by_id = node_index(world_data)
+        dest = (by_id.get(travel.get("destination_node_id")) or {}).get("name") \
+            or "the destination"
+        guidance += (
+            f"\n\nA journey toward {dest} is underway: about "
+            f"{progress['minutes_traveled']} of ~{progress['eta_minutes']} "
+            f"in-world minutes covered so far "
+            f"(~{progress['minutes_remaining']} remain). Report the minutes of "
+            f"actual travel this turn's story covered in travel_minutes_covered, "
+            f"and set travel_completed only if the narration finished the whole "
+            f"remaining trip (e.g. it ended with the player arriving)."
+        )
     location_context = build_location_context(host, state, world_data)
     if location_context:
         return f"{guidance}\n\n{location_context}"

@@ -110,7 +110,7 @@ def _play_session(builder, tmpdir, wid):
         "engine": engine,
         "session_manager": sm,
         "settings": FakeSettings({
-            "world.travel_turns_per_edge": 2,
+            "world.travel_minutes_per_edge": 20,
             "world.backfill_per_turn": 0,
             "world.site_expansion_mode": "prefetch",
         }),

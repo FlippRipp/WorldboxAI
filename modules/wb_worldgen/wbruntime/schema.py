@@ -123,13 +123,36 @@ def build_location_mutation_schema(world_data: dict, state: dict = None) -> dict
             "type": "select",
             "label": "Destination node ID",
             "options": location_options[:30],
-            "description": "The node_id of a destination on the CURRENT map the player moved to or set out toward. Distant destinations are fine — the journey plays out over multiple turns. For a way that leads to another map, use player_passage instead. Set only if player_location_changed is true."
+            "description": "The node_id of a destination on the CURRENT map the player moved to or set out toward. Distant destinations are fine — the journey plays out over in-world time. For a way that leads to another map, use player_passage instead. Set only if player_location_changed is true."
         },
         "travel_interrupted": {
             "type": "boolean",
             "label": "Did the player pause an ongoing journey this turn (camping, resting, fighting, exploring a stop)?"
         },
+        "travel_minutes_covered": {
+            "type": "string",
+            "label": "In-world minutes the player spent traveling this turn",
+            "description": (
+                "Integer. Your best estimate of the in-world minutes the narration "
+                "spent actually MOVING the player toward their destination this turn "
+                "(riding, walking, driving). Time spent at a stop — talking, resting, "
+                "fighting — does not count. 0 when no journey progressed."
+            ),
+        },
     }
+    travel = (state or {}).get("module_data", {}).get("wb_worldgen", {}).get("travel") \
+        if state else None
+    if travel:
+        schema["travel_completed"] = {
+            "type": "boolean",
+            "label": "Did the narration finish the ENTIRE remaining journey?",
+            "description": (
+                "True when the story covered the rest of the trip — e.g. an "
+                "uneventful ride narrated start to finish, ending with the player "
+                "arriving. The player is placed at the destination now. Leave false "
+                "if the journey is still underway when the scene ends."
+            ),
+        }
     region_names = [r.get("name", "") for r in regions if r.get("name")]
     if region_names:
         schema["player_location_region"] = {

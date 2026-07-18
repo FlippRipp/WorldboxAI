@@ -17,12 +17,34 @@ export default function GameMapOverlay({ state = {} }) {
   // journey record in its module_data; the renderer shows the marker mid-edge.
   const travel = state.module_data?.wb_worldgen?.travel;
   const playerTravel = useMemo(() => {
-    if (!travel?.route || travel.leg_index == null) return null;
-    const from = travel.route[travel.leg_index];
-    const to = travel.route[travel.leg_index + 1];
-    if (!from || !to) return null;
-    const frac = travel.leg_distance ? Math.min(travel.leg_progress / travel.leg_distance, 1) : 0;
-    return { fromNodeId: from, toNodeId: to, frac };
+    if (!travel) return null;
+    // Legacy turn-based record (pre time-based travel; re-plans on next turn).
+    if (travel.route && travel.leg_index != null) {
+      const from = travel.route[travel.leg_index];
+      const to = travel.route[travel.leg_index + 1];
+      if (!from || !to) return null;
+      const frac = travel.leg_distance ? Math.min(travel.leg_progress / travel.leg_distance, 1) : 0;
+      return { fromNodeId: from, toNodeId: to, frac };
+    }
+    // Time-based journey: walk the itinerary by the elapsed-minutes fraction
+    // (mirrors wbruntime/routing.advance_position).
+    const itinerary = travel.itinerary;
+    if (!itinerary?.segments) return null;
+    const eta = Math.max(1, travel.eta_minutes || 1);
+    let remaining = (itinerary.ee_total || 0)
+      * Math.min(1, (travel.minutes_traveled || 0) / eta);
+    for (const seg of itinerary.segments) {
+      if (seg.kind === 'connection') {
+        if (remaining >= seg.ee) { remaining -= seg.ee; continue; }
+        return null; // aboard the connection — the marker stays at the near node
+      }
+      for (let i = 0; i < (seg.leg_ee || []).length; i++) {
+        const ee = seg.leg_ee[i];
+        if (remaining >= ee) { remaining -= ee; continue; }
+        return { fromNodeId: seg.nodes[i], toNodeId: seg.nodes[i + 1], frac: ee ? remaining / ee : 1 };
+      }
+    }
+    return null;
   }, [travel]);
 
   const [open, setOpen] = useState(false);
