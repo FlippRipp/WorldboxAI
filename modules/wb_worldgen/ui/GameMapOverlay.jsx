@@ -53,7 +53,9 @@ export default function GameMapOverlay({ state = {} }) {
     ? localSite
     : worldData?.site_maps?.[playerNodeId] || null;
   const sitePosition = state.module_data?.wb_worldgen?.site_position;
-  const currentSubId = sitePosition?.parent_node_id === playerNodeId
+  // Guard on sitePosition itself: with neither a site position nor a player
+  // node id, `undefined === undefined` used to pass and crash on the read.
+  const currentSubId = sitePosition && sitePosition.parent_node_id === playerNodeId
     ? sitePosition.sub_location_id
     : null;
   // A child map anchored at the player's node (world_format 2 interiors).
@@ -90,12 +92,16 @@ export default function GameMapOverlay({ state = {} }) {
     }
   }, [hasMaps, mapsById, playerMapId, rootMapId, activeMapId]);
 
+  // Focus is transient: it zooms the renderer in on the node, then clears so
+  // later map switches reset to their default view as usual.
+  const focusOn = (nodeId) => {
+    setFocusNodeId(nodeId);
+    setTimeout(() => setFocusNodeId(null), 4000);
+  };
+
   const handleMapChange = (targetMapId, nodeId) => {
     setActiveMapId(targetMapId);
-    if (nodeId) {
-      setFocusNodeId(nodeId);
-      setTimeout(() => setFocusNodeId(null), 4000);
-    }
+    if (nodeId) focusOn(nodeId);
   };
 
   const crumbs = useMemo(
@@ -115,7 +121,12 @@ export default function GameMapOverlay({ state = {} }) {
     <div className="fixed right-4 z-50 top-16 sm:top-auto sm:bottom-4">
       {!open ? (
         <button
-          onClick={() => setOpen(true)}
+          onClick={() => {
+            setOpen(true);
+            // Open centered + zoomed on the player's current position instead
+            // of the default whole-map view.
+            if (playerNodeId) focusOn(playerNodeId);
+          }}
           className="bg-gray-800/90 border border-gray-600 hover:border-purple-500 rounded-lg px-3 py-2 text-sm text-gray-300 hover:text-purple-300 transition-colors shadow-lg"
         >
           Map
