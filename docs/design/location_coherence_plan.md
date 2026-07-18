@@ -52,19 +52,17 @@ persists to the child-map bundle, syncs session/save/RAG. The Reader gets a
 `new_sub_location` field whenever the player is on a child map; travel grows
 the map and moves the player there.
 
-## Remaining
-
-### M4 — Brand-new overworld nodes when no slot fits (task C)
+### M4 — Brand-new overworld nodes when no slot fits (task C) (`e31ca6e`)
 
 The authoring call may answer `{"node_id": "NEW", "near_node_id": <existing
 node>, ...}` instead of picking a slot: no offered position suits the place,
-so found it directly beside the named node. Engine does the geometry (one
-typical route leg from the anchor, angle clearest of existing nodes, one real
-edge in); the LLM only decides *what* and *next to which place*.
+so it is founded directly beside the named node. Engine does the geometry
+(one typical route leg from the anchor, angle clearest of existing nodes,
+one real edge in); the LLM only decides *what* and *next to which place*.
 
 **"No good slot" is a distance-tiered rule with real numbers in the prompt**
-(the map's typical route leg — mean edge length — is stated, and slots
-already carry numeric distances):
+(the map's typical route leg — mean edge length — is stated, the named
+places are listed with ids, and slots already carry numeric distances):
 
 | Request kind | Good slot must be | Else |
 | --- | --- | --- |
@@ -74,12 +72,16 @@ already carry numeric distances):
 | Unanchored ("a lonely lighthouse") | fit by nature (region/terrain/type) | NEW only if nothing fits |
 
 Within the distance budget the best-*fitting* slot wins — closeness
-qualifies, fit ranks. Persistence needs an append helper dispatching by map
-(root → `map_generation` step data; child map → bundle, M3's path), plus the
-usual session/save/RAG sync and compiled-cache invalidation. Invalid NEW
-output falls back to today's best-existing behavior. New-node edges carry no
-road geometry (plain link) — acceptable while NEW stays the escape hatch,
-which the slot-first prompt ordering enforces.
+qualifies, fit ranks. Persistence appends via `append_map_node`, dispatching
+by map (root/parallel → the matching `map_generation` layer, through the
+enrichment write cache; child map → bundle, M3's path); the founded node
+joins its anchor's region membership, and travel mirrors it into the
+session, save file, and RAG index. Invalid NEW output falls back to the
+best-existing behavior. New-node edges carry no road geometry (plain
+link) — acceptable while NEW stays the escape hatch, which the slot-first
+prompt ordering enforces.
+
+## Remaining
 
 ### M5 — Interior-vs-adjacent boundary
 
