@@ -67,6 +67,23 @@ def ensure_v2(state: dict) -> bool:
     return changed
 
 
+def fringe_node_ids(world_data: dict, revealed: set) -> set:
+    """Nodes one edge beyond the revealed set. The map shows them as faded,
+    name-only markers (nameless ones stay hidden until backfill names them);
+    they are valid travel destinations but their details stay unknown until
+    the player actually goes there."""
+    fringe = set()
+    for e in all_map_edges(world_data):
+        fr, to = e.get("from"), e.get("to")
+        if not fr or not to:
+            continue
+        if fr in revealed and to not in revealed:
+            fringe.add(to)
+        elif to in revealed and fr not in revealed:
+            fringe.add(fr)
+    return fringe
+
+
 def reveal_bfs(start_id: str, adjacency: dict, radius: int) -> set:
     visited = {start_id}
     frontier = [start_id]

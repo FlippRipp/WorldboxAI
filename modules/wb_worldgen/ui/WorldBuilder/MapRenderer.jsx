@@ -538,7 +538,10 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
   // Fog of war: the map art itself is fully visible; unknown nodes (and any
   // road missing a known endpoint) are simply not rendered. The backend owns
   // the revealed set — it grows as the player travels and via the story-start
-  // known-locations pass. The player's own node is always visible.
+  // known-locations pass. The player's own node is always visible. Nodes one
+  // edge beyond the revealed set form a name-only fringe: drawn faded with
+  // just their name, details withheld until the player actually goes there;
+  // nameless fringe nodes stay hidden until the backfill names them.
   const fogEnabled = !!(fogOfWar && activeNodes.length);
   const effectiveRevealedIds = useMemo(() => {
     if (!fogEnabled) return new Set();
@@ -552,10 +555,37 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
     return effectiveRevealedIds.has(nodeId);
   }, [fogEnabled, effectiveRevealedIds]);
 
-  const isEdgeRevealed = useCallback((fromId, toId) => {
-    if (!fogEnabled) return true;
-    return effectiveRevealedIds.has(fromId) && effectiveRevealedIds.has(toId);
-  }, [fogEnabled, effectiveRevealedIds]);
+  const fringeIds = useMemo(() => {
+    if (!fogEnabled) return new Set();
+    const out = new Set();
+    (activeMap?.edges || []).forEach((e) => {
+      if (!e.from || !e.to) return;
+      if (effectiveRevealedIds.has(e.from) && !effectiveRevealedIds.has(e.to)) out.add(e.to);
+      else if (effectiveRevealedIds.has(e.to) && !effectiveRevealedIds.has(e.from)) out.add(e.from);
+    });
+    return out;
+  }, [fogEnabled, activeMap, effectiveRevealedIds]);
+
+  const isNodeFringe = useCallback((node) => (
+    fogEnabled && !!node?.name && !effectiveRevealedIds.has(node.id) && fringeIds.has(node.id)
+  ), [fogEnabled, effectiveRevealedIds, fringeIds]);
+
+  const activeNodeById = useMemo(() => {
+    const byId = {};
+    activeNodes.forEach((n) => { byId[n.id] = n; });
+    return byId;
+  }, [activeNodes]);
+
+  // Road visibility: 1 between revealed endpoints, faded when it leads out to
+  // a displayed fringe node, 0 (hidden) otherwise.
+  const edgeVisibility = useCallback((fromId, toId) => {
+    if (!fogEnabled) return 1;
+    const fromRevealed = effectiveRevealedIds.has(fromId);
+    const toRevealed = effectiveRevealedIds.has(toId);
+    if (fromRevealed && toRevealed) return 1;
+    const far = fromRevealed ? activeNodeById[toId] : toRevealed ? activeNodeById[fromId] : null;
+    return far && isNodeFringe(far) ? 0.45 : 0;
+  }, [fogEnabled, effectiveRevealedIds, activeNodeById, isNodeFringe]);
 
   // Zoom/pan handlers
   const handleWheel = useCallback((e) => {
@@ -677,8 +707,9 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
     if (hoveredNode && canNavigate) {
       const conn = getNodeConnection(hoveredNode);
       if (conn && conn.targetMapId) {
-        if (fogEnabled && !isNodeRevealed(conn.pairedNodeId)) {
-          // Don't navigate if paired node is unrevealed
+        if (fogEnabled && (!isNodeRevealed(hoveredNode.id) || !isNodeRevealed(conn.pairedNodeId))) {
+          // Don't navigate through an unexplored (fringe) connection node or
+          // toward an unrevealed paired node.
           return;
         }
         changeMap(conn.targetMapId, conn.pairedNodeId);
@@ -1025,13 +1056,15 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
           {activeRoads && activeRoads.map((road, i) => {
             if (road.tier !== 'path') return null;
             if (!road.path || road.path.length < 2) return null;
-            if (!isEdgeRevealed(road.from, road.to)) return null;
+            const vis = edgeVisibility(road.from, road.to);
+            if (!vis) return null;
             const imp = road.importance ?? 0;
             const pts = road.path.map(([x, y]) => `${sx(x)},${sy(y)}`).join(' ');
             return (
               <polyline
                 key={`path-${i}`}
                 points={pts}
+                opacity={vis}
                 fill="none"
                 stroke={`rgba(120,72,30,${(0.15 + imp * 0.05).toFixed(3)})`}
                 strokeWidth={0.4 + imp * 0.09}
@@ -1049,12 +1082,14 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
           {activeRoads && activeRoads.map((road, i) => {
             if (road.tier !== 'lane') return null;
             if (!road.path || road.path.length < 2) return null;
-            if (!isEdgeRevealed(road.from, road.to)) return null;
+            const vis = edgeVisibility(road.from, road.to);
+            if (!vis) return null;
             const pts = road.path.map(([x, y]) => `${sx(x)},${sy(y)}`).join(' ');
             return (
               <polyline
                 key={`lane-${i}`}
                 points={pts}
+                opacity={vis}
                 fill="none"
                 stroke="rgba(148,163,184,0.18)"
                 strokeWidth={0.45}
@@ -1067,12 +1102,14 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
           {activeRoads && activeRoads.map((road, i) => {
             if (road.tier !== 'street') return null;
             if (!road.path || road.path.length < 2) return null;
-            if (!isEdgeRevealed(road.from, road.to)) return null;
+            const vis = edgeVisibility(road.from, road.to);
+            if (!vis) return null;
             const pts = road.path.map(([x, y]) => `${sx(x)},${sy(y)}`).join(' ');
             return (
               <polyline
                 key={`street-${i}`}
                 points={pts}
+                opacity={vis}
                 fill="none"
                 stroke="rgba(148,163,184,0.30)"
                 strokeWidth={0.7}
@@ -1085,12 +1122,14 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
           {activeRoads && activeRoads.map((road, i) => {
             if (road.tier !== 'avenue') return null;
             if (!road.path || road.path.length < 2) return null;
-            if (!isEdgeRevealed(road.from, road.to)) return null;
+            const vis = edgeVisibility(road.from, road.to);
+            if (!vis) return null;
             const pts = road.path.map(([x, y]) => `${sx(x)},${sy(y)}`).join(' ');
             return (
               <polyline
                 key={`avenue-${i}`}
                 points={pts}
+                opacity={vis}
                 fill="none"
                 stroke="rgba(148,163,184,0.55)"
                 strokeWidth={1.4}
@@ -1105,12 +1144,14 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
           {activeRoads && activeRoads.map((road, i) => {
             if (['path', 'street', 'avenue', 'lane'].includes(road.tier)) return null;
             if (!road.path || road.path.length < 2) return null;
-            if (!isEdgeRevealed(road.from, road.to)) return null;
+            const vis = edgeVisibility(road.from, road.to);
+            if (!vis) return null;
             const pts = road.path.map(([x, y]) => `${sx(x)},${sy(y)}`).join(' ');
             return (
               <polyline
                 key={`road-${i}`}
                 points={pts}
+                opacity={vis}
                 fill="none"
                 stroke="rgba(120,72,30,0.85)"
                 strokeWidth={1.6}
@@ -1122,9 +1163,12 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
             );
           })}
 
-          {/* Nodes (fog of war: unknown nodes are not rendered at all) */}
+          {/* Nodes (fog of war: unknown nodes are not rendered at all; the
+              name-only fringe renders faded, without subtitle or glow) */}
           {activeNodes.map((node) => {
-            if (!isNodeRevealed(node.id)) return null;
+            const revealed = isNodeRevealed(node.id);
+            const fringe = !revealed && isNodeFringe(node);
+            if (!revealed && !fringe) return null;
             const r = getImportanceRadius(node.importance, nodeScale);
             const color = TYPE_COLORS[node.type] || '#6b7280';
             const isHovered = hoveredNode?.id === node.id;
@@ -1135,11 +1179,12 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
             return (
               <g
                 key={node.id}
+                opacity={fringe ? 0.45 : 1}
                 onMouseEnter={() => setHoveredNode(node)}
                 onMouseLeave={() => setHoveredNode(null)}
                 onClick={() => {
                   // Clicking a connection glyph travels to the far map.
-                  if (nodeConn && nodeConn.targetMapId && nodeConn.targetMapId !== activeMap?.map_id
+                  if (revealed && nodeConn && nodeConn.targetMapId && nodeConn.targetMapId !== activeMap?.map_id
                       && canNavigate && !(fogEnabled && !isNodeRevealed(nodeConn.pairedNodeId))) {
                     changeMap(nodeConn.targetMapId, nodeConn.pairedNodeId);
                     return;
@@ -1148,7 +1193,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
                 }}
                 style={{ cursor: 'pointer' }}
               >
-                {nodeConn && (
+                {nodeConn && revealed && (
                   <title>
                     {`${nodeConn.name || node.name || 'Connection'} (${nodeConn.kind || 'link'})${
                       nodeConn.targetMapId
@@ -1157,7 +1202,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
                     }`}
                   </title>
                 )}
-                {isPopulated && (
+                {isPopulated && revealed && (
                   <circle
                     cx={sx(node.x)}
                     cy={sy(node.y)}
@@ -1188,7 +1233,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
                     >
                       {node.name.length > 18 ? node.name.slice(0, 17) + '\u2026' : node.name}
                     </text>
-                    {node.label_description && (
+                    {node.label_description && revealed && (
                       <text
                         x={sx(node.x)}
                         y={sy(node.y) + r + 20 * nodeScale}
@@ -1324,20 +1369,26 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
                     {selectedNode.layer_id}
                   </span>
                 )}
-                <span className="text-xs text-purple-400 ml-auto">
-                  Importance: {selectedNode.importance}/10
-                </span>
+                {isNodeRevealed(selectedNode.id) ? (
+                  <span className="text-xs text-purple-400 ml-auto">
+                    Importance: {selectedNode.importance}/10
+                  </span>
+                ) : (
+                  <span className="text-xs text-gray-500 italic ml-auto">
+                    unexplored
+                  </span>
+                )}
                 <span className="text-gray-500 text-xs flex-shrink-0">
                   {infoExpanded ? '▾' : '▸'}
                 </span>
               </button>
-              {infoExpanded && selectedNode.description && (
+              {infoExpanded && isNodeRevealed(selectedNode.id) && selectedNode.description && (
                 <p className="text-xs text-gray-400 leading-relaxed">
                   {renderDescriptionWithLinks(selectedNode.description)}
                 </p>
               )}
               {/* Connection link info */}
-              {infoExpanded && isConnectionNode(selectedNode) && (() => {
+              {infoExpanded && isNodeRevealed(selectedNode.id) && isConnectionNode(selectedNode) && (() => {
                 const conn = getNodeConnection(selectedNode);
                 if (!conn) return null;
                 const pairedNode = (Array.isArray(activeNodes) ? activeNodes : []).find((n) => n.id === conn.pairedNodeId);

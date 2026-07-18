@@ -153,9 +153,10 @@ async def create_world_story_source(*, save_id, source_id, start_preference, ses
         player_location_node_id = start_location.get("node_id")
         player_location_region = start_location.get("region")
         player_location_map_id = start_location.get("map_id") or compiled.get("root_map_id", "root")
-        adjacency = _rt_worldspace.build_graph_adjacency(compiled)
-        revealed_node_ids = list(
-            _rt_worldspace.reveal_bfs(player_location_node_id, adjacency, radius=1))
+        # Only the start node itself is fully known; its neighbors show up on
+        # the map as the faded name-only fringe, and the known-locations pass
+        # fully reveals whatever the character genuinely knows about.
+        revealed_node_ids = [player_location_node_id]
 
     state = session_manager.create_save(
         save_id,

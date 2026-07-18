@@ -36,7 +36,6 @@ from .worldspace import (
     node_index,
     node_needs_detail,
     player_map_id,
-    reveal_bfs,
 )
 
 
@@ -276,23 +275,31 @@ async def on_mutate_state(host, mutation: dict, state: dict, sdk) -> dict:
     revealed = list(set(state.get("revealed_node_ids", [])))
     revealed_dirty = False
     newly_revealed: list[str] = []
+    fringe_neighbors: list[str] = []
 
     def reveal_around(nid, map_id=None):
+        # Fog opens only where the player actually stands. Direct neighbors
+        # stay unrevealed — the map renders them as a faded, name-only fringe
+        # (computed from edges client-side) — but they're queued for naming
+        # so that fringe has names to show.
         nonlocal revealed_dirty
+        if nid not in revealed:
+            revealed.append(nid)
+            newly_revealed.append(nid)
+            revealed_dirty = True
         adjacency = build_graph_adjacency(world_data, map_id or map_of_node(world_data, nid))
-        for x in reveal_bfs(nid, adjacency, radius=1):
-            if x not in revealed:
-                revealed.append(x)
-                newly_revealed.append(x)
-                revealed_dirty = True
+        for nb in adjacency.get(nid, []):
+            if nb not in revealed and nb not in fringe_neighbors:
+                fringe_neighbors.append(nb)
 
     def queue_revealed_backfill():
-        # Newly revealed places get detailed silently in the background so
-        # they have names/descriptions by the time the story reaches them.
-        if not newly_revealed:
+        # Newly revealed places and the name-only fringe around them get
+        # detailed silently in the background so they have names/descriptions
+        # by the time the story (or the map) needs them.
+        if not newly_revealed and not fringe_neighbors:
             return
         by_id = node_index(world_data)
-        needs = [nid for nid in newly_revealed
+        needs = [nid for nid in newly_revealed + fringe_neighbors
                  if nid in by_id and node_needs_detail(by_id[nid])]
         if needs:
             _backfill_rt.queue_backfill(host, state, needs, front=True)

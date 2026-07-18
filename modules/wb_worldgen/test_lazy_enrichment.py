@@ -272,7 +272,8 @@ def test_reveal_queues_backfill_on_teleport(builder, tmpdir):
 
     asyncio.run(main())
 
-    # The teleport revealed n2/n4 around n3; revealed nodes got detailed.
+    # The teleport revealed n3; its neighbors n2/n4 became the name-only
+    # fringe and were queued for naming so the map can show them.
     described = {n["id"] for n in sm.state["world_data"]["maps"]["root"]["nodes"] if n["description"]}
     assert {"n2", "n4"} <= described
 
@@ -322,3 +323,22 @@ def test_mutation_schema_offers_revealed_unexplored_nodes():
     assert "n1 (Emberhold)" in options
     assert "n2 (unexplored waypoint)" in options
     assert not any(o.startswith("n3") for o in options)  # unrevealed stays hidden
+
+
+def test_mutation_schema_offers_unexplored_fringe_nodes():
+    # A node one edge beyond the revealed set (the map's name-only fringe)
+    # is a valid destination even before it's revealed.
+    world = {
+        "map": {"nodes": [
+            {"id": "n1", "name": "Emberhold", "type": "town"},
+            {"id": "n2", "name": "", "type": "waypoint"},
+            {"id": "n3", "name": "", "type": "waypoint"},
+        ], "edges": [{"from": "n1", "to": "n2"}]},
+        "regions": {"regions": []},
+        "layers": [],
+    }
+    state = {"revealed_node_ids": ["n1"]}
+    schema = wbg._build_location_mutation_schema(world, state)
+    options = schema["player_location_node_id"]["options"]
+    assert "n2 (unexplored waypoint)" in options  # fringe of n1
+    assert not any(o.startswith("n3") for o in options)  # beyond the fringe

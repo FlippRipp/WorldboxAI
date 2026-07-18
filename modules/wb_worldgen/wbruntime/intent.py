@@ -27,6 +27,7 @@ from . import routing as _routing
 from .travel import plan_journey
 from .worldspace import (
     breadcrumb,
+    fringe_node_ids,
     get_travel,
     map_nodes,
     maps_by_id,
@@ -75,10 +76,12 @@ def _current_location_line(state: dict, world_data: dict) -> str:
 
 
 def _destination_roster(world_data: dict, state: dict) -> list[str]:
-    """Every revealed, named node the player could head for, grouped under
-    its map's hierarchy breadcrumb. No caps — resolution must see the whole
-    world."""
+    """Every named node the player could head for — revealed ones plus the
+    name-only fringe beside them (their names show on the map) — grouped
+    under its map's hierarchy breadcrumb. No caps — resolution must see the
+    whole world."""
     revealed = set(state.get("revealed_node_ids") or [])
+    visible = revealed | fringe_node_ids(world_data, revealed)
     current = state.get("player_location_node_id")
     lines = []
     for map_id in maps_by_id(world_data):
@@ -86,7 +89,7 @@ def _destination_roster(world_data: dict, state: dict) -> list[str]:
         for n in map_nodes(world_data, map_id):
             if not n.get("name") or n.get("id") == current:
                 continue
-            if n.get("id") not in revealed:
+            if n.get("id") not in visible:
                 continue
             entries.append(f"  - {n['id']}: {n['name']} ({n.get('type', 'location')})")
         if entries:
@@ -108,6 +111,7 @@ async def _semantic_candidates(engine, world_data: dict, state: dict,
         inspector_ctx={"call_type": "embedding", "step": "travel_intent:destination",
                        "module_source": "wb_worldgen"})
     revealed = set(state.get("revealed_node_ids") or [])
+    visible = revealed | fringe_node_ids(world_data, revealed)
     current = state.get("player_location_node_id")
     by_id = node_index(world_data)
     candidates = []
@@ -116,7 +120,7 @@ async def _semantic_candidates(engine, world_data: dict, state: dict,
             continue
         nid = entry.get("source_id")
         node = by_id.get(nid)
-        if node is None or nid == current or nid not in revealed:
+        if node is None or nid == current or nid not in visible:
             continue
         if any(c.get("id") == nid for c in candidates):
             continue

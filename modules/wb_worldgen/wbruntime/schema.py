@@ -7,6 +7,7 @@ id from the listed exits). Hidden connections are never offered."""
 from .worldspace import (
     children_by_anchor,
     connections_from,
+    fringe_node_ids,
     get_map,
     map_nodes,
     map_of_node,
@@ -106,14 +107,16 @@ def build_location_mutation_schema(world_data: dict, state: dict = None) -> dict
         if n.get("name"):
             location_options.append(f"{n['id']} ({n.get('name', '')})")
     # Lazy worlds leave minor waypoints unnamed until visited; offer the
-    # revealed ones as explicit "unexplored" destinations so the player can
-    # still head toward them (they get detailed on approach).
+    # revealed ones — and the fringe right beside them — as explicit
+    # "unexplored" destinations so the player can still head toward them
+    # (they get detailed on approach).
     if state and len(location_options) < 30:
         revealed = set(state.get("revealed_node_ids", []))
+        reachable = revealed | fringe_node_ids(world_data, revealed)
         for n in nodes:
             if len(location_options) >= 30:
                 break
-            if not n.get("name") and n.get("id") in revealed:
+            if not n.get("name") and n.get("id") in reachable:
                 location_options.append(f"{n['id']} (unexplored {n.get('type', 'waypoint')})")
     if not location_options:
         location_options = ["any"]

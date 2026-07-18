@@ -15,7 +15,7 @@ import asyncio
 import logging
 
 from . import sync as _sync
-from .worldspace import all_map_nodes, get_travel, node_needs_detail
+from .worldspace import all_map_nodes, fringe_node_ids, get_travel, node_needs_detail
 
 _logger = logging.getLogger(__name__)
 
@@ -158,5 +158,10 @@ def kick_background_detail(host, state: dict):
     if not pending:
         return
     revealed = set(state.get("revealed_node_ids", []))
-    pending.sort(key=lambda n: (-(n.get("id") in revealed), -n.get("importance", 0)))
+    # The name-only fringe ranks right after revealed nodes: an unnamed
+    # fringe node is invisible on the map until backfill names it.
+    fringe = fringe_node_ids(world_data, revealed)
+    pending.sort(key=lambda n: (-(n.get("id") in revealed),
+                                -(n.get("id") in fringe),
+                                -n.get("importance", 0)))
     queue_backfill(host, state, [n["id"] for n in pending[:per_turn]])

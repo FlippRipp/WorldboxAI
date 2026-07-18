@@ -62,7 +62,7 @@ Cost consequence for designers: creating a world is fast, and depth appears exac
 
 **The map screen is the reference.** It shows the current map under fog of war, a breadcrumb trail up the hierarchy (`Aerathis › Thornhold › The Broken Keep`), a switcher for parallel maps, and markers on locations that lead somewhere — a diamond for a passage, an explore action for enterable places. Browsing the map never moves the player; only the story does.
 
-**Fog of war** reveals the world as it's explored, per map. Entering a new map lights up the arrival point and its surroundings.
+**Fog of war** reveals the world as it's explored, per map. Arriving somewhere lights up that spot fully; its direct neighbors appear as a faded, name-only fringe — nothing beyond their names is known until the player actually goes there.
 
 ## Where the structure comes from
 

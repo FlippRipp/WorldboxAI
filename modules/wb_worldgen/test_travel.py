@@ -114,7 +114,10 @@ def test_waypoints_are_reached_and_revealed_along_the_way():
     assert result["player_location_node_id"] == "n_b"
     assert state["player_location_node_id"] == "n_b"
     assert state["player_location_region"] == "West"  # Bryn's region
-    assert "n_c" in state["revealed_node_ids"]  # fog opens around Bryn
+    assert "n_b" in state["revealed_node_ids"]  # the reached waypoint is revealed
+    # Neighbors are NOT revealed anymore — they form the name-only fringe
+    # the map renders faded (details stay hidden until the player goes there).
+    assert "n_c" not in state["revealed_node_ids"]
     travel = state["module_data"]["wb_worldgen"]["travel"]
     assert travel["minutes_traveled"] == 25
     assert travel["waypoint_cursor"] == 1
@@ -149,6 +152,38 @@ def test_travel_completed_finishes_the_journey_early():
     assert state["module_data"]["wb_worldgen"]["travel"] is None
     # Waypoints along the skipped stretch are still revealed.
     assert "n_c" in state["revealed_node_ids"]
+
+
+def test_arrival_reveals_only_the_visited_node():
+    # Landing somewhere opens fog on that node alone; its neighbors become
+    # the map's name-only fringe instead of being revealed outright.
+    wbg._services = {"settings": FakeSettings({"world.travel_minutes_per_edge": 0})}
+    state = make_state(make_world())
+    state["revealed_node_ids"] = ["n_a"]
+    run_turn(state, {"player_location_node_id": "n_b"})
+    assert set(state["revealed_node_ids"]) == {"n_a", "n_b"}
+
+
+def test_fringe_is_one_edge_beyond_the_revealed_set():
+    from wbruntime.worldspace import ensure_v2, fringe_node_ids
+    state = make_state(make_world())
+    ensure_v2(state)
+    world = state["world_data"]
+    assert fringe_node_ids(world, {"n_a", "n_b"}) == {"n_c"}
+    assert fringe_node_ids(world, {"n_b"}) == {"n_a", "n_c"}
+    # The unreachable island has no edges — never part of any fringe.
+    assert fringe_node_ids(world, {"n_a", "n_b", "n_c", "n_d"}) == set()
+
+
+def test_intent_roster_offers_the_name_only_fringe():
+    # Fringe names are visible on the map, so the player can head for them;
+    # nodes beyond the fringe stay unlisted.
+    from wbruntime.intent import _destination_roster
+    state = make_state(make_world())  # revealed: n_a, n_b
+    roster = "\n".join(_destination_roster(state["world_data"], state))
+    assert "n_b: Bryn" in roster
+    assert "n_c: Cael" in roster  # fringe of n_b
+    assert "n_d" not in roster  # two edges out — still unknown
 
 
 def test_instant_mode_keeps_classic_teleport():
