@@ -5,6 +5,7 @@ from backend.engine.registry import ModuleRegistry
 from backend.engine.graph import EngineGraph, CHARACTER_UPDATE_FIELDS
 from backend.engine.llm import LLMProviderError
 from backend.engine.llm_inspector import LLMInspector
+from backend.engine.llm_call_log import LLMCallLog, write_save_dump
 from backend.engine.log_store import LogStore, install_log_capture
 from backend.engine.session import GameSessionManager, sanitize_module_instructions
 from backend.engine.settings_registry import SettingsRegistry
@@ -82,6 +83,13 @@ theme_store = ThemeStore(data_dir)
 
 llm_inspector = LLMInspector()
 engine.llm.set_inspector(llm_inspector)
+
+# Persistent LLM call log: the inspector appends every completed call to
+# data/logs/llm_calls.jsonl so the full history survives restarts and the
+# inspector's ring-buffer eviction. Downloaded via /api/llm-log/dump.
+logs_dir = os.path.join(data_dir, "logs")
+llm_call_log = LLMCallLog(logs_dir)
+llm_inspector.set_call_logger(llm_call_log)
 
 
 class ChatHub:
@@ -1062,6 +1070,34 @@ async def get_llm_inspector_calls(since_id: str = "", limit: int = 50):
 async def clear_llm_inspector_calls():
     llm_inspector.clear()
     return {"cleared": True}
+
+
+@app.get("/api/llm-log/dump")
+async def dump_llm_log():
+    """Download the persistent LLM call log (one JSON object per line)."""
+    content = llm_call_log.read_all()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return Response(
+        content=content,
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": f'attachment; filename="llm_calls_{stamp}.jsonl"'},
+    )
+
+
+class DumpSaveToLogRequest(BaseModel):
+    save_id: str
+
+
+@app.post("/api/logs/dump-save")
+async def dump_save_to_log(request: DumpSaveToLogRequest):
+    """Write a save's full state as pretty JSON into the logs directory, so
+    it can be inspected (or fed to tooling) without unpacking the .wbx."""
+    try:
+        state = session_manager.save_manager.load_save(request.save_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    path = write_save_dump(logs_dir, request.save_id, state)
+    return {"path": str(path)}
 
 
 @app.get("/api/logs")

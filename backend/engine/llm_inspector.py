@@ -43,12 +43,18 @@ class LLMInspector:
     def __init__(self, max_records: int = 200):
         self._calls: deque[LLMCallRecord] = deque(maxlen=max_records)
         self._ws_broadcast: Optional[Callable] = None
+        # Optional persistent sink (LLMCallLog): every completed call is
+        # appended there, surviving the ring buffer's eviction and restarts.
+        self._call_logger = None
         # In-flight calls awaiting completion, keyed by call id. The record
         # object is shared with self._calls so updates are reflected in both.
         self._records: dict[str, LLMCallRecord] = {}
 
     def set_ws_broadcast(self, fn):
         self._ws_broadcast = fn
+
+    def set_call_logger(self, logger):
+        self._call_logger = logger
 
     async def _broadcast(self, record: LLMCallRecord):
         if self._ws_broadcast:
@@ -114,6 +120,12 @@ class LLMInspector:
         record.tokens_out = tokens_out
         record.error = error
         record.status = "cancelled" if cancelled else ("error" if error else "complete")
+
+        if self._call_logger:
+            try:
+                self._call_logger.log_call(self._record_to_dict(record))
+            except Exception:
+                pass
 
         await self._broadcast(record)
 

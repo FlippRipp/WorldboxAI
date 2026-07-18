@@ -32,6 +32,7 @@ Thumbs.db
 .DS_Store
 
 # User data (characters, worlds, scenarios, saves, theme)
+data/logs/
 data/saves/
 data/characters/
 data/worlds/
