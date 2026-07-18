@@ -1,8 +1,9 @@
-"""Auto-reveal pass: which places does the character already know at story start?
+"""Auto-reveal pass: which places does the character already know?
 
 Runs once per story via ``on_intro_complete``, right after the opening message
-is generated. Every detailed node (name + description) still hidden by fog of
-war is sent to the LLM in batches together with the character (name, race,
+is generated, and on demand via the ``/recall`` command in already-started
+stories. Every detailed node (name + description) still hidden by fog of war
+is sent to the LLM in batches together with the character (name, race,
 backstory), the start location, the world premise and the opening scene; the
 LLM answers with the ids of the locations the character would plausibly
 already know about, and those join ``revealed_node_ids``. Nodes without
@@ -135,7 +136,10 @@ def _concurrency(host) -> int:
     return 3
 
 
-async def on_intro_complete(host, state: dict, sdk) -> dict:
+async def reveal_known_locations(host, state: dict, sdk) -> dict:
+    """Run the pass. Returns ``{}`` when nothing changed, else the full
+    updated ``revealed_node_ids`` plus ``newly_known_node_ids`` for callers
+    that want to report what was added (the ``/recall`` command)."""
     world_data = state.get("world_data")
     if not world_data:
         return {}
@@ -168,4 +172,4 @@ async def on_intro_complete(host, state: dict, sdk) -> dict:
         return {}
     logger.info("Known-locations pass revealed %d of %d candidate nodes",
                 len(known), len(candidates))
-    return {"revealed_node_ids": revealed + known}
+    return {"revealed_node_ids": revealed + known, "newly_known_node_ids": known}

@@ -302,6 +302,7 @@ def set_services(services: dict):
 #   * on_gather_context   -> per-turn <current_location> context_string
 #   * on_intro_context     -> richer world block for the opening scene
 #   * on_intro_complete    -> one-shot reveal of locations the character knows
+#   * on_command_recall    -> /recall: same reveal pass, on demand mid-story
 #   * on_mutation_schema   -> dynamic movement schema offered to the Reader
 #   * on_mutate_state      -> apply a move + fog-of-war reveal
 # ---------------------------------------------------------------------------
@@ -412,7 +413,26 @@ async def on_intro_context(state: dict, sdk) -> dict:
 
 
 async def on_intro_complete(state: dict, sdk) -> dict:
-    return await _rt_known.on_intro_complete(_HOST, state, sdk)
+    return await _rt_known.reveal_known_locations(_HOST, state, sdk)
+
+
+async def on_command_recall(args, state: dict, sdk) -> dict:
+    """``/recall``: run the known-locations pass in an already-started story."""
+    if not state.get("world_data"):
+        return {"error": True, "message": "This story has no world map."}
+    result = await _rt_known.reveal_known_locations(_HOST, state, sdk)
+    new_ids = result.get("newly_known_node_ids") or []
+    if not new_ids:
+        return {"message": "No new places came to mind — everything your "
+                           "character knows is already on the map."}
+    by_id = _rt_worldspace.node_index(state["world_data"])
+    names = [by_id[nid].get("name") for nid in new_ids if nid in by_id]
+    names = [n for n in names if n]
+    return {
+        "message": f"Your character recalls {len(new_ids)} known place(s): "
+                   + ", ".join(names),
+        "revealed_node_ids": result["revealed_node_ids"],
+    }
 
 
 async def on_mutation_schema(state: dict, sdk) -> dict:

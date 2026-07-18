@@ -13,6 +13,12 @@
     "context_string": true,
     "module_data": true
   },
+  "commands": {
+    "/recall": "on_command_recall"
+  },
+  "command_help": {
+    "/recall": "Reveal the map locations your character would already know about"
+  },
   "modes": [
     {
       "id": "world-gen",

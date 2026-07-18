@@ -290,6 +290,62 @@ def test_websocket_button_command_still_pops_up_on_error(tmp_path, monkeypatch):
     assert state_update["type"] == "state_update"
 
 
+def test_websocket_recall_command_updates_fog_of_war(tmp_path, monkeypatch):
+    # /recall runs the known-locations pass mid-story; the revealed_node_ids
+    # it returns is a sanctioned command write-back that must land in session
+    # state and reach the client via state_update.
+    client, session_manager = make_client(tmp_path, monkeypatch)
+
+    session_manager.state.update({
+        "world_data": {
+            "world_format": 2,
+            "root_map_id": "root",
+            "maps": {"root": {
+                "map_id": "root", "label": "Overworld",
+                "nodes": [
+                    {"id": "n_a", "name": "Haven", "type": "settlement",
+                     "x": 0, "y": 0, "description": "Home port."},
+                    {"id": "n_b", "name": "Beacon Rock", "type": "landmark",
+                     "x": 10, "y": 0, "importance": 8,
+                     "description": "A lighthouse every sailor knows."},
+                ],
+                "edges": [{"from": "n_a", "to": "n_b"}],
+            }},
+            "connections": [],
+            "lore": {"world_name": "Testia", "premise": "A test realm."},
+        },
+        "player_location_node_id": "n_a",
+        "player_location_map_id": "root",
+        "revealed_node_ids": ["n_a"],
+    })
+
+    class RecallLLM:
+        mode = "live"
+        reader_model = "reader-model"
+
+        async def simple_completion(self, messages=None, **kwargs):
+            return '{"known_node_ids": ["n_b"]}'
+
+    monkeypatch.setattr(server.engine, "llm", RecallLLM())
+
+    with client.websocket_connect("/ws/chat") as websocket:
+        websocket.send_json({"text": "/recall"})
+        command_result = None
+        state_update = None
+        for _ in range(16):
+            message = websocket.receive_json()
+            if message["type"] == "command_result":
+                command_result = message
+            elif message["type"] == "state_update":
+                state_update = message
+                break
+
+    assert command_result["error"] is False
+    assert "Beacon Rock" in command_result["message"]
+    assert state_update["state"]["revealed_node_ids"] == ["n_a", "n_b"]
+    assert session_manager.state["revealed_node_ids"] == ["n_a", "n_b"]
+
+
 def test_websocket_unknown_or_inactive_command_falls_through_to_turn(tmp_path, monkeypatch):
     client, session_manager = make_client(tmp_path, monkeypatch)
     # No modules active for this save: /plot must be treated as normal input.

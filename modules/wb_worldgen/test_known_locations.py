@@ -182,6 +182,37 @@ def test_mock_llm_mode_skips_the_pass():
     assert llm.calls == []
 
 
+def test_recall_command_reveals_and_names_the_new_places():
+    llm = ScriptedLLM([{"known_node_ids": ["n_capital"]}])
+    state = make_state(make_world())
+    wbg._services = {"engine": FakeEngine(llm),
+                     "settings": FakeSettings({"world.enrichment_concurrency": 2})}
+
+    result = asyncio.run(wbg.on_command_recall([], state, None))
+
+    assert result["revealed_node_ids"] == ["n_home", "n_capital"]
+    assert "Aurelia" in result["message"]
+    assert not result.get("error")
+
+
+def test_recall_command_reports_when_nothing_new():
+    llm = ScriptedLLM([{"known_node_ids": []}])
+    state = make_state(make_world())
+    wbg._services = {"engine": FakeEngine(llm),
+                     "settings": FakeSettings({"world.enrichment_concurrency": 2})}
+
+    result = asyncio.run(wbg.on_command_recall([], state, None))
+
+    assert "revealed_node_ids" not in result
+    assert "No new places" in result["message"]
+
+
+def test_recall_command_without_world_is_an_error():
+    result = asyncio.run(wbg.on_command_recall([], {"module_data": {}}, None))
+
+    assert result["error"] is True
+
+
 def test_no_detailed_hidden_nodes_means_no_llm_call():
     world = make_world()
     state = make_state(world)

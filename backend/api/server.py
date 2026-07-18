@@ -2421,10 +2421,17 @@ async def websocket_endpoint(websocket: WebSocket):
         Commands may return the same keys the librarian node collects from
         on_librarian hooks: whitelisted player-identity fields under
         ``character_update``, and the module's OWN ``module_data`` subtree
-        (gated on the manifest's ``produces.module_data``). Everything else in
-        the result is ignored — commands cannot touch other modules' data.
+        (gated on the manifest's ``produces.module_data``). The fog-of-war
+        key ``revealed_node_ids`` is sanctioned too, mirroring what the
+        reader collects from on_mutate_state (e.g. wb_worldgen's /recall).
+        Everything else in the result is ignored — commands cannot touch
+        other modules' data.
         """
         state = session_manager.state
+        revealed = result.get("revealed_node_ids")
+        if isinstance(revealed, list):
+            state["revealed_node_ids"] = revealed
+            print(f"[Command] {mod_id}: revealed_node_ids updated ({len(revealed)} nodes)")
         update = result.get("character_update")
         if isinstance(update, dict):
             player = state.get("characters", {}).get("default_player")
