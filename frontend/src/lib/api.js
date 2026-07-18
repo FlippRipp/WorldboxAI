@@ -114,9 +114,9 @@ export const api = {
     return request(`/api/logs?${params}`);
   },
   clearServerLogs:        () => request('/api/logs', { method: 'DELETE' }),
-  // Persistent LLM call log (direct download URL, used as an anchor href).
+  // Debug dumps (direct download URLs, used as anchor hrefs).
   llmLogDumpUrl:          () => `${API}/api/llm-log/dump`,
-  dumpSaveToLog:          (saveId) => request('/api/logs/dump-save', { method: 'POST', body: JSON.stringify({ save_id: saveId }) }),
+  saveDumpUrl:            (saveId) => `${API}/api/saves/${saveId}/dump`,
   getSettings:            (scope = 'story') => request(`/api/settings?scope=${scope}`),
   updateSettings:         (updates, scope = 'story') => request('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: updates, scope }) }),
   getWidget:              (modId) => fetch(`${API}/widgets/${modId}/widget.jsx?_ts=${Date.now()}`),

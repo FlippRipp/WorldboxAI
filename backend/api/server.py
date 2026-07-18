@@ -5,7 +5,7 @@ from backend.engine.registry import ModuleRegistry
 from backend.engine.graph import EngineGraph, CHARACTER_UPDATE_FIELDS
 from backend.engine.llm import LLMProviderError
 from backend.engine.llm_inspector import LLMInspector
-from backend.engine.llm_call_log import LLMCallLog, write_save_dump
+from backend.engine.llm_call_log import LLMCallLog
 from backend.engine.log_store import LogStore, install_log_capture
 from backend.engine.session import GameSessionManager, sanitize_module_instructions
 from backend.engine.settings_registry import SettingsRegistry
@@ -21,7 +21,9 @@ from backend.engine.theme_store import ThemeStore
 from dotenv import load_dotenv
 from pydantic import BaseModel
 import os
+import re
 import sys
+import json
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -1084,20 +1086,21 @@ async def dump_llm_log():
     )
 
 
-class DumpSaveToLogRequest(BaseModel):
-    save_id: str
-
-
-@app.post("/api/logs/dump-save")
-async def dump_save_to_log(request: DumpSaveToLogRequest):
-    """Write a save's full state as pretty JSON into the logs directory, so
-    it can be inspected (or fed to tooling) without unpacking the .wbx."""
+@app.get("/api/saves/{save_id}/dump")
+async def dump_save_state(save_id: str):
+    """Download a save's full state as pretty JSON, so it can be inspected
+    (or fed to tooling) without unpacking the .wbx."""
     try:
-        state = session_manager.save_manager.load_save(request.save_id)
+        state = session_manager.save_manager.load_save(save_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    path = write_save_dump(logs_dir, request.save_id, state)
-    return {"path": str(path)}
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", save_id) or "save"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return Response(
+        content=json.dumps(state, indent=2, ensure_ascii=False, default=str),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="save_dump_{safe_id}_{stamp}.json"'},
+    )
 
 
 @app.get("/api/logs")

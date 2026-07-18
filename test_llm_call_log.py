@@ -5,7 +5,7 @@ import types
 from fastapi.testclient import TestClient
 
 import backend.api.server as server
-from backend.engine.llm_call_log import LLMCallLog, write_save_dump
+from backend.engine.llm_call_log import LLMCallLog
 from backend.engine.llm_inspector import LLMInspector
 
 
@@ -95,19 +95,6 @@ def test_inspector_survives_broken_logger():
     assert inspector.get_calls()[0]["status"] == "complete"
 
 
-# ---------------------------------------------------------- save dumps
-
-def test_write_save_dump(tmp_path):
-    state = {"core": {"metadata": {"turn": 3}}, "characters": {}}
-    path = write_save_dump(str(tmp_path), "My Story!", state)
-
-    assert path.parent == tmp_path
-    assert path.name.startswith("save_dump_My_Story__")
-    assert path.suffix == ".json"
-    with open(path, encoding="utf-8") as f:
-        assert json.load(f) == state
-
-
 # ------------------------------------------------------------- endpoints
 
 def test_dump_llm_log_endpoint(tmp_path, monkeypatch):
@@ -123,25 +110,26 @@ def test_dump_llm_log_endpoint(tmp_path, monkeypatch):
     assert json.loads(resp.text)["id"] == "a1"
 
 
-def test_dump_save_to_log_endpoint(tmp_path, monkeypatch):
+def test_dump_save_state_endpoint(monkeypatch):
     state = {"core": {"metadata": {"turn": 7}}}
 
     class StubSaveManager:
         def load_save(self, save_id):
-            if save_id != "demo":
+            if save_id != "demo save":
                 raise FileNotFoundError(f"Save {save_id} not found.")
             return state
 
-    monkeypatch.setattr(server, "logs_dir", str(tmp_path))
     monkeypatch.setattr(server, "session_manager",
                         types.SimpleNamespace(save_manager=StubSaveManager()))
 
     client = TestClient(server.app)
-    resp = client.post("/api/logs/dump-save", json={"save_id": "demo"})
+    resp = client.get("/api/saves/demo save/dump")
     assert resp.status_code == 200
-    path = resp.json()["path"]
-    with open(path, encoding="utf-8") as f:
-        assert json.load(f) == state
+    disposition = resp.headers["content-disposition"]
+    assert "attachment" in disposition
+    # The download filename uses a filesystem-safe id and a timestamp.
+    assert 'filename="save_dump_demo_save_' in disposition
+    assert resp.json() == state
 
-    resp = client.post("/api/logs/dump-save", json={"save_id": "missing"})
+    resp = client.get("/api/saves/missing/dump")
     assert resp.status_code == 404

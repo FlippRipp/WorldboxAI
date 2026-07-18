@@ -2,14 +2,12 @@ import { useEffect, useState } from 'react';
 import { api } from '../../lib/api';
 
 // Debug log tools: download the persistent LLM call log (every call the
-// server ever made, as JSONL), and dump a selected save's full state into
-// a log file on the server for inspection.
+// server ever made, as JSONL), and download a selected save's full state
+// as a JSON dump.
 export default function LogSettings() {
   const [saves, setSaves] = useState(null);
   const [selectedSave, setSelectedSave] = useState('');
-  const [dumpResult, setDumpResult] = useState('');
   const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -23,20 +21,6 @@ export default function LogSettings() {
       .catch((e) => { if (!cancelled) { setSaves([]); setError(e.message || 'Failed to load saves.'); } });
     return () => { cancelled = true; };
   }, []);
-
-  const handleDumpSave = async () => {
-    setBusy(true);
-    setError('');
-    setDumpResult('');
-    try {
-      const res = await api.dumpSaveToLog(selectedSave);
-      setDumpResult(`Save written to ${res.path}`);
-    } catch (e) {
-      setError(e.message || 'Failed to write save to log file.');
-    } finally {
-      setBusy(false);
-    }
-  };
 
   return (
     <div className="bg-gray-900/60 border border-gray-800 rounded-xl p-4 space-y-6">
@@ -57,12 +41,12 @@ export default function LogSettings() {
       <div className="border-t border-gray-800 pt-4 space-y-2">
         <div className="flex flex-col">
           <span className="text-sm font-medium text-gray-300">Dump save state</span>
-          <span className="text-xs text-gray-500">Write the selected save's full state to a log file on the server.</span>
+          <span className="text-xs text-gray-500">Download the selected save's full state as a JSON file.</span>
         </div>
         <div className="flex items-center gap-2">
           <select
             value={selectedSave}
-            onChange={(e) => { setSelectedSave(e.target.value); setDumpResult(''); }}
+            onChange={(e) => setSelectedSave(e.target.value)}
             disabled={!saves || saves.length === 0}
             className="flex-1 min-w-0 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-gray-200 text-sm disabled:opacity-40"
             aria-label="Save to dump"
@@ -73,15 +57,20 @@ export default function LogSettings() {
               <option key={s.id} value={s.id}>{s.display_name || s.id}</option>
             ))}
           </select>
-          <button
-            onClick={handleDumpSave}
-            disabled={busy || !selectedSave}
-            className="shrink-0 px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {busy ? 'Writing…' : 'Write to Log File'}
-          </button>
+          {selectedSave ? (
+            <a
+              href={api.saveDumpUrl(selectedSave)}
+              download
+              className="shrink-0 px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium transition-colors"
+            >
+              Download Dump
+            </a>
+          ) : (
+            <span className="shrink-0 px-3 py-1.5 rounded-lg bg-purple-600 text-white text-sm font-medium opacity-40 cursor-not-allowed">
+              Download Dump
+            </span>
+          )}
         </div>
-        {dumpResult && <div className="text-xs text-green-400 break-all">{dumpResult}</div>}
       </div>
 
       {error && <div className="text-xs text-red-400">{error}</div>}
