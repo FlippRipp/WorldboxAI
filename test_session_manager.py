@@ -227,6 +227,83 @@ def test_module_instructions_persist_and_survive_settings_saves():
     shutil.rmtree(data_dir)
 
 
+def _seed_travel_turns(tmp_path):
+    """A save where turn 1's storyteller message moved the player: turn 0 has
+    the player at the village, turn 1 mid-journey at a waypoint with extra fog
+    revealed and an active travel record."""
+    session = GameSessionManager(str(tmp_path / "data"))
+    session.create_save("autosave")
+    sm, sid = session.save_manager, session.active_save_id
+
+    session.state["chat_messages"] = [{"role": "ai", "content": "Intro."}]
+    session.state["history"] = ["Intro."]
+    session.state["turn"] = 0
+    session.state["player_location_node_id"] = "n_village"
+    session.state["player_location_map_id"] = "m_root"
+    session.state["player_location_region"] = "Vale"
+    session.state["revealed_node_ids"] = ["n_village"]
+    sm.save_turn(sid, session.state, 0)
+
+    session.state["chat_messages"] += [
+        {"role": "user", "content": "Travel to the citadel."},
+        {"role": "ai", "content": "You set out along the high road."},
+    ]
+    session.state["history"] += ["You set out along the high road."]
+    session.state["turn"] = 1
+    session.state["player_location_node_id"] = "n_waypoint"
+    session.state["player_location_region"] = "High Road"
+    session.state["revealed_node_ids"] = ["n_village", "n_waypoint"]
+    session.state["module_data"]["wb_worldgen"] = {
+        "travel": {"phase": "journey", "destination_node_id": "n_citadel"}}
+    sm.save_turn(sid, session.state, 1)
+    session.begin_turn_swipes()
+    return session
+
+
+def test_delete_last_turn_rolls_back_location_fog_and_travel(tmp_path):
+    """Regression: turn snapshots didn't include Core/metadata.json and
+    undo_turn preserved it wholesale, so deleting a travel turn reverted the
+    journey record (Module_States) but left the player standing at the
+    advanced waypoint with fog already opened."""
+    session = _seed_travel_turns(tmp_path)
+    state = session.delete_message(2)
+    assert state["turn"] == 0
+    assert state["player_location_node_id"] == "n_village"
+    assert state["player_location_region"] == "Vale"
+    assert state["revealed_node_ids"] == ["n_village"]
+    assert (state["module_data"].get("wb_worldgen") or {}).get("travel") is None
+
+
+def test_prepare_regenerate_rolls_back_location(tmp_path):
+    """Same gap on the regenerate path: the fresh generation must start from
+    where the player stood before the turn, not where the discarded turn
+    left them."""
+    session = _seed_travel_turns(tmp_path)
+    assert session.prepare_regenerate() == 1
+    assert session.state["player_location_node_id"] == "n_village"
+    assert session.state["revealed_node_ids"] == ["n_village"]
+
+
+def test_undo_with_legacy_snapshot_keeps_live_metadata(tmp_path):
+    """Snapshots created before metadata.json was included must keep today's
+    behavior: the live metadata (location included) survives untouched."""
+    import zipfile
+
+    session = _seed_travel_turns(tmp_path)
+    snap = tmp_path / "data" / "saves" / session.active_save_id / "Snapshots" / "turn_0.zip"
+    with zipfile.ZipFile(snap, "r") as zf:
+        members = {n: zf.read(n) for n in zf.namelist()
+                   if n.replace("\\", "/") != "Core/metadata.json"}
+    with zipfile.ZipFile(snap, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+
+    state = session.delete_message(2)
+    assert state["turn"] == 0
+    assert state["player_location_node_id"] == "n_waypoint"
+    assert state["revealed_node_ids"] == ["n_village", "n_waypoint"]
+
+
 def test_session_manager_refuses_turns_without_active_save():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(base_dir, "test_session_no_save_data")

@@ -7,6 +7,18 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from backend.engine.prompt_pipeline import default_prompt_pipeline, DEFAULT_CONTINUE_PROMPT
 
+# Metadata keys that describe per-turn game state and must roll back with a
+# turn snapshot (unlike identity keys — world_id, display_name, lorebook
+# links — which always keep their live values across a rollback).
+ROLLBACK_METADATA_KEYS = (
+    "player_location_node_id",
+    "player_location_region",
+    "player_location_map_id",
+    "player_location_layer_id",
+    "revealed_node_ids",
+    "sticky_world_entries",
+)
+
 class SaveManager:
     """
     Manages loading templates (.wbp) and active instances (.wbx) 
@@ -369,12 +381,12 @@ class SaveManager:
         """Creates a snapshot zip of Characters and Module_States"""
         save_path = self.saves_dir / save_id
         snap_path = save_path / "Snapshots" / f"turn_{turn_number}.zip"
-        
+
         with zipfile.ZipFile(snap_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             chars_dir = save_path / "Characters"
             mods_dir = save_path / "Module_States"
             core_dir = save_path / "Core"
-            for file in ["chat_history.json", "chat_messages.json", "prompt_pipeline.json"]:
+            for file in ["metadata.json", "chat_history.json", "chat_messages.json", "prompt_pipeline.json"]:
                 fpath = core_dir / file
                 if fpath.exists():
                     zipf.write(fpath, os.path.join("Core", file))
@@ -405,43 +417,67 @@ class SaveManager:
         if wbx_path.exists():
             wbx_path.unlink()
 
+    def _extract_turn_snapshot(self, save_path: Path, snap_path: Path) -> dict:
+        """Extract a turn snapshot over the workspace and return the metadata
+        the rollback should end up with (turn counter not yet set).
+
+        Metadata merges rather than restores wholesale: the per-turn keys
+        (player location, fog, sticky entries) revert to the snapshot's
+        values — so e.g. deleting a travel turn puts the player back where
+        they were — while identity keys (world_id, display_name, lorebook
+        links) keep their live values. Overwriting those would orphan the
+        save's lorebook links: their rows stay embedded in the world index
+        while lorebook_ids is lost, so disabled entries keep surfacing in
+        RAG and can't be re-synced. Snapshots from before metadata was
+        included keep the live metadata untouched."""
+        meta_path = save_path / "Core" / "metadata.json"
+        live_meta = {}
+        if meta_path.exists():
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    live_meta = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                live_meta = {}
+        with zipfile.ZipFile(snap_path, 'r') as zipf:
+            names = {n.replace("\\", "/") for n in zipf.namelist()}
+            zipf.extractall(save_path)
+        meta = dict(live_meta)
+        if "Core/metadata.json" in names:
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    snap_meta = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                snap_meta = {}
+            for key in ROLLBACK_METADATA_KEYS:
+                if key in snap_meta:
+                    meta[key] = snap_meta[key]
+                else:
+                    meta.pop(key, None)
+        return meta
+
     def undo_turn(self, save_id: str, target_turn: int) -> dict:
         """Restores state from a snapshot and removes newer snapshots."""
         save_path = self.saves_dir / save_id
         snap_path = save_path / "Snapshots" / f"turn_{target_turn}.zip"
-        
+
         if not snap_path.exists():
             raise FileNotFoundError(f"Snapshot for turn {target_turn} not found.")
-            
+
         # Clean current Characters and Module_States
         for f in (save_path / "Characters").glob("*.json"): f.unlink()
         for f in (save_path / "Module_States").glob("*.json"): f.unlink()
-        
-        # Extract snapshot
-        with zipfile.ZipFile(snap_path, 'r') as zipf:
-            zipf.extractall(save_path)
-            
+
+        # Extract snapshot (rolls per-turn metadata back, keeps identity keys)
+        meta = self._extract_turn_snapshot(save_path, snap_path)
+
         # Cleanup newer snapshots
         for snap in (save_path / "Snapshots").glob("turn_*.zip"):
             snap_turn = int(snap.stem.split("_")[1])
             if snap_turn > target_turn:
                 snap.unlink()
 
-        # Update the turn counter while preserving the rest of the metadata
-        # (world_id, player location, lorebook_ids, lorebook_embed_fingerprint,
-        # …). Overwriting it wholesale would orphan the save's lorebook links —
-        # their rows stay embedded in the world index while lorebook_ids is lost,
-        # so disabled entries keep surfacing in RAG and can't be re-synced.
-        meta_path = save_path / "Core" / "metadata.json"
-        meta = {}
-        if meta_path.exists():
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                meta = {}
         meta["turn"] = target_turn
-        with open(meta_path, "w", encoding="utf-8") as f:
+        with open(save_path / "Core" / "metadata.json", "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
 
         self._pack_save(save_id)
@@ -547,23 +583,19 @@ class SaveManager:
     def restore_turn_snapshot(self, save_id: str, target_turn: int) -> dict:
         """Roll the workspace back to the END of `target_turn` as a base for
         regenerating the next turn. Unlike `undo_turn` this does NOT delete newer
-        snapshots or swipes, and it preserves metadata (world_id, location) while
-        resetting the turn counter so the regenerated turn gets the right number."""
+        snapshots or swipes. Per-turn metadata (player location, fog) rolls back
+        with the snapshot while identity keys (world_id, lorebook links) keep
+        their live values, and the turn counter is reset so the regenerated turn
+        gets the right number."""
         save_path = self.saves_dir / save_id
         snap_path = save_path / "Snapshots" / f"turn_{target_turn}.zip"
         if not snap_path.exists():
             raise FileNotFoundError(f"Snapshot for turn {target_turn} not found.")
         for f in (save_path / "Characters").glob("*.json"): f.unlink()
         for f in (save_path / "Module_States").glob("*.json"): f.unlink()
-        with zipfile.ZipFile(snap_path, 'r') as zipf:
-            zipf.extractall(save_path)
-        meta_path = save_path / "Core" / "metadata.json"
-        meta = {}
-        if meta_path.exists():
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
+        meta = self._extract_turn_snapshot(save_path, snap_path)
         meta["turn"] = target_turn
-        with open(meta_path, "w", encoding="utf-8") as f:
+        with open(save_path / "Core" / "metadata.json", "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
         self._pack_save(save_id)
         return self.load_save(save_id)
