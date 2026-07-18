@@ -425,13 +425,14 @@ def test_build_world_prompt_fold_messages():
         [{"question": "What era?", "answer": "Late medieval."}],
         scenario={"name": "The Sunken Court"},
     )
-    # Conservative-edit framing: nothing changed unnecessarily.
-    assert "conservative edit" in msgs[0]["content"]
+    # Every answer must land; untouched text keeps the player's wording.
+    assert "Every answer must end up reflected" in msgs[0]["content"]
+    assert "never a reason to leave an answer out" in msgs[0]["content"]
     user = msgs[1]["content"]
     assert "A drowned city of rival guilds." in user
     assert "The Sunken Court" in user
     assert "What era?" in user and "Late medieval." in user
-    assert "changing nothing" in user
+    assert "every answer is fully incorporated" in user
 
     # Empty draft: the answers become the first version.
     msgs2 = build_world_prompt_fold_messages(

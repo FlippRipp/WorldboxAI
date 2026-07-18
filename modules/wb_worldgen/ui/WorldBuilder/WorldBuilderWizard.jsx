@@ -135,8 +135,9 @@ function WorldPromptField({ value, onChange, disabled, scenarioId }) {
 // Iterative interview that digs unmentioned details out of the player before
 // generation: the AI reads the prompt (empty is fine — then it interviews from
 // scratch) and asks a round of clarifying questions; answered ones are folded
-// back into the prompt with a conservative rewrite that changes nothing
-// unnecessarily. Repeatable until the player is happy — accepting is simply
+// back into the prompt — every answer lands, adding and rewriting what it
+// touches while the rest keeps the player's wording. Repeatable until the
+// player is happy — accepting is simply
 // generating. Prior rounds are sent along so questions never repeat, and the
 // in-flight round survives a relaunch (Android kills the backgrounded PWA).
 const INTERVIEW_KEY = 'wb_worldgen_interview';

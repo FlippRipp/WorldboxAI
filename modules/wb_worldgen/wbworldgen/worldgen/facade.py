@@ -203,21 +203,23 @@ def build_world_prompt_fold_messages(current_text: str,
     """LLM messages for folding a round of interview answers into the seed
     prompt.
 
-    A conservative rewrite: the current prompt is the player's text and must
-    survive intact wherever the answers don't touch it — the model only weaves
-    in what the answers add or change. With an empty current prompt the
-    answers become the first draft. Pure (no I/O) so it is unit-testable.
+    Every answer must land in the prompt — added where it brings something
+    new, rewriting whatever it changes — while parts the answers don't touch
+    keep the player's wording. With an empty current prompt the answers become
+    the first draft. Pure (no I/O) so it is unit-testable.
     """
     system = (
         "You are a world-building assistant maintaining the SEED PROMPT for an AI "
         "world generator — a short, vivid paragraph of creative direction the "
         "generator expands into a full world. The player has answered interview "
-        "questions about their world; fold their answers into the prompt. This is a "
-        "conservative edit, not a rewrite: keep the current prompt's wording, "
-        "structure and details unchanged wherever the answers don't touch them, and "
-        "only add or adjust what the answers actually say. Do not pad, embellish, or "
-        "drop anything the player wrote. If the current prompt is empty, write a "
-        "first draft from the answers alone. "
+        "questions about their world; fold their answers into the prompt. Every "
+        "answer must end up reflected in the prompt: add what it introduces, and "
+        "rewrite whatever parts of the prompt it changes or contradicts — "
+        "preserving the current text is never a reason to leave an answer out. "
+        "Where the answers don't touch the prompt, keep the player's wording and "
+        "details as they are, and do not pad or embellish beyond what the answers "
+        "say. If the current prompt is empty, write a first draft from the answers "
+        "alone. "
         'Return only valid JSON: {"text": "..."}.'
     )
     parts = []
@@ -234,8 +236,9 @@ def build_world_prompt_fold_messages(current_text: str,
     answers_text = _interview_history_text(answers)
     parts.append(f"The player's answers this round:\n<answers>\n{answers_text}\n</answers>")
     parts.append(
-        "Update the seed prompt to incorporate the answers, changing nothing "
-        "unnecessarily. Return only the seed prompt text.")
+        "Update the seed prompt so every answer is fully incorporated — add and "
+        "change whatever the answers require, and keep the rest as the player "
+        "wrote it. Return only the seed prompt text.")
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": "\n\n".join(parts)},

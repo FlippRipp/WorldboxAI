@@ -446,9 +446,9 @@ class FoldWorldAnswersRequest(BaseModel):
 
 @router.post("/api/world/fold-answers")
 async def fold_world_answers(request: FoldWorldAnswersRequest):
-    """Fold a round of interview answers into the World Prompt: a conservative
-    rewrite that only weaves in what the answers add or change, leaving the
-    rest of the player's text untouched."""
+    """Fold a round of interview answers into the World Prompt: every answer
+    lands — added or rewritten into the prompt as needed — while parts the
+    answers don't touch keep the player's text."""
     from wbworldgen.worldgen.facade import build_world_prompt_fold_messages
 
     answered = [a for a in request.answers or []
