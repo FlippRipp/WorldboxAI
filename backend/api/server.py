@@ -2461,8 +2461,9 @@ async def websocket_endpoint(websocket: WebSocket):
         on_librarian hooks: whitelisted player-identity fields under
         ``character_update``, and the module's OWN ``module_data`` subtree
         (gated on the manifest's ``produces.module_data``). The fog-of-war
-        key ``revealed_node_ids`` is sanctioned too, mirroring what the
-        reader collects from on_mutate_state (e.g. wb_worldgen's /recall).
+        key ``revealed_node_ids`` and the player-location keys are
+        sanctioned too, mirroring what the reader collects from
+        on_mutate_state (e.g. wb_worldgen's /recall and /teleport).
         Everything else in the result is ignored — commands cannot touch
         other modules' data.
         """
@@ -2471,6 +2472,13 @@ async def websocket_endpoint(websocket: WebSocket):
         if isinstance(revealed, list):
             state["revealed_node_ids"] = revealed
             print(f"[Command] {mod_id}: revealed_node_ids updated ({len(revealed)} nodes)")
+        node_id = result.get("player_location_node_id")
+        if isinstance(node_id, str) and node_id:
+            state["player_location_node_id"] = node_id
+            for key in ("player_location_map_id", "player_location_region"):
+                if isinstance(result.get(key), str) and result[key]:
+                    state[key] = result[key]
+            print(f"[Command] {mod_id}: player moved to {node_id}")
         update = result.get("character_update")
         if isinstance(update, dict):
             player = state.get("characters", {}).get("default_player")

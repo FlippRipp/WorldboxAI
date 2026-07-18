@@ -458,6 +458,59 @@ async def on_command_recall(args, state: dict, sdk) -> dict:
     }
 
 
+async def on_command_teleport(args, state: dict, sdk) -> dict:
+    """``/teleport <node id or name>``: put the player at any map node
+    instantly, clearing any active journey and interior position. A testing
+    tool, not gameplay: no story turn, no fog fringe, no site expansion —
+    only the target node itself is revealed."""
+    world_data = state.get("world_data")
+    if not world_data:
+        return {"error": True, "message": "This story has no world map."}
+    by_id = _rt_worldspace.node_index(world_data)
+    current = state.get("player_location_node_id")
+    query = " ".join(args).strip()
+    if not query:
+        here = (by_id.get(current) or {}).get("name") or "an unknown place"
+        return {"message": f"You are at {here} ({current}). "
+                           "Usage: /teleport <node id or name>"}
+
+    if query in by_id:
+        target = by_id[query]
+    else:
+        q = query.lower()
+        named = [n for n in by_id.values() if q == (n.get("name") or "").lower()]
+        matches = named or [n for n in by_id.values()
+                            if q in (n.get("name") or "").lower()]
+        if not matches:
+            return {"error": True, "message": f"No map node matches '{query}'."}
+        if len(matches) > 1:
+            options = ", ".join(
+                f"{n.get('name')} ({n.get('id')})" for n in matches[:5])
+            return {"error": True, "message": f"'{query}' is ambiguous: {options}"}
+        target = matches[0]
+
+    node_id = target.get("id")
+    name = target.get("name") or node_id
+    if node_id == current:
+        return {"message": f"Already at {name}."}
+    map_id = _rt_worldspace.map_of_node(world_data, node_id) \
+        or _rt_worldspace.player_map_id(state)
+    revealed = list(state.get("revealed_node_ids") or [])
+    if node_id not in revealed:
+        revealed.append(node_id)
+    here = (by_id.get(current) or {}).get("name") or current or "nowhere"
+    return {
+        "message": f"Teleported from {here} to {name} ({node_id}).",
+        "player_location_node_id": node_id,
+        "player_location_map_id": map_id,
+        "player_location_region": target.get("region")
+            or state.get("player_location_region"),
+        "revealed_node_ids": revealed,
+        "module_data": {"wb_worldgen": {"travel": None, "site_position": None}},
+        "module_data_replace": ["travel", "site_position"],
+    }
+
+
 async def on_mutation_schema(state: dict, sdk) -> dict:
     return await _rt_schema.on_mutation_schema(_HOST, state, sdk)
 

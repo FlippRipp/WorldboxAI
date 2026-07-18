@@ -15,10 +15,12 @@
     "module_data": true
   },
   "commands": {
-    "/recall": "on_command_recall"
+    "/recall": "on_command_recall",
+    "/teleport": "on_command_teleport"
   },
   "command_help": {
-    "/recall": "Reveal the map locations your character would already know about"
+    "/recall": "Reveal the map locations your character would already know about",
+    "/teleport": "Instantly move your character to a map node (testing tool): /teleport <node id or name>"
   },
   "modes": [
     {
