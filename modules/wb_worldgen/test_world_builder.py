@@ -324,6 +324,30 @@ def test_scenario_grounding_text():
     assert "Tags" not in text
 
 
+def test_scenario_start_brief():
+    from wbworldgen.worldgen.facade import scenario_start_brief
+    assert scenario_start_brief({}) == ""
+    # Without a change request: the grounding framed as "where does the
+    # opening scene take place".
+    plain = scenario_start_brief({
+        "name": "Ambush",
+        "scenario_description": "Bandits stalk the mountain road.",
+        "starting_prompt": "The wagon wheel snaps at dusk.",
+    })
+    assert "The wagon wheel snaps at dusk." in plain
+    assert "opening scene takes place" in plain
+    assert "HIGHEST" not in plain
+    # The player's pending change request leads and outranks the scenario text.
+    changed = scenario_start_brief({
+        "name": "Ambush",
+        "scenario_description": "Bandits stalk the mountain road.",
+        "starting_prompt": "The wagon wheel snaps at dusk.",
+        "pending_modification_request": "set it at sea instead",
+    })
+    assert changed.index("set it at sea instead") < changed.index("The wagon wheel snaps at dusk.")
+    assert "HIGHEST priority" in changed
+
+
 def test_generate_step_composes_scenario(builder):
     captured = {}
 

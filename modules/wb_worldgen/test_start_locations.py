@@ -7,7 +7,10 @@ include module tests): python -m pytest modules/wb_worldgen/test_start_locations
 """
 
 import asyncio
+import importlib.util
 import json
+import os
+import pathlib
 import shutil
 import tempfile
 import types
@@ -16,6 +19,15 @@ import pytest
 
 from wbworldgen.worldgen import WorldBuilder
 from wbworldgen.worldgen import start_locations as start_locs
+
+# The module file is named backend.py, which collides with the core `backend`
+# package — load it explicitly by path under a private name.
+_MOD_DIR = os.path.abspath(os.path.dirname(__file__))
+_spec = importlib.util.spec_from_file_location(
+    "wb_worldgen_backend_start_tests", os.path.join(_MOD_DIR, "backend.py")
+)
+wbg = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(wbg)
 
 
 @pytest.fixture
@@ -166,6 +178,71 @@ def test_mock_llm_never_asks_for_no_match(builder):
 
     # Single candidate, mock mode: picked directly without any LLM call.
     assert location["node_id"] == "s1"
+
+
+def _fake_session(tmpdir):
+    data_dir = pathlib.Path(tmpdir) / "session_data"
+    return types.SimpleNamespace(
+        data_dir=data_dir,
+        state={},
+        create_save=lambda save_id, **kw: {"save_id": save_id, **kw},
+        get_memory_path=lambda: str(data_dir / "memory"),
+    )
+
+
+def _fake_engine(llm):
+    async def _noop_async(*args, **kwargs):
+        return 0
+
+    return types.SimpleNamespace(
+        llm=llm,
+        set_memory_path=lambda p: None,
+        ensure_memory=_noop_async,
+        memory=types.SimpleNamespace(init_world_index=lambda p: None, embed_world=_noop_async),
+    )
+
+
+def test_story_source_derives_start_from_scenario(builder, tmpdir, monkeypatch):
+    # World + scenario with no explicit pick or typed preference: the start
+    # location is chosen from the scenario itself — the pick prompt carries
+    # the opening scene and the player's change request (highest priority).
+    wid = _start_world(builder)
+    llm = ScriptedLLM([{"node_id": "s1", "name": "Havenport", "reason": "the opening is set in a harbor"}])
+    monkeypatch.setattr(wbg, "world_builder", builder)
+
+    scenario = {
+        "name": "Ambush",
+        "scenario_description": "Bandits stalk the harbor road.",
+        "starting_prompt": "The wagon wheel snaps at dusk by the docks.",
+        "pending_modification_request": "make the harbor freeze over",
+    }
+    result = asyncio.run(wbg.create_world_story_source(
+        save_id="scenario_start", source_id=wid, start_preference=None,
+        session_manager=_fake_session(tmpdir),
+        engine=_fake_engine(llm), scenario=scenario))
+
+    assert result["start_location"]["node_id"] == "s1"
+    pick_msg = llm.calls[0][1]["content"]
+    assert "The wagon wheel snaps at dusk by the docks." in pick_msg
+    assert "make the harbor freeze over" in pick_msg
+
+
+def test_story_source_prefers_typed_preference_over_scenario(builder, tmpdir, monkeypatch):
+    # An explicit start preference (API callers) still wins over the scenario.
+    wid = _start_world(builder)
+    llm = ScriptedLLM([{"node_id": "s1", "name": "Havenport", "reason": "a port town"}])
+    monkeypatch.setattr(wbg, "world_builder", builder)
+
+    scenario = {"name": "Ambush", "starting_prompt": "The wagon wheel snaps at dusk."}
+    result = asyncio.run(wbg.create_world_story_source(
+        save_id="pref_start", source_id=wid, start_preference="a port town",
+        session_manager=_fake_session(tmpdir),
+        engine=_fake_engine(llm), scenario=scenario))
+
+    assert result["start_location"]["node_id"] == "s1"
+    pick_msg = llm.calls[0][1]["content"]
+    assert "a port town" in pick_msg
+    assert "wagon wheel" not in pick_msg
 
 
 def test_unnamed_slots_prefers_important_nodes():

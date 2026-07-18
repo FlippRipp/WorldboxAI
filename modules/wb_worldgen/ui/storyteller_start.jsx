@@ -4,9 +4,11 @@ import { api } from 'api';
 // Story-source picker contributed by wb_worldgen, embedded in the storyteller
 // start screen. Controlled component: the host owns the chosen story source
 // (`selected`) and updates it via `onSelect`. The host may pair the world with
-// an independently chosen scenario (world = setting, scenario = opening).
+// an independently chosen scenario (world = setting, scenario = opening);
+// `scenarioSelected` reflects that pairing — the start location then follows
+// from the scenario's opening, so the preference UI is hidden.
 // Renders nothing if there are no saved worlds yet.
-export default function StorytellerStart({ selected, onSelect }) {
+export default function StorytellerStart({ selected, onSelect, scenarioSelected = false }) {
   const [worlds, setWorlds] = useState([]);
   const [worldsError, setWorldsError] = useState(false);
   // Hydrate from the host's selection so remounting (e.g. leaving and
@@ -115,7 +117,14 @@ export default function StorytellerStart({ selected, onSelect }) {
         ))}
       </div>
 
-      {activeWorldId && (
+      {activeWorldId && scenarioSelected && (
+        <div className="pt-2 border-t border-gray-700">
+          <p className="text-xs text-gray-500 italic">
+            The starting location will be chosen to fit the selected scenario's opening.
+          </p>
+        </div>
+      )}
+      {activeWorldId && !scenarioSelected && (
         <div className="space-y-2 pt-2 border-t border-gray-700">
           <p className="text-xs text-gray-400">Starting location preference (optional)</p>
           <div className="flex gap-2">

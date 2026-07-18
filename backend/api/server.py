@@ -1245,6 +1245,10 @@ async def create_save(request: CreateSaveRequest):
                 source_id=request.world_id,
                 start_preference=request.start_preference,
                 start_location_node_id=request.start_location_node_id,
+                # The scenario copy (with any pending modification request) so
+                # the provider can derive the start location from the
+                # scenario's opening when no explicit pick/preference exists.
+                scenario=scenario,
                 session_manager=session_manager,
                 engine=engine,
                 character_module_data=character_module_data,

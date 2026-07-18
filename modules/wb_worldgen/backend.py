@@ -104,18 +104,22 @@ def _build_world_character_context(context: dict) -> dict:
         return {}
 
 
-async def create_world_story_source(*, save_id, source_id, start_preference, session_manager, engine, start_location_node_id=None, character_module_data=None, character_data=None) -> dict:
+async def create_world_story_source(*, save_id, source_id, start_preference, session_manager, engine, start_location_node_id=None, scenario=None, character_module_data=None, character_data=None) -> dict:
     """Story-source provider for create_save: turn a world_id into a playable save.
 
     Uses the start location the player already picked on the start screen
-    (``start_location_node_id``) when given; otherwise picks one (LLM from the
-    preference, or random). Seeds the fog-of-war reveal, persists
-    ``World/world_data.json``, embeds the world into the save's RAG index, and
-    writes the world keys into session state.
-    Returns the chosen start_location (for the API response).
+    (``start_location_node_id``) when given; otherwise picks one via LLM —
+    from the typed preference, or, when the story combines the world with a
+    scenario, from the scenario itself (its opening scene decides where the
+    story starts; the player's modification request has highest priority) —
+    or random. Seeds the fog-of-war reveal, persists ``World/world_data.json``,
+    embeds the world into the save's RAG index, and writes the world keys into
+    session state. Returns the chosen start_location (for the API response).
     """
     import json as _json
     import random as _random
+
+    from wbworldgen.worldgen.facade import scenario_start_brief
 
     world_id = source_id
     world_state = world_builder.load_world(world_id)
@@ -125,13 +129,15 @@ async def create_world_story_source(*, save_id, source_id, start_preference, ses
     if start_location_node_id:
         locations = world_builder.get_start_locations(world_id)
         start_location = next((l for l in locations if l.get("node_id") == start_location_node_id), None)
-    if start_location is None and start_preference:
-        start_location = await world_builder.llm_pick_start_location(world_id, start_preference, engine.llm)
-        if start_location and start_location.get("generated"):
-            # The pick authored a brand-new start location onto the map —
-            # recompile so the save's world_data carries it.
-            world_state = world_builder.load_world(world_id)
-            compiled = world_builder.compile_world(world_state)
+    if start_location is None:
+        pick_request = (start_preference or "").strip() or (scenario_start_brief(scenario) if scenario else "")
+        if pick_request:
+            start_location = await world_builder.llm_pick_start_location(world_id, pick_request, engine.llm)
+            if start_location and start_location.get("generated"):
+                # The pick authored a brand-new start location onto the map —
+                # recompile so the save's world_data carries it.
+                world_state = world_builder.load_world(world_id)
+                compiled = world_builder.compile_world(world_state)
     if start_location is None:
         locations = world_builder.get_start_locations(world_id)
         start_location = _random.choice(locations) if locations else None

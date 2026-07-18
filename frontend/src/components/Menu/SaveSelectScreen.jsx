@@ -274,9 +274,16 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
     try {
       const isWorld = storySource?.type === 'world';
       // A pre-picked start location is sent by node id; only an unpicked
-      // preference is sent as text (the backend then picks via LLM).
-      const pickedNodeId = isWorld ? (storySource.startLocation?.node_id || null) : null;
-      const pref = isWorld && !pickedNodeId
+      // preference is sent as text (the backend then picks via LLM). When a
+      // scenario is combined with the world, the start-location UI is hidden
+      // and the backend derives the start from the scenario's opening — any
+      // lingering pick/preference from before the scenario was selected must
+      // not be sent.
+      const scenarioChosen = !!selectedScenario;
+      const pickedNodeId = isWorld && !scenarioChosen
+        ? (storySource.startLocation?.node_id || null)
+        : null;
+      const pref = isWorld && !scenarioChosen && !pickedNodeId
         ? (storySource.startPreference?.trim() || null)
         : null;
       await api.createSave(name, {
@@ -455,6 +462,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                     file={m.storyteller_start.screen}
                     selected={storySource}
                     onSelect={selectStorySource}
+                    scenarioSelected={!!selectedScenario}
                   />
                 ))}
 

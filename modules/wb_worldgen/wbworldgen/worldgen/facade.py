@@ -62,6 +62,29 @@ def scenario_grounding_text(scenario: dict) -> str:
     return "\n\n".join(parts)
 
 
+def scenario_start_brief(scenario: dict) -> str:
+    """Render a scenario record as the start-location request used when a
+    story combines a world with a scenario: the start location should be
+    wherever the scenario's opening scene takes place.
+
+    The player's pending modification request comes first and is marked
+    highest-priority — it may move the opening somewhere the scenario text
+    doesn't. Never truncated.
+    """
+    parts = []
+    request = str(scenario.get("pending_modification_request") or "").strip()
+    if request:
+        parts.append(
+            "The player's change request for this scenario — HIGHEST priority, "
+            f"it overrides the scenario text below where they conflict:\n{request}")
+    grounding = scenario_grounding_text(scenario)
+    if grounding:
+        parts.append(
+            "The story starts with this scenario — choose the location where "
+            f"its opening scene takes place (or the closest fit):\n{grounding}")
+    return "\n\n".join(parts)
+
+
 def build_world_prompt_messages(instruction: str, current_text: str = "",
                                 scenario: dict | None = None) -> list[dict]:
     """LLM messages for writing a world SEED PROMPT from the player's notes.

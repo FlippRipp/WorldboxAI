@@ -80,10 +80,13 @@ def test_create_save_with_world_and_scenario(tmp_path, monkeypatch):
     })
     monkeypatch.setattr(server, "scenario_store", store)
 
+    seen = {}
+
     async def fake_world_provider(*, save_id, source_id, start_preference,
                                   session_manager, engine,
-                                  start_location_node_id=None,
+                                  start_location_node_id=None, scenario=None,
                                   character_module_data=None, character_data=None):
+        seen["scenario"] = scenario
         state = session_manager.create_save(save_id)
         session_manager.state["world_data"] = {"id": source_id}
         return {"state": state, "start_location": None}
@@ -94,6 +97,7 @@ def test_create_save_with_world_and_scenario(tmp_path, monkeypatch):
         "save_id": "combo_save",
         "world_id": "test_world",
         "scenario_id": record["id"],
+        "scenario_request": "set it in winter",
     })
     assert resp.status_code == 200
 
@@ -101,6 +105,10 @@ def test_create_save_with_world_and_scenario(tmp_path, monkeypatch):
     assert scenario_file.exists()
     assert session_manager.state["world_data"]["id"] == "test_world"
     assert session_manager.state["scenario_data"]["starting_prompt"] == "The wagon wheel snaps at dusk."
+    # The scenario copy (with the player's change request) reaches the world
+    # provider so it can derive the start location from the scenario's opening.
+    assert seen["scenario"]["starting_prompt"] == "The wagon wheel snaps at dusk."
+    assert seen["scenario"]["pending_modification_request"] == "set it in winter"
 
 
 def test_create_save_passes_picked_start_location(tmp_path, monkeypatch):
@@ -113,7 +121,7 @@ def test_create_save_passes_picked_start_location(tmp_path, monkeypatch):
 
     async def fake_world_provider(*, save_id, source_id, start_preference,
                                   session_manager, engine,
-                                  start_location_node_id=None,
+                                  start_location_node_id=None, scenario=None,
                                   character_module_data=None, character_data=None):
         seen["start_location_node_id"] = start_location_node_id
         seen["start_preference"] = start_preference
