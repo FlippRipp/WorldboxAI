@@ -306,6 +306,10 @@ requires/produces contract is listed in the catalog below and is enforced.
 produce its content; review, read_lint and evaluate verify it. Every major \
 location must end up named and described (the lint's unnamed/undescribed \
 major findings show the gap).
+- Child maps (planet surfaces, city streets, interiors) are created ONLY \
+by expand_node on an expandable node — re-running map_generation cannot \
+add them and replaces the existing maps instead. The hierarchy's \
+pregenerate plans are your upfront work list for them.
 - Fix content findings with steered regeneration: run_pass with rework, \
 node_ids and a guidance note is your primary fix instrument. Regenerating \
 a step with a steering note is the recourse for structural problems.

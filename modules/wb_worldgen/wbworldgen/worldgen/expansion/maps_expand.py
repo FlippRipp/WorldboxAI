@@ -193,7 +193,8 @@ class MapExpansionEngine:
     async def expand(self, compiled: dict, parent_map_id: str, node: dict, *,
                      max_locations: int = 10, template_vocab: dict = None,
                      level_type: str = None, total_nodes: int = None,
-                     world_id: str = None, must_include: str = None) -> dict:
+                     world_id: str = None, must_include: str = None,
+                     user_note: str = "") -> dict:
         """Generate {"map": MapRecord, "connections": [ConnectionRecord]} for
         one anchor node. Raises on LLM failure or a violated entrance
         contract — nothing is persisted here.
@@ -204,7 +205,9 @@ class MapExpansionEngine:
         ``world_id`` enables terrain rasters for terrain-flagged levels (they
         persist under the world's terrain directory). ``must_include`` is a
         place the story already went to inside this location — the authored
-        interior is told to include it."""
+        interior is told to include it. ``user_note`` is the regeneration
+        steering channel (D1) rendered into the authoring prompt — it steers
+        both authored content and a procedural child's authored identity."""
         from wbworldgen.worldgen import mapspace as _ms
         max_locations = max(4, min(int(max_locations or 10), 16))
         parent_map = _ms.get_map(compiled, parent_map_id) or {}
@@ -239,6 +242,10 @@ class MapExpansionEngine:
             # generation call gets them in full.
             from wbworldgen.worldgen.notes import notes_matching_name
             context["child_notes"] = notes_matching_name(compiled, node.get("name", ""))
+            # The steering note rides the context dict, not the signature —
+            # _live_expand is an established test patch point (the C1
+            # guidance-channel precedent: never break existing patchers).
+            context["user_note"] = str(user_note or "")
             parsed = await self._live_expand(node, context, parent_map, levels,
                                              max_locations, template_vocab,
                                              must_include=must_list)
@@ -1170,6 +1177,8 @@ Output ONLY valid JSON:
         node_id = node.get("id", "")
         node_name = node.get("name", "Unnamed")
         node_type = node.get("type", "settlement")
+        user_note = str(context.get("user_note") or "")
+        note_block = _steering_note_block(user_note)
 
         world = context.get("world", {})
         region = context.get("region", {})
@@ -1227,7 +1236,7 @@ Region context:
 {factions_line}{neighbors_line}
 Location to expand: {node_name} ({node_type})
 Description: {node.get('description', '') or node.get('label_description', '')}
-{must_include_line}
+{must_include_line}{note_block}
 Choose the level_type for this new map from:
 {levels_block}
 {procedural_note}
@@ -1259,6 +1268,7 @@ Output ONLY valid JSON:
             world_tone=world.get('tone', ''),
             world_premise=world.get('premise', ''),
             max_locations=str(max_locations),
+            user_note=user_note,
         )
 
         messages = [

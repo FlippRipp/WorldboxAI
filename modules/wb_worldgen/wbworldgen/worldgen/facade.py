@@ -538,14 +538,16 @@ class WorldBuilder:
 
     async def expand_node(self, world_id: str, map_id: str, node_id: str,
                           force: bool = False, level_type: str = None,
-                          must_include: str = None) -> dict:
+                          must_include: str = None, user_note: str = "") -> dict:
         """Generate (or return the cached) child map for one anchor node.
 
         One full-attention LLM call, cached under the world's ``maps/``
         directory — every save of the world inherits it. Returns
         {"map": MapRecord, "connections": [ConnectionRecord]}. ``level_type``
         pins the child's level (pregenerate plans, explicit caller choice);
-        otherwise the LLM picks from the allowed levels.
+        otherwise the LLM picks from the allowed levels. ``user_note``
+        steers the authoring call — the D1 channel a ``force`` regeneration
+        needs to be more than a re-roll.
         """
         if not force:
             existing = self.get_child_map(world_id, map_id, node_id)
@@ -561,7 +563,7 @@ class WorldBuilder:
             compiled, map_id, node, max_locations=max_locations,
             template_vocab=compiled.get("template_vocab"),
             level_type=level_type, total_nodes=child_nodes, world_id=world_id,
-            must_include=must_include)
+            must_include=must_include, user_note=user_note)
         self._persistence.save_child_map(world_id, bundle)
         # Keep the cached compiled world truthful without a full invalidation
         # (a reload would also re-read maps/ via load_world).

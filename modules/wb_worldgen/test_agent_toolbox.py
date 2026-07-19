@@ -731,7 +731,8 @@ def test_read_map_include_prose(builder):
 
 def _abstract_world(builder, world_id="abstract_world"):
     """World whose designed root is authored-abstract (map_style 'abstract',
-    root level on the world_map generator)."""
+    root level on the world_map generator), with an interior level below it
+    so nodes can open into child maps."""
     return builder.save_world(world_id, {
         "seed_prompt": "a veil of worlds",
         "steps": {
@@ -741,7 +742,8 @@ def _abstract_world(builder, world_id="abstract_world"):
                             "approved": True},
             "lore": {"data": {"world_name": "The Veil"}, "approved": True},
             "hierarchy_design": {"data": {"levels": [
-                {"level_type": "world", "generator_id": "world_map"}]},
+                {"level_type": "world", "generator_id": "world_map"},
+                {"level_type": "interior", "generator_id": "interior"}]},
                 "approved": True},
         },
     })
@@ -937,3 +939,112 @@ def test_revert_restores_world_and_compiled_cache(builder):
     nodes = builder.load_world(wid)["steps"]["map_generation"]["data"]["nodes"]
     assert nodes[0]["name"] == "Town 0"
     assert builder.services.compiled.get_node(wid, "n0")["name"] == "Town 0"
+
+
+# ---------------------------------------------------------------------------
+# expand_node (v2d): child maps become reachable — the wall in both live runs
+# ---------------------------------------------------------------------------
+
+def _expanded_world(builder, world_id="expand_world"):
+    """Abstract world with a generated, named root map — the smallest world
+    where a node can open into a child. Returns (world_id, a node id)."""
+    wid = _abstract_world(builder, world_id=world_id)
+    run(invoke_tool(_ctx(builder, wid), "run_step",
+                    {"step_id": "map_generation"}))
+    detail = run(invoke_tool(_ctx(builder, wid), "read_map",
+                             {"map_id": "root"}))
+    return wid, detail["node_list"][0]["id"]
+
+
+def test_expand_node_creates_child_map(mock_builder):
+    wid, nid = _expanded_world(mock_builder)
+    ctx = _ctx(mock_builder, wid)
+    result = run(invoke_tool(ctx, "expand_node", {"node_id": nid}))
+    assert result["existed"] is False
+    assert result["nodes"] > 0 and result["named"] == result["nodes"]
+    assert result["connections"] >= 1        # anchored back to its parent
+    assert "no label pass is pending" in result["note"]
+    # The child is a real persisted map the read tools serve, and the
+    # anchor stops advertising as expandable.
+    child = run(invoke_tool(ctx, "read_map", {"map_id": result["map_id"]}))
+    assert child["anchor_node_id"] == nid
+    node_view = run(invoke_tool(ctx, "read_node", {"node_id": nid}))
+    assert node_view["expandable"] is False
+
+
+def test_expand_node_cached_and_force_regenerates(mock_builder):
+    wid, nid = _expanded_world(mock_builder)
+    ctx = _ctx(mock_builder, wid)
+    first = run(invoke_tool(ctx, "expand_node", {"node_id": nid}))
+    again = run(invoke_tool(ctx, "expand_node", {"node_id": nid}))
+    assert again["existed"] is True and again["map_id"] == first["map_id"]
+    assert "force=true" in again["note"]
+    forced = run(invoke_tool(ctx, "expand_node",
+                             {"node_id": nid, "force": True,
+                              "note": "bigger halls"}))
+    assert forced["existed"] is False and forced["map_id"] == first["map_id"]
+
+
+def test_expand_node_rejections(mock_builder):
+    wid, nid = _expanded_world(mock_builder)
+    ctx = _ctx(mock_builder, wid)
+    with pytest.raises(ToolError, match="Unknown node"):
+        run(invoke_tool(ctx, "expand_node", {"node_id": "ghost"}))
+    with pytest.raises(ToolError) as err:
+        run(invoke_tool(ctx, "expand_node",
+                        {"node_id": nid, "level_type": "galaxy"}))
+    assert "not an allowed child level" in str(err.value)
+    assert "interior" in str(err.value)      # the rejection lists what IS allowed
+    bare = _map_world(mock_builder, named=False, world_id="bare_world")
+    with pytest.raises(ToolError, match="unnamed"):
+        run(invoke_tool(_ctx(mock_builder, bare), "expand_node",
+                        {"node_id": "n0"}))
+
+
+def test_expand_node_threads_note_into_author(builder):
+    # The child author must receive the steering note — a force regeneration
+    # without it is the Ecstasy Veil unsteerable-re-roll failure again.
+    from wbworldgen.worldgen.expansion import maps_expand as me
+
+    wid = _abstract_world(builder, world_id="expand_live")
+    captured = {}
+
+    async def fake_jrc(llm, **kw):
+        label = kw.get("step_label", "")
+        captured.setdefault(label, kw["messages"])
+        if label.startswith("map:expand"):
+            return {"label": "The Keep", "level_type": "interior",
+                    "description": "d", "entrance_kind": "gate",
+                    "entrance_name": "Gate", "entrance_description": "",
+                    "locations": [
+                        {"name": "Gatehouse", "type": "gate",
+                         "description": "x", "adjacent": ["Hall"],
+                         "is_entrance": True},
+                        {"name": "Hall", "type": "hall", "description": "y",
+                         "adjacent": ["Gatehouse"]}],
+                    "connections": []}
+        return {"description": "a veil", "nodes": [
+            {"name": "Alpha", "kind": "planet", "importance": 8,
+             "description": "First.", "adjacent": ["Beta"]},
+            {"name": "Beta", "kind": "planet", "importance": 6,
+             "description": "Second.", "adjacent": ["Alpha"]}]}
+
+    original = me.json_retry_completion
+    me.json_retry_completion = fake_jrc
+    try:
+        run(invoke_tool(_ctx(builder, wid), "run_step",
+                        {"step_id": "map_generation"}))
+        detail = run(invoke_tool(_ctx(builder, wid), "read_map",
+                                 {"map_id": "root"}))
+        nid = detail["node_list"][0]["id"]
+        result = run(invoke_tool(_ctx(builder, wid), "expand_node",
+                                 {"node_id": nid,
+                                  "note": "make the gatehouse ominous"}))
+    finally:
+        me.json_retry_completion = original
+    assert result["nodes"] == 2 and result["named"] == 2
+    expand_msgs = next(v for k, v in captured.items()
+                       if k.startswith("map:expand"))
+    user_msg = expand_msgs[1]["content"]
+    assert "Steering note for THIS generation" in user_msg
+    assert "make the gatehouse ominous" in user_msg
