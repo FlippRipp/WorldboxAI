@@ -126,7 +126,7 @@ export default function WorldIdeation({ promptText, onPromptChange, scenarioId, 
       </div>
 
       {(messages.length > 0 || busy) && (
-        <div ref={listRef} className="max-h-72 overflow-y-auto space-y-2 pr-1">
+        <div ref={listRef} className="max-h-72 overflow-y-auto book-scroll space-y-2 pr-1">
           {messages.map((m, i) => (
             <div key={i} className={m.role === 'player' ? 'flex justify-end' : 'flex justify-start'}>
               <div

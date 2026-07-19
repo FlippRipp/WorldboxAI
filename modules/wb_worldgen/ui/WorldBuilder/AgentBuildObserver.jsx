@@ -165,7 +165,7 @@ function LogRow({ evt }) {
   if (evt.type === 'action') {
     const args = evt.args && Object.keys(evt.args).length ? compactJson(evt.args) : null;
     return (
-      <div className="text-sm text-gray-300 pl-3">
+      <div className="text-sm text-gray-300 pl-3 break-words">
         ▸ <span className="text-purple-300 font-medium">{evt.tool}</span>
         {args && <span className="text-gray-500 text-xs"> {args}</span>}
         {evt.args && Object.keys(evt.args).length > 0 && !args && (
@@ -173,7 +173,7 @@ function LogRow({ evt }) {
             {open ? 'hide args' : 'args…'}
           </button>
         )}
-        {open && <pre className="text-[11px] text-gray-500 bg-gray-900/60 rounded p-2 mt-1 overflow-x-auto">{JSON.stringify(evt.args, null, 2)}</pre>}
+        {open && <pre className="text-[11px] text-gray-500 bg-gray-900/60 rounded p-2 mt-1 whitespace-pre-wrap break-words">{JSON.stringify(evt.args, null, 2)}</pre>}
       </div>
     );
   }
@@ -208,7 +208,7 @@ function LogRow({ evt }) {
           </ul>
         )}
         {open && evt.result && (
-          <pre className="text-[11px] text-gray-500 bg-gray-900/60 rounded p-2 overflow-x-auto max-h-64 overflow-y-auto">{JSON.stringify(evt.result, null, 2)}</pre>
+          <pre className="text-[11px] text-gray-500 bg-gray-900/60 rounded p-2 whitespace-pre-wrap break-words">{JSON.stringify(evt.result, null, 2)}</pre>
         )}
       </div>
     );
@@ -344,7 +344,7 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
         )}
         <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-6 space-y-4">
 
-          <div className="flex items-start justify-between gap-4">
+          <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <h2 className="text-2xl font-bold text-gray-100 flex items-center gap-3">
                 {running && (
@@ -493,7 +493,7 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
 
           <div>
             <div className="text-[11px] uppercase tracking-wider text-gray-600 mb-1">Action log</div>
-            <div ref={logRef} className="bg-gray-900/50 border border-gray-800 rounded-lg p-3 max-h-96 overflow-y-auto space-y-1.5">
+            <div ref={logRef} className="bg-gray-900/50 border border-gray-800 rounded-lg p-3 max-h-96 overflow-y-auto book-scroll space-y-1.5">
               {events.length === 0 && (
                 <p className="text-xs text-gray-600">{gone ? 'No log.' : 'Waiting for the first turn…'}</p>
               )}
