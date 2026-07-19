@@ -9,8 +9,12 @@ is superseded by a tool-calling agent loop plus a conversational ideation
 phase — settled choices are recorded as D1–D5 in Arc C, the old four open
 questions are resolved or dissolved there (module capabilities survives as
 the one open question, deferred, non-blocking). C1 (toolbox registry +
-tools + lints) LANDED 2026-07-19 (e989488). Next item: C2 (agent harness +
-evaluator). Records the structural assessment of
+tools + lints) LANDED 2026-07-19 (e989488); C2 (agent harness + evaluator)
+LANDED 2026-07-19 (275d8b9); C3 (build observer UI) LANDED 2026-07-19
+(f039a87) — the recorded live run is deliberately open: Filip drives it
+through the C3 observer (a first live smoke ran 3 healthy turns before
+being stopped on request; see C2's landed note). Next item: C4 (ideation).
+Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
 agentic builder — an LLM receives a world idea and figures out what it needs
@@ -742,12 +746,60 @@ budget exhaustion, invalid-action recovery, done-gate refusal, todo
 round-trip, reattach — plus one recorded live run (Arc B's verification
 pattern).
 
+*Landed 2026-07-19 (275d8b9), with one decided refinement (settled with
+Filip at C2 start): the todo list rides each turn's completion
+(``{"thought", "todo", "action"|"done"}`` — one protocol shape, the todo
+can never drift from the action stream) instead of separate todo tools.
+``agent/harness.py`` owns the loop: per-turn system prompt = brief +
+scenario + current world rules re-read from disk (D4) + the full catalog
+render + protocol + budget status; ``agent_turn`` (smartest slot,
+``json_retry_completion``) is the mock seam the 19 canned-sequence tests
+patch. Budgets are settings (``world.agent_max_turns/_max_tool_calls/
+_fix_rounds``, defaults 40/60/3); protocol errors, ToolErrors and LLM
+failures return as next-turn observations (3 consecutive LLM failures
+abort). The done-gate additionally refuses structurally empty builds (no
+world_rules / no named nodes — an empty world lints clean, so the gate
+itself must check); blocking findings must be fixed, accepted by key with
+a recorded note, or auto-accepted after the fix-round budget.
+``agent/evaluator.py``: lints + one smartest-slot critique (rules as
+rubric, structural excerpts), stable finding keys
+(``source:kind:map:node``), lint-only degradation offline — which is what
+makes the gate testable without tokens; registered as the ``evaluate``
+tool, whose tool-run results feed the same fix-round tracking. Events:
+persisted ``agent_build.json`` artifact (indexed log, the SSE replay
+cursor) + transient enrichment progress threaded through new
+``ToolContext.on_event``; routes ``POST agent/build``, ``GET
+agent/status``, ``POST agent/events`` (replay+live, race-safe dedupe,
+artifact-served after restart), ``POST agent/cancel``. Launch affordance
+lives beside skip-review in the wizard prompt box. Facade/persistence
+additions: ``world_dir()``, snapshot ``last_event``; adopting an existing
+world into a build forces ``complete=False`` (else draft_complete makes
+the draft read finished). The recorded live run: a first smoke on
+OpenRouter deepseek ran 3 healthy turns (11-item todo in pipeline order,
+world_form → world_rules → lore, zero protocol/tool errors, cancel
+honored at the turn boundary) before Filip stopped it; the full recorded
+run is his C3-observer live test.*
+
 ### C3. Build observer UI — size M
 
 The watching surface: live todo list, current action, streamed action
 log, evaluator findings, cancel, reattach-on-relaunch. Builds on the
 B1.5/EnrichmentPanel event patterns. Verify in real Chrome (project
 memory: the Preview pane is unreliable for this UI).
+
+*Landed 2026-07-19 (f039a87): ``ui/WorldBuilder/AgentBuildObserver.jsx``
+over ``api.agentBuildEvents`` (SSE-over-POST, same framing as enrichRun
+but every event is delivered — terminal included — and a dropped stream
+returns null so the observer resumes from last-seen ``i``+1). Todo panel
+from the latest turn event, current-action strip with the transient
+enrichment progress line, action log with one-line result summaries +
+expandable raw JSON, findings rendered inline (severity, kind,
+suggestion) from evaluate results and done-gate rejections, terminal
+banners incl. accepted/auto-accepted findings, cancel, reconnect-on-drop
+and artifact replay for finished builds. Browser verification is Filip's
+live test (which doubles as C2's recorded live run); note his
+long-running dev backend must RESTART to pick up the C2 python routes —
+module JSX reloads from disk, the harness does not.*
 
 ### C4. Ideation — conversational world definition — size L
 
@@ -805,9 +857,9 @@ file, before the 2026-07-19 Arc C rewrite).
 | 7 | B2 catalog | S | ✓ landed (22954e9) | agentic substrate |
 | 8 | B3 dependencies (+ order-pin test first) | M | ✓ landed (0b0cab0) | plan validation |
 | 9 | C1 toolbox registry + tools + lints | M–L | ✓ landed (e989488) | the agent's action surface |
-| 10 | C2 agent harness + evaluator | L | next | agentic mode v1 |
-| 11 | C3 build observer UI | M | after C2 | watching the build |
-| 12 | C4 ideation conversation | L | after C3 (swappable) | the front door |
+| 10 | C2 agent harness + evaluator | L | ✓ landed (275d8b9) | agentic mode v1 |
+| 11 | C3 build observer UI | M | ✓ landed (f039a87); live test = Filip's | watching the build |
+| 12 | C4 ideation conversation | L | next | the front door |
 
 (A5 landed before B1 — the reverse of the original ordering; nothing
 depended on the order.) RuntimeHost (`backend.py` half of A1) can ride along
