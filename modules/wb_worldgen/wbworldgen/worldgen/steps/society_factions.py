@@ -9,9 +9,9 @@ class SocietyFactionsStep(Step):
                    "of this world, and the places they hold.")
     after = "natural_landmarks"
     guidance = (
-        "Set region to the name of the region or district (from Terrain & "
-        "Regions) where the group is based, so its places land in the right "
-        "part of the map. A group's significant landmarks are placed NEAR its "
+        "Set region to the name of one of the areas the Notable Features step "
+        "authored (copy it EXACTLY) where the group is based, so its places "
+        "land in the right part of the map. A group's significant landmarks are placed NEAR its "
         "first settlement — list only places that stand on the map in their "
         "own right. A room or space INSIDE another place (an office inside a "
         "school, a shrine room inside a temple) belongs in the Notable "

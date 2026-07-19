@@ -157,7 +157,6 @@ async def _run_one_shot_generation(state: dict, session_id: str):
     state.setdefault("steps", {})
     enrichment_steps = {"node_labeling", "node_descriptions"}
     terrain_task = None
-    done_steps: set = set()
     state["_generating"] = "all"
     try:
         # Iterate the full registry and re-check the effective list per
@@ -166,7 +165,7 @@ async def _run_one_shot_generation(state: dict, session_id: str):
         for step_id in list(world_builder._ordered_ids):
             if step_id not in _ordered_ids_for(state):
                 continue
-            if step_id in enrichment_steps or step_id in done_steps:
+            if step_id in enrichment_steps:
                 continue
             if step_id == "terrain_generation" and terrain_task is not None:
                 data = await terrain_task
@@ -174,19 +173,13 @@ async def _run_one_shot_generation(state: dict, session_id: str):
             elif state.get("steps", {}).get(step_id, {}).get("data"):
                 # Generated before an interruption — keep it.
                 continue
-            elif (step_id == "natural_landmarks"
-                    and "society_factions" in _ordered_ids_for(state)
-                    and not state["steps"].get("society_factions", {}).get("data")):
-                # Independent full-attention calls (both depend only on
-                # terrain_regions) — run them concurrently in one-shot mode.
-                landmarks_data, factions_data = await asyncio.gather(
-                    world_builder.generate_step(step_id, state, seed_prompt),
-                    world_builder.generate_step("society_factions", state, seed_prompt),
-                )
-                state["steps"]["society_factions"] = {"data": factions_data, "approved": True}
-                done_steps.add("society_factions")
-                data = landmarks_data
             else:
+                # Strictly sequential: society_factions runs AFTER
+                # natural_landmarks (its ``region`` field must reference the
+                # areas that step authors). A former optimization ran the two
+                # concurrently, so the factions call invented region names
+                # that matched nothing and every faction place landed on a
+                # random node — see docs/design/worldgen_quality_fixes.md.
                 data = await world_builder.generate_step(step_id, state, seed_prompt)
             state["steps"][step_id] = {"data": data, "approved": True}
             _auto_save_draft(session_id)

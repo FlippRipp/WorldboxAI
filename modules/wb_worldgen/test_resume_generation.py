@@ -66,6 +66,38 @@ def test_one_shot_auto_saves_draft_after_every_step(fake_builder):
     assert all(not s["complete"] for s in fake_builder.draft_saves[:-1])
 
 
+def test_one_shot_society_factions_sees_natural_landmarks_data():
+    # society_factions' region field must reference the areas natural_landmarks
+    # authors, so one-shot mode must run them strictly in order — a former
+    # optimization gathered them concurrently and every faction region name
+    # missed the join.
+    class OrderCheckingBuilder(FakeBuilder):
+        def __init__(self):
+            super().__init__(ordered_ids=("natural_landmarks", "society_factions"))
+            self.landmarks_data_at_factions_call = None
+
+        async def generate_step(self, step_id, state, prompt, user_note="", config=None):
+            if step_id == "society_factions":
+                self.landmarks_data_at_factions_call = bool(
+                    state.get("steps", {}).get("natural_landmarks", {}).get("data"))
+            return await super().generate_step(step_id, state, prompt, user_note, config)
+
+    fake = OrderCheckingBuilder()
+    old = world_routes.world_builder
+    world_routes.world_builder = fake
+    try:
+        asyncio.run(world_routes.generate_world(
+            world_routes.WorldGenerateRequest(seed_prompt="p", skip_review=True),
+            session_id="resume_test_order"))
+    finally:
+        world_routes.world_builder = old
+        world_routes.world_gen_sessions.pop("resume_test_order", None)
+        world_routes.world_draft_ids.pop("resume_test_order", None)
+
+    assert fake.generated == ["natural_landmarks", "society_factions"]
+    assert fake.landmarks_data_at_factions_call is True
+
+
 def test_continue_resumes_without_redoing_finished_steps(fake_builder):
     world_routes.world_gen_sessions["resume_test_cont"] = {
         "seed_prompt": "p",
