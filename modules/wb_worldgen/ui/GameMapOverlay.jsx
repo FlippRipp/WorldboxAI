@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { api } from 'api';
 import MapRenderer from './WorldBuilder/MapRenderer';
 import { normalizeWorldData, breadcrumb } from './lib/mapspace';
@@ -120,6 +120,20 @@ export default function GameMapOverlay({ state = {} }) {
     setFocusNodeId(nodeId);
     setTimeout(() => setFocusNodeId(null), 4000);
   };
+
+  // Follow the player across maps: a server-driven move to another map —
+  // story travel crossing a boundary, /teleport, an undo rolling the player
+  // back outside — switches the displayed map to where the player now is.
+  // Keyed on the CHANGE of playerMapId (not its value), so manually browsing
+  // other maps is never overridden while the player stays put.
+  const followedMapRef = useRef(playerMapId);
+  useEffect(() => {
+    if (!playerMapId || !mapsById[playerMapId]) return;
+    if (followedMapRef.current === playerMapId) return;
+    followedMapRef.current = playerMapId;
+    setActiveMapId(playerMapId);
+    if (playerNodeId) focusOn(playerNodeId);
+  }, [playerMapId, mapsById, playerNodeId]);
 
   const handleMapChange = (targetMapId, nodeId) => {
     setActiveMapId(targetMapId);
