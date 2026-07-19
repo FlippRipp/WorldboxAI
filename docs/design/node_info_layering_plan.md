@@ -1,6 +1,10 @@
 # Node Information Layering — Surface vs Storyteller Details
 
-*Status: DESIGNED 2026-07-19 with Filip; not yet implemented. Records the
+*Status: DESIGNED 2026-07-19 with Filip; all three slices LANDED the same
+day (slice 1 model+writers 87c9608, slice 2 context flow 505bbda, slice 3
+hidden connections cca663a — refinements recorded per slice below).
+Outstanding: the Arc-B-style live verification (folds into Filip's
+outstanding agent-mode live test). Records the
 decisions from the conversation so implementation starts from decisions,
 not re-derivation. Companion docs:
 `docs/design/worldgen_agentic_architecture_plan.md` (the pass registry,
@@ -183,6 +187,34 @@ Suite green module-by-path + root; `git checkout -- test_data` after.
    inclusion, agent read tools (N5). Size S.
 3. **Hidden connections** — generation schema + prompt, surgery
    argument, `include_hidden` audit (N6). Size S.
+
+*Landed 2026-07-19 (87c9608, 505bbda, cca663a), with recorded
+refinements against the sketch. Slice 1: ``generate_description``
+returns a ``(description, additional_details)`` tuple (the
+``generate_label`` precedent) with ``existing_details`` as a kwarg;
+the N4 runtime split became two predicates —
+``node_missing_essentials`` (arrival-blocking) vs ``node_needs_detail``
+(trickle) — so old worlds enrich in the background but never stall a
+turn; the interior generator's field whitelist would have silently
+dropped the channel (fixed — the one writer the checklist missed);
+the JSON-failure fallback yields description-only, leaving the node
+pending on purpose (self-healing); ``add_node`` (surgery) gained the
+field too — write parity, not just ``edit_node``; the authored root
+and abstract-layer calls were covered as additional authoring
+surfaces. Slice 2: the details render as one ``<storyteller_notes>``
+block (node + site-level + current-sub entries behind a single
+discipline header); the RAG question left open by N5 was decided
+INCLUDE — all four lockstep entry builders (core index incl. legacy
+branches, sync backfill, child maps, sites) append
+`` Storyteller notes: ...`` so retrieval carries the marked depth.
+Slice 3: the audited pre-leak was ``custom_transition_target``
+offering a hidden way's far node ("beyond a known way") — now
+visible-only; the player's map overlay filters hidden connections
+(``discover_passage`` flips the flag in the session copy, so found
+ways surface on their own); a hidden extra connection never counts as
+the child map's anchor (the visible entrance is always inserted);
+``connection_between``'s duplicate check was verified already
+hidden-aware.*
 
 ## v2 candidates (recorded, unscheduled)
 
