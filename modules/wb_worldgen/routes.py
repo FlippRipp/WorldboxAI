@@ -932,7 +932,7 @@ async def expand_site_in_session(request: SessionExpandSiteRequest):
         except Exception:
             logger.exception("failed to persist world_data after map expansion")
     if engine is not None and engine.memory is not None and engine.memory.has_world_index():
-        from wbworldgen.worldgen.enrichment.maps_expand import map_world_entries
+        from wbworldgen.worldgen.expansion.maps_expand import map_world_entries
         entries = map_world_entries(record, bundle.get("connections"),
                                     maps_by_id=(wd or {}).get("maps") or {})
         if entries:

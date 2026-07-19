@@ -261,7 +261,7 @@ def test_site_entry_formats_stay_in_lockstep(tmp_path):
     from pathlib import Path
     sys.path.insert(0, str(Path("modules/wb_worldgen").resolve()))
     try:
-        from wbworldgen.worldgen.enrichment.sites import site_world_entries
+        from wbworldgen.worldgen.expansion.sites import site_world_entries
     finally:
         sys.path.pop(0)
 

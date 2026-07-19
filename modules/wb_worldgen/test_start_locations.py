@@ -572,7 +572,7 @@ def test_descent_expands_missing_interior_with_must_include(builder, monkeypatch
     # The scene names a spot inside a building with no interior map: the
     # interior is expanded on the spot, required to contain that spot, and
     # the descent continues into it.
-    from wbworldgen.worldgen.enrichment import maps_expand
+    from wbworldgen.worldgen.expansion import maps_expand
 
     wid = _start_world(builder)
     llm = ScriptedLLM([
@@ -611,7 +611,7 @@ def test_authored_start_descends_into_its_scene_part(builder, monkeypatch):
     # Nothing matches, so a brand-new place is authored — and the scene opens
     # in a specific part of it: its interior is expanded and the start lands
     # on that part, several loop moves chained together.
-    from wbworldgen.worldgen.enrichment import maps_expand
+    from wbworldgen.worldgen.expansion import maps_expand
 
     wid = _start_world(builder)
     llm = ScriptedLLM([

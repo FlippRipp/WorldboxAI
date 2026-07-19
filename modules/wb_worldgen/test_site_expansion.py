@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from wbworldgen.worldgen import WorldBuilder
-from wbworldgen.worldgen.enrichment.maps_expand import (
+from wbworldgen.worldgen.expansion.maps_expand import (
     child_map_id,
     is_expandable,
     map_world_entries,

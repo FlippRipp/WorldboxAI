@@ -18,9 +18,10 @@ from wbworldgen.worldgen import pipeline as _pipeline
 from wbworldgen.worldgen import start_locations as _start
 from wbworldgen.worldgen.compiled_cache import CompiledWorldCache
 from wbworldgen.worldgen.generation.llm import DEFAULT_SYSTEM_FRAMING
-from wbworldgen.worldgen.enrichment import EnrichmentEngine, SiteExpansionEngine, collect_nodes_by_layer
-from wbworldgen.worldgen.enrichment import maps_expand as _maps_expand
-from wbworldgen.worldgen.enrichment import sites as _sites_mod
+from wbworldgen.worldgen.enrichment import EnrichmentEngine, collect_nodes_by_layer
+from wbworldgen.worldgen.expansion import SiteExpansionEngine
+from wbworldgen.worldgen.expansion import maps_expand as _maps_expand
+from wbworldgen.worldgen.expansion import sites as _sites_mod
 from wbworldgen.worldgen.generation import LLMStepGenerator, MapStepGenerator, MockStepGenerator
 from wbworldgen.worldgen.hooks import HookRegistry
 from wbworldgen.worldgen.persistence import WorldPersistence

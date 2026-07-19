@@ -616,7 +616,7 @@ class MemoryManager:
                     })
         # Lazily-expanded site interiors (districts/venues inside major
         # locations). Format must stay in lockstep with
-        # wbworldgen.worldgen.enrichment.sites.site_world_entries, which emits
+        # wbworldgen.worldgen.expansion.sites.site_world_entries, which emits
         # the same entries incrementally when a site is expanded mid-play.
         for parent_id, site in (world_data.get("site_maps") or {}).items():
             parent_name = site.get("name", "")

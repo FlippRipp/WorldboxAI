@@ -18,7 +18,7 @@ import tempfile
 import pytest
 
 from wbworldgen.worldgen import WorldBuilder, register_default_steps
-from wbworldgen.worldgen.enrichment.maps_expand import (
+from wbworldgen.worldgen.expansion.maps_expand import (
     allowed_child_levels,
     child_map_id,
     is_expandable,

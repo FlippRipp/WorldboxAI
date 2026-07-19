@@ -173,7 +173,7 @@ def build_location_mutation_schema(world_data: dict, state: dict = None) -> dict
         node = node_index(world_data).get(current_node_id)
         expandable = False
         if node is not None:
-            from wbworldgen.worldgen.enrichment.maps_expand import is_expandable as _is_exp
+            from wbworldgen.worldgen.expansion.maps_expand import is_expandable as _is_exp
             expandable = _is_exp(world_data, player_map_id(state), node)
         if expandable:
             passage_options.append(

@@ -139,7 +139,7 @@ def sync_child_map(host, world_id: str, bundle: dict):
 
 async def embed_child_map(host, world_id: str, bundle: dict):
     """Add a freshly expanded child map's entries to the save's RAG index."""
-    from wbworldgen.worldgen.enrichment.maps_expand import map_world_entries
+    from wbworldgen.worldgen.expansion.maps_expand import map_world_entries
     sm = host._services.get("session_manager") if host._services else None
     engine = host._services.get("engine") if host._services else None
     if sm is None or engine is None or sm.state.get("world_id") != world_id:

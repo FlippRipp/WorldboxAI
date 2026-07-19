@@ -85,7 +85,7 @@ A compiled world dict (`world_data`) carries:
 | Migration (legacy map/map_layers/sites → v2) | `wbworldgen/worldgen/migrate.py` |
 | Generator registry | `wbworldgen/worldgen/generation/registry.py` |
 | Interior layout (deterministic) | `wbworldgen/worldgen/generation/interior_layout.py` |
-| Child-map expansion (one LLM call) | `wbworldgen/worldgen/enrichment/maps_expand.py` |
+| Child-map expansion (one LLM call) | `wbworldgen/worldgen/expansion/maps_expand.py` |
 | Movement/passages/transits/improvised ways | `wbruntime/travel.py` |
 | Mutation schema (Reader-facing fields) | `wbruntime/schema.py` |
 | Location/intro context + primer | `wbruntime/context.py` |

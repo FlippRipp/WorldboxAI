@@ -17,7 +17,7 @@ import tempfile
 import pytest
 
 from wbworldgen.worldgen import WorldBuilder, register_default_steps
-from wbworldgen.worldgen.enrichment.maps_expand import allowed_child_levels
+from wbworldgen.worldgen.expansion.maps_expand import allowed_child_levels
 from wbworldgen.worldgen.migrate import DEFAULT_LEVELS
 from wbworldgen.worldgen.design import designed_levels, root_generator_for
 from wbworldgen.worldgen.steps.hierarchy_design import normalize_hierarchy_design
