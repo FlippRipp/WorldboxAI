@@ -17,7 +17,9 @@ being stopped on request; see C2's landed note). C4 (ideation) LANDED
 2026-07-19 (b73c275) — Arc C code-complete; with it, the CLASSIC ENTRY IS
 DISABLED (decided with Filip at C4 start; see C4's landed note) — agent
 mode is the one way to build a new world, "for now". Outstanding: Filip's
-live test (build + conversation check).
+live test (build + conversation check). v2a (structural surgery toolset)
+DESIGNED 2026-07-19 and begun on Filip's go, ahead of the original
+evidence gate — see the v2a section in Arc C.
 Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
@@ -856,14 +858,100 @@ still pending).*
 
 ### v2 extensions (recorded, deliberately unscheduled)
 
-- Structural surgery tools (add/remove nodes, connection rewiring,
-  terrain edits) with deliberately designed invariant validation.
+- Structural surgery tools — node/edge/connection surgery DESIGNED
+  2026-07-19 and scheduled as v2a (see below); terrain edits split off
+  as v2b, double-gated (live evidence + Filip's intended holistic
+  terrain-system review, review first).
 - A tool-looping evaluator (read tools, multi-step critique).
 - Backend-restart resume (re-derive agent context from todo + world
   state).
 - Play-time policy in the brief (old question 3's other half).
 - Module-contributed tools (old question 4) — after the module-contract
   discussion.
+
+### v2a — Structural surgery toolset (designed 2026-07-19)
+
+*Design settled with Filip in conversation while C4 was in flight,
+recorded so implementation starts from decisions, not re-derivation.
+Originally gated on live-test evidence (D1: "if evaluation shows a
+recurring wall"); Filip chose 2026-07-19, C4 having landed, to build it
+directly — the still-outstanding live test then exercises the full v2a
+toolbox too.*
+
+**Two code findings shaped it.** (1) Addition already has a trusted
+path: `persistence.append_map_node` (play-time location authoring)
+handles both storage homes (child-map bundle vs `map_generation` step
+data), enrichment write-cache coherence, and partner-region membership;
+`_found_new_node` supplies anchor-relative placement. What v1 truly
+lacks is remove, rewire, and any connection write surface — connections
+live in two homes (root/parallel in step data, child maps in their
+bundles, merged at compile). (2) The lints already detect surgery's
+entire failure surface (dangling edge/connection, orphan, disconnected
+map, unreachable map, broken link token), which is what makes S1's
+two-tier validation sufficient.
+
+**Decisions:**
+
+- **S1 — Refuse hard, warn soft (P7 applied to surgery).** A mutation
+  that would leave a dangling *reference* — removing a node a child map
+  anchors on or a connection endpoint names, adding an edge to a
+  nonexistent node — is rejected pre-execution with the blockers listed;
+  the agent resolves them stepwise. Soft topology and content quality
+  (map splits, inbound `${link_...}` tokens going stale, orphaning) are
+  allowed, surfaced in the tool result, and owned by lints + the
+  done-gate — mid-restructure worlds are transiently messy by design.
+  Never silently repaired.
+- **S2 — No session gate.** By design, sessions copy the world into the
+  session save — a session never plays the template world directly — so
+  surgery on a world cannot reach an existing session's state.
+  `remove_node` therefore carries no session check.
+- **S3 — A shared surgery surface; tools wrap it.** Validated mutations
+  live in `worldgen/surgery.py` — add_node / remove_node / add_edge /
+  remove_edge / add_connection / remove_connection — each validating,
+  writing through persistence, invalidating the compiled cache, and
+  returning a report (blockers refused, warnings surfaced). Agent tools
+  in `agent/tools/structure.py` wrap these 1:1 (P5), keeping D1's
+  agent-write-surface = user-write-surface property in the forward
+  direction: a future human map editor gets identical invariants for
+  free.
+- **S4 — Unnamed adds are legal.** `add_node` may create unnamed nodes
+  (enrichment fills them; the majors-floor lints keep them visible).
+  Placement is always anchor-relative — the `_found_new_node` route-leg
+  computation promoted to a shared home — and the tool never accepts raw
+  coordinates, keeping bounds/terrain validity out of the agent's hands.
+- **S5 — Terrain edits are v2b, double-gated.** Targeted terrain edits
+  are the one genuinely new machinery (masked pipeline re-runs) and the
+  heaviest invariant carrier (nodes are placed on the current raster; no
+  lint detects a stranded settlement). Whole-map regeneration already
+  exists via `run_step`. v2b waits for (a) live evidence of demand and
+  (b) the holistic terrain-system review Filip intends — the review
+  comes first.
+
+**Tool sketch** (all `mutates: true`, under the existing D5 budgets — no
+new budget classes):
+
+- `add_node(map_id*, near_node_id*, name?, type?, importance?,
+  label_description?, description?, edges_to?=[anchor],
+  region?=partner's)` — name uniqueness via `join_key` as in
+  `edit_node`; writes through `append_map_node`.
+- `remove_node(node_id*)` — refuses on child-map anchors and connection
+  endpoints (S1); cascades its edges and region membership (center-node
+  reassignment included); reports nodes whose descriptions link to it
+  and lost `contained_locations` bindings; warns on map split. Needs the
+  new persistence mirror of `append_map_node`'s dual dispatch.
+- `add_edge` / `remove_edge` — same-map endpoints, no duplicate edges;
+  removal warns on orphan/disconnect. Accepted limitation: new edges get
+  no road polyline (roads are generation-time artifacts;
+  `append_map_node` edges already behave this way).
+- `add_connection` / `remove_connection` — minimal surface (from/to
+  endpoints, kind, name, description, bidirectional; defaults for
+  travel/requirements/hidden). Storage ownership mirrors expansion: a
+  connection touching a child map lives in that child's bundle,
+  root↔root lives in step data. Removal warns when it leaves a map
+  unreachable.
+- `edit_node` grows `type` / `importance` — the existing
+  `save_node_enrichment` path (`_persist_generated_start` already writes
+  both fields through it).
 
 ### Superseded: the plan-artifact design (refined and replaced 2026-07-19)
 
