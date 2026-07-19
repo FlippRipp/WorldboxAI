@@ -2,9 +2,10 @@
 
 *Status: Arcs A and B COMPLETE (A1–A5, B1, B1.5, B2, B3 — all landed
 2026-07-19; RuntimeHost still pending, rides along with the next backend.py
-change). Arc C refined into C1a/C1b; its four open questions are
-deliberately STILL OPEN — settle them with Filip before C1a starts. Next:
-that discussion. Records the structural assessment of
+change), and Arc B verified end-to-end on live LLMs the same day (see "Live
+verification of Arc B" — three follow-up discussion items surfaced). Arc C
+refined into C1a/C1b; its four open questions are deliberately STILL OPEN —
+settle them with Filip before C1a starts. Next: that discussion. Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
 agentic builder — an LLM receives a world idea and figures out what it needs
@@ -466,6 +467,64 @@ only (landmarks does not require terrain); `map_generation` requires
 `hierarchy` per the example here — its procedural fallback serves
 old-world replay, which never enters the checker. The catalog markdown
 now annotates requires/produces for the planner.*
+
+### Live verification of Arc B (2026-07-19)
+
+One full end-to-end run on live LLMs (OpenRouter; `deepseek-v4-pro` as
+reader/storyteller, `deepseek-v4-flash` as the fast slot), driven through
+the real surfaces: one-shot pipeline via the API, enrichment through the
+EnrichmentPanel in real Chrome, standalone review via its panel Run
+affordance. World: **The Shattered Sea** (`the_shattered_sea`, kept in
+`data/worlds` as the reference specimen) — the model chose `terrain`
+style, skipped nothing, and designed two 50-node maps (surface archipelago
++ "The Drowned Deeps" parallel realm); 100 nodes, 60 majors, 22 pre-named
+by authored-location binding. Pipeline 398s; enrichment ~3.5 min.
+
+**Verified live:**
+
+- Registry-driven scheduling honors the importance floor: exactly the 60
+  majors labeled + described (the other 40 left to lazy play-time detail);
+  ~54 enrichment LLM calls with zero transient retries, zero rate-limit
+  backoffs, zero failed nodes.
+- Batched labeling: ~38 missing names in a handful of batched fast-slot
+  calls (~2 min); **zero duplicate names across both maps** — used-name
+  threading and batch dedup hold up against a real model.
+- SSE + panel: the phase event flips rows to scoped totals (22/60 →
+  60/60), per-map bars track both maps live (root 35/35, deeps 25/25),
+  the map renames in real time from node events, and REVIEW rows render
+  fixes with old name + reviewer objection.
+- Descriptions: 48 of 60 carry resolved `${link_id|Name (direction)}`
+  references, zero bare link tokens, clean UTF-8 on disk.
+- Review as a standalone map pass: flagged a real implied-containment pair
+  the label batch had invented on the Deeps ("Siren's Bell" /
+  "Siren's Bell-Tower", non-adjacent), relabeled both with the objection
+  as steering ("God-Fall Scar", "Spire of Salt and Bone") and reworked
+  both descriptions to match; all persisted.
+
+**Follow-ups surfaced (discussion items, deliberately not scheduled):**
+
+1. **One-shot worlds have no enrichment-panel host.** `skip_review` marks
+   a world complete without enrichment step entries, and both the wizard's
+   complete-state and `WorldReviewScreen` render enrichment UI only for
+   steps with data — so a one-shot world offers no upfront-enrichment
+   affordance after saving (it details lazily during play). Pre-existing,
+   not an Arc B regression; the live run bridged it by writing a
+   `node_labeling` entry via the save-step API. Options: always render the
+   enrichment step on the review screen, or have one-shot completion
+   commit empty enrichment entries the way `seed_world` does.
+2. **The review trigger never fires in the default lazy-detail flow.**
+   `on_map_complete` requires *every* node on a map named, and
+   floor-limited runs never complete a map — so automatic review only
+   happens with `world.upfront_detail = full` (or when play-time backfill
+   happens to finish a map). Faithful to the pre-B1 code, but it means the
+   interleaved review is effectively dormant in the default configuration;
+   worth deciding whether the trigger should also fire on
+   "floor-scope complete", or whether standalone review after the upfront
+   run should be part of the default flow.
+3. **Review repairs vs the run's node copies** (already recorded in B1's
+   landed note): repairs update compiled nodes but not the run's
+   `all_nodes` copies, so a `phase="all"` run can describe a relabeled
+   node under its pre-review name.
 
 ---
 
