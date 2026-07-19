@@ -121,6 +121,18 @@ def _artifact_path(builder, world_id: str):
     return builder.services.enrichment_store.world_dir(world_id) / ARTIFACT_FILENAME
 
 
+def has_build_artifact(builder, world_id: str) -> bool:
+    """True when a persisted agent-build artifact exists for the world. The
+    world list uses this to route an in-progress world's recovery: reattach
+    to the recorded build's observer, or offer a fresh adopt run when no
+    build ever touched it. Best-effort like the artifact reads — a builder
+    without a store (test fakes) simply has no artifacts."""
+    try:
+        return _artifact_path(builder, world_id).is_file()
+    except Exception:
+        return False
+
+
 def load_build_artifact(builder, world_id: str) -> dict | None:
     """The persisted build artifact (todo + action log + outcome), or None.
     Serves observers when no live build is registered (finished builds

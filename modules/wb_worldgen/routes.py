@@ -798,7 +798,15 @@ async def discard_world(session_id: str = "default"):
 
 @router.get("/api/world/list")
 async def list_worlds():
-    return {"worlds": world_builder.list_worlds()}
+    from wbworldgen.worldgen.agent import harness as agent_harness
+    worlds = world_builder.list_worlds()
+    for w in worlds:
+        # Routes an in-progress world's recovery affordance: reattach to its
+        # build's observer when an artifact exists, offer a fresh adopt run
+        # ("Finish with AI") when none does (e.g. a pre-agent-era draft).
+        w["has_agent_build"] = agent_harness.has_build_artifact(
+            world_builder, w["id"])
+    return {"worlds": worlds}
 
 @router.get("/api/world/load/{world_id}")
 async def load_world(world_id: str, session_id: str = "default"):
@@ -823,6 +831,85 @@ async def resume_world(request: ResumeRequest, session_id: str = "default"):
         return _state_response(state)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+@router.get("/api/world/{world_id}/compiled")
+async def get_compiled_world(world_id: str):
+    """The compiled (game-ready) view of a saved world: every step's output
+    plus post-generation child-map bundles and surgery connections merged —
+    the same world a session would load. This is the world explorer's read
+    surface; raw step files stay reachable via /api/world/load for editing.
+
+    Compiled fresh from disk per call rather than through the size-1
+    CompiledWorldCache: a browse must never evict the actively-enriched
+    world's cache entry, and the cache's terrain-raster attach would
+    decompress tens of MB only for this route to strip them again.
+    """
+    from wbworldgen.worldgen.compiler import compile_world
+    try:
+        state = world_builder.load_world(world_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    compiled = compile_world(state, world_builder.steps_by_id())
+    return {"compiled": {k: v for k, v in compiled.items()
+                         if not str(k).startswith("_")}}
+
+
+class RegenerateStepRequest(BaseModel):
+    #: Steering note threaded into the step's prompt (same channel as the
+    #: wizard-era guidance notes and the agent's run_step steering).
+    note: str = ""
+    #: Optional config override for the step's schema fields.
+    data: Optional[dict] = None
+
+
+#: Steps the world-scoped regenerate refuses: map/terrain regeneration on a
+#: saved world is structural surgery through a side door (child-map anchors
+#: and enrichment would silently desync — agent territory, per D1), and the
+#: enrichment steps are engine-driven (the enrichment panel runs them).
+_UNREGENERATABLE_STEPS = {"map_generation", "terrain_generation",
+                          "node_labeling", "node_descriptions"}
+
+
+@router.post("/api/world/{world_id}/regenerate-step/{step_id}")
+async def regenerate_saved_world_step(world_id: str, step_id: str,
+                                      request: RegenerateStepRequest = None):
+    """Regenerate one step of a saved world in place: load the world's state
+    from disk, run the step with the full chain context (and the brief, for
+    world_rules' agreed-rules enforcement), persist just that step back, and
+    invalidate the compiled cache. World-scoped on purpose — the session
+    draft machinery is not involved, so no phantom draft copies appear and
+    the world's completion status is untouched."""
+    steps = world_builder.steps_by_id()
+    if step_id not in steps:
+        raise HTTPException(status_code=404, detail=f"Unknown step: {step_id}")
+    if step_id in _UNREGENERATABLE_STEPS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Step '{step_id}' cannot be regenerated on a saved world — "
+                   "map and terrain structure changes go through an agent build, "
+                   "and enrichment runs through the enrichment panel.")
+    try:
+        state = world_builder.load_world(world_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    # Any artifact-writing side effects resolve their target directory from
+    # the state's draft id — pin it so nothing lands in a fresh directory.
+    state["_draft_id"] = world_id
+    note = (request.note if request else "") or ""
+    config = request.data if request else None
+    data = await world_builder.generate_step(
+        step_id, state,
+        state.get("seed_prompt", ""),
+        user_note=note,
+        config=config,
+    )
+    prev = state.get("steps", {}).get(step_id) or {}
+    entry = {**prev, "data": data}
+    if note:
+        entry["note"] = note
+    world_builder.save_step(world_id, step_id, entry)
+    return {"step": step_id, "data": data}
+
 
 @router.delete("/api/world/{world_id}")
 async def delete_world(world_id: str):
@@ -1088,6 +1175,11 @@ class AgentBuildRequest(BaseModel):
     #: "subject"}] — world-scoped facts and per-subject notes the build is
     #: verified against.
     notes: list[dict] = []
+    #: Adopt an existing world instead of drafting a fresh one: the build
+    #: keeps the world's current content (and, when rules/notes are empty,
+    #: its recorded brief) and works from there — the recovery path for
+    #: interrupted or pre-agent-era in-progress worlds.
+    world_id: Optional[str] = None
     scenario_id: Optional[str] = None
     scenario: str = ""
 
@@ -1104,12 +1196,17 @@ async def agent_build_start(request: AgentBuildRequest):
         raise HTTPException(status_code=400, detail="seed_prompt is required")
     scenario_state: dict = {}
     _apply_scenario(scenario_state, request.scenario_id, request.scenario)
-    handle = agent_harness.start_agent_build(
-        world_builder, request.seed_prompt.strip(),
-        rules=request.rules,
-        notes=request.notes,
-        scenario=scenario_state.get("scenario", ""),
-        scenario_id=scenario_state.get("scenario_id"))
+    try:
+        handle = agent_harness.start_agent_build(
+            world_builder, request.seed_prompt.strip(),
+            rules=request.rules,
+            notes=request.notes,
+            world_id=request.world_id,
+            scenario=scenario_state.get("scenario", ""),
+            scenario_id=scenario_state.get("scenario_id"))
+    except ValueError as exc:
+        status = 409 if "already running" in str(exc) else 400
+        raise HTTPException(status_code=status, detail=str(exc))
     return {"world_id": handle.world_id, "status": handle.status}
 
 

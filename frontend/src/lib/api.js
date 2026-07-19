@@ -193,7 +193,11 @@ export const api = {
   // whole world on its own, from the ideation brief (seed prompt + the
   // co-authored world rules). Launch returns the new world id immediately;
   // poll status (or stream the events endpoint) to watch, cancel any time.
-  agentBuild:             (seedPrompt, scenarioId = null, rules = [], notes = []) => request('/api/world/agent/build', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, rules, notes, ...(scenarioId ? { scenario_id: scenarioId } : {}) }) }),
+  // Pass worldId to ADOPT an existing world (the recovery path for
+  // interrupted or pre-agent-era in-progress worlds): the build keeps the
+  // world's current content — and its recorded brief, when rules/notes are
+  // omitted — and works from there.
+  agentBuild:             (seedPrompt, scenarioId = null, rules = [], notes = [], worldId = null) => request('/api/world/agent/build', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, rules, notes, ...(scenarioId ? { scenario_id: scenarioId } : {}), ...(worldId ? { world_id: worldId } : {}) }) }),
   agentVeto:              (worldId, noteIds) => request(`/api/world/${worldId}/agent/veto`, { method: 'POST', body: JSON.stringify({ note_ids: noteIds }) }),
   agentBuildStatus:       (worldId) => request(`/api/world/${worldId}/agent/status`),
   agentBuildCancel:       (worldId) => request(`/api/world/${worldId}/agent/cancel`, { method: 'POST' }),
@@ -241,6 +245,13 @@ export const api = {
   discardWorld:           () => request('/api/world/discard', { method: 'POST' }),
   listWorlds:             () => request('/api/world/list'),
   loadWorld:              (worldId) => request(`/api/world/load/${worldId}`),
+  // The compiled (game-ready) view of a saved world — child-map bundles,
+  // surgery connections and enrichment merged. The world explorer's read
+  // surface.
+  getCompiledWorld:       (worldId) => request(`/api/world/${worldId}/compiled`),
+  // Regenerate one step of a SAVED world in place (with an optional
+  // steering note); world-scoped — never touches the session machinery.
+  regenerateWorldStep:    (worldId, stepId, note = '') => request(`/api/world/${worldId}/regenerate-step/${stepId}`, { method: 'POST', body: JSON.stringify({ note }) }),
   resumeWorld:            (worldId) => request('/api/world/resume', { method: 'POST', body: JSON.stringify({ world_id: worldId }) }),
   deleteWorld:            (worldId) => request(`/api/world/${worldId}`, { method: 'DELETE' }),
   saveWorldStep:          (worldId, stepId, data) => request(`/api/world/save-step/${worldId}/${stepId}`, { method: 'POST', body: JSON.stringify({ data }) }),

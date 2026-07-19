@@ -2,14 +2,14 @@ import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { Delaunay } from 'd3-delaunay';
 import { normalizeWorldData, connectionsByNode, breadcrumb, childrenByAnchor } from '../lib/mapspace';
 
-const TYPE_COLORS = {
+export const TYPE_COLORS = {
   settlement: '#f59e0b',
   landmark: '#3b82f6',
   crossroads: '#6b7280',
   wilderness: '#22c55e',
 };
 
-const CONNECTION_COLORS = {
+export const CONNECTION_COLORS = {
   dungeon_entrance: '#ef4444',
   cave_entrance: '#78716c',
   cave_mouth: '#78716c',
@@ -46,7 +46,7 @@ function getImportanceRadius(imp, scale) {
   return (base + frac * maxExtra) * scale;
 }
 
-function renderDescriptionWithLinks(text) {
+export function renderDescriptionWithLinks(text) {
   if (!text) return null;
   const parts = text.split(/(\$\{link_[^}]+\})/g);
   return parts.map((part, i) => {
@@ -108,10 +108,17 @@ const MAX_ZOOM = 40;
 // text); 2 doubles everything for readability, especially on touch screens.
 const UI_SCALE = 2;
 
-export default function MapRenderer({ nodes, edges, regions, config, layers, connections, activeLayerId, onLayerChange, mapsById, activeMapId, onMapChange, rootMapId, playerMapId, fogOfWar, navigateToLayer, focusNodeId, worldId, roads, playerTravel }) {
+export default function MapRenderer({ nodes, edges, regions, config, layers, connections, activeLayerId, onLayerChange, mapsById, activeMapId, onMapChange, rootMapId, playerMapId, fogOfWar, navigateToLayer, focusNodeId, worldId, roads, playerTravel, onNodeSelect }) {
   const [hoveredNode, setHoveredNode] = useState(null);
   const [hoveredRegion, setHoveredRegion] = useState(null);
-  const [selectedNode, setSelectedNode] = useState(null);
+  const [selectedNode, _setSelectedNode] = useState(null);
+  // Selection is internal state, mirrored out through the optional
+  // onNodeSelect callback so a hosting panel (the world explorer's elements
+  // list) can track what the user tapped on the map.
+  const setSelectedNode = useCallback((node) => {
+    _setSelectedNode(node);
+    onNodeSelect?.(node);
+  }, [onNodeSelect]);
   const [viewBox, setViewBox] = useState({ x: 0, y: 0, w: 800, h: 500 });
   const [dragging, setDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
