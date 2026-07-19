@@ -19,19 +19,23 @@ async def evaluate(ctx, map_id: str = None) -> dict:
     world_state = builder.load_world(ctx.world_id)
     return await evaluate_world(
         builder.services, world_state, compiled, map_id=map_id,
-        major_floor=type(builder).MAJOR_IMPORTANCE_FLOOR)
+        major_floor=type(builder).MAJOR_IMPORTANCE_FLOOR,
+        builder=builder, world_id=ctx.world_id, on_event=ctx.on_event)
 
 
 register_tool(ToolSpec(
     id="evaluate",
     label="Evaluate the build",
     description=(
-        "Full verification: the deterministic lint report plus (when world "
+        "Full verification: the deterministic lint report, (when world "
         "rules exist) an LLM critique of the built content against those "
-        "rules. Returns findings with stable keys; severity 'problem' "
-        "findings block a done claim until fixed or explicitly accepted. "
-        "This is the same evaluation the done-gate runs — evaluate before "
-        "claiming done."
+        "rules, and (when the brief carries notes) the note verifier — a "
+        "read-only agent that checks every agreed note against the world "
+        "and reports per-note verdicts. Returns findings with stable keys; "
+        "severity 'problem' findings block a done claim until fixed or "
+        "explicitly accepted — note findings (note:*) are NEVER "
+        "auto-accepted. This is the same evaluation the done-gate runs — "
+        "evaluate before claiming done."
     ),
     invoke=evaluate,
     params={"map_id": {"type": "string",

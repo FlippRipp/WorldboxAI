@@ -133,11 +133,19 @@ Evaluate the content against the rules. Output ONLY the JSON object."""
 
 
 async def evaluate_world(services, world_state: dict, compiled: dict,
-                         map_id: str = None, major_floor: int = None) -> dict:
-    """Evaluate the current build: deterministic lints plus (with a live
-    LLM and authored rules) one structured critique call. Returns
-    ``{"clean", "findings", "lint"}`` where findings carry stable keys and
-    ``clean`` means no blocking (severity 'problem') findings."""
+                         map_id: str = None, major_floor: int = None,
+                         builder=None, world_id: str = None,
+                         on_event=None) -> dict:
+    """Evaluate the current build: deterministic lints, (with a live LLM and
+    authored rules) one structured critique call, and (with a live LLM,
+    notes in the brief, and ``builder``/``world_id`` supplied) the
+    tool-looping note verifier (C5/N4). Returns ``{"clean", "findings",
+    "lint", "notes"}`` where findings carry stable keys and ``clean`` means
+    no blocking (severity 'problem') findings. Note findings key per note
+    (``note:<id>:-:-``) so their fix-round tracking is stable across
+    binding changes — and the done-gate never auto-accepts them (N6)."""
+    from wbworldgen.worldgen.agent.verifier import verify_notes
+
     lint_report = lint_world(compiled, map_id=map_id, major_floor=major_floor)
     findings = _lint_findings(lint_report)
 
@@ -171,6 +179,42 @@ async def evaluate_world(services, world_state: dict, compiled: dict,
                 "suggestion": str(f.get("suggestion", "")),
             })
 
+    note_report = await verify_notes(
+        services, builder, world_id, world_state, compiled,
+        map_id=map_id, on_event=on_event)
+    for v in note_report["verdicts"]:
+        if v["verdict"] == "honored":
+            continue
+        findings.append({
+            "key": finding_key("note", v["id"]),
+            "source": "note", "kind": "note_violation",
+            "severity": "problem",
+            "map_id": v.get("map_id"), "node_id": None,
+            "note_id": v["id"],
+            "finding": (f"Agreed note {v['id']} is not honored"
+                        + (f" ({v['subject']})" if v.get("subject") else "")
+                        + f": {v['text']} — " + (v.get("evidence") or
+                                                 "the verifier found no evidence of it")),
+            "suggestion": v.get("suggestion", ""),
+        })
+    for nid in note_report["unverified"]:
+        findings.append({
+            "key": finding_key("note", nid),
+            "source": "note", "kind": "note_unverified",
+            "severity": "problem", "map_id": None, "node_id": None,
+            "note_id": nid,
+            "finding": (f"Agreed note {nid} could not be verified within the "
+                        "verifier's budget. Evaluate again (or simplify what "
+                        "the verifier must read)."),
+            "suggestion": "",
+        })
+
     blocking = [f for f in findings if f["severity"] == "problem"]
+    honored = sum(1 for v in note_report["verdicts"] if v["verdict"] == "honored")
     return {"clean": not blocking, "findings": findings,
-            "blocking": len(blocking), "lint": lint_report}
+            "blocking": len(blocking), "lint": lint_report,
+            "notes": {"skipped": note_report["skipped"],
+                      "checked": len(note_report["verdicts"]),
+                      "honored": honored,
+                      "unverified": len(note_report["unverified"]),
+                      "verdicts": note_report["verdicts"]}}

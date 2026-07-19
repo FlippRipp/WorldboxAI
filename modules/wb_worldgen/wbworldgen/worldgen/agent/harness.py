@@ -353,11 +353,19 @@ def _track_findings(handle: AgentBuild, eval_result: dict):
             handle.finding_rounds[f["key"]] = handle.finding_rounds.get(f["key"], 0) + 1
 
 
+def _is_note_finding(key: str) -> bool:
+    """Note obligations (verifier findings and the unbound-note lint) are
+    never auto-accepted (N6): every note ends honored, honored-as-amended,
+    or explicitly accepted with a recorded reason."""
+    return key.startswith("note:") or ":note_unbound:" in key
+
+
 async def _done_gate(handle: AgentBuild, done_claim: dict, budgets: dict):
     """Final evaluation on a done claim (D3). Returns (result, rejection):
     result when the gate passes — blocking findings all fixed, accepted by
-    key in the claim, or auto-accepted after the fix-round budget —
-    otherwise a rejection observation for the agent."""
+    key in the claim, or auto-accepted after the fix-round budget (note
+    findings excepted, N6) — otherwise a rejection observation for the
+    agent."""
     builder = handle.builder
     services = builder.services
     world_state = builder.load_world(handle.world_id)
@@ -378,9 +386,13 @@ async def _done_gate(handle: AgentBuild, done_claim: dict, budgets: dict):
             "message": ("The world has no named locations yet — generate the "
                         "map and run the label pass before claiming done.")}
 
+    async def on_progress(evt: dict):
+        await _emit(handle, {"type": "progress", "event": evt}, persist=False)
+
     eval_result = await evaluate_world(
         services, world_state, compiled,
-        major_floor=type(builder).MAJOR_IMPORTANCE_FLOOR)
+        major_floor=type(builder).MAJOR_IMPORTANCE_FLOOR,
+        builder=builder, world_id=handle.world_id, on_event=on_progress)
     _track_findings(handle, eval_result)
     await _emit(handle, {"type": "eval", "trigger": "done_claim",
                          "clean": eval_result["clean"],
@@ -389,7 +401,8 @@ async def _done_gate(handle: AgentBuild, done_claim: dict, budgets: dict):
 
     blocking = [f for f in eval_result["findings"] if f["severity"] == "problem"]
     accepts = set(done_claim.get("accept_findings") or [])
-    auto = {k for k, n in handle.finding_rounds.items() if n > budgets["fix_rounds"]}
+    auto = {k for k, n in handle.finding_rounds.items()
+            if n > budgets["fix_rounds"] and not _is_note_finding(k)}
     remaining = [f for f in blocking if f["key"] not in accepts and f["key"] not in auto]
     if remaining:
         return None, {
