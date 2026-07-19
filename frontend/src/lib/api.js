@@ -195,6 +195,45 @@ export const api = {
   agentBuild:             (seedPrompt, scenarioId = null) => request('/api/world/agent/build', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, ...(scenarioId ? { scenario_id: scenarioId } : {}) }) }),
   agentBuildStatus:       (worldId) => request(`/api/world/${worldId}/agent/status`),
   agentBuildCancel:       (worldId) => request(`/api/world/${worldId}/agent/cancel`, { method: 'POST' }),
+  // Agent build event stream: replays the persisted action log from `after`
+  // (persisted events carry their index `i`), then streams live — including
+  // transient enrichment progress events (no `i`). Every event is handed to
+  // onEvent; resolves with the terminal {type:"done"} event, or null when
+  // the stream dropped before one arrived (reconnect with the last seen
+  // i + 1). Pass an AbortController signal to detach without cancelling
+  // the build.
+  agentBuildEvents: async (worldId, { after = 0 } = {}, onEvent, signal) => {
+    const res = await fetch(`${API}/api/world/${worldId}/agent/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ after }),
+      signal,
+    });
+    if (!res.ok || !res.body) {
+      const err = await res.json().catch(() => ({}));
+      throw new ApiError(res.status, err.detail || res.statusText);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let final = null;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        const dataLine = block.split('\n').find((l) => l.startsWith('data:'));
+        if (!dataLine) continue;
+        const data = JSON.parse(dataLine.slice(5).trim());
+        if (data.type === 'done') final = data;
+        onEvent?.(data);
+      }
+    }
+    return final;
+  },
   compileWorld:           (saveId = null) => request('/api/world/compile', { method: 'POST', body: JSON.stringify(saveId ? { save_id: saveId } : {}) }),
   saveWorld:              (worldId) => request('/api/world/save', { method: 'POST', body: JSON.stringify({ world_id: worldId }) }),
   discardWorld:           () => request('/api/world/discard', { method: 'POST' }),

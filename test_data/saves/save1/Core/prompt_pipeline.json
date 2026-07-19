@@ -69,5 +69,20 @@
     "config": {
       "text": "Describe the outcome of the player's action and the current environment. Write 2-4 concise paragraphs. Do not use bullet points or lists."
     }
+  },
+  {
+    "id": "chat_history",
+    "type": "chat_history",
+    "source": "engine",
+    "enabled": true,
+    "role_type": "system",
+    "placement": "system_relative",
+    "depth": null,
+    "display_name": "Chat History",
+    "category": "utility",
+    "generation_types": null,
+    "config": {
+      "max_turns": null
+    }
   }
 ]
