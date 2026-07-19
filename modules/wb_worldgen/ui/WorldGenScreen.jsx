@@ -1,13 +1,18 @@
 import React, { useState, useEffect } from 'react';
 import { api } from 'api';
 import WorldListScreen from './WorldBuilder/WorldListScreen';
-import WorldBuilderWizard from './WorldBuilder/WorldBuilderWizard';
+import WorldBuilderWizard, { readSavedForm, clearAgentBuildPin } from './WorldBuilder/WorldBuilderWizard';
 import WorldReviewScreen from './WorldBuilder/WorldReviewScreen';
 
 // Entry screen for the "World Generation" module mode. Owns the list/create/
 // review navigation that used to live in App.jsx as separate top-level modes.
 export default function WorldGenScreen({ onBack }) {
-  const [view, setView] = useState('list'); // 'list' | 'create' | 'review'
+  // A pinned agent build (running, or terminal and not yet dismissed) takes
+  // the user straight back to its observer inside the wizard — the loop
+  // runs server-side and must be findable after a relaunch. The pin
+  // releases on the observer's Dismiss, or on an explicit classic resume
+  // below. Synchronous (localStorage) so the list never flashes first.
+  const [view, setView] = useState(() => (readSavedForm().agentWorldId ? 'create' : 'list')); // 'list' | 'create' | 'review'
   const [reviewWorldId, setReviewWorldId] = useState(null);
   const [wizardKey, setWizardKey] = useState(0);
 
@@ -53,6 +58,11 @@ export default function WorldGenScreen({ onBack }) {
       onOpenWorld={(id, resume = false) => {
         if (id) {
           if (resume) {
+            // Explicit intent wins: resuming a draft in the classic wizard
+            // releases any pinned agent observer (which would otherwise
+            // hijack the wizard view). Stopped agent builds are finished
+            // by hand through exactly this path.
+            clearAgentBuildPin();
             api.resumeWorld(id).then(() => {
               setWizardKey((k) => k + 1);
               setView('create');

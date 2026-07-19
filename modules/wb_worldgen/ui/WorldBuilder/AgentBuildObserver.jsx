@@ -159,7 +159,7 @@ function LogRow({ evt }) {
   return null;
 }
 
-export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds }) {
+export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, onBack }) {
   const [meta, setMeta] = useState(null);        // status snapshot (seed prompt etc.)
   const [events, setEvents] = useState([]);      // persisted, i-ordered
   const [progress, setProgress] = useState(null);
@@ -242,6 +242,17 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds })
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center p-6">
       <div className="w-full max-w-3xl mt-10 space-y-4">
+        {onBack && (
+          <button
+            onClick={onBack}
+            className="flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+            {running ? 'Back — the build keeps running' : 'Back'}
+          </button>
+        )}
         <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-6 space-y-4">
 
           <div className="flex items-start justify-between gap-4">

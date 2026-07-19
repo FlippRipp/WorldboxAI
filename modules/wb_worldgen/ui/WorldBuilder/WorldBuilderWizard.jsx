@@ -288,18 +288,33 @@ function WorldPromptInterview({ promptText, onPromptChange, scenarioId, disabled
   );
 }
 
-// The pre-generation form (prompt, scenario, skip-review) mirrored
-// to localStorage on every change: Android kills the backgrounded PWA, and a
-// prompt that was typed (or AI-written) but not yet generated exists nowhere
-// else. Cleared when the world is saved.
-const FORM_KEY = 'wb_worldgen_wizard_form';
+// The pre-generation form (prompt, scenario, skip-review) plus the pinned
+// agent-build world id, mirrored to localStorage on every change: Android
+// kills the backgrounded PWA, and a prompt that was typed (or AI-written)
+// but not yet generated exists nowhere else. Cleared when the world is
+// saved. Exported so WorldGenScreen can route entry straight back to a
+// pinned agent build's observer, and release the pin on an explicit
+// classic resume.
+export const FORM_KEY = 'wb_worldgen_wizard_form';
 
-function readSavedForm() {
+export function readSavedForm() {
   try {
     return JSON.parse(localStorage.getItem(FORM_KEY) || 'null') || {};
   } catch {
     return {};
   }
+}
+
+// Drop the agent-build pin (the user chose something else explicitly —
+// e.g. resuming a draft in the classic wizard); the rest of the saved
+// form survives.
+export function clearAgentBuildPin() {
+  try {
+    const saved = readSavedForm();
+    if (saved.agentWorldId) {
+      localStorage.setItem(FORM_KEY, JSON.stringify({ ...saved, agentWorldId: null }));
+    }
+  } catch { /* storage unavailable — nothing pinned */ }
 }
 
 export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
@@ -579,6 +594,7 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
         worldId={agentWorldId}
         onDismiss={() => setAgentWorldId(null)}
         onOpenWorlds={() => { setAgentWorldId(null); onWorldCreated?.(); }}
+        onBack={onBack}
       />
     );
   }
