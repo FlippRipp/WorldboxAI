@@ -78,15 +78,17 @@ def node_world_entry(wd: dict, node: dict) -> dict | None:
     from wbworldgen.worldgen import mapspace as _ms
     map_id = _ms.map_of_node(wd, nid)
     root_id = wd.get("root_map_id", "root")
+    details = f" Storyteller notes: {node['additional_details']}" \
+        if node.get("additional_details") else ""
     if map_id is not None and map_id != root_id:
         m = _ms.get_map(wd, map_id) or {}
         label = m.get("label", map_id)
         return {
-            "text": f"Location [{label}]: {node['name']} ({node.get('type', 'location')}). {node['description']}",
+            "text": f"Location [{label}]: {node['name']} ({node.get('type', 'location')}). {node['description']}{details}",
             "source_type": "node", "source_id": nid, "region": label,
         }
     return {
-        "text": f"Location: {node['name']} ({node.get('type', 'location')}). {node['description']}",
+        "text": f"Location: {node['name']} ({node.get('type', 'location')}). {node['description']}{details}",
         "source_type": "node", "source_id": nid, "region": node.get("region") or node.get("name", ""),
     }
 

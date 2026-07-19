@@ -34,6 +34,7 @@ def _map_stats(rec: dict) -> dict:
         "nodes": len(nodes),
         "named": sum(1 for n in nodes if n.get("name")),
         "described": sum(1 for n in nodes if n.get("description")),
+        "detailed": sum(1 for n in nodes if n.get("additional_details")),
     }
 
 
@@ -111,7 +112,8 @@ async def read_map(ctx, map_id: str) -> dict:
     for n in rec.get("nodes", []):
         entry = {"id": n.get("id"), "name": n.get("name", ""),
                  "type": n.get("type", ""), "importance": n.get("importance", 0),
-                 "described": bool(n.get("description"))}
+                 "described": bool(n.get("description")),
+                 "detailed": bool(n.get("additional_details"))}
         if n.get("region"):
             entry["region"] = n["region"]
         nodes.append(entry)

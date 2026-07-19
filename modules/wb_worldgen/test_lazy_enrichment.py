@@ -372,3 +372,75 @@ def test_merge_node_fields_carries_additional_details():
     target = {"id": "n1", "name": "A", "description": "d"}
     assert merge_node_fields(target, {"additional_details": "Secret: below."})
     assert target["additional_details"] == "Secret: below."
+
+
+def test_location_context_storyteller_notes_channel():
+    """The storyteller's <current_location> carries a <storyteller_notes>
+    block with the details channel + discipline header; the reader variant
+    (include_storyteller_notes=False) carries neither."""
+    from wbruntime import context as rt_context
+
+    wd = {
+        "root_map_id": "root",
+        "maps": {"root": {"map_id": "root", "label": "Root", "nodes": [
+            {"id": "n0", "name": "Harbor Town", "type": "settlement",
+             "description": "Salt wind and gulls.",
+             "additional_details": "Secret: the harbormaster is a smuggler.",
+             "x": 0.0, "y": 0.0}], "edges": [], "config": {}}},
+        "regions": {"regions": []},
+    }
+    state = {"world_id": "w", "world_data": wd,
+             "player_location_node_id": "n0",
+             "player_location_region": "", "module_data": {}}
+
+    block = rt_context.build_location_context(None, state, wd)
+    assert "<storyteller_notes>" in block
+    assert "Secret: the harbormaster is a smuggler." in block
+    assert "player cannot read" in block
+
+    reader = rt_context.build_location_context(
+        None, state, wd, include_storyteller_notes=False)
+    assert "storyteller_notes" not in reader
+    assert "Secret:" not in reader
+    # The surface line is present in both variants.
+    assert "Salt wind and gulls." in block and "Salt wind and gulls." in reader
+
+    # Site-level details join the notes; a sub-location's details appear
+    # only when the player is AT that sub-location.
+    wd["site_maps"] = {"n0": {
+        "parent_node_id": "n0", "name": "Harbor Town",
+        "layout_summary": "Docks below, terraces above.",
+        "additional_details": "Secret: a sea-cave opens under the docks.",
+        "sub_locations": [{
+            "id": "n0:s1", "name": "The Docks", "type": "district",
+            "description": "Wet planks.",
+            "additional_details": "Secret: a contraband cache.",
+            "adjacent": []}],
+    }}
+    block = rt_context.build_location_context(None, state, wd)
+    assert "Secret: a sea-cave opens under the docks." in block
+    assert "contraband cache" not in block
+
+
+def test_world_entries_carry_storyteller_notes():
+    """The incremental RAG entry builders append the details channel in the
+    same format the core index builder uses (lockstep)."""
+    from wbruntime.sync import node_world_entry
+    from wbworldgen.worldgen.expansion.sites import site_world_entries
+
+    wd = {"root_map_id": "root",
+          "maps": {"root": {"map_id": "root", "nodes": []}}}
+    node = {"id": "x", "name": "Keep", "type": "castle",
+            "description": "Grey walls.",
+            "additional_details": "Secret: a tunnel below."}
+    entry = node_world_entry(wd, node)
+    assert entry["text"] == ("Location: Keep (castle). Grey walls. "
+                             "Storyteller notes: Secret: a tunnel below.")
+
+    site = {"name": "Keep", "layout_summary": "One court.",
+            "sub_locations": [{"id": "x:s1", "name": "Court", "type": "court",
+                               "description": "Open sky.",
+                               "additional_details": "Secret: below."}]}
+    sub_entry = next(e for e in site_world_entries("x", site)
+                     if e["source_type"] == "site_node")
+    assert sub_entry["text"].endswith("Storyteller notes: Secret: below.")

@@ -53,6 +53,8 @@ def site_world_entries(parent_node_id: str, site: dict) -> list[dict]:
         text = f"Place in {parent_name}: {sub['name']} ({sub.get('type', 'place')})"
         if sub.get("description"):
             text += f". {sub['description']}"
+        if sub.get("additional_details"):
+            text += f" Storyteller notes: {sub['additional_details']}"
         entries.append({
             "text": text,
             "source_type": "site_node",

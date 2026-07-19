@@ -80,6 +80,8 @@ def _content_excerpts(compiled: dict) -> str:
                 lines.append(f"    label: {n['label_description']}")
             if n.get("description"):
                 lines.append(f"    description: {n['description']}")
+            if n.get("additional_details"):
+                lines.append(f"    storyteller details: {n['additional_details']}")
     return "\n".join(lines)
 
 

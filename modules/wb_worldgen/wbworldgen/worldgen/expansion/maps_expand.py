@@ -139,8 +139,11 @@ def map_world_entries(map_record: dict, connections: list = None,
     for node in map_record.get("nodes", []):
         if not node.get("name") or not node.get("description"):
             continue
+        text = f"Location [{label}]: {node['name']} ({node.get('type', 'location')}). {node['description']}"
+        if node.get("additional_details"):
+            text += f" Storyteller notes: {node['additional_details']}"
         entries.append({
-            "text": f"Location [{label}]: {node['name']} ({node.get('type', 'location')}). {node['description']}",
+            "text": text,
             "source_type": "node",
             "source_id": node.get("id", ""),
             "region": label,

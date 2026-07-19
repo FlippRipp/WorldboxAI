@@ -579,11 +579,15 @@ class MemoryManager:
                 for node in map_rec.get("nodes", []):
                     if not (node.get("name") and node.get("description")):
                         continue
+                    # Format lockstep with wbruntime.sync.node_world_entry /
+                    # maps_expand.map_world_entries (incremental writers).
+                    details = f" Storyteller notes: {node['additional_details']}" \
+                        if node.get("additional_details") else ""
                     if map_id == root_map_id:
-                        text = f"Location: {node['name']} ({node.get('type', 'location')}). {node['description']}"
+                        text = f"Location: {node['name']} ({node.get('type', 'location')}). {node['description']}{details}"
                         region = node.get("region") or node.get("name", "")
                     else:
-                        text = f"Location [{label}]: {node['name']} ({node.get('type', 'location')}). {node['description']}"
+                        text = f"Location [{label}]: {node['name']} ({node.get('type', 'location')}). {node['description']}{details}"
                         region = label
                     entries.append({
                         "id": str(uuid.uuid4()),
@@ -598,18 +602,22 @@ class MemoryManager:
                 layer_map = map_layer.get("map", {})
                 for node in layer_map.get("nodes", []):
                     if node.get("name") and node.get("description"):
+                        details = f" Storyteller notes: {node['additional_details']}" \
+                            if node.get("additional_details") else ""
                         entries.append({
                             "id": str(uuid.uuid4()),
-                            "text": f"Location [{layer_name}]: {node['name']} ({node.get('type', 'location')}). {node['description']}",
+                            "text": f"Location [{layer_name}]: {node['name']} ({node.get('type', 'location')}). {node['description']}{details}",
                             "source_type": "node",
                             "source_id": node.get("id", ""),
                             "region": layer_name,
                         })
             for node in world_map.get("nodes", []):
                 if node.get("name") and node.get("description"):
+                    details = f" Storyteller notes: {node['additional_details']}" \
+                        if node.get("additional_details") else ""
                     entries.append({
                         "id": str(uuid.uuid4()),
-                        "text": f"Location: {node['name']} ({node.get('type', 'location')}). {node['description']}",
+                        "text": f"Location: {node['name']} ({node.get('type', 'location')}). {node['description']}{details}",
                         "source_type": "node",
                         "source_id": node.get("id", ""),
                         "region": node.get("name", ""),
@@ -634,6 +642,8 @@ class MemoryManager:
                 text = f"Place in {parent_name}: {sub['name']} ({sub.get('type', 'place')})"
                 if sub.get("description"):
                     text += f". {sub['description']}"
+                if sub.get("additional_details"):
+                    text += f" Storyteller notes: {sub['additional_details']}"
                 entries.append({
                     "id": str(uuid.uuid4()),
                     "text": text,

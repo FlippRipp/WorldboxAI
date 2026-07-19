@@ -271,7 +271,8 @@ def test_site_entry_formats_stay_in_lockstep(tmp_path):
         "layout_summary": "Terraces ring the harbor.",
         "sub_locations": [
             {"id": "n1:s1", "name": "Saltmarket Row", "type": "market",
-             "description": "Fish and rope."},
+             "description": "Fish and rope.",
+             "additional_details": "Secret: a fence trades from the ice house."},
         ],
     }
     manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
@@ -307,7 +308,8 @@ def test_build_world_entries_v2_maps_nodes_and_connections(tmp_path):
                 "parent_map_id": "root", "anchor_node_id": None,
                 "nodes": [
                     {"id": "u1", "name": "Gloomvault", "type": "city",
-                     "description": "A fungal city."},
+                     "description": "A fungal city.",
+                     "additional_details": "Secret: the spore-priests rule it."},
                 ],
                 "edges": [],
             },
@@ -344,8 +346,11 @@ def test_build_world_entries_v2_maps_nodes_and_connections(tmp_path):
     assert root_node["region"] == flat_node["region"] == "Emberhold"
 
     # Non-root maps use the bracketed map label, with the label as region.
+    # additional_details ride the entry as appended storyteller notes.
     sub_node = by_key[("node", "u1")]
-    assert sub_node["text"] == "Location [The Underdark]: Gloomvault (city). A fungal city."
+    assert sub_node["text"] == ("Location [The Underdark]: Gloomvault (city). "
+                                "A fungal city. Storyteller notes: Secret: "
+                                "the spore-priests rule it.")
     assert sub_node["region"] == "The Underdark"
 
     conn = by_key[("connection", "c1")]

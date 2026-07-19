@@ -333,7 +333,7 @@ def test_read_world_reports_steps_maps_artifacts(builder):
     assert steps["world_rules"]["present"] is False
     assert result["maps"] == [{"map_id": "root", "label": "World",
                                "level_type": "world", "nodes": 6, "named": 6,
-                               "described": 0}]
+                               "described": 0, "detailed": 0}]
     assert "maps" in result["artifacts"] and "labels" in result["artifacts"]
     assert "rules" not in result["artifacts"]
 
@@ -676,3 +676,29 @@ def test_lint_link_tokens_scan_additional_details():
     assert broken and broken[0]["targets"] == ["zzz"]
     assert broken[0]["field"] == "additional_details"
     assert unresolved and unresolved[0]["targets"] == ["c"]
+
+
+def test_read_map_reports_detailed_flag(builder):
+    wid = _map_world(builder, named=True)
+    ctx = _ctx(builder, wid)
+    run(invoke_tool(ctx, "edit_node",
+                    {"node_id": "n0", "additional_details": "Secret: under the well."}))
+    detail = run(invoke_tool(ctx, "read_map", {"map_id": "root"}))
+    assert detail["detailed"] == 1
+    flags = {n["id"]: n["detailed"] for n in detail["node_list"]}
+    assert flags["n0"] is True and flags["n1"] is False
+    node = run(invoke_tool(ctx, "read_node", {"node_id": "n0"}))
+    assert node["node"]["additional_details"] == "Secret: under the well."
+
+
+def test_evaluator_excerpts_include_storyteller_details():
+    from wbworldgen.worldgen.agent.evaluator import _content_excerpts
+
+    compiled = {"root_map_id": "root", "maps": {"root": {
+        "map_id": "root", "label": "Root", "nodes": [
+            {"id": "a", "name": "Keep", "type": "castle", "importance": 9,
+             "description": "Grey walls.",
+             "additional_details": "Secret: a tunnel below."}],
+        "edges": []}}}
+    text = _content_excerpts(compiled)
+    assert "storyteller details: Secret: a tunnel below." in text

@@ -221,3 +221,18 @@ def test_no_detailed_hidden_nodes_means_no_llm_call():
 
     assert run_pass(state, llm) == {}
     assert llm.calls == []
+
+
+def test_candidates_carry_storyteller_details():
+    from wbruntime.known_locations import known_location_candidates
+
+    wd = {"root_map_id": "root", "maps": {"root": {"map_id": "root", "nodes": [
+        {"id": "n0", "name": "Lost Vault", "type": "ruin", "importance": 7,
+         "description": "A sealed door in the cliff.",
+         "additional_details": "Secret: no living soul remembers it."},
+        {"id": "n1", "name": "Plain Town", "type": "town", "importance": 5,
+         "description": "A town."},
+    ], "edges": []}}}
+    out = {c["id"]: c for c in known_location_candidates(wd, revealed=set())}
+    assert out["n0"]["storyteller_details"] == "Secret: no living soul remembers it."
+    assert "storyteller_details" not in out["n1"]

@@ -167,7 +167,13 @@ def _exits_block(world_data: dict, state: dict) -> list[str]:
     return lines
 
 
-def build_location_context(host, state: dict, world_data: dict) -> str:
+def build_location_context(host, state: dict, world_data: dict,
+                           include_storyteller_notes: bool = True) -> str:
+    """The per-turn <current_location> block. ``include_storyteller_notes``
+    gates the <storyteller_notes> sub-block (the additional_details channel —
+    see docs/design/node_info_layering_plan.md): on for the storyteller and
+    the opening scene, off for the reader/extractor call, which only needs
+    the player-knowable world."""
     travel = get_travel(state)
     if travel:
         travel_context = build_travel_context(host, travel, state, world_data)
@@ -205,6 +211,7 @@ def build_location_context(host, state: dict, world_data: dict) -> str:
             for rule in map_rules:
                 parts.append(f"  - {rule}")
             parts.append("</map_rules>")
+    storyteller_notes = []
     if current_node:
         node_name = current_node.get("name", "")
         node_type = current_node.get("type", "location")
@@ -220,6 +227,9 @@ def build_location_context(host, state: dict, world_data: dict) -> str:
                 f"Location: an unexplored {node_type} — this place has no established "
                 "name or details yet. Improvise fitting local color from the region "
                 "and terrain context; keep any specifics provisional.")
+        if current_node.get("additional_details"):
+            storyteller_notes.append(
+                f"{node_name or 'This location'}: {current_node['additional_details']}")
         site = (world_data.get("site_maps") or {}).get(node_id)
         if site:
             subs = site.get("sub_locations", [])
@@ -248,6 +258,23 @@ def build_location_context(host, state: dict, world_data: dict) -> str:
                         line += f": {sub['description'][:200]}"
                     parts.append(line)
             parts.append("</location_interior>")
+            if site.get("additional_details"):
+                storyteller_notes.append(
+                    f"{node_name or 'This place'} as a whole: {site['additional_details']}")
+            if current_sub and current_sub.get("additional_details"):
+                storyteller_notes.append(
+                    f"{current_sub.get('name', 'The current spot')}: "
+                    f"{current_sub['additional_details']}")
+    if include_storyteller_notes and storyteller_notes:
+        parts.append("<storyteller_notes>")
+        parts.append(
+            "(Your private prep — the player cannot read any of this. Weave "
+            "unmarked details into the story freely when they fit; reveal "
+            "facts marked \"Secret:\" only when the fiction genuinely earns "
+            "the discovery. Notes you never use are fine.)")
+        for note in storyteller_notes:
+            parts.append(f"- {note}")
+        parts.append("</storyteller_notes>")
     parts.extend(_exits_block(world_data, state))
     if current_region:
         parts.append(f"Region: {current_region.get('name', '')}")
@@ -331,7 +358,10 @@ async def on_reader_context(host, state: dict, sdk) -> str:
             f"and set travel_completed only if the narration finished the whole "
             f"remaining trip (e.g. it ended with the player arriving)."
         )
-    location_context = build_location_context(host, state, world_data)
+    # The reader only extracts movement — the storyteller-notes channel is
+    # deliberately withheld from this call (N5 of the layering plan).
+    location_context = build_location_context(host, state, world_data,
+                                              include_storyteller_notes=False)
     if location_context:
         return f"{guidance}\n\n{location_context}"
     return guidance

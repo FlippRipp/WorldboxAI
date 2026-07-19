@@ -28,9 +28,10 @@ _SYSTEM = (
     "settlements, renowned landmarks), places in or near their home region, places "
     "tied to their backstory (origin, travels, trade), and whatever is common "
     "knowledge to any local.\n"
-    "The character does NOT know places whose description marks them as secret, "
-    "hidden, lost or undiscovered, nor minor spots far from anything the character "
-    "has a link to. Knowing OF a place is enough — they need not have visited it.\n"
+    "The character does NOT know places whose description or storyteller details "
+    "mark them as secret, hidden, lost or undiscovered, nor minor spots far from "
+    "anything the character has a link to. Knowing OF a place is enough — they "
+    "need not have visited it.\n"
     "When unsure, lean on importance (0-10): high importance means widely known.\n"
     "Output only valid JSON."
 )
@@ -47,7 +48,7 @@ def known_location_candidates(world_data: dict, revealed: set) -> list[dict]:
                 continue
             if not node.get("name") or not node.get("description"):
                 continue
-            out.append({
+            entry = {
                 "id": nid,
                 "name": node["name"],
                 "type": node.get("type", "location"),
@@ -55,7 +56,12 @@ def known_location_candidates(world_data: dict, revealed: set) -> list[dict]:
                 "importance": node.get("importance"),
                 "map_label": map_label,
                 "description": node["description"],
-            })
+            }
+            # The judge needs the storyteller channel too — "this place is
+            # secret/lost" now lives there rather than in the public prose.
+            if node.get("additional_details"):
+                entry["storyteller_details"] = node["additional_details"]
+            out.append(entry)
     return out
 
 
