@@ -30,7 +30,13 @@ explorer + classic-system removal) LANDED 2026-07-19: the post-creation
 list view is replaced by a map-first explorer over the compiled world,
 the classic sequential wizard/review system is deleted UI+routes deep,
 and in-progress worlds recover through agent-build adoption — see the
-C6 section.
+C6 section. The Ecstasy Veil live build (2026-07-19, Filip's second
+live run) exposed four silent-contract defects — all fixed same day
+(5174f95, 39380ca; see "Live-run findings — the Ecstasy Veil build") —
+and settled the design of v2c (checkpoint/revert, the agent's undo),
+LANDED 2026-07-19 (60889d7) on Filip's go: every mutating action is
+auto-checkpointed and a build-scoped revert tool restores byte-exact.
+The catalog is now 20 tools.
 Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
@@ -996,6 +1002,65 @@ three connection homes) plus the module-by-path and root suites; a
 scripted five-op live sequence (add node, add portal, split-warn remove,
 healing edge, refused endpoint removal) rendered for Filip in chat.*
 
+### v2c — Checkpoint/revert: the agent's undo (designed and landed 2026-07-19)
+
+*Designed with Filip 2026-07-19 ("can we give the AI tools to revert
+changes that it did wrongly"), built on his go the same day together with
+the Ecstasy Veil fixes. That build's turns 11–17 are the motivating
+specimen: a silently-destructive ``map_generation`` re-run replaced a
+finished, fully-authored root map; the agent burned five turns diagnosing
+and then "restored" the map from conversation memory — producing a
+sibling it could not tell from the original, and reporting success.*
+
+**Decisions:**
+
+- **R1 — Snapshots, not inverse operations.** Surgery tools have natural
+  inverses, but the heavy tools' inverse ("undo this step re-run") IS
+  "restore the previous bytes", and partial rollback of interleaved
+  mutations is a merge problem an LLM mid-build will get wrong. A world
+  is a plain directory (metadata + step files + child-map bundles +
+  sites + terrain rasters) and ``load_world`` reads it fresh — so a
+  checkpoint is a byte-exact directory copy and restore is total,
+  linear, honest.
+- **R2 — The harness checkpoints automatically before every mutating
+  tool call** (``ToolSpec.mutates`` is already declared), keyed by the
+  action's log index; the observation echoes the checkpoint id. Auto,
+  never agent-invoked: the failure mode is precisely that the agent does
+  not know it is about to do something destructive (the Ecstasy Veil
+  agent believed it was *creating* a child map). A failing snapshot
+  blocks the mutation loudly instead of running it unprotected (P7) and
+  costs no budget.
+- **R3 — Revert rewinds world content only.** Todo, observations,
+  budgets and finding-round tracking keep going forward — ``git
+  revert``, not a time machine — and restore carries the CURRENT brief
+  forward: the user's contract (rules, notes, amendments, verifier
+  context, veto locks) is not the agent's work product to roll back.
+  ``discuss_finding`` outcomes are therefore effectively non-revertible,
+  by design (the veto is the user's instrument there, N7).
+- **R4 — History never rewinds.** ``agent_build.json`` and the
+  checkpoint store itself are excluded from snapshot and restore both
+  ways.
+- **R5 — The window is strictly per-build.** Cleared at launch (stale
+  tags from a previous build on an adopted/vetoed world would collide
+  with fresh action indices) and on every terminal state. Revert is
+  itself a mutating action — checkpointed, budgeted, revertible; no new
+  budget class (D5 bounds any revert loop).
+
+*Landed 2026-07-19 (60889d7): ``persistence.snapshot_world`` /
+``restore_world`` / ``list_checkpoints`` / ``clear_checkpoints``
+(``_checkpoints/`` inside the world dir). Snapshot flushes the
+enrichment write cache first so pending node writes are captured;
+restore invalidates that cache BEFORE replacing files — a later flush
+must never resurrect the abandoned timeline — and drops the child-node
+index; the revert tool then invalidates the facade-owned compiled cache.
+The build-scoped ``revert`` tool is the 20th catalog entry; the system
+prompt teaches "revert instead of rebuilding lost content from memory".
+Verified by 12 new tests: checkpoint-store roundtrip over every content
+home incl. terrain rasters, history exclusion both ways, brief
+carry-forward, flush/invalidate coherence, and the real loop
+(mutate→revert→byte-equal, read-only actions snapshot nothing, launch
+clears stale tags, a failed snapshot blocks the mutation).*
+
 ### C5 — Ideation notes, the note verifier and the review gate (designed 2026-07-19)
 
 *Designed 2026-07-19 with Filip directly after v2a, build started on his go
@@ -1235,8 +1300,74 @@ whether ``parallel_maps`` should carry creation-time rasters, or whether
 planet-likes belong as terrain-flagged children instead; a lint for
 terrain entries with no raster on disk (would have caught the
 fabrication at the done-gate); rejecting unknown ``run_step`` config
-keys (P7 at the config layer); a sanctioned record-a-blocker move so a
-walled agent surfaces the wall instead of patching around it.
+keys (P7 at the config layer) — *landed 2026-07-19 with the Ecstasy
+Veil fixes (5174f95), next section*; a sanctioned record-a-blocker move
+so a walled agent surfaces the wall instead of patching around it.
+
+### Live-run findings — the Ecstasy Veil build (2026-07-19)
+
+Filip's second live build (an erotic sci-fi galaxy of eight worlds;
+artifact exported at turn 23 mid-run) hit the Crucible Stars child-map
+wall again — and the diagnosis from the build artifact + LLM call log
+surfaced four NEW defects, all in the silent-contract family P7 exists
+to prevent. All four were fixed the same day; the run also settled v2c.
+
+1. **A finished root map destroyed by an invented, silently-accepted
+   config.** Turn 11: hunting a child planet map, the agent called
+   ``run_step("map_generation", config={"parent_node_id": ..,
+   "level_type": "planet", "generator_id": .., "total_nodes": 25})``.
+   None of those keys exist; nothing rejected them (``total_nodes`` was
+   even below the schema's own minimum) — the step re-ran the abstract
+   root author and REPLACED the finished 20-node, fully-named-and-
+   described root with a fresh 14-node map. The call "succeeded".
+2. **The steering note never reached the map author.** Turn 17, the
+   recovery: regenerate with a note listing the remembered nodes
+   ("restoring the original 20 locations: Helios Prime …"). All three
+   ``map:abstract`` calls of the build had BYTE-IDENTICAL inputs
+   (tokens_in 2874 each): ``generate_step``'s USES_MAP branch dropped
+   both ``user_note`` and ``config`` on the authored/abstract paths —
+   the advertised D1 recovery instrument went nowhere, for exactly the
+   step where structural problems live. The partial-looking restoration
+   was anchoring (authored places from lore/landmarks context), i.e. an
+   unsteerable re-roll; node counts 20 → 14 → 20 across identical
+   prompts are sampling variance, nothing more.
+3. **The evaluator manufactured a false blocking finding.** Turn 21's
+   critique flagged "The map claims 20 locations but only 12 are
+   listed" — a contradiction the excerpt builder itself created:
+   ``_content_excerpts`` printed the full count in the map header, then
+   silently sliced the node list to the 12 highest-importance entries.
+   The model did what it was told with the fabricated mismatch; two
+   turns burned re-reading and re-evaluating, and the false finding fed
+   fix-round tracking.
+4. **``run_step``'s map result lied about naming.** The abstract author
+   names and describes every node at generation time, yet the result
+   note said "Nodes are unnamed until the label pass runs" — in the
+   same dict as ``"named": 20`` — sending the agent on a no-op label
+   pass at turn 8.
+
+**Landed same day:** 5174f95 — ``user_note`` threads into
+``expand_root``/``expand_abstract_root`` and every abstract layer
+prompt (steered map regeneration is now real); ``Step.config_schema``,
+the declared generation-config contract (``schema`` describes OUTPUT
+fields — the Ecstasy Veil config was invented precisely because no
+contract said what config IS), declared for the two consumers
+(``map_generation.total_nodes``, terrain ``resolution``/``biome_mode``),
+rendered into the catalog, validated loudly by ``run_step`` via the
+shared ``validate_params``; per-world steering honesty — ``total_nodes``
+rejected on authored/abstract roots (the author picks its own count, cap
+20), notes rejected on procedural map/terrain roots (no LLM reads
+them); the truthful result note (actual unnamed counts). 39380ca — the
+excerpt carries an explicit truncation marker with the numbers and the
+critique prompt forbids findings inferred from the excerpt's own
+bounds. 60889d7 — v2c (see its section): with checkpoints, turn 11's
+destruction would have been one ``revert`` call instead of six turns
+and a sibling map.
+
+**Still open (unchanged from Crucible Stars):** the expansion/
+pregenerate tools — the agent still cannot CREATE the child maps it was
+hunting in both live runs; v2c makes that wall recoverable, not
+reachable — plus parallel-map rasters, the missing-raster lint, and
+record-a-blocker.
 
 ### Superseded: the plan-artifact design (refined and replaced 2026-07-19)
 
@@ -1277,6 +1408,8 @@ file, before the 2026-07-19 Arc C rewrite).
 | 13 | v2a structural surgery toolset | M–L | ✓ landed (51e8c0d) | the agent's structure fix instrument |
 | 14 | C5 ideation notes + note verifier + review gate | L | ✓ landed (36a32db…903bca4) | detail survives Go, scoped; the user gets what they asked for |
 | 15 | C6 world explorer + classic-system removal | L | ✓ landed (2 commits, 2026-07-19) | the world is a map, not a list; one build system left |
+| 16 | Ecstasy Veil P7 fixes (config contract, note threading, excerpt honesty) | S–M | ✓ landed (5174f95, 39380ca) | steering that actually steers; no fabricated findings |
+| 17 | v2c checkpoint/revert | M | ✓ landed (60889d7) | the agent's undo — a destructive mistake is one call back |
 
 (A5 landed before B1 — the reverse of the original ordering; nothing
 depended on the order.) RuntimeHost (`backend.py` half of A1) can ride along
