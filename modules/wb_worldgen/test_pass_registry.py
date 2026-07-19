@@ -224,6 +224,47 @@ def test_batching_only_for_batchable_specs(builder, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Routes: the pass catalog + per-pass progress (B1.5)
+# ---------------------------------------------------------------------------
+
+def test_enrich_passes_and_progress_routes(builder):
+    import routes as world_routes
+
+    wid = _map_world(builder, 4)
+    world = builder.load_world(wid)
+    nodes = world["steps"]["map_generation"]["data"]["nodes"]
+    nodes[0]["name"] = "Alpha"
+    nodes[0]["description"] = "The first place."
+    nodes[1]["name"] = "Beta"
+    builder.save_world(wid, world)
+
+    old = world_routes.world_builder
+    world_routes.world_builder = builder
+    try:
+        catalog = asyncio.run(world_routes.enrich_passes(wid))
+        assert [p["id"] for p in catalog["passes"]] == ["label", "describe", "review"]
+        assert all(p["label"] and p["description"] for p in catalog["passes"])
+        by_id = {p["id"]: p for p in catalog["passes"]}
+        assert by_id["label"]["unit"] == "node" and by_id["label"]["batchable"] is True
+        assert by_id["describe"]["batchable"] is False
+        assert by_id["review"]["unit"] == "map"
+
+        progress = asyncio.run(world_routes.enrich_progress(wid))
+        p = progress["passes"]
+        assert p["label"]["done"] == 2 and p["label"]["total"] == 4
+        # describe's domain is named nodes: 2 named, 1 described.
+        assert p["describe"]["done"] == 1 and p["describe"]["total"] == 2
+        assert "review" not in p  # map passes have no node-progress entry
+        assert p["label"]["per_layer"]["root"] == {"done": 2, "total": 4}
+        assert p["describe"]["per_layer"]["root"] == {"done": 1, "total": 2}
+        # Default lazy-detail floor is 6; this world has no majors.
+        assert progress["upfront"]["importance_floor"] == 6
+        assert progress["upfront"]["passes"]["label"] == {"done": 0, "total": 0}
+    finally:
+        world_routes.world_builder = old
+
+
+# ---------------------------------------------------------------------------
 # Event-stream compatibility: the built-ins emit the pre-B1 sequence
 # ---------------------------------------------------------------------------
 

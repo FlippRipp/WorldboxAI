@@ -1070,42 +1070,65 @@ async def enrich_cancel(world_id: str):
     return {"world_id": world_id, "cancelling": True}
 
 
+@router.get("/api/world/{world_id}/enrich/passes")
+async def enrich_passes(world_id: str):
+    """The enrichment pass slice of the capability catalog: what passes are
+    registered, so the panel renders one row per pass instead of hardcoding
+    phases (a dropped-in pass module appears here without frontend edits)."""
+    from wbworldgen.worldgen.enrichment import registered_passes
+    return {
+        "world_id": world_id,
+        "passes": [
+            {"id": s.id, "label": s.label, "description": s.description,
+             "unit": s.unit, "batchable": s.batchable}
+            for s in registered_passes()
+        ],
+    }
+
+
 @router.get("/api/world/{world_id}/enrich/progress")
 async def enrich_progress(world_id: str, layer_id: Optional[str] = None):
+    """Per-pass enrichment progress, computed from each registered node
+    pass's is_done/in_domain predicates: done/total plus a per-map
+    breakdown, and the lazy-detail (importance floor) scope."""
+    from wbworldgen.worldgen.enrichment import node_passes
     try:
         world_data = world_builder.load_world(world_id)
         compiled = world_builder.compile_world(world_data)
         all_nodes, layer_map = world_builder._collect_nodes_by_layer(compiled, layer_id)
-        label_progress = {}
-        desc_progress = {}
-        for lid, info in layer_map.items():
-            lid_nodes = [n for n in all_nodes if n.get("layer_id", "") == lid]
-            labeled = sum(1 for n in lid_nodes if n.get("name"))
-            described = sum(1 for n in lid_nodes if n.get("description"))
-            label_progress[lid] = {"done": labeled, "total": info["total"]}
-            desc_progress[lid] = {"done": described, "total": labeled}
-        total_labeled = sum(v["done"] for v in label_progress.values())
-        total_nodes = sum(v["total"] for v in label_progress.values())
-        total_described = sum(v["done"] for v in desc_progress.values())
-        total_labeled_nodes = sum(v["total"] for v in desc_progress.values())
-        # Major-location scope: what the default upfront pass will actually
-        # target when world.upfront_detail is "major_locations" (the rest is
-        # generated on demand during play).
+
         importance_floor = world_builder.default_importance_floor()
-        upfront = {"importance_floor": importance_floor}
-        if importance_floor is not None:
-            majors = [n for n in all_nodes if n.get("importance", 0) >= importance_floor]
-            upfront["labeling"] = {
-                "done": sum(1 for n in majors if n.get("name")), "total": len(majors)}
-            upfront["descriptions"] = {
-                "done": sum(1 for n in majors if n.get("description")),
-                "total": sum(1 for n in majors if n.get("name"))}
-        return {
-            "world_id": world_id,
-            "labeling": {"per_layer": label_progress, "total_labeled": total_labeled, "total_nodes": total_nodes},
-            "descriptions": {"per_layer": desc_progress, "total_described": total_described, "total_nodes": total_labeled_nodes},
-            "upfront": upfront,
-        }
+        upfront = {"importance_floor": importance_floor, "passes": {}}
+        majors = ([n for n in all_nodes if n.get("importance", 0) >= importance_floor]
+                  if importance_floor is not None else [])
+
+        # Bucket nodes exactly like the run's SSE events do (map id first,
+        # legacy layer id fallback) so the panel can merge the two sources.
+        def _map_key(n):
+            return n.get("map_id", n.get("layer_id", ""))
+
+        passes = {}
+        for spec in node_passes():
+            per_layer = {}
+            for lid, info in layer_map.items():
+                lid_nodes = [n for n in all_nodes if _map_key(n) == lid]
+                per_layer[lid] = {
+                    "done": sum(1 for n in lid_nodes if spec.is_done(n)),
+                    "total": sum(1 for n in lid_nodes if spec.in_domain(n)),
+                }
+            passes[spec.id] = {
+                "label": spec.label,
+                "unit": spec.unit,
+                "done": sum(v["done"] for v in per_layer.values()),
+                "total": sum(v["total"] for v in per_layer.values()),
+                "per_layer": per_layer,
+            }
+            if importance_floor is not None:
+                upfront["passes"][spec.id] = {
+                    "done": sum(1 for n in majors if spec.is_done(n)),
+                    "total": sum(1 for n in majors if spec.in_domain(n)),
+                }
+        return {"world_id": world_id, "passes": passes, "upfront": upfront}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 

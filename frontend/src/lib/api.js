@@ -199,6 +199,7 @@ export const api = {
   saveWorldStep:          (worldId, stepId, data) => request(`/api/world/save-step/${worldId}/${stepId}`, { method: 'POST', body: JSON.stringify({ data }) }),
   getStartLocations:      (worldId) => request(`/api/world/${worldId}/start-locations`),
   pickStartLocation:      (worldId, preference = '') => request(`/api/world/${worldId}/pick-start`, { method: 'POST', body: JSON.stringify({ preference }) }),
+  enrichPasses:           (worldId) => request(`/api/world/${worldId}/enrich/passes`),
   enrichProgress:         (worldId, layerId = null) => {
     const qs = layerId ? `?layer_id=${encodeURIComponent(layerId)}` : '';
     return request(`/api/world/${worldId}/enrich/progress${qs}`);
