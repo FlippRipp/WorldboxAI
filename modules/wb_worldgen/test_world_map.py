@@ -3,12 +3,14 @@ from collections import deque
 
 import pytest
 
-from wbworldgen.world_map import (
+from wbworldgen.mapmodel import (
     MapNode,
     MapRegion,
     WorldMap,
-    WorldMapGenerator,
     compass_direction,
+)
+from wbworldgen.worldgen.generation.overworld import (
+    WorldMapGenerator,
     generate_map,
     generate_multilayer_map,
 )

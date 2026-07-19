@@ -14,7 +14,7 @@ import types
 
 import pytest
 
-from wbworldgen.world_map import bind_named_locations
+from wbworldgen.worldgen.generation.binding import bind_named_locations
 from wbworldgen.worldgen import WorldBuilder, register_default_steps
 from wbworldgen.worldgen.compiler import collect_scope_content, merge_geography_steps
 

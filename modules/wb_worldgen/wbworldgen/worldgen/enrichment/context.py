@@ -2,7 +2,7 @@
 
 import re
 
-from wbworldgen.world_map import compass_direction as _compass_direction
+from wbworldgen.mapmodel import compass_direction as _compass_direction
 
 
 def collect_nodes_by_layer(compiled: dict, layer_filter: str = None) -> tuple:

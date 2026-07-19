@@ -19,7 +19,7 @@ import heapq
 import math
 import random
 
-from wbworldgen.world_map import bind_named_locations
+from wbworldgen.worldgen.generation.binding import bind_named_locations
 from wbworldgen.worldgen.generation.roadnet import (
     DEFAULT_LEVELS,
     OUTWARD_GENERATIONS,

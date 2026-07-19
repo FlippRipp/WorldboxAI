@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from wbworldgen.terrain import biomes as _bm
-from wbworldgen.world_map import WorldMapGenerator
+from wbworldgen.worldgen.generation.overworld import WorldMapGenerator
 from wbworldgen.worldgen import region_affinity as _ra
 from wbworldgen.worldgen import terrain_placement as _tp
 

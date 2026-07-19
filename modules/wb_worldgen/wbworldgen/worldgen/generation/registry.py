@@ -61,7 +61,7 @@ def _build_world_map(spec: dict) -> dict:
 
     spec: {compiled_world, total_nodes?, map_width?, map_height?, id_prefix?,
     terrain?, seed?}."""
-    from wbworldgen.world_map import WorldMapGenerator
+    from wbworldgen.worldgen.generation.overworld import WorldMapGenerator
     gen = WorldMapGenerator(seed=spec.get("seed"))
     wm = gen.generate(
         spec["compiled_world"],

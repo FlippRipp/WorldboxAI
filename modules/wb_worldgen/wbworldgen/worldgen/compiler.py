@@ -7,17 +7,7 @@ depending on the orchestrator.
 
 from typing import Any, Optional
 
-
-def _norm_name(name) -> str:
-    """Case/whitespace/article-tolerant key for joining authored names.
-
-    A leading "The " is dropped so cross-step references join even when one
-    step writes "The Neon Docks" and another "Neon Docks" — with independent
-    LLM calls authoring each side, that mismatch is routine."""
-    key = str(name or "").strip().lower()
-    if key.startswith("the ") and len(key) > 4:
-        key = key[4:]
-    return key
+from wbworldgen.mapmodel import join_key as _norm_name
 
 
 def _region_resolver(area_names: list, landmarks: list):

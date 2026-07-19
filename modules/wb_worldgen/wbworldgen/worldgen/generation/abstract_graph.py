@@ -37,7 +37,7 @@ in ``enrichment/maps_expand.py``.
 
 import math
 
-from wbworldgen.world_map import _join_key
+from wbworldgen.mapmodel import join_key
 
 #: Node-count bounds for one authored abstract map.
 MAX_ROOT_NODES = 20
@@ -86,12 +86,12 @@ def normalize_abstract_graph(parsed: dict, named_locations: list, areas: list,
     for a in areas or []:
         name = str((a or {}).get("name", "")).strip()
         if name:
-            area_by_key.setdefault(_join_key(name), name)
+            area_by_key.setdefault(join_key(name), name)
     loc_by_key = {}
     for loc in named_locations or []:
         name = str((loc or {}).get("name", "")).strip()
         if name:
-            loc_by_key.setdefault(_join_key(name), loc)
+            loc_by_key.setdefault(join_key(name), loc)
 
     layer_id = id_prefix.rstrip("_")
     nodes: list[dict] = []
@@ -105,7 +105,7 @@ def normalize_abstract_graph(parsed: dict, named_locations: list, areas: list,
         if not isinstance(raw, dict):
             continue
         name = str(raw.get("name", "")).strip()
-        key = _join_key(name)
+        key = join_key(name)
         if not name or key in by_key:
             continue
         if len(nodes) >= max_nodes:
@@ -127,7 +127,7 @@ def normalize_abstract_graph(parsed: dict, named_locations: list, areas: list,
             "description": description,
             "label_description": "",
             "type": _engine_type(importance),
-            "region": area_by_key.get(_join_key(raw.get("region", "")), ""),
+            "region": area_by_key.get(join_key(raw.get("region", "")), ""),
         }
         if layer_id:
             node["layer_id"] = layer_id
@@ -162,7 +162,7 @@ def normalize_abstract_graph(parsed: dict, named_locations: list, areas: list,
     # Satellite links resolve after every node exists (forward references).
     by_id = {n["id"]: n for n in nodes}
     for node_id, parent_name in raw_parents.items():
-        parent = by_key.get(_join_key(parent_name))
+        parent = by_key.get(join_key(parent_name))
         if parent is not None and parent["id"] != node_id:
             by_id[node_id]["parent_id"] = parent["id"]
 
@@ -170,7 +170,7 @@ def normalize_abstract_graph(parsed: dict, named_locations: list, areas: list,
     for node in nodes:
         for contained_name in raw_contains.get(node["id"], []):
             contained_name = str(contained_name or "").strip()
-            ckey = _join_key(contained_name)
+            ckey = join_key(contained_name)
             if not contained_name or ckey in by_key or ckey in placed:
                 continue
             loc = loc_by_key.get(ckey)
@@ -189,11 +189,11 @@ def normalize_abstract_graph(parsed: dict, named_locations: list, areas: list,
     for key, loc in loc_by_key.items():
         if key in placed or key in by_key:
             continue
-        anchor = by_key.get(_join_key(loc.get("part_of", "")))
+        anchor = by_key.get(join_key(loc.get("part_of", "")))
         if anchor is None and loc.get("region"):
             anchor = _most_important(
                 [n for n in nodes
-                 if _join_key(n.get("region")) == _join_key(loc["region"])])
+                 if join_key(n.get("region")) == join_key(loc["region"])])
         if anchor is None:
             anchor = _most_important(nodes)
         if anchor is None:
@@ -209,7 +209,7 @@ def normalize_abstract_graph(parsed: dict, named_locations: list, areas: list,
     seen_pairs: set[frozenset] = set()
     for node in nodes:
         for other_name in raw_adjacent.get(node["id"], []):
-            other = by_key.get(_join_key(str(other_name or "")))
+            other = by_key.get(join_key(str(other_name or "")))
             if other is None or other["id"] == node["id"]:
                 continue
             pair = frozenset((node["id"], other["id"]))
@@ -244,7 +244,7 @@ def ensure_crossing_nodes(graph: dict, label: str, kind: str, count: int,
     nodes = graph["nodes"]
     kind = (kind or "passage").strip() or "passage"
     matched = [n for n in nodes
-               if _join_key(n.get("crossing", "")) == _join_key(label)]
+               if join_key(n.get("crossing", "")) == join_key(label)]
     if not matched:
         matched = [n for n in nodes
                    if n.get("crossing") and not n.get("interlayer_connection_id")]
@@ -577,11 +577,11 @@ def mock_abstract_parsed(label: str, areas: list, named_locations: list,
              str(loc.get("region", "") or "").strip(),
              8 if loc.get("category") == "settlement" else 6,
              loc.get("description", "") or f"Mock {label} place.")
-    present = {_join_key(n["region"]) for n in nodes if n["region"]}
+    present = {join_key(n["region"]) for n in nodes if n["region"]}
     for area in area_names:
         if len(nodes) >= max_nodes:
             break
-        if _join_key(area) not in present:
+        if join_key(area) not in present:
             _add(f"{area} Hub", "hub", area, 7, f"Mock hub of {area}.")
 
     if not nodes:

@@ -1020,7 +1020,7 @@ Output ONLY valid JSON:
             if isinstance(c, dict) and str(c.get("name", "")).strip()
         ]
         if contained:
-            from wbworldgen.world_map import bind_named_locations
+            from wbworldgen.worldgen.generation.binding import bind_named_locations
             bind_named_locations(record["nodes"], contained, record["edges"])
 
         # Arrival point: the map's most important node — its natural hub.

@@ -4,9 +4,9 @@ import logging
 
 import re as _re
 
-from wbworldgen.world_map import bind_named_locations as _bind_named_locations
-from wbworldgen.world_map import generate_map as _generate_map_static
-from wbworldgen.world_map import generate_multilayer_map as _generate_multilayer_map
+from wbworldgen.worldgen.generation.binding import bind_named_locations as _bind_named_locations
+from wbworldgen.worldgen.generation.overworld import generate_map as _generate_map_static
+from wbworldgen.worldgen.generation.overworld import generate_multilayer_map as _generate_multilayer_map
 from wbworldgen.worldgen.compiler import build_compiled_for_map, collect_scope_content
 from wbworldgen.worldgen import terrain_store as _ts
 from wbworldgen.worldgen.persistence import WorldPersistence
