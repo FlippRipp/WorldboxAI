@@ -1,6 +1,10 @@
 # Worldgen Architecture — Modularity & Agentic Builder Plan
 
-*Status: proposed (2026-07-19). Records the structural assessment of
+*Status: Arc A landed (A1–A5, 2026-07-19; RuntimeHost still pending, rides
+along with the next backend.py change). Arc B/C proposed — settle B1's design
+questions (pass work-unit granularity, interleaved review, the legacy
+label_next/describe_next endpoints, EnrichmentPanel generalization) before
+starting. Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
 agentic builder — an LLM receives a world idea and figures out what it needs

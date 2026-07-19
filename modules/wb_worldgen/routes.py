@@ -210,7 +210,7 @@ async def generate_world(request: WorldGenerateRequest, session_id: str = "defau
     state = {"seed_prompt": request.seed_prompt, "steps": {}}
     if request.scenario_id:
         from backend.engine.scenario import ScenarioStore
-        from wbworldgen.worldgen.facade import scenario_grounding_text
+        from wbworldgen.worldgen.prompts import scenario_grounding_text
         try:
             record = ScenarioStore(session_manager.data_dir).load_scenario(request.scenario_id)
         except (FileNotFoundError, ValueError):
@@ -369,7 +369,7 @@ async def rewrite_world_prompt(request: RewriteWorldPromptRequest):
     """LLM-as-author for the World Prompt: turns the player's notes (the enrich
     field), the current draft, and an optional linked scenario into a world
     seed prompt. Mirrors the scenario editor's prompt rewrite."""
-    from wbworldgen.worldgen.facade import build_world_prompt_messages
+    from wbworldgen.worldgen.prompts import build_world_prompt_messages
 
     instruction = (request.instruction or "").strip()
     current_text = (request.current_text or "").strip()
@@ -401,7 +401,7 @@ async def world_prompt_questions(request: WorldPromptQuestionsRequest):
     any previous rounds) and asks a few clarifying questions about details the
     prompt leaves open. An empty draft is fine — the questions then help the
     player shape the world from scratch."""
-    from wbworldgen.worldgen.facade import build_world_questions_messages
+    from wbworldgen.worldgen.prompts import build_world_questions_messages
     try:
         from backend.engine.llm import LLMProviderError
     except ImportError:  # isolated module-test context: core pkg not on path
@@ -442,7 +442,7 @@ async def fold_world_answers(request: FoldWorldAnswersRequest):
     """Fold a round of interview answers into the World Prompt: every answer
     lands — added or rewritten into the prompt as needed — while parts the
     answers don't touch keep the player's text."""
-    from wbworldgen.worldgen.facade import build_world_prompt_fold_messages
+    from wbworldgen.worldgen.prompts import build_world_prompt_fold_messages
 
     answered = [a for a in request.answers or []
                 if str(a.get("answer") or "").strip()]
@@ -633,7 +633,7 @@ class SeedRequest(BaseModel):
 @router.post("/api/world/debug/seed")
 async def debug_seed_world(request: SeedRequest):
     try:
-        result = world_builder.seed_world(
+        result = await world_builder.seed_world(
             request.seed_prompt,
             world_id=request.world_id,
             total_nodes=request.total_nodes,

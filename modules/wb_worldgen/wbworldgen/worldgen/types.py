@@ -119,3 +119,6 @@ class StepContext:
     user_note: str = ""
     config: Optional[dict] = None
     services: Any = None
+    #: Forces the step's mock/offline path even when a live LLM is wired
+    #: (seeded worlds must be deterministic and never spend tokens).
+    force_mock: bool = False

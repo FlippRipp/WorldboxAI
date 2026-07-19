@@ -716,7 +716,7 @@ def test_save_world_marked_complete(builder):
 
 def test_seed_world_completes(builder_with_steps):
     wb = builder_with_steps
-    result = wb.seed_world("a dark fantasy fungal world", "test_seed")
+    result = asyncio.run(wb.seed_world("a dark fantasy fungal world", "test_seed"))
     assert result["world_id"] == "test_seed"
     assert result["seed_prompt"] == "a dark fantasy fungal world"
     assert result["step_count"] > 0
@@ -726,14 +726,14 @@ def test_seed_world_completes(builder_with_steps):
 
 def test_seed_world_auto_generates_id(builder_with_steps):
     wb = builder_with_steps
-    result = wb.seed_world("test prompt")
+    result = asyncio.run(wb.seed_world("test prompt"))
     assert result["world_id"]
     assert len(result["world_id"]) > 0
 
 
 def test_seed_world_creates_save(builder_with_steps):
     wb = builder_with_steps
-    result = wb.seed_world("fantasy world", "seed_save_test")
+    result = asyncio.run(wb.seed_world("fantasy world", "seed_save_test"))
     worlds = wb.list_worlds()
     assert any(w["id"] == result["world_id"] for w in worlds)
 

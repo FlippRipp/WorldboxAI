@@ -144,7 +144,7 @@ class WorldFormStep(Step):
         # Custom-generate steps bypass the facade's mock branch, so handle
         # mock mode here (precedent: terrain_generation does its own work).
         llm = services._llm_service
-        if llm is None or getattr(llm, "mode", "mock") == "mock":
+        if ctx.force_mock or llm is None or getattr(llm, "mode", "mock") == "mock":
             from wbworldgen.worldgen.fixtures.mock_data import mock_world_form
             return normalize_world_form(mock_world_form(ctx.user_prompt, ctx.user_note), known_ids)
 

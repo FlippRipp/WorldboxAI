@@ -307,7 +307,7 @@ def test_live_generate_style_note_and_junk_fallback(builder):
 # ---------------------------------------------------------------------------
 
 def test_seeded_city_world_designs_street_root(builder):
-    builder.seed_world("a neon cyberpunk city of rain", world_id="seed_city", total_nodes=40)
+    asyncio.run(builder.seed_world("a neon cyberpunk city of rain", world_id="seed_city", total_nodes=40))
     compiled = builder.compile_world(builder.load_world("seed_city"))
     root = compiled["maps"][compiled["root_map_id"]]
     assert (root["level_type"], root["generator_id"]) == ("city", "city_roadnet")
@@ -315,7 +315,7 @@ def test_seeded_city_world_designs_street_root(builder):
 
 
 def test_seeded_fantasy_world_unchanged(builder):
-    builder.seed_world("a mythic fantasy overworld", world_id="seed_world", total_nodes=40)
+    asyncio.run(builder.seed_world("a mythic fantasy overworld", world_id="seed_world", total_nodes=40))
     compiled = builder.compile_world(builder.load_world("seed_world"))
     root = compiled["maps"][compiled["root_map_id"]]
     assert (root["level_type"], root["generator_id"]) == ("world", "world_map")

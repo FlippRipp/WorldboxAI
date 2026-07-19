@@ -462,7 +462,7 @@ Output ONLY valid JSON:
         return self._layout_root(parsed, level, max_locations)
 
     async def expand_root(self, world_state: dict, user_prompt: str, level: dict,
-                          max_locations: int = 12) -> dict:
+                          max_locations: int = 12, force_mock: bool = False) -> dict:
         """Author the ROOT map for a world whose root level uses an authored
         (needs_llm_content) generator — the whole playable world is one
         interior-style place (a mansion, a generation ship, a single keep).
@@ -470,7 +470,7 @@ Output ONLY valid JSON:
         lays them out. Returns a map_generation step-data dict
         ({nodes, edges, config, generator_id}) — no parent, no entrance
         connection, exactly like the procedural root path's output."""
-        if not self._llm or self._llm.mode == "mock":
+        if force_mock or not self._llm or self._llm.mode == "mock":
             return self.mock_root_map(world_state, level, max_locations)
         from wbworldgen.worldgen.compiler import build_compiled_for_map
         compiled = build_compiled_for_map(world_state)
@@ -576,7 +576,8 @@ Output ONLY valid JSON:
 
     async def expand_abstract_root(self, world_state: dict, user_prompt: str,
                                    level: dict, directive: str = "",
-                                   world_kind: str = "") -> dict:
+                                   world_kind: str = "",
+                                   force_mock: bool = False) -> dict:
         """Author the ROOT map for an abstract world (map_style "abstract"):
         a solar system, a dream web — a graph of real conceptual places, not
         a procedural scatter. One full-attention call authors the root layer
@@ -586,7 +587,7 @@ Output ONLY valid JSON:
         places everything. Returns map_generation step data in the same
         shape as the procedural path (flat map, or legacy multilayer with
         parallel planes)."""
-        if not self._llm or self._llm.mode == "mock":
+        if force_mock or not self._llm or self._llm.mode == "mock":
             return self.mock_abstract_root(world_state, level)
         seed_prompt, lore, rules, areas, scopes, parallel = \
             self._abstract_inputs(world_state)

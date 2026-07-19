@@ -122,7 +122,7 @@ async def create_world_story_source(*, save_id, source_id, start_preference, ses
     import json as _json
     import random as _random
 
-    from wbworldgen.worldgen.facade import scenario_start_brief
+    from wbworldgen.worldgen.prompts import scenario_start_brief
 
     world_id = source_id
     world_state = world_builder.load_world(world_id)

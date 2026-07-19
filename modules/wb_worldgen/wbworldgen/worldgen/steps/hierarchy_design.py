@@ -244,7 +244,7 @@ class HierarchyDesignStep(Step):
         # Custom-generate steps bypass the facade's mock branch, so handle
         # mock mode here (precedent: world_form).
         llm = services._llm_service
-        if llm is None or getattr(llm, "mode", "mock") == "mock":
+        if ctx.force_mock or llm is None or getattr(llm, "mode", "mock") == "mock":
             from wbworldgen.worldgen.fixtures.mock_data import mock_hierarchy_design
             return normalize_hierarchy_design(
                 mock_hierarchy_design(ctx.user_prompt, ctx.user_note),

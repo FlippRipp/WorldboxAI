@@ -26,7 +26,7 @@ from wbworldgen.worldgen.generation import LLMStepGenerator, MapStepGenerator, M
 from wbworldgen.worldgen.hooks import HookRegistry
 from wbworldgen.worldgen.persistence import WorldPersistence
 from wbworldgen.worldgen.services import GenServices
-from wbworldgen.worldgen.base import USES_MAP
+from wbworldgen.worldgen.base import USES_ENRICHMENT, USES_MAP
 from wbworldgen.worldgen.fixtures.mock_data import (
     mock_hierarchy_design, mock_layer_design, mock_layer_rules, mock_lore,
     mock_natural_landmarks, mock_rules, mock_society_factions,
@@ -36,246 +36,17 @@ from wbworldgen.worldgen.types import StepContext
 
 logger = logging.getLogger(__name__)
 
+# Re-exported for compatibility: routes, tests and older callers import
+# these from the facade; they live in prompts.py now.
+from wbworldgen.worldgen.prompts import (  # noqa: F401
+    build_world_prompt_fold_messages,
+    build_world_prompt_messages,
+    build_world_questions_messages,
+    scenario_grounding_text,
+    scenario_start_brief,
+    seed_with_scenario,
+)
 
-def scenario_grounding_text(scenario: dict) -> str:
-    """Render a linked scenario record (backend.engine.scenario) as the
-    grounding text world generation is seeded with.
-
-    The scenario's situation and opening scene are treated as established
-    facts: the generated world must contain the places, people and stakes
-    they reference, because the story will open there. Never truncated.
-    """
-    parts = []
-    name = str(scenario.get("name") or "").strip()
-    if name:
-        parts.append(f"Scenario: {name}")
-    desc = str(scenario.get("scenario_description") or "").strip()
-    if desc:
-        parts.append(f"Setting and situation:\n{desc}")
-    opening = str(scenario.get("starting_prompt") or "").strip()
-    if opening:
-        parts.append(
-            "The story will open with this exact scene — the world must contain "
-            f"the places, people and situation it references:\n{opening}")
-    for key, label in (("themes", "Themes"), ("tags", "Tags"), ("pacing", "Pacing")):
-        val = str(scenario.get(key) or "").strip()
-        if val:
-            parts.append(f"{label}: {val}")
-    return "\n\n".join(parts)
-
-
-def scenario_start_brief(scenario: dict) -> str:
-    """Render a scenario record as the start-location request used when a
-    story combines a world with a scenario: the start location should be
-    wherever the scenario's opening scene takes place.
-
-    The player's pending modification request comes first and is marked
-    highest-priority — it may move the opening somewhere the scenario text
-    doesn't. Never truncated.
-    """
-    parts = []
-    request = str(scenario.get("pending_modification_request") or "").strip()
-    if request:
-        parts.append(
-            "The player's change request for this scenario — HIGHEST priority, "
-            f"it overrides the scenario text below where they conflict:\n{request}")
-    grounding = scenario_grounding_text(scenario)
-    if grounding:
-        parts.append(
-            "The story starts with this scenario — choose the location where "
-            f"its opening scene takes place (or the closest fit):\n{grounding}")
-    return "\n\n".join(parts)
-
-
-def build_world_prompt_messages(instruction: str, current_text: str = "",
-                                scenario: dict | None = None) -> list[dict]:
-    """LLM messages for writing a world SEED PROMPT from the player's notes.
-
-    The player types free-form direction (the enrich field) and optionally has
-    a draft prompt and/or a linked scenario; the model turns them into a
-    concise seed prompt — the creative direction the generator expands into
-    rules, lore and a map, NOT the world itself and NOT in-fiction narration.
-    Pure (no I/O) so it is unit-testable; the route feeds the result to the
-    LLM. Mirrors the scenario editor's prompt-rewrite framing.
-    """
-    system = (
-        "You are a world-building assistant that writes the SEED PROMPT for an AI "
-        "world generator. A seed prompt is a short, vivid paragraph of creative "
-        "direction — premise, setting, tone, and any defining features — that the "
-        "generator expands into a full world (rules, lore, regions, a map). It is "
-        "NOT the world itself and NOT in-fiction narration: write it as direction "
-        "for the generator, in plain descriptive prose, a few sentences long. "
-        'Return only valid JSON: {"text": "..."}.'
-    )
-    parts = []
-    grounding = scenario_grounding_text(scenario) if scenario else ""
-    if grounding:
-        parts.append(
-            "The world must fit this scenario the player has chosen — honor its "
-            "setting, situation, names and tone:\n"
-            f"<scenario>\n{grounding}\n</scenario>")
-    current_text = (current_text or "").strip()
-    if current_text:
-        parts.append(f"<current_world_prompt>\n{current_text}\n</current_world_prompt>")
-    else:
-        parts.append("<current_world_prompt>\n(empty — write a new seed prompt from scratch)\n</current_world_prompt>")
-    instr = (instruction or "").strip()
-    parts.append(
-        "<direction>\n"
-        + (instr or "Write a fitting world seed prompt from the scenario above.")
-        + "\n</direction>")
-    parts.append(
-        "Write or revise the world seed prompt to follow the direction, building on "
-        "the current prompt when present and grounding everything in the scenario "
-        "when one is given. Return only the seed prompt text.")
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": "\n\n".join(parts)},
-    ]
-
-
-def _interview_history_text(history: list[dict] | None) -> str:
-    """Render prior interview rounds (question/answer pairs) as plain text for
-    the LLM. Skipped questions are shown as such — the player saw them and
-    chose not to answer. Never truncated."""
-    lines = []
-    for pair in history or []:
-        question = str(pair.get("question") or "").strip()
-        if not question:
-            continue
-        answer = str(pair.get("answer") or "").strip()
-        lines.append(f"Q: {question}\nA: {answer or '(skipped — the player left this open)'}")
-    return "\n\n".join(lines)
-
-
-def build_world_questions_messages(current_text: str = "",
-                                   history: list[dict] | None = None,
-                                   scenario: dict | None = None) -> list[dict]:
-    """LLM messages for the world-prompt interview: ask the player a short
-    round of clarifying questions about details the seed prompt leaves open.
-
-    Works from an empty prompt too — the first round then asks foundational
-    questions (genre, tone, scale, central conflict). Prior rounds are passed
-    in `history` so the model never repeats itself, and a linked scenario is
-    grounding so it never asks what the scenario already answers. Pure (no
-    I/O) so it is unit-testable; the route feeds the result to the LLM.
-    """
-    system = (
-        "You are a world-building assistant interviewing the player about the world "
-        "they want an AI world generator to create. Read their seed prompt draft and "
-        "ask 3-5 short, concrete questions about important details it leaves open — "
-        "the things that would most change the generated world (tone, scale, conflict, "
-        "magic or technology, factions, geography, cultures, history, what makes it "
-        "distinct). Ask ONLY about the world itself — the setting the generator will "
-        "build. Never ask about protagonists, individual characters, their goals or "
-        "relationships, or how the story's plot unfolds: those belong to the scenario "
-        "and the story, not to world generation. Each question must be answerable in "
-        "a sentence or two. Never ask anything the prompt, the scenario, or a "
-        "previous answer already settles, and never repeat a question from a previous "
-        "round — a skipped question means the player wants to leave it open, so move "
-        "on to something else. "
-        'Return only valid JSON: {"questions": ["...", "..."]}.'
-    )
-    parts = []
-    grounding = scenario_grounding_text(scenario) if scenario else ""
-    if grounding:
-        parts.append(
-            "The world must fit this scenario the player has chosen — treat "
-            "everything in it as already decided, not something to ask about. Its "
-            "characters and events are story material, not open questions: ask "
-            "about the wider world the scenario takes place in, never about the "
-            "scenario's people or plot:\n"
-            f"<scenario>\n{grounding}\n</scenario>")
-    current_text = (current_text or "").strip()
-    if current_text:
-        parts.append(f"<current_world_prompt>\n{current_text}\n</current_world_prompt>")
-    else:
-        parts.append(
-            "<current_world_prompt>\n(empty — the player hasn't written anything yet; "
-            "ask foundational questions that help them shape the world from scratch)\n"
-            "</current_world_prompt>")
-    history_text = _interview_history_text(history)
-    if history_text:
-        parts.append(
-            "Questions already asked in previous rounds — do not repeat or rephrase "
-            f"any of these:\n<previous_rounds>\n{history_text}\n</previous_rounds>")
-    parts.append("Ask the next round of questions. Return only the JSON.")
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": "\n\n".join(parts)},
-    ]
-
-
-def build_world_prompt_fold_messages(current_text: str,
-                                     answers: list[dict],
-                                     scenario: dict | None = None) -> list[dict]:
-    """LLM messages for folding a round of interview answers into the seed
-    prompt.
-
-    Every answer must land in the prompt — added where it brings something
-    new, rewriting whatever it changes — while parts the answers don't touch
-    keep the player's wording. With an empty current prompt the answers become
-    the first draft. Pure (no I/O) so it is unit-testable.
-    """
-    system = (
-        "You are a world-building assistant maintaining the SEED PROMPT for an AI "
-        "world generator — a short, vivid paragraph of creative direction the "
-        "generator expands into a full world. The player has answered interview "
-        "questions about their world; fold their answers into the prompt. Every "
-        "answer must end up reflected in the prompt: add what it introduces, and "
-        "rewrite whatever parts of the prompt it changes or contradicts — "
-        "preserving the current text is never a reason to leave an answer out. "
-        "Where the answers don't touch the prompt, keep the player's wording and "
-        "details as they are, and do not pad or embellish beyond what the answers "
-        "say. If the current prompt is empty, write a first draft from the answers "
-        "alone. "
-        'Return only valid JSON: {"text": "..."}.'
-    )
-    parts = []
-    grounding = scenario_grounding_text(scenario) if scenario else ""
-    if grounding:
-        parts.append(
-            "The world must fit this scenario the player has chosen — keep the "
-            f"prompt consistent with it:\n<scenario>\n{grounding}\n</scenario>")
-    current_text = (current_text or "").strip()
-    if current_text:
-        parts.append(f"<current_world_prompt>\n{current_text}\n</current_world_prompt>")
-    else:
-        parts.append("<current_world_prompt>\n(empty — write the first draft from the answers)\n</current_world_prompt>")
-    answers_text = _interview_history_text(answers)
-    parts.append(f"The player's answers this round:\n<answers>\n{answers_text}\n</answers>")
-    parts.append(
-        "Update the seed prompt so every answer is fully incorporated — add and "
-        "change whatever the answers require, and keep the rest as the player "
-        "wrote it. Return only the seed prompt text.")
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": "\n\n".join(parts)},
-    ]
-
-
-def seed_with_scenario(world_state: dict, user_prompt: str) -> str:
-    """The effective seed text for generation: the user's prompt, plus the
-    optional scenario document supplied at world creation.
-
-    The scenario is longer-form source material (a campaign setting, an
-    adventure premise, pasted background text) the world must be grounded in;
-    the seed prompt is the creative direction on top of it. Composed here —
-    the single seam every step generation passes through — so the LLM, mock
-    and custom-step paths all see both. Never truncated.
-    """
-    scenario = str((world_state or {}).get("scenario") or "").strip()
-    if not scenario:
-        return user_prompt
-    return (
-        f"{user_prompt}\n\n"
-        "The world's creator also provided a scenario — source material this world is set in. "
-        "Ground the world in it: keep its facts, names, tone and situation consistent, and treat "
-        "the seed prompt above as direction for what to build from it.\n"
-        "--- SCENARIO ---\n"
-        f"{scenario}\n"
-        "--- END SCENARIO ---"
-    )
 
 
 class WorldBuilder:
@@ -364,6 +135,14 @@ class WorldBuilder:
     def _enrichment_semaphore(self, semaphore):
         self._services.semaphore = semaphore
 
+    @property
+    def services(self) -> GenServices:
+        """The explicit engine contract (see ``GenServices``). Public so the
+        subsystems that orchestrate through the facade (start_locations, and
+        later the plan executor) read dependencies through one named object
+        instead of facade privates."""
+        return self._services
+
     # --- configuration ------------------------------------------------------
 
     def set_llm_service(self, service):
@@ -418,7 +197,8 @@ class WorldBuilder:
 
     # --- generation ---------------------------------------------------------
 
-    async def generate_step(self, step_id: str, world_state: dict, user_prompt: str, user_note: str = "", config: dict = None) -> dict:
+    async def generate_step(self, step_id: str, world_state: dict, user_prompt: str, user_note: str = "", config: dict = None,
+                            force_mock: bool = False) -> dict:
         step = self._steps.get(step_id)
         if not step:
             raise ValueError(f"Unknown step: {step_id}")
@@ -429,7 +209,8 @@ class WorldBuilder:
         custom = getattr(step, "generate", None)
         if callable(custom):
             ctx = StepContext(step=step, world_state=world_state, user_prompt=user_prompt,
-                              user_note=user_note, config=config, services=self)
+                              user_note=user_note, config=config, services=self,
+                              force_mock=force_mock)
             data = await custom(ctx)
             await self._hook_registry.dispatch_step(step_id, data, world_state, user_prompt)
             return data
@@ -446,7 +227,7 @@ class WorldBuilder:
                     "world.site_max_sublocations", 10, 4, 16)
                 return await self._maps_expand.expand_root(
                     world_state, user_prompt, level,
-                    max_locations=max(8, max_locations))
+                    max_locations=max(8, max_locations), force_mock=force_mock)
             abstract_level = _design.abstract_root_level(world_state, root_gen)
             if abstract_level is not None:
                 # Abstract worlds (a solar system, a dream web) get an
@@ -456,7 +237,8 @@ class WorldBuilder:
                 return await self._maps_expand.expand_abstract_root(
                     world_state, user_prompt, abstract_level,
                     directive=_design.coverage_directive(world_state, "map_generation"),
-                    world_kind=_design.world_kind(world_state))
+                    world_kind=_design.world_kind(world_state),
+                    force_mock=force_mock)
             # Delaunay + road pathfinding are CPU-bound; keep the event loop free.
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
@@ -466,7 +248,7 @@ class WorldBuilder:
         view = getattr(step, "view_for", None)
         if callable(view):
             step = view(world_state)
-        if self._llm_service and self._llm_service.mode != "mock":
+        if not force_mock and self._llm_service and self._llm_service.mode != "mock":
             context = self._build_chain_context(world_state, step_id)
             data = await self._llm_gen.generate(
                 step, context, user_prompt, user_note,
@@ -595,33 +377,27 @@ class WorldBuilder:
         self._compiled.invalidate(world_id)
         return result
 
-    def seed_world(self, seed_prompt: str, world_id: str = None, total_nodes: int = 60) -> dict:
+    async def seed_world(self, seed_prompt: str, world_id: str = None, total_nodes: int = 60) -> dict:
+        """Build a complete world offline: the normal pipeline step by step
+        with the mock strategy forced (a live LLM is never called), every
+        step approved. Terrain rasters and the engine-driven enrichment
+        steps stay empty — a seeded world is a pre-enrichment draft, exactly
+        like a wizard world before the enrichment panel runs."""
         import uuid
         safe_id = world_id or uuid.uuid4().hex[:8]
         safe_id = "".join(c for c in safe_id.lower().replace(" ", "_") if c.isalnum() or c in "_-")
 
         world_state = {"seed_prompt": seed_prompt, "steps": {}, "complete": False, "current_step": None}
-        from wbworldgen.worldgen.fixtures.mock_data import MOCK_GENERATORS
 
         note_for_layer = ""
         for step_id in self._ordered_ids:
-            if step_id == "map_generation":
-                root_gen = _design.root_generator_for(world_state)
-                level = _design.authored_root_level(world_state, root_gen)
-                abstract_level = _design.abstract_root_level(world_state, root_gen)
-                if level is not None:
-                    data = self._maps_expand.mock_root_map(world_state, level)
-                elif abstract_level is not None:
-                    data = self._maps_expand.mock_abstract_root(world_state, abstract_level)
-                else:
-                    data = self._map_gen.generate(world_state, {"total_nodes": total_nodes},
-                                                  root_gen)
+            step = self._steps[step_id]
+            if step_id == "terrain_generation" or getattr(step, "uses", "") == USES_ENRICHMENT:
+                data = {}
             else:
-                handler = MOCK_GENERATORS.get(step_id)
-                if handler:
-                    data = handler(seed_prompt, note_for_layer)
-                else:
-                    data = {}
+                data = await self.generate_step(
+                    step_id, world_state, seed_prompt, user_note=note_for_layer,
+                    config={"total_nodes": total_nodes}, force_mock=True)
             world_state["steps"][step_id] = {"data": data, "approved": True}
             if step_id == "hierarchy_design" and isinstance(data, dict) and data.get("parallel_maps"):
                 note_for_layer = "world with parallel maps"
@@ -876,10 +652,6 @@ class WorldBuilder:
 
     # --- start locations ----------------------------------------------------
 
-    #: Safety net for the start-location descent: author→expand→author chains
-    #: deeper than this are pathological, not worlds.
-    MAX_START_DESCENT = 5
-
     def get_start_locations(self, world_id: str) -> list[dict]:
         compiled = self.compile_world(self.load_world(world_id))
         return _start.get_start_locations(compiled)
@@ -891,217 +663,16 @@ class WorldBuilder:
         return _start.find_start_candidate(compiled, node_id)
 
     async def llm_pick_start_location(self, world_id: str, preference: str, llm):
-        """Choose where the story starts, descending the map hierarchy.
-
-        Level by level (world → city → building → room ...) the best match
-        for the preference is picked among one map's places; when the chosen
-        place has a child map the descent continues inside it (with an
-        EXTERIOR answer to stop at the place itself). At any level a no-match
-        authors a brand-new location — on the level's unnamed map positions
-        (or founded beside an anchor) at the top, or grown onto the interior
-        map below — and when the scene calls for a spot inside a place with
-        no interior map yet, the interior is expanded on the spot with that
-        spot required to exist (``must_include``).
-
-        The returned candidate may carry ``ancestor_node_ids`` (the container
-        chain walked down, for fog-of-war reveal) and ``world_modified``
-        (something was authored or expanded; callers holding a compiled world
-        should recompile)."""
-        compiled = self.compile_world(self.load_world(world_id))
-        live = llm is not None and getattr(llm, "mode", "mock") != "mock"
-
-        top_map_ids = [mid for mid, m in _mapspace.maps_by_id(compiled).items()
-                       if not m.get("anchor_node_id")]
-        candidates = (_start.map_candidates(compiled, top_map_ids)
-                      or _start.get_start_locations(compiled))
-        result = await _start.llm_pick_start_location(
-            compiled, candidates, preference, llm, allow_no_match=live)
-
-        world_modified = False
-        if isinstance(result, dict) and result.get("no_match"):
-            wanted = result.get("wanted", "")
-            authored = await _start.generate_start_location(
-                compiled, preference, wanted, llm)
-            if authored and authored.get("belongs_inside"):
-                # The requested start is inside an existing place — start the
-                # descent at that place, with the request as the spot to find
-                # (or create) inside it.
-                inside = next((c for c in candidates
-                               if c.get("node_id") == authored["belongs_inside"]), None)
-                if inside is not None:
-                    result = dict(inside)
-                    result["inside_hint"] = wanted
-                else:
-                    authored = None
-                    result = None
-            elif authored:
-                scene_inside = authored.get("scene_inside", "")
-                result = self._persist_generated_start(world_id, authored)
-                world_modified = True
-                compiled = self.compile_world(self.load_world(world_id))
-                if scene_inside:
-                    result["inside_hint"] = scene_inside
-            if not authored:
-                # Generation failed — settle for the best existing candidate.
-                result = await _start.llm_pick_start_location(
-                    compiled, candidates, preference, llm)
-
-        if result is None or not live or not preference \
-                or preference.lower() == "random":
-            return result
-
-        result = await self._descend_start_location(
-            world_id, compiled, result, preference, llm)
-        if world_modified:
-            result["world_modified"] = True
-        return result
-
-    async def _descend_start_location(self, world_id: str, compiled: dict,
-                                      result: dict, preference: str, llm) -> dict:
-        """Walk the picked start down the map hierarchy (see
-        ``llm_pick_start_location``). Sets ``world_modified`` on the result
-        when an interior was expanded or a room grown along the way."""
-        ancestors = []
-        for _ in range(self.MAX_START_DESCENT):
-            node_id = result.get("node_id")
-            map_id = result.get("map_id") or _mapspace.ROOT_MAP_ID
-            hint = str(result.pop("inside_hint", "") or "").strip()
-            children = _mapspace.children_by_anchor(compiled).get((map_id, node_id))
-            if not children:
-                if not hint:
-                    break
-                # The scene wants a spot inside a place with no interior map:
-                # expand it now, requiring that spot to exist on the new map.
-                node = _mapspace.node_index(compiled).get(node_id)
-                if not _maps_expand.is_expandable(compiled, map_id, node):
-                    break
-                try:
-                    bundle = await self.expand_node(
-                        world_id, map_id, node_id, must_include=hint)
-                except Exception:
-                    logger.exception(
-                        "start descent: interior expansion failed for %s", node_id)
-                    break
-                record = bundle["map"]
-                compiled.setdefault("maps", {})[record["map_id"]] = record
-                compiled.setdefault("connections", []).extend(
-                    bundle.get("connections") or [])
-                compiled.pop("_node_by_id", None)
-                children = [record["map_id"]]
-                result["world_modified"] = True
-            child_id = children[0]
-            sub_candidates = _start.map_candidates(compiled, [child_id])
-            if not sub_candidates:
-                break
-            sub = await _start.llm_pick_start_location(
-                compiled, sub_candidates, preference, llm,
-                allow_no_match=True, inside_of=result, scene_hint=hint)
-            if sub is None or sub.get("exterior"):
-                break
-            if sub.get("no_match"):
-                grown = await self.grow_child_map(
-                    world_id, child_id, sub.get("wanted") or hint or preference)
-                node = (grown or {}).get("node")
-                if node and node.get("name"):
-                    child_map = _mapspace.get_map(compiled, child_id) or {}
-                    sub = {
-                        "node_id": node.get("id"),
-                        "name": node.get("name"),
-                        "type": node.get("type", "location"),
-                        "description": node.get("description", ""),
-                        "region": "",
-                        "map_id": child_id,
-                        "map_label": child_map.get("label", child_id),
-                        "generated": True,
-                    }
-                    if grown.get("created"):
-                        result["world_modified"] = True
-                        compiled = self.compile_world(self.load_world(world_id))
-                else:
-                    sub = await _start.llm_pick_start_location(
-                        compiled, sub_candidates, preference, llm,
-                        inside_of=result, scene_hint=hint)
-                    if sub is None or sub.get("exterior"):
-                        break
-            if result.pop("world_modified", False):
-                sub["world_modified"] = True
-            ancestors.append(node_id)
-            result = sub
-        if ancestors:
-            result["ancestor_node_ids"] = ancestors
-        return result
+        """Choose where the story starts, descending the map hierarchy — the
+        full contract lives on ``start_locations.pick_start_location``."""
+        return await _start.pick_start_location(self, world_id, preference, llm)
 
     async def author_location(self, world_id: str, description: str,
                               anchor_node_id: str = None) -> dict | None:
-        """Author a brand-new named location matching a free-text description
-        onto one of the world's unnamed map positions (one full-attention
-        call) — used when the story needs a place that doesn't exist yet
-        (e.g. a teleport to a named-but-unmapped destination).
-        ``anchor_node_id`` (the player's current node) makes the placement
-        spatially aware: slots are offered nearest-first so a place described
-        relative to here lands nearby. Returns the candidate-shaped entry
-        (node_id, map_id, ...) or None when no slot fits or the call fails."""
-        if not self._llm_service or self._llm_service.mode == "mock":
-            return None
-        compiled = self._compiled.load(world_id)
-        try:
-            authored = await _start.generate_start_location(
-                compiled, description, description, self._llm_service,
-                anchor_node_id=anchor_node_id)
-        except Exception:
-            logger.exception("on-demand location authoring failed")
-            return None
-        if not authored:
-            return None
-        if authored.get("belongs_inside"):
-            # Cross-boundary redirect: the place lives inside an existing
-            # site, not on the overworld — the caller grows that interior.
-            return {"belongs_inside": authored["belongs_inside"]}
-        result = self._persist_generated_start(world_id, authored)
-        self._compiled.invalidate(world_id)
-        return result
-
-    def _persist_generated_start(self, world_id: str, authored: dict) -> dict:
-        """Write an on-demand location into the world — onto its claimed map
-        node (name, type, description, importance bump), or, for a NEW-founded
-        node, appended wholesale to its map — and return it in candidate
-        shape (NEW results additionally carry ``new_node``/``new_edges``/
-        ``map_id`` so play-time callers can mirror them into the session)."""
-        node_id = authored["node_id"]
-        importance = self.MAJOR_IMPORTANCE_FLOOR if authored["type"] == "landmark" else 8
-        new_node = authored.get("new_node")
-        if new_node is not None:
-            new_node["importance"] = importance
-            self._persistence.append_map_node(
-                world_id, authored.get("map_id", ""), new_node,
-                authored.get("new_edges") or [])
-        else:
-            writes = {
-                "name": authored["name"],
-                "type": authored["type"],
-                "importance": importance,
-            }
-            if authored.get("label_description"):
-                writes["label_description"] = authored["label_description"]
-            if authored.get("description"):
-                writes["description"] = authored["description"]
-            for field, value in writes.items():
-                self._save_node_enrichment(world_id, node_id, field, value)
-            self._flush_enrichment_cache(world_id)
-        self._compiled.invalidate(world_id)
-
-        compiled = self.compile_world(self.load_world(world_id))
-        for entry in _start.get_start_locations(compiled):
-            if entry.get("node_id") == node_id:
-                entry["reason"] = authored.get("reason", "")
-                entry["generated"] = True
-                if new_node is not None:
-                    entry["new_node"] = dict(new_node)
-                    entry["new_edges"] = [dict(e) for e in authored.get("new_edges") or []]
-                return entry
-        # Node fell outside the candidate filter (shouldn't happen) — return
-        # the authored fields directly so the caller still gets a start.
-        return {**authored, "generated": True}
+        """Author a brand-new named location for a free-text description —
+        see ``start_locations.author_location``."""
+        return await _start.author_location(self, world_id, description,
+                                            anchor_node_id=anchor_node_id)
 
     # --- mock fixtures (kept as methods for direct callers/tests) ----------
 

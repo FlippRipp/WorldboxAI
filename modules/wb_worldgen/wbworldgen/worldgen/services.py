@@ -67,7 +67,9 @@ class GenServices:
     #: Prompt library lookup: ``prompts(prompt_id, fallback, **kwargs) -> str``.
     prompts: Callable[..., str] = None
     #: Enrichment write path: ``save_node_enrichment(world_id, node_id,
-    #: field, value)`` and ``flush_enrichment_cache(world_id=None)``.
+    #: field, value)`` and ``flush_enrichment_cache(world_id=None)``; the
+    #: start-location authoring path additionally uses
+    #: ``append_map_node(world_id, map_id, node, edges)``.
     enrichment_store: Any = None
     #: Compiled-world cache shared by every engine (see compiled_cache.py).
     compiled: CompiledWorldCache = None

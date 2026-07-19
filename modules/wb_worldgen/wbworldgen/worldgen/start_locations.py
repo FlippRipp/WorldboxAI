@@ -528,3 +528,238 @@ Found a new location matching the request at the best-fitting position. Return J
     if scene_inside:
         result["scene_inside"] = scene_inside
     return result
+
+
+# --- the full start pick (facade-driven orchestration) -----------------------
+# These compose the WorldBuilder facade's public operations (compile_world /
+# load_world / expand_node / grow_child_map) and read engine dependencies
+# through ``builder.services`` — never facade privates.
+
+#: Safety net for the start-location descent: author→expand→author chains
+#: deeper than this are pathological, not worlds.
+MAX_START_DESCENT = 5
+
+
+async def pick_start_location(builder, world_id: str, preference: str, llm):
+    """Choose where the story starts, descending the map hierarchy.
+
+    Level by level (world → city → building → room ...) the best match
+    for the preference is picked among one map's places; when the chosen
+    place has a child map the descent continues inside it (with an
+    EXTERIOR answer to stop at the place itself). At any level a no-match
+    authors a brand-new location — on the level's unnamed map positions
+    (or founded beside an anchor) at the top, or grown onto the interior
+    map below — and when the scene calls for a spot inside a place with
+    no interior map yet, the interior is expanded on the spot with that
+    spot required to exist (``must_include``).
+
+    The returned candidate may carry ``ancestor_node_ids`` (the container
+    chain walked down, for fog-of-war reveal) and ``world_modified``
+    (something was authored or expanded; callers holding a compiled world
+    should recompile)."""
+    from wbworldgen.worldgen import mapspace as _mapspace
+
+    compiled = builder.compile_world(builder.load_world(world_id))
+    live = llm is not None and getattr(llm, "mode", "mock") != "mock"
+
+    top_map_ids = [mid for mid, m in _mapspace.maps_by_id(compiled).items()
+                   if not m.get("anchor_node_id")]
+    candidates = (map_candidates(compiled, top_map_ids)
+                  or get_start_locations(compiled))
+    result = await llm_pick_start_location(
+        compiled, candidates, preference, llm, allow_no_match=live)
+
+    world_modified = False
+    if isinstance(result, dict) and result.get("no_match"):
+        wanted = result.get("wanted", "")
+        authored = await generate_start_location(
+            compiled, preference, wanted, llm)
+        if authored and authored.get("belongs_inside"):
+            # The requested start is inside an existing place — start the
+            # descent at that place, with the request as the spot to find
+            # (or create) inside it.
+            inside = next((c for c in candidates
+                           if c.get("node_id") == authored["belongs_inside"]), None)
+            if inside is not None:
+                result = dict(inside)
+                result["inside_hint"] = wanted
+            else:
+                authored = None
+                result = None
+        elif authored:
+            scene_inside = authored.get("scene_inside", "")
+            result = _persist_generated_start(builder, world_id, authored)
+            world_modified = True
+            compiled = builder.compile_world(builder.load_world(world_id))
+            if scene_inside:
+                result["inside_hint"] = scene_inside
+        if not authored:
+            # Generation failed — settle for the best existing candidate.
+            result = await llm_pick_start_location(
+                compiled, candidates, preference, llm)
+
+    if result is None or not live or not preference \
+            or preference.lower() == "random":
+        return result
+
+    result = await _descend_start_location(
+        builder, world_id, compiled, result, preference, llm)
+    if world_modified:
+        result["world_modified"] = True
+    return result
+
+
+async def _descend_start_location(builder, world_id: str, compiled: dict,
+                                  result: dict, preference: str, llm) -> dict:
+    """Walk the picked start down the map hierarchy (see
+    ``pick_start_location``). Sets ``world_modified`` on the result
+    when an interior was expanded or a room grown along the way."""
+    from wbworldgen.worldgen import mapspace as _mapspace
+    from wbworldgen.worldgen.expansion import maps_expand as _maps_expand
+
+    ancestors = []
+    for _ in range(MAX_START_DESCENT):
+        node_id = result.get("node_id")
+        map_id = result.get("map_id") or _mapspace.ROOT_MAP_ID
+        hint = str(result.pop("inside_hint", "") or "").strip()
+        children = _mapspace.children_by_anchor(compiled).get((map_id, node_id))
+        if not children:
+            if not hint:
+                break
+            # The scene wants a spot inside a place with no interior map:
+            # expand it now, requiring that spot to exist on the new map.
+            node = _mapspace.node_index(compiled).get(node_id)
+            if not _maps_expand.is_expandable(compiled, map_id, node):
+                break
+            try:
+                bundle = await builder.expand_node(
+                    world_id, map_id, node_id, must_include=hint)
+            except Exception:
+                logger.exception(
+                    "start descent: interior expansion failed for %s", node_id)
+                break
+            record = bundle["map"]
+            compiled.setdefault("maps", {})[record["map_id"]] = record
+            compiled.setdefault("connections", []).extend(
+                bundle.get("connections") or [])
+            compiled.pop("_node_by_id", None)
+            children = [record["map_id"]]
+            result["world_modified"] = True
+        child_id = children[0]
+        sub_candidates = map_candidates(compiled, [child_id])
+        if not sub_candidates:
+            break
+        sub = await llm_pick_start_location(
+            compiled, sub_candidates, preference, llm,
+            allow_no_match=True, inside_of=result, scene_hint=hint)
+        if sub is None or sub.get("exterior"):
+            break
+        if sub.get("no_match"):
+            grown = await builder.grow_child_map(
+                world_id, child_id, sub.get("wanted") or hint or preference)
+            node = (grown or {}).get("node")
+            if node and node.get("name"):
+                child_map = _mapspace.get_map(compiled, child_id) or {}
+                sub = {
+                    "node_id": node.get("id"),
+                    "name": node.get("name"),
+                    "type": node.get("type", "location"),
+                    "description": node.get("description", ""),
+                    "region": "",
+                    "map_id": child_id,
+                    "map_label": child_map.get("label", child_id),
+                    "generated": True,
+                }
+                if grown.get("created"):
+                    result["world_modified"] = True
+                    compiled = builder.compile_world(builder.load_world(world_id))
+            else:
+                sub = await llm_pick_start_location(
+                    compiled, sub_candidates, preference, llm,
+                    inside_of=result, scene_hint=hint)
+                if sub is None or sub.get("exterior"):
+                    break
+        if result.pop("world_modified", False):
+            sub["world_modified"] = True
+        ancestors.append(node_id)
+        result = sub
+    if ancestors:
+        result["ancestor_node_ids"] = ancestors
+    return result
+
+
+async def author_location(builder, world_id: str, description: str,
+                          anchor_node_id: str = None) -> dict | None:
+    """Author a brand-new named location matching a free-text description
+    onto one of the world's unnamed map positions (one full-attention
+    call) — used when the story needs a place that doesn't exist yet
+    (e.g. a teleport to a named-but-unmapped destination).
+    ``anchor_node_id`` (the player's current node) makes the placement
+    spatially aware: slots are offered nearest-first so a place described
+    relative to here lands nearby. Returns the candidate-shaped entry
+    (node_id, map_id, ...) or None when no slot fits or the call fails."""
+    services = builder.services
+    if not services.llm or services.llm.mode == "mock":
+        return None
+    compiled = services.compiled.load(world_id)
+    try:
+        authored = await generate_start_location(
+            compiled, description, description, services.llm,
+            anchor_node_id=anchor_node_id)
+    except Exception:
+        logger.exception("on-demand location authoring failed")
+        return None
+    if not authored:
+        return None
+    if authored.get("belongs_inside"):
+        # Cross-boundary redirect: the place lives inside an existing
+        # site, not on the overworld — the caller grows that interior.
+        return {"belongs_inside": authored["belongs_inside"]}
+    result = _persist_generated_start(builder, world_id, authored)
+    services.compiled.invalidate(world_id)
+    return result
+
+
+def _persist_generated_start(builder, world_id: str, authored: dict) -> dict:
+    """Write an on-demand location into the world — onto its claimed map
+    node (name, type, description, importance bump), or, for a NEW-founded
+    node, appended wholesale to its map — and return it in candidate
+    shape (NEW results additionally carry ``new_node``/``new_edges``/
+    ``map_id`` so play-time callers can mirror them into the session)."""
+    services = builder.services
+    store = services.enrichment_store
+    node_id = authored["node_id"]
+    importance = builder.MAJOR_IMPORTANCE_FLOOR if authored["type"] == "landmark" else 8
+    new_node = authored.get("new_node")
+    if new_node is not None:
+        new_node["importance"] = importance
+        store.append_map_node(
+            world_id, authored.get("map_id", ""), new_node,
+            authored.get("new_edges") or [])
+    else:
+        writes = {
+            "name": authored["name"],
+            "type": authored["type"],
+            "importance": importance,
+        }
+        if authored.get("label_description"):
+            writes["label_description"] = authored["label_description"]
+        if authored.get("description"):
+            writes["description"] = authored["description"]
+        for field, value in writes.items():
+            store.save_node_enrichment(world_id, node_id, field, value)
+        store.flush_enrichment_cache(world_id)
+    services.compiled.invalidate(world_id)
+
+    compiled = builder.compile_world(builder.load_world(world_id))
+    for entry in get_start_locations(compiled):
+        if entry.get("node_id") == node_id:
+            entry["reason"] = authored.get("reason", "")
+            entry["generated"] = True
+            if new_node is not None:
+                entry["new_node"] = dict(new_node)
+                entry["new_edges"] = [dict(e) for e in authored.get("new_edges") or []]
+            return entry
+    # Node fell outside the candidate filter (shouldn't happen) — return
+    # the authored fields directly so the caller still gets a start.
+    return {**authored, "generated": True}
