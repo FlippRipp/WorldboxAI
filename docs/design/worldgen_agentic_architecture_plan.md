@@ -1,10 +1,11 @@
 # Worldgen Architecture — Modularity & Agentic Builder Plan
 
 *Status: Arc A landed (A1–A5, 2026-07-19; RuntimeHost still pending, rides
-along with the next backend.py change). Arc B/C proposed — settle B1's design
-questions (pass work-unit granularity, interleaved review, the legacy
-label_next/describe_next endpoints, EnrichmentPanel generalization) before
-starting. Records the structural assessment of
+along with the next backend.py change). Arc B refined and DECIDED with Filip
+(2026-07-19): unit+trigger pass model, legacy per-node endpoints removed in
+B1, panel generalization as B1.5. Arc C refined into C1a/C1b; its four open
+questions are deliberately STILL OPEN — settle them with Filip before C1a
+starts. Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
 agentic builder — an LLM receives a world idea and figures out what it needs
@@ -53,9 +54,69 @@ The agentic builder is these two patterns generalized from "the map ladder"
 to "the whole build". None of the phases below change player-visible
 capabilities; Arc C adds a new mode without removing the current one.
 
+## Design principles
+
+The rules the arcs are built on. Every change to `wb_worldgen` — inside this
+plan or after it — should be checkable against these; a change that needs to
+break one should say so explicitly and update this section, not quietly
+deviate. Cite them by number in reviews.
+
+**Architecture:**
+
+- **P1 — A capability is a catalog entry.** Every unit of build behavior
+  (step, generator, pass) is a self-describing registry entry: id, label, a
+  description that doubles as the planner's selection text, declared
+  contracts. Unknown ids fail loudly, always. If a behavior can't be
+  described as a catalog entry, it isn't a capability yet — don't bolt it on
+  as a special case.
+- **P2 — Dropped file, no dispatcher edits.** Adding a capability = adding a
+  module that registers itself. If a new step/generator/pass requires editing
+  a shared dispatcher, run loop, or if-ladder, the seam is broken — fix the
+  seam, don't extend the ladder. (This is the convergence thesis made
+  operational: what an engineer adds by file-drop, the planner discovers by
+  catalog.)
+- **P3 — Explicit contracts only.** Dependencies are named fields on small
+  typed objects (`GenServices`); subsystems compose the facade's *public*
+  API plus `services`. Nothing reaches into another object's privates. When
+  new code needs something the contract lacks, extend the contract visibly
+  (documented field/method — precedent: `append_map_node` on
+  `enrichment_store`), never grep-couple.
+- **P4 — Steps produce, `design.py` reads.** "What did the AI decide for
+  this world" has exactly one query surface. Core never imports step
+  internals; the import direction is steps → core, never back.
+- **P5 — One execution path, many sources.** Classic wizard, seeded worlds,
+  and planned (agentic) builds all drive the same orchestration
+  (`generate_step`, the generators, the pass engine) — what varies is the
+  source (live LLM vs `force_mock`, default plan vs authored plan). Never a
+  second execution engine, never a duplicated walk. (Precedent: A5's
+  `seed_world`.)
+- **P6 — AI generates, user steers.** Every stage is editable, rerollable,
+  approvable. Agent decisions are persisted artifacts the UI can show and
+  the user can veto — never conversation state inside one long LLM call.
+  Executed work is immutable; revisions may only add or narrow future work.
+- **P7 — Loud validation, never silent repair.** A plan or request that
+  references an unknown capability or an unsatisfied dependency is rejected
+  before execution. Validation errors are surfaced, not patched around.
+
+**Working rules:**
+
+- **P8 — Refactors land alone.** Structural items land with zero behavior
+  change, full suite green (module by path + root), pushed to `main` before
+  the next item begins. Behavior changes ride their own commits with their
+  own tests.
+- **P9 — Structural budgets, not token caps.** Never cap tokens/characters
+  when assembling LLM context (project rule). Budget plans in structural
+  units: max items, max passes per scope, max revision rounds.
+- **P10 — Boundaries are drawn once.** Shared types stay dependency-free
+  (`mapmodel` is stdlib-only — keep it that way). When two roadmap items
+  would redraw the same line, the later item owns it (precedent: A4 skipped
+  the engine split because B1 draws that boundary).
+
 ## Where the structure stands
 
-Assessment from the 2026-07-19 read-through (~22.7k lines non-test Python).
+Assessment from the 2026-07-19 read-through (~22.7k lines non-test Python;
+the pain points below are the *pre-Arc-A* record of why the refactor exists —
+A1–A5 have since addressed #1–#4 and most of #5).
 
 **Seams that already work — protect them:**
 
@@ -116,19 +177,19 @@ wb_worldgen/
   backend.py                # module adapter: wiring + engine-discovered hooks only
   routes.py, terrain_routes.py
   wbworldgen/
-    mapmodel/               # A4: shared map types (MapNode, WorldMap, ...) — dependency-free
+    mapmodel/               # A4 ✓ shared map types + join_key — stdlib-only, keep it so
     terrain/                # unchanged
     worldgen/
       base.py, steps/       # step catalog (unchanged mechanism)
-      generation/           # generator catalog + overworld/city/interior builders
-      enrichment/           # node-pass catalog: label/describe/review as registered passes (B1)
-      expansion/            # A4: maps_expand + sites move here from enrichment/
-      design.py             # A3: the one query surface over the AI's world design
-      services.py           # A1: GenServices — the explicit engine contract
-      compiled_cache.py     # A2: CompiledWorldCache
-      prompts.py            # A5: world-prompt message builders
-      compiler.py, persistence.py, facade.py (thin), ...
-  wbruntime/                # unchanged internally; explicit RuntimeHost instead of _HOST
+      generation/           # generator catalog + overworld/city/interior builders + binding (A4 ✓)
+      enrichment/           # B1: engine.py (scheduler) + passes/{label,describe,review}.py + context.py
+      expansion/            # A4 ✓ maps_expand + sites (child-map/site generation)
+      design.py             # A3 ✓ the one query surface over the AI's world design
+      services.py           # A1 ✓ GenServices — the explicit engine contract
+      compiled_cache.py     # A2 ✓ CompiledWorldCache
+      prompts.py            # A5 ✓ world-prompt message builders
+      compiler.py, persistence.py, facade.py (701 lines, delegates + wiring), ...
+  wbruntime/                # unchanged internally; explicit RuntimeHost instead of _HOST (pending)
 ```
 
 Three catalogs — **steps** (pipeline stages), **generators** (map builders),
@@ -207,6 +268,11 @@ table in `design.py` — not five call sites.
   orchestrator (concurrency, batching, cancel, backoff) and the LLM call
   implementations — this also pre-stages B1.
 
+*Landed 2026-07-19: the engine split was deliberately skipped (P10 — B1
+draws that boundary); `join_key` was promoted into `mapmodel` and the
+compiler's identical `_norm_name` unified onto it; `enrichment/context.py`
+stayed in place (see B1).*
+
 ### A5. Slim the facade — size M
 
 - World-prompt message builders (`build_world_prompt_messages`,
@@ -221,6 +287,14 @@ table in `design.py` — not five call sites.
 - Drop delegation one-liners whose only callers were the engines (now served
   by `GenServices`); keep the public API used by routes/tests byte-stable.
 
+*Landed 2026-07-19: facade 1131→701 lines. `seed_world` became async and a
+`force_mock` flag threads through `generate_step`/`StepContext`/the root
+expanders (seeding never spends tokens even with a live LLM wired); terrain
+and enrichment steps stay `{}` in seeds for exact parity. The moved
+start-location orchestration reads dependencies through the new public
+`facade.services` property (P3). All remaining facade shims had live
+callers and stayed.*
+
 ---
 
 ## Arc B — Self-describing capabilities
@@ -230,53 +304,116 @@ catalog the agentic planner will read.
 
 ### B1. Enrichment pass registry — size L
 
+*Decided with Filip (2026-07-19): unit+trigger model; legacy per-node
+endpoints removed; panel generalization split out as B1.5.*
+
 Today the engine's run loop hardcodes the label/describe phases and review
-is a bespoke method. Introduce a pass registry in the mold of
-`generation/registry.py`:
+is a bespoke method. The 2026-07-19 code review established that the
+originally sketched per-node spec does not survive contact with review:
+review works on **maps** (one critique call per map, then per-node repairs),
+fires **mid-run** (as soon as a map's labeling completes, engine.py ~674),
+and its repairs **re-invoke** the label and describe implementations.
+The registry therefore models work units and triggers explicitly:
 
 ```python
 @dataclass
-class NodePassSpec:
+class PassSpec:
     id: str                   # "label", "describe", "review", "history", ...
     label: str
     description: str          # doubles as planner-catalog text
-    selector: Callable        # (compiled, node, state) -> needs this pass?
-    run: Callable             # async (services, node, context) -> field updates
-    after: list[str]          # pass ordering constraints (describe after label)
-    batchable: bool           # can share one LLM call across nodes
+    unit: str                 # "node" | "map" — what one work item is
+    selector: Callable        # (compiled, unit, state) -> pending? (rework-aware)
+    run: Callable             # async (services, unit, context) -> field updates
+    after: list[str]          # ordering constraints (describe after label)
+    triggers: dict | None     # {"on_map_complete": "label"} — interleaved firing
+    batchable: bool           # may share one LLM call across units (label batching)
 ```
 
-The engine keeps everything that is genuinely shared — importance ordering,
-concurrency/semaphore, batching, retries/backoff, rate-limit handling,
-cancel, SSE progress events — and iterates *registered passes* instead of a
-phase tuple. `label`, `describe`, `review` become the three built-in specs;
-their prompts and post-processing move out of the engine into their spec
-modules. A new pass (history, cultures, per-region flavor, extra critique)
-is then a dropped file, exactly like a step or a generator.
+- **The engine keeps everything genuinely shared** — importance ordering,
+  per-unit pending computation, concurrency/semaphore, batching for
+  batchable specs, retries + the services-owned rate-limit backoff, cancel,
+  SSE progress events, flush cadence, compiled-cache handling — and iterates
+  *registered passes* instead of the phase tuple. One scheduler, two
+  iteration shapes (node passes, map passes).
+- **Layout:** `enrichment/passes/{label,describe,review}.py`. Prompts and
+  post-processing move out of the engine into these modules as importable
+  module-level functions, so review's repair path imports the label/describe
+  implementations directly — pass-to-pass reuse is a plain import, not
+  engine plumbing. The engine split deferred from A4 happens here (run
+  orchestrator vs pass bodies), drawing the boundary once (P10).
+  `enrichment/context.py` stays put: it is the node-context assembly the
+  passes share; `expansion/` and `start_locations` importing it
+  cross-package is accepted and documented.
+- **Review as a first-class pass:** `unit="map"`,
+  `triggers={"on_map_complete": "label"}` — preserving today's interleaved
+  behavior exactly (a map is reviewed the moment its naming completes;
+  best-effort, a review failure never fails the run). Standalone review runs
+  via `enrich_run(phase="review")`. This is what makes review visible in the
+  C1 planner catalog.
+- **Removals (decided):** the legacy per-node endpoints
+  `/enrich/label_next` + `/enrich/describe_next`, the facade delegates
+  `enrich_next_label`/`enrich_next_description`/`review_enrichment_labels`,
+  and the engine methods `label_next`/`describe_next`. They have no frontend
+  callers (the UI drives the SSE `enrich/run` API, which already covers
+  `rework`), and they duplicate the selection semantics the specs now own.
+  Tests migrate to `enrich_run(count=1)` / `enrich_run(phase="review")`.
 
 **Compatibility:** the `phase=` API on `enrich_run` maps onto pass ids
-(`"all"` = every registered pass in order). Existing settings
-(`world.enrichment_concurrency`, `world.enrichment_batch_size`,
-`world.upfront_detail`) keep their meaning.
+(`"all"` = every registered pass in dependency order). The SSE event shape
+is unchanged for the built-ins (`type: phase|node|failed|done`, with the
+`phase` field carrying the pass id). `rework` becomes a selector argument.
+Existing settings (`world.enrichment_concurrency`,
+`world.enrichment_batch_size`, `world.upfront_detail`) keep their meaning.
+
+**Verify:** the existing `test_enrichment_run.py` suite passes with at most
+call-site updates for the removed endpoints; new unit tests cover pass
+registration + unknown-id failure (P1), node-vs-map scheduling, trigger
+firing, batching only for batchable specs, and an event-stream compatibility
+assertion (a built-ins run emits the same event sequence as before B1).
+
+### B1.5 Enrichment panel over the pass catalog — size S (frontend)
+
+`EnrichmentPanel.jsx` hardcodes exactly two phases
+(`isLabeling ? 'label' : 'describe'`); a third registered pass would stream
+events the panel miscounts. Directly after B1: a small endpoint serves the
+pass slice of the catalog (id, label, description, unit), and the panel
+renders one progress row per registered pass instead of the hardcoded
+branches — "everything" runs all passes, each pass gets its run affordance,
+and a future `history` pass appears without frontend edits (P2 extended to
+the UI). Verify in the real browser (drive real Chrome — see project
+memory; the Preview pane is unreliable for this UI).
 
 ### B2. One capability catalog — size S
 
 Give the three registries a uniform `describe()` and one function that
 renders the combined catalog (steps + generators + passes) as the document
-an LLM — or a human — reads. `hierarchy_design` already consumes the
-generator slice of this; B2 just makes the full catalog a first-class
-artifact. Module-contributed hooks (`HOOK_NAMES`) should eventually appear
-here too, so other modules' capabilities are visible to the planner.
+an LLM — or a human — reads, in both structured (JSON) and human-readable
+(markdown) forms. `hierarchy_design` already consumes the generator slice
+(`list_generators()` is already describe-shaped); B2 makes the full catalog
+a first-class artifact that C1's planner reads whole. Module-contributed
+hooks (`HOOK_NAMES`) are explicitly *out* for now — that is Arc C open
+question 4.
 
 ### B3. Declared data dependencies — size M
 
 Steps today declare ordering (`after`); they don't declare *data*. Add
 optional `requires`/`produces` artifact declarations (e.g. `world_rules`
 produces `rules`; `map_generation` requires `hierarchy`, produces `maps`).
-Ordering is derived topologically with the current declaration order as the
-tiebreak, so behavior is unchanged — but a planner (Arc C) can now *check*
-a plan ("this pass needs maps; nothing in the plan produces maps") instead
-of trusting the LLM, and a human gets the dependency graph for free.
+`PassSpec` gets `requires` too (e.g. every pass requires `maps`; `describe`
+requires `labels`) so plan validation covers pass items, while ordering
+*within* enrichment stays the registry's `after`.
+
+Two guard rails from the review:
+
+- **Pin the order first.** The current `resolve_order` resolves ties in
+  declaration order; the derived topological order must reproduce today's
+  default pipeline byte-for-byte, because chain-context order feeds prompts
+  — a silent reorder changes generations subtly. Land a regression test
+  asserting the exact current order *before* switching the derivation.
+- **Validation is the executor's, not the sorter's.** The dependency checker
+  is a standalone function evaluated against the *effective* item list
+  (after `dynamic_skips`) — C1's executor calls it (P7). `resolve_order`
+  itself keeps its current behavior and API.
 
 ---
 
@@ -300,7 +437,10 @@ system gets right:
 
 The proposal that satisfies all three: **the plan is itself a step.**
 
-### C1. Build-plan step + plan executor — size L
+### C1a. Build-plan step + plan executor (server) — size L
+
+*Blocked on the open questions below — do not start until they are settled
+with Filip.*
 
 Insert a `build_plan` step after `world_form` (which already decides
 per-world skips and map style — a proto-plan). Its generation reads the B2
@@ -309,30 +449,68 @@ catalog and the world idea and authors a plan artifact:
 ```jsonc
 {
   "items": [
-    {"capability": "step:lore", "config": {...}, "note": "creation myth as corporate founding"},
-    {"capability": "step:hierarchy_design"},
-    {"capability": "step:map_generation"},
-    {"capability": "pass:label", "scope": {"layer": "root"}},
-    {"capability": "pass:history", "scope": {"importance_min": 3}},
-    {"capability": "pass:review"}
+    {"id": "it_01", "capability": "step:lore", "config": {...},
+     "note": "creation myth as corporate founding",
+     "origin": "planned", "status": "pending"},
+    {"id": "it_02", "capability": "step:hierarchy_design",
+     "origin": "planned", "status": "pending"},
+    {"id": "it_03", "capability": "step:map_generation",
+     "origin": "planned", "status": "pending"},
+    {"id": "it_04", "capability": "pass:label", "scope": {"layer": "root"},
+     "origin": "planned", "status": "pending"},
+    {"id": "it_05", "capability": "pass:history", "scope": {"importance_min": 3},
+     "origin": "planned", "status": "pending"},
+    {"id": "it_06", "capability": "pass:review",
+     "origin": "planned", "status": "pending"}
   ],
   "notes": "why this shape"
 }
 ```
 
-- The plan renders in the existing pipeline UI (the frontend already handles
-  per-world step lists via `ordered_ids_for` + dynamic skips — this extends
-  that pattern rather than inventing a new one). The user can edit, reorder,
-  reroll, approve — the plan is a step like any other.
-- The executor validates against the catalog + B3 dependencies, then runs
-  items through the *same* orchestration paths that exist today
-  (`generate_step`, generator builds, the pass engine). No second execution
-  engine.
-- The default plan — produced without an LLM call — is exactly today's
-  pipeline, so classic mode and agentic mode are one code path with two plan
-  sources, and old worlds replay unchanged.
-- `seed_world` becomes "execute the default plan with mocks", closing the
-  loop on A5.
+- **Per-item execution state lives on the artifact.** Step items still
+  persist their outputs into `world_state["steps"]` exactly as today; pass
+  items have no step data, so their completion record is the item's
+  `status` (`pending | running | done | failed | skipped`). That is what
+  makes a planned build resumable mid-flight (P6), and `origin`
+  (`default | planned | revision`) is the attribution trail C2 needs.
+- **The executor validates, then reuses.** Validation = catalog membership
+  (P1/P7) + the B3 dependency check against the effective item list + scope
+  shape. It runs at authoring *and again at execution* — the module set may
+  have changed between the two (a plan referencing a capability that
+  disappeared fails loudly, never silently skips). Execution drives the
+  *same* orchestration that exists today — `generate_step` for step items,
+  generator builds, the pass engine with the item's scope mapped onto
+  selector arguments — no second execution engine (P5).
+- **The default plan — produced without an LLM call — is exactly today's
+  pipeline** (`ordered_ids_for` + dynamic skips rendered as plan items with
+  `origin: "default"`), so classic mode and agentic mode are one code path
+  with two plan sources, and old worlds replay unchanged.
+- `seed_world` becomes "execute the default plan with `force_mock`",
+  closing the loop A5 opened (its pipeline-driving rewrite and the
+  `force_mock` thread through `generate_step` are the ready seam).
+
+**Verify:** `test_build_plan.py` — default-plan parity (a default plan
+executes byte-identical to today's wizard flow in mock mode), validation
+rejections (unknown capability, unmet dependency, bad scope), resume from a
+half-executed plan, seed-world-as-plan parity. Plus a visual check of a
+planned world's map output before pushing.
+
+### C1b. Plan editor UI — size M–L
+
+The wizard already renders per-world step lists (`ordered_ids_for` +
+dynamic skips → `effectiveIds`/`skippedIds` in `WorldBuilderWizard.jsx`),
+but two things are genuinely new, which is why the UI is its own item
+rather than a C1a footnote:
+
+- **Editing the plan artifact.** Free-text capability ids in the generic
+  schema form would be unvalidated typing; the editor is catalog-driven —
+  pick a capability from the B2 catalog, get its config/scope form, reorder,
+  per-item reroll/veto/approve (P6). Until C1b lands, the plan artifact
+  renders read-only through the existing step-data view.
+- **Mixed progression.** A plan interleaves step items (today's form-per-step
+  flow) with pass items (progress-bar work, EnrichmentPanel-style rows from
+  B1.5). How the wizard's current-step/approval loop presents that mix is
+  real UX design — sequence it after C1a proves the artifact shape.
 
 ### C2. Reactive loop — size L, exploratory
 
@@ -346,57 +524,72 @@ on steps for exactly this), and may append/modify *not-yet-executed* items —
 edits to the plan artifact, persisted, visible and vetoable in the UI, with
 executed items immutable.
 
-Guardrails to decide up front:
+Guardrails — decided in principle (P6/P7/P9), with the addition from the
+review that they are **enforced by the executor, not trusted to the
+prompt**:
 
-- **Budgets in structural units, not tokens.** Project rule: no token caps
-  in context assembly. Budget the *plan* instead — max items, max passes per
-  node class, max revision rounds — plus the existing concurrency settings.
-- **Convergence:** revision rounds are bounded and monotone (a revision may
-  add or narrow work, not reopen executed items).
-- **Attribution:** plan items record `origin: "default" | "planned" |
-  "revision"` so we can see what the agent chose to do (mirrors the
-  `origin` field on ConnectionRecords).
+- **Budgets in structural units** (P9): max items, max passes per scope,
+  max revision rounds — plus the existing concurrency settings.
+- **Convergence, enforced:** the executor rejects a revision that touches an
+  executed item or exceeds the round budget — monotonicity is validation,
+  not instruction-following.
+- **Attribution:** `origin: "revision"` on everything a revision adds
+  (mirrors the `origin` field on ConnectionRecords).
 
-### Open questions (to discuss before C1 starts)
+### Open questions — STILL OPEN (settle with Filip before C1a)
+
+*Reviewed 2026-07-19 and deliberately left open rather than adopted; each
+has a working proposal, but the proposals are inputs to that discussion, not
+decisions.*
 
 1. **Planner freedom.** Does `build_plan` choose only *which* capabilities
-   and their configs/scopes (proposed), or can it also author new pass
+   and their configs/scopes (proposal), or can it also author new pass
    prompts ad hoc? Proposal: catalog-only at first; "ad-hoc pass authored
    from a prompt" can later be one registered capability
    (`pass:custom_prompt`) rather than a hole in the validation story.
+   *Blocks: the plan schema (whether items may carry prompt text) and the
+   validator's strictness.*
 2. **Granularity of scopes.** Per-map, per-layer, per-importance-band
-   selectors for passes probably suffice; per-node plans would explode the
-   artifact.
-3. **Where interleaving lives.** Enrichment currently runs both inside the
-   pipeline (upfront detail) and lazily at play time (backfill, expansion).
-   Does the plan govern only build time (proposal for C1), or eventually
-   also play-time policy ("this world backfills history lazily")?
+   selectors for passes (proposal); per-node plans would explode the
+   artifact. *Blocks: the `scope` field shape and its mapping onto pass
+   selectors.*
+3. **Where interleaving lives.** Enrichment runs both inside the pipeline
+   (upfront detail) and lazily at play time (backfill, expansion). Does the
+   plan govern only build time (proposal for C1), or eventually also
+   play-time policy ("this world backfills history lazily")? *Blocks:
+   whether the artifact carries a play-time section C1a must not invent
+   ad hoc later.*
 4. **Module capabilities.** Should other modules (`wb_core_rpg`, ...) be
    able to register passes/steps into the catalogs directly, superseding
    some of the bespoke `HOOK_NAMES`? Powerful, but changes the module
-   contract — separate discussion.
+   contract — separate discussion. *Blocks: B2's hook visibility and the
+   catalog's namespace rules.*
 
 ---
 
 ## Sequencing
 
-| Order | Item | Size | Serves |
-|-------|------|------|--------|
-| 1 | A1 GenServices (+A2 cache, folded in) | M | everything downstream |
-| 2 | A3 design.py | M | new map types |
-| 3 | A4 package moves | M | readability; stages B1 |
-| 4 | B1 pass registry | L | new LLM passes |
-| 5 | A5 facade slimming | M | hygiene; stages C1 |
-| 6 | B2 catalog + B3 dependencies | S+M | agentic substrate |
-| 7 | C1 build-plan step | L | agentic mode v1 |
-| 8 | C2 reactive loop | L | agentic mode v2 (exploratory) |
+| Order | Item | Size | Status | Serves |
+|-------|------|------|--------|--------|
+| 1 | A1 GenServices (+A2 cache, folded in) | M | ✓ landed (13e9613) | everything downstream |
+| 2 | A3 design.py | M | ✓ landed (f4d5251) | new map types |
+| 3 | A4 package moves | M | ✓ landed (d0ca8c3, 839376a) | readability; staged B1 |
+| 4 | A5 facade slimming | M | ✓ landed (9cf5ad4) | hygiene; staged C1 |
+| 5 | B1 pass registry (+ engine split, legacy endpoint removal) | L | next | new LLM passes |
+| 6 | B1.5 panel over the pass catalog | S | after B1 | UI keeps the P2 promise |
+| 7 | B2 catalog | S | | agentic substrate |
+| 8 | B3 dependencies (+ order-pin test first) | M | | plan validation |
+| 9 | C1a build-plan step + executor (server) | L | ⛔ open questions first | agentic mode v1 |
+| 10 | C1b plan editor UI | M–L | after C1a | steering the plan |
+| 11 | C2 reactive loop | L | exploratory | agentic mode v2 |
 
-RuntimeHost (`backend.py` half of A1) can ride along with any item that
-touches `backend.py`. Every item lands independently: suite green
-(`python -m pytest`, then `git checkout -- test_data`), pushed to `main`
-before the next begins. Arcs A and B change no behavior, so their
+(A5 landed before B1 — the reverse of the original ordering; nothing
+depended on the order.) RuntimeHost (`backend.py` half of A1) can ride along
+with any item that touches `backend.py`. Every item lands per P8: module
+suite by path + root suite green (`git checkout -- test_data` after), pushed
+to `main` before the next begins. Arc B changes no behavior (its
 verification is the existing per-feature test files plus new unit tests for
-the extracted contracts (`GenServices` fake, pass-spec registration,
-plan validation). C1 adds behavior and gets its own test file
-(`test_build_plan.py`) plus a visual check of a planned world's map output
-before pushing.
+the extracted contracts — pass-spec registration, event-stream compat,
+dependency checking); the one deliberate exception is B1's decided removal
+of the dead legacy endpoints. C1a adds behavior and gets `test_build_plan.py`
+plus a visual check of a planned world's map output before pushing.
