@@ -1,9 +1,9 @@
 """World-prompt message builders and scenario grounding.
 
 Pure functions (no I/O, no facade state): they render the player's seed
-prompt, scenario record and interview history into the LLM message lists the
-routes feed to the model. Kept unit-testable on purpose; the facade re-exports
-them so its public surface is unchanged.
+prompt, scenario record and ideation conversation into the LLM message lists
+the routes feed to the model. Kept unit-testable on purpose; the facade
+re-exports the seed-prompt builder so its public surface is unchanged.
 """
 
 def scenario_grounding_text(scenario: dict) -> str:
@@ -103,120 +103,95 @@ def build_world_prompt_messages(instruction: str, current_text: str = "",
     ]
 
 
-def _interview_history_text(history: list[dict] | None) -> str:
-    """Render prior interview rounds (question/answer pairs) as plain text for
-    the LLM. Skipped questions are shown as such — the player saw them and
-    chose not to answer. Never truncated."""
+def _conversation_transcript(history: list[dict] | None) -> str:
+    """Render the ideation conversation for the LLM, oldest first. Never
+    truncated."""
     lines = []
-    for pair in history or []:
-        question = str(pair.get("question") or "").strip()
-        if not question:
+    for msg in history or []:
+        text = str(msg.get("text") or "").strip()
+        if not text:
             continue
-        answer = str(pair.get("answer") or "").strip()
-        lines.append(f"Q: {question}\nA: {answer or '(skipped — the player left this open)'}")
+        who = "You" if msg.get("role") == "assistant" else "Player"
+        lines.append(f"{who}: {text}")
     return "\n\n".join(lines)
 
 
-def build_world_questions_messages(current_text: str = "",
-                                   history: list[dict] | None = None,
-                                   scenario: dict | None = None) -> list[dict]:
-    """LLM messages for the world-prompt interview: ask the player a short
-    round of clarifying questions about details the seed prompt leaves open.
+def build_ideation_turn_messages(history: list[dict],
+                                 prompt_draft: str = "",
+                                 rules_draft: list | None = None,
+                                 scenario: dict | None = None) -> list[dict]:
+    """LLM messages for one turn of the ideation conversation (C4): the
+    chat-shaped front door of agent-mode world building.
 
-    Works from an empty prompt too — the first round then asks foundational
-    questions (genre, tone, scale, central conflict). Prior rounds are passed
-    in `history` so the model never repeats itself, and a linked scenario is
-    grounding so it never asks what the scenario already answers. Pure (no
-    I/O) so it is unit-testable; the route feeds the result to the LLM.
+    The model is a design partner converging with the player on what the
+    world IS. Every turn it replies conversationally AND returns the two
+    shared drafts in full — the seed prompt and the world rules (rules
+    first: they double as the build's evaluation rubric, D3/D4) — plus a
+    ``ready`` flag: its judgment that the idea feels settled and the build
+    can start (the go *offer*; the player's go-ahead stays the approval
+    moment, and the UI never gates on this flag). The drafts round-trip
+    through the client every turn, so the player's hand edits are simply
+    part of the current truth. Pure (no I/O) so it is unit-testable; the
+    route feeds the result to the LLM.
     """
+    from wbworldgen.worldgen.steps.world_rules import RULES_DOCTRINE
+
     system = (
-        "You are a world-building assistant interviewing the player about the world "
-        "they want an AI world generator to create. Read their seed prompt draft and "
-        "ask 3-5 short, concrete questions about important details it leaves open — "
-        "the things that would most change the generated world (tone, scale, conflict, "
-        "magic or technology, factions, geography, cultures, history, what makes it "
-        "distinct). Ask ONLY about the world itself — the setting the generator will "
-        "build. Never ask about protagonists, individual characters, their goals or "
-        "relationships, or how the story's plot unfolds: those belong to the scenario "
-        "and the story, not to world generation. Each question must be answerable in "
-        "a sentence or two. Never ask anything the prompt, the scenario, or a "
-        "previous answer already settles, and never repeat a question from a previous "
-        "round — a skipped question means the player wants to leave it open, so move "
-        "on to something else. "
-        'Return only valid JSON: {"questions": ["...", "..."]}.'
+        "You are the world-design partner in a game's world builder. The player "
+        "and you are converging, in conversation, on what a world IS before an "
+        "autonomous agent builds the whole thing unattended. Be a sharp, concrete "
+        "collaborator: build on what the player gives, propose ideas they can "
+        "react to, and ask at most a couple of pointed questions per turn — never "
+        "a checklist interrogation. A player with a strong vision needs "
+        "distillation, not invention; a player with a vague itch needs vivid "
+        "options to pick between. Talk about the world only — protagonists and "
+        "plot belong to the stories told in it later.\n\n"
+        "You maintain two shared draft artifacts, returned in full every turn:\n"
+        '- "prompt": the world seed prompt — a short, vivid paragraph of creative '
+        "direction (premise, setting, tone, defining features) the generator "
+        "expands into a full world. It is direction for a generator, never "
+        "in-fiction narration.\n"
+        '- "rules": the world rules — the handful of statements (aim for 3-7) '
+        "that define how this world works. They are the spine of the design and "
+        "double as the rubric the finished world is judged against, so converge "
+        "them FIRST.\n\n"
+        f"What makes a good world rule:\n{RULES_DOCTRINE}\n\n"
+        "The player sees both drafts beside the chat and can edit them by hand; "
+        "the versions you receive are the current truth — never revert their "
+        "edits, only evolve the drafts with the conversation.\n\n"
+        "When the idea feels settled — the prompt captures it and the rules are "
+        "concrete enough to judge a world by — set \"ready\" to true and offer "
+        "in your reply to start the build. If the player asks to just build it, "
+        "distill the best prompt and rules you can from what you have and set "
+        "\"ready\" to true immediately. Otherwise keep \"ready\" false.\n\n"
+        "Return only valid JSON:\n"
+        '{"reply": "...", "prompt": "...", "rules": ["...", "..."], "ready": false}\n'
+        '"reply" is your message to the player (plain conversational text). '
+        '"prompt" and "rules" are the complete updated drafts — full '
+        "replacements, not diffs."
     )
     parts = []
     grounding = scenario_grounding_text(scenario) if scenario else ""
     if grounding:
         parts.append(
             "The world must fit this scenario the player has chosen — treat "
-            "everything in it as already decided, not something to ask about. Its "
-            "characters and events are story material, not open questions: ask "
-            "about the wider world the scenario takes place in, never about the "
-            "scenario's people or plot:\n"
+            "everything in it as already decided, and design the wider world "
+            "around it rather than re-asking what it settles:\n"
             f"<scenario>\n{grounding}\n</scenario>")
-    current_text = (current_text or "").strip()
-    if current_text:
-        parts.append(f"<current_world_prompt>\n{current_text}\n</current_world_prompt>")
-    else:
-        parts.append(
-            "<current_world_prompt>\n(empty — the player hasn't written anything yet; "
-            "ask foundational questions that help them shape the world from scratch)\n"
-            "</current_world_prompt>")
-    history_text = _interview_history_text(history)
-    if history_text:
-        parts.append(
-            "Questions already asked in previous rounds — do not repeat or rephrase "
-            f"any of these:\n<previous_rounds>\n{history_text}\n</previous_rounds>")
-    parts.append("Ask the next round of questions. Return only the JSON.")
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": "\n\n".join(parts)},
-    ]
-
-
-def build_world_prompt_fold_messages(current_text: str,
-                                     answers: list[dict],
-                                     scenario: dict | None = None) -> list[dict]:
-    """LLM messages for folding a round of interview answers into the seed
-    prompt.
-
-    Every answer must land in the prompt — added where it brings something
-    new, rewriting whatever it changes — while parts the answers don't touch
-    keep the player's wording. With an empty current prompt the answers become
-    the first draft. Pure (no I/O) so it is unit-testable.
-    """
-    system = (
-        "You are a world-building assistant maintaining the SEED PROMPT for an AI "
-        "world generator — a short, vivid paragraph of creative direction the "
-        "generator expands into a full world. The player has answered interview "
-        "questions about their world; fold their answers into the prompt. Every "
-        "answer must end up reflected in the prompt: add what it introduces, and "
-        "rewrite whatever parts of the prompt it changes or contradicts — "
-        "preserving the current text is never a reason to leave an answer out. "
-        "Where the answers don't touch the prompt, keep the player's wording and "
-        "details as they are, and do not pad or embellish beyond what the answers "
-        "say. If the current prompt is empty, write a first draft from the answers "
-        "alone. "
-        'Return only valid JSON: {"text": "..."}.'
-    )
-    parts = []
-    grounding = scenario_grounding_text(scenario) if scenario else ""
-    if grounding:
-        parts.append(
-            "The world must fit this scenario the player has chosen — keep the "
-            f"prompt consistent with it:\n<scenario>\n{grounding}\n</scenario>")
-    current_text = (current_text or "").strip()
-    if current_text:
-        parts.append(f"<current_world_prompt>\n{current_text}\n</current_world_prompt>")
-    else:
-        parts.append("<current_world_prompt>\n(empty — write the first draft from the answers)\n</current_world_prompt>")
-    answers_text = _interview_history_text(answers)
-    parts.append(f"The player's answers this round:\n<answers>\n{answers_text}\n</answers>")
+    prompt_draft = (prompt_draft or "").strip()
     parts.append(
-        "Update the seed prompt so every answer is fully incorporated — add and "
-        "change whatever the answers require, and keep the rest as the player "
-        "wrote it. Return only the seed prompt text.")
+        "<current_prompt>\n"
+        + (prompt_draft or "(empty — no seed prompt yet)")
+        + "\n</current_prompt>")
+    rules = [str(r).strip() for r in (rules_draft or []) if str(r).strip()]
+    parts.append(
+        "<current_rules>\n"
+        + ("\n".join(f"- {r}" for r in rules) if rules else "(none agreed yet)")
+        + "\n</current_rules>")
+    parts.append(f"<conversation>\n{_conversation_transcript(history)}\n</conversation>")
+    parts.append(
+        "Continue the conversation: answer the player's latest message and "
+        "return the updated drafts. Return only the JSON.")
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": "\n\n".join(parts)},

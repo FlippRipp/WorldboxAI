@@ -128,6 +128,10 @@ class WorldPersistence:
             metadata["scenario"] = world_state["scenario"]
         if world_state.get("scenario_id"):
             metadata["scenario_id"] = world_state["scenario_id"]
+        if isinstance(world_state.get("brief"), dict):
+            # The ideation brief (C4): prompt + co-authored world rules — the
+            # agent's standing instructions, part of the world's record.
+            metadata["brief"] = world_state["brief"]
         if world_state.get("template_id"):
             metadata["template_id"] = world_state["template_id"]
             # Snapshot the vocabulary at creation time so a later template
@@ -181,6 +185,8 @@ class WorldPersistence:
             world_state["scenario"] = metadata["scenario"]
         if metadata.get("scenario_id"):
             world_state["scenario_id"] = metadata["scenario_id"]
+        if isinstance(metadata.get("brief"), dict):
+            world_state["brief"] = metadata["brief"]
         if metadata.get("template_id"):
             world_state["template_id"] = metadata["template_id"]
             if isinstance(metadata.get("template_vocab"), dict):

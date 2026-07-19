@@ -425,6 +425,28 @@ def test_patch_step_merges_creates_and_guards(mock_builder):
         run(invoke_tool(ctx, "patch_step", {"step_id": "world_rules", "data": {}}))
 
 
+def test_patch_step_guards_brief_rules(mock_builder):
+    """C4: a custom_rules patch may extend the co-authored brief rules but
+    never drop one — they are fixed design decisions (loud rejection, P7)."""
+    wid = _map_world(mock_builder)
+    state = mock_builder.load_world(wid)
+    state["brief"] = {"prompt": "test world",
+                      "rules": ["The tide is a living god."]}
+    mock_builder.save_world(wid, state)
+    ctx = _ctx(mock_builder, wid)
+    with pytest.raises(ToolError, match="must keep every co-authored"):
+        run(invoke_tool(ctx, "patch_step",
+                        {"step_id": "world_rules",
+                         "data": {"custom_rules": ["Something else."]}}))
+    # Keeping the agreed rule (any position) passes; other fields are free.
+    run(invoke_tool(ctx, "patch_step",
+                    {"step_id": "world_rules",
+                     "data": {"custom_rules": ["Something else.",
+                                               "The tide is a living god."]}}))
+    run(invoke_tool(ctx, "patch_step",
+                    {"step_id": "world_rules", "data": {"genre": "myth"}}))
+
+
 # ---------------------------------------------------------------------------
 # run_pass: preconditions, scope validation, guidance channel
 # ---------------------------------------------------------------------------

@@ -173,11 +173,11 @@ export const api = {
   // LLM-as-author: write/rewrite the World Prompt from the player's notes
   // (instruction), the current draft, and an optional linked scenario.
   rewriteWorldPrompt:     ({ instruction = '', currentText = null, scenarioId = null }) => request('/api/world/rewrite-prompt', { method: 'POST', body: JSON.stringify({ instruction, current_text: currentText, scenario_id: scenarioId }) }),
-  // World-prompt interview: one round of clarifying questions about the draft
-  // (history = prior rounds so questions never repeat), then fold the answers
-  // back into the prompt with a conservative rewrite.
-  worldPromptQuestions:   ({ currentText = null, history = [], scenarioId = null }) => request('/api/world/prompt-questions', { method: 'POST', body: JSON.stringify({ current_text: currentText, history, scenario_id: scenarioId }) }),
-  foldWorldAnswers:       ({ currentText = null, answers = [], scenarioId = null }) => request('/api/world/fold-answers', { method: 'POST', body: JSON.stringify({ current_text: currentText, answers, scenario_id: scenarioId }) }),
+  // Ideation conversation (C4): one stateless turn — the model answers the
+  // player and returns the updated seed-prompt + world-rules drafts, plus
+  // `ready` (its judgment that the idea is settled — the go offer). The
+  // client holds the conversation and the drafts round-trip every turn.
+  ideationTurn:           ({ messages = [], prompt = null, rules = [], scenarioId = null }) => request('/api/world/ideation-turn', { method: 'POST', body: JSON.stringify({ messages, prompt, rules, scenario_id: scenarioId }) }),
   generateWorldStep:      (stepId, note = '', data = null) => {
     const body = { note };
     if (data) body.data = data;
@@ -190,9 +190,10 @@ export const api = {
   // while the app was minimized); no-op if it's running, complete, or review-mode.
   continueWorldGeneration: () => request('/api/world/continue', { method: 'POST' }),
   // Agent builds (C2): a server-side agent plans, builds and verifies the
-  // whole world on its own. Launch returns the new world id immediately;
+  // whole world on its own, from the ideation brief (seed prompt + the
+  // co-authored world rules). Launch returns the new world id immediately;
   // poll status (or stream the events endpoint) to watch, cancel any time.
-  agentBuild:             (seedPrompt, scenarioId = null) => request('/api/world/agent/build', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, ...(scenarioId ? { scenario_id: scenarioId } : {}) }) }),
+  agentBuild:             (seedPrompt, scenarioId = null, rules = []) => request('/api/world/agent/build', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, rules, ...(scenarioId ? { scenario_id: scenarioId } : {}) }) }),
   agentBuildStatus:       (worldId) => request(`/api/world/${worldId}/agent/status`),
   agentBuildCancel:       (worldId) => request(`/api/world/${worldId}/agent/cancel`, { method: 'POST' }),
   // Agent build event stream: replays the persisted action log from `after`

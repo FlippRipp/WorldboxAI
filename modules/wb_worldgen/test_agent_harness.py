@@ -512,3 +512,47 @@ def test_double_launch_for_same_world_is_refused(builder, monkeypatch):
         await handle.task
 
     run(go())
+
+
+def test_brief_rules_persist_and_reach_the_prompt(builder, monkeypatch):
+    """C4: co-authored rules land in state['brief'] (persisted), in the
+    handle/snapshot (observers), and in every turn's system prompt as
+    fixed input for world_rules."""
+    seen = {}
+
+    async def failing_turn(services, messages):
+        seen["system"] = messages[0]["content"]
+        raise RuntimeError("no model in this test")
+
+    monkeypatch.setattr(harness, "agent_turn", failing_turn)
+    cleaned = ["The tide is a living god.", "Iron rusts overnight."]
+
+    async def go():
+        handle = harness.start_agent_build(
+            builder, "a drowned world",
+            rules=["  The tide is a living god. ", "", "Iron rusts overnight."])
+        await handle.task
+        return handle
+
+    handle = run(go())
+    assert handle.brief == {"prompt": "a drowned world", "rules": cleaned}
+    assert handle.snapshot()["brief"]["rules"] == cleaned
+    assert builder.load_world(handle.world_id)["brief"] == {
+        "prompt": "a drowned world", "rules": cleaned}
+    system = seen["system"]
+    assert "Co-authored world rules" in system
+    for rule in cleaned:
+        assert f"- {rule}" in system
+    # The author-rules-first instruction points at the fixed input.
+    assert "co-authored rules above are its fixed input" in system
+
+    # Adopting the same world without passing rules keeps the recorded brief.
+    async def adopt():
+        h2 = harness.start_agent_build(builder, "a drowned world",
+                                       world_id=handle.world_id)
+        await h2.task
+        return h2
+
+    h2 = run(adopt())
+    assert h2.brief["rules"] == cleaned
+    assert builder.load_world(handle.world_id)["brief"]["rules"] == cleaned

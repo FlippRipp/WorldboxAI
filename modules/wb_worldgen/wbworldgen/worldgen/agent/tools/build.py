@@ -125,6 +125,18 @@ async def patch_step(ctx, step_id: str, data: dict) -> dict:
         raise ToolError("patch_step: 'data' must carry at least one key to set.")
 
     world_state = builder.load_world(ctx.world_id)
+    if step_id == "world_rules" and "custom_rules" in data:
+        from wbworldgen.worldgen.steps.world_rules import brief_rules
+        agreed = brief_rules(world_state)
+        patched = data.get("custom_rules")
+        patched = ([str(r).strip() for r in patched]
+                   if isinstance(patched, list) else [])
+        missing = [r for r in agreed if r not in patched]
+        if missing:
+            raise ToolError(
+                "patch_step: custom_rules must keep every co-authored brief "
+                f"rule verbatim; missing: {missing}. The brief's rules are "
+                "fixed design decisions — extend them, don't drop them.")
     entry = world_state.get("steps", {}).get(step_id) or {}
     merged = dict(entry.get("data") or {})
     merged.update(data)

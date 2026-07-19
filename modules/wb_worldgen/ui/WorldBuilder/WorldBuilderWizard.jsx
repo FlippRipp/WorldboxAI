@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from 'api';
 import StepCard from './StepCard';
 import AgentBuildObserver from './AgentBuildObserver';
+import WorldIdeation, { clearSavedIdeation } from './WorldIdeation';
 
 function AutoTextarea({ value, onChange, disabled, minRows = 3, placeholder }) {
   const ref = useRef(null);
@@ -133,162 +134,7 @@ function WorldPromptField({ value, onChange, disabled, scenarioId }) {
   );
 }
 
-// Iterative interview that digs unmentioned details out of the player before
-// generation: the AI reads the prompt (empty is fine — then it interviews from
-// scratch) and asks a round of clarifying questions; answered ones are folded
-// back into the prompt — every answer lands, adding and rewriting what it
-// touches while the rest keeps the player's wording. Repeatable until the
-// player is happy — accepting is simply
-// generating. Prior rounds are sent along so questions never repeat, and the
-// in-flight round survives a relaunch (Android kills the backgrounded PWA).
-const INTERVIEW_KEY = 'wb_worldgen_interview';
-
-function readSavedInterview() {
-  try {
-    return JSON.parse(localStorage.getItem(INTERVIEW_KEY) || 'null') || {};
-  } catch {
-    return {};
-  }
-}
-
-function WorldPromptInterview({ promptText, onPromptChange, scenarioId, disabled }) {
-  const [questions, setQuestions] = useState(() => readSavedInterview().questions || null);
-  const [answers, setAnswers] = useState(() => readSavedInterview().answers || []);
-  const [history, setHistory] = useState(() => readSavedInterview().history || []);
-  const [busy, setBusy] = useState(null); // 'ask' | 'fold' | null
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    try {
-      if (questions || history.length) {
-        localStorage.setItem(INTERVIEW_KEY, JSON.stringify({ questions, answers, history }));
-      } else {
-        localStorage.removeItem(INTERVIEW_KEY);
-      }
-    } catch { /* storage unavailable */ }
-  }, [questions, answers, history]);
-
-  const ask = async () => {
-    if (busy) return;
-    setBusy('ask');
-    setError('');
-    try {
-      const res = await api.worldPromptQuestions({
-        currentText: (promptText || '').trim() || null,
-        history,
-        scenarioId: scenarioId || null,
-      });
-      setQuestions(res.questions);
-      setAnswers(res.questions.map(() => ''));
-    } catch (e) {
-      setError(e.message || 'Failed to get questions.');
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const closeRound = (roundPairs) => {
-    setHistory((h) => [...h, ...roundPairs]);
-    setQuestions(null);
-    setAnswers([]);
-  };
-
-  const fold = async () => {
-    if (busy) return;
-    const pairs = questions.map((q, i) => ({ question: q, answer: (answers[i] || '').trim() }));
-    if (!pairs.some((p) => p.answer)) return;
-    setBusy('fold');
-    setError('');
-    try {
-      const res = await api.foldWorldAnswers({
-        currentText: (promptText || '').trim() || null,
-        answers: pairs.filter((p) => p.answer),
-        scenarioId: scenarioId || null,
-      });
-      onPromptChange(res.text);
-      closeRound(pairs);
-    } catch (e) {
-      setError(e.message || 'Failed to update the prompt.');
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const dismiss = () => {
-    if (busy) return;
-    // The whole round counts as skipped — typed-but-not-folded answers never
-    // reached the prompt, so they must not read as settled next round.
-    closeRound(questions.map((q) => ({ question: q, answer: '' })));
-    setError('');
-  };
-
-  const hasAnswer = answers.some((a) => (a || '').trim());
-
-  if (!questions) {
-    return (
-      <div className="space-y-1">
-        <button
-          type="button"
-          onClick={ask}
-          disabled={disabled || !!busy}
-          title="The AI asks about details your prompt leaves open, then works your answers into it"
-          className="px-3 py-1.5 rounded-lg text-xs border border-gray-700 text-gray-400 hover:bg-gray-700 disabled:opacity-50 transition-colors"
-        >
-          {busy === 'ask'
-            ? 'Thinking of questions…'
-            : history.length ? '❓ Ask more questions' : '❓ Refine with questions'}
-        </button>
-        {error && <p className="text-xs text-red-400">{error}</p>}
-      </div>
-    );
-  }
-
-  return (
-    <div className="rounded-lg border border-purple-800/50 bg-purple-950/20 p-3 space-y-3">
-      <p className="text-xs text-gray-400">
-        Answer the questions you care about and skip the rest — skipped ones are left
-        for the generator to decide.
-      </p>
-      {questions.map((q, i) => (
-        <div key={i}>
-          <p className="text-sm text-gray-300 mb-1">{q}</p>
-          <AutoTextarea
-            value={answers[i] || ''}
-            onChange={(e) => {
-              const next = answers.slice();
-              next[i] = e.target.value;
-              setAnswers(next);
-            }}
-            disabled={disabled || !!busy}
-            minRows={1}
-            placeholder="(leave blank to skip)"
-          />
-        </div>
-      ))}
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={fold}
-          disabled={disabled || !!busy || !hasAnswer}
-          className="px-3 py-1.5 rounded-lg text-xs bg-purple-700 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed text-white transition-colors"
-        >
-          {busy === 'fold' ? 'Updating prompt…' : 'Add answers to prompt'}
-        </button>
-        <button
-          type="button"
-          onClick={dismiss}
-          disabled={disabled || !!busy}
-          className="px-3 py-1.5 rounded-lg text-xs border border-gray-700 text-gray-400 hover:bg-gray-700 disabled:opacity-50 transition-colors"
-        >
-          Skip these
-        </button>
-      </div>
-      {error && <p className="text-xs text-red-400">{error}</p>}
-    </div>
-  );
-}
-
-// The pre-generation form (prompt, scenario, skip-review) plus the pinned
+// The pre-generation form (prompt, scenario) plus the pinned
 // agent-build world id, mirrored to localStorage on every change: Android
 // kills the backgrounded PWA, and a prompt that was typed (or AI-written)
 // but not yet generated exists nowhere else. Cleared when the world is
@@ -322,7 +168,9 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
   const [worldState, setWorldState] = useState(null);
   const [currentStepId, setCurrentStepId] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [skipReview, setSkipReview] = useState(() => !!readSavedForm().skipReview);
+  // Only set while resuming a pre-C4 one-shot draft: new builds are always
+  // agent builds (the classic entry is disabled — see the pre-start screen).
+  const [skipReview, setSkipReview] = useState(false);
   const [seedPrompt, setSeedPrompt] = useState(() => readSavedForm().seedPrompt || '');
   const [scenarios, setScenarios] = useState([]);
   const [scenarioId, setScenarioId] = useState(() => readSavedForm().scenarioId || null);
@@ -349,9 +197,9 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
   // Mirror the form so a relaunch before generation starts loses nothing.
   useEffect(() => {
     try {
-      localStorage.setItem(FORM_KEY, JSON.stringify({ seedPrompt, scenarioId, skipReview, agentWorldId }));
+      localStorage.setItem(FORM_KEY, JSON.stringify({ seedPrompt, scenarioId, agentWorldId }));
     } catch { /* storage unavailable — the server draft still covers started runs */ }
-  }, [seedPrompt, scenarioId, skipReview, agentWorldId]);
+  }, [seedPrompt, scenarioId, agentWorldId]);
 
 
   useEffect(() => {
@@ -430,35 +278,15 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
     return () => { alive = false; clearInterval(t); };
   }, [started, polling]);
 
-  const handleStart = async () => {
+  // The go-ahead (C4): hand the ideation brief — prompt + co-authored rules
+  // — to the server-side agent. The conversation is done its job once the
+  // build owns the brief, so its saved state clears here.
+  const handleAgentStart = async (rules = []) => {
     if (!seedPrompt.trim()) return;
     setLoading(true);
     try {
-      const result = await api.generateWorld(seedPrompt.trim(), skipReview, scenarioId);
-      setWorldState(result.state);
-      if (result.effective_steps) setEffectiveSteps(result.effective_steps);
-      setStarted(true);
-
-      if (skipReview) {
-        api.getWorldState().then((data) => {
-          setWorldState(data.state);
-          if (data.effective_steps) setEffectiveSteps(data.effective_steps);
-        });
-      } else {
-        setCurrentStepId(result.current_step);
-      }
-    } catch (e) {
-      alert('Failed to start world generation: ' + e.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleAgentStart = async () => {
-    if (!seedPrompt.trim()) return;
-    setLoading(true);
-    try {
-      const result = await api.agentBuild(seedPrompt.trim(), scenarioId);
+      const result = await api.agentBuild(seedPrompt.trim(), scenarioId, rules);
+      clearSavedIdeation();
       setAgentWorldId(result.world_id);
     } catch (e) {
       alert('Failed to start the agent build: ' + e.message);
@@ -575,7 +403,6 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
       await api.saveWorld(worldId);
       try {
         localStorage.removeItem(FORM_KEY);
-        localStorage.removeItem(INTERVIEW_KEY);
       } catch { /* ignore */ }
       setWorldState(null);
       setStarted(false);
@@ -617,9 +444,9 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
             <div>
               <h2 className="text-2xl font-bold text-gray-100 mb-2">World Generation</h2>
               <p className="text-gray-400 text-sm">
-                Describe the world you want to create — any genre, any scale. The AI reads your
-                prompt and shapes the generation to fit, from a fantasy overworld to a single
-                modern city.
+                Describe the world you want to create — any genre, any scale. Shape the idea
+                in conversation with the AI, then hand it off: an agent plans, builds and
+                verifies the whole world to fit.
               </p>
             </div>
 
@@ -673,51 +500,13 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
               scenarioId={scenarioId}
             />
 
-            <WorldPromptInterview
+            <WorldIdeation
               promptText={seedPrompt}
               onPromptChange={setSeedPrompt}
               scenarioId={scenarioId}
-              disabled={loading}
+              onGo={handleAgentStart}
+              starting={loading}
             />
-
-            <div className="flex items-center gap-3">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={skipReview}
-                  onChange={(e) => setSkipReview(e.target.checked)}
-                  className="accent-purple-500"
-                  disabled={loading}
-                />
-                <span className="text-sm text-gray-400">Skip review — generate all at once</span>
-              </label>
-            </div>
-
-            <button
-              onClick={handleStart}
-              disabled={loading || !seedPrompt.trim()}
-              className="w-full py-3 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg font-medium text-lg transition-colors flex items-center justify-center gap-2"
-            >
-              {loading && (
-                <span className="inline-block w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              )}
-              {loading ? 'Generating...' : 'Generate World'}
-            </button>
-
-            <div>
-              <button
-                onClick={handleAgentStart}
-                disabled={loading || !seedPrompt.trim()}
-                className="w-full py-3 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 rounded-lg font-medium text-lg transition-colors"
-              >
-                Let the AI build it
-              </button>
-              <p className="text-xs text-gray-500 mt-2">
-                An agent plans, builds and verifies the whole world on its own —
-                watch it work, or come back later. It runs server-side, so
-                closing the app doesn't stop it.
-              </p>
-            </div>
           </div>
         </div>
       </div>

@@ -391,77 +391,70 @@ async def rewrite_world_prompt(request: RewriteWorldPromptRequest):
     return {"text": text}
 
 
-class WorldPromptQuestionsRequest(BaseModel):
-    #: The current World Prompt draft — may be empty (interview from scratch).
-    current_text: Optional[str] = None
-    #: Question/answer pairs from previous interview rounds, oldest first.
-    #: Each item: {"question": str, "answer": str} (empty answer = skipped).
-    history: list[dict] = []
+class IdeationTurnRequest(BaseModel):
+    #: Conversation so far, oldest first, the player's newest message last.
+    #: Each item: {"role": "player"|"assistant", "text": str}.
+    messages: list[dict] = []
+    #: Current seed-prompt draft (the shared field — may be hand-edited).
+    prompt: Optional[str] = None
+    #: Current world-rules draft.
+    rules: list[str] = []
     #: Optional linked scenario: its content counts as already decided.
     scenario_id: Optional[str] = None
 
 
-@router.post("/api/world/prompt-questions")
-async def world_prompt_questions(request: WorldPromptQuestionsRequest):
-    """One round of the world-prompt interview: the LLM reads the draft (and
-    any previous rounds) and asks a few clarifying questions about details the
-    prompt leaves open. An empty draft is fine — the questions then help the
-    player shape the world from scratch."""
-    from wbworldgen.worldgen.prompts import build_world_questions_messages
+@router.post("/api/world/ideation-turn")
+async def ideation_turn(request: IdeationTurnRequest):
+    """One turn of the ideation conversation (C4): the model answers the
+    player and returns the updated seed-prompt + world-rules drafts, plus
+    ``ready`` — its judgment that the idea feels settled (the go offer; the
+    player's go-ahead stays the approval moment). Stateless like the other
+    seed-prompt endpoints: the client holds the conversation (localStorage,
+    relaunch-safe) and the drafts round-trip every turn, so hand edits
+    between turns are simply the current truth."""
+    from wbworldgen.worldgen.prompts import build_ideation_turn_messages
     try:
         from backend.engine.llm import LLMProviderError
     except ImportError:  # isolated module-test context: core pkg not on path
         LLMProviderError = RuntimeError
 
+    if not any(str(m.get("text") or "").strip()
+               for m in request.messages if m.get("role") != "assistant"):
+        raise HTTPException(status_code=400,
+                            detail="Say something to the design partner first.")
     scenario = _load_scenario_or_404(request.scenario_id)
-    messages = build_world_questions_messages(
-        (request.current_text or "").strip(), request.history, scenario)
+    messages = build_ideation_turn_messages(
+        request.messages, (request.prompt or "").strip(), request.rules, scenario)
     try:
         content = await engine.llm.simple_completion(
             messages,
             model=engine.llm.storyteller_model,
             response_format={"type": "json_object"},
-            inspector_ctx={"call_type": "world_prompt_questions", "step": "world_build:seed_prompt"},
+            inspector_ctx={"call_type": "world_ideation", "step": "world_build:ideation"},
         )
-        raw = json.loads(content).get("questions")
-        questions = [str(q).strip() for q in raw if str(q).strip()] if isinstance(raw, list) else []
+        data = json.loads(content)
+        reply = str(data.get("reply") or "").strip()
+        prompt = str(data.get("prompt") or "").strip()
+        raw_rules = data.get("rules")
+        rules = ([str(r).strip() for r in raw_rules if str(r).strip()]
+                 if isinstance(raw_rules, list) else None)
+        ready = bool(data.get("ready"))
     except LLMProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     except (ValueError, TypeError, AttributeError) as exc:
-        raise HTTPException(status_code=502, detail=f"World prompt interview returned unusable output: {exc}")
-    if not questions:
-        raise HTTPException(status_code=502, detail="World prompt interview returned no questions.")
-    return {"questions": questions}
-
-
-class FoldWorldAnswersRequest(BaseModel):
-    #: The current World Prompt draft — may be empty (answers become the draft).
-    current_text: Optional[str] = None
-    #: This round's question/answer pairs: {"question": str, "answer": str}.
-    answers: list[dict] = []
-    #: Optional linked scenario the prompt must stay consistent with.
-    scenario_id: Optional[str] = None
-
-
-@router.post("/api/world/fold-answers")
-async def fold_world_answers(request: FoldWorldAnswersRequest):
-    """Fold a round of interview answers into the World Prompt: every answer
-    lands — added or rewritten into the prompt as needed — while parts the
-    answers don't touch keep the player's text."""
-    from wbworldgen.worldgen.prompts import build_world_prompt_fold_messages
-
-    answered = [a for a in request.answers or []
-                if str(a.get("answer") or "").strip()]
-    if not answered:
-        raise HTTPException(status_code=400,
-                            detail="Answer at least one question to update the prompt.")
-
-    scenario = _load_scenario_or_404(request.scenario_id)
-    messages = build_world_prompt_fold_messages(
-        (request.current_text or "").strip(), answered, scenario)
-    text = await _seed_prompt_completion(
-        messages, "world_prompt_fold", "World prompt update")
-    return {"text": text}
+        raise HTTPException(status_code=502,
+                            detail=f"Ideation turn returned unusable output: {exc}")
+    if not reply:
+        raise HTTPException(status_code=502, detail="Ideation turn returned no reply.")
+    # A model that omits a draft leaves it unchanged — the client always
+    # overwrites its local drafts with this response.
+    return {
+        "reply": reply,
+        "prompt": prompt or (request.prompt or "").strip(),
+        "rules": (rules if rules is not None
+                  else [str(r).strip() for r in request.rules if str(r).strip()]),
+        "ready": ready,
+    }
 
 
 @router.post("/api/world/generate-step/{step_id}")
@@ -1080,17 +1073,20 @@ async def enrich_cancel(world_id: str):
 
 class AgentBuildRequest(BaseModel):
     seed_prompt: str
+    #: Co-authored world rules from the ideation conversation (C4) — the
+    #: brief's fixed design decisions, fed to the world_rules step as input.
+    rules: list[str] = []
     scenario_id: Optional[str] = None
     scenario: str = ""
 
 
 @router.post("/api/world/agent/build")
 async def agent_build_start(request: AgentBuildRequest):
-    """Launch a server-side agent build from a prompt ("let the AI build
-    it"). Returns immediately with the new world id; the loop keeps running
-    server-side — watch it via the status/events endpoints, cancel any time.
-    The finished world saves itself; until then it lives as an in-progress
-    draft."""
+    """Launch a server-side agent build from the ideation brief (seed prompt
+    + co-authored world rules). Returns immediately with the new world id;
+    the loop keeps running server-side — watch it via the status/events
+    endpoints, cancel any time. The finished world saves itself; until then
+    it lives as an in-progress draft."""
     from wbworldgen.worldgen.agent import harness as agent_harness
     if not request.seed_prompt.strip():
         raise HTTPException(status_code=400, detail="seed_prompt is required")
@@ -1098,6 +1094,7 @@ async def agent_build_start(request: AgentBuildRequest):
     _apply_scenario(scenario_state, request.scenario_id, request.scenario)
     handle = agent_harness.start_agent_build(
         world_builder, request.seed_prompt.strip(),
+        rules=request.rules,
         scenario=scenario_state.get("scenario", ""),
         scenario_id=scenario_state.get("scenario_id"))
     return {"world_id": handle.world_id, "status": handle.status}

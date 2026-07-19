@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import tempfile
+import types
 from pathlib import Path
 
 import pytest
@@ -391,58 +392,88 @@ def test_build_world_prompt_messages():
     assert "seed prompt from the scenario" in msgs3[1]["content"]
 
 
-def test_build_world_questions_messages():
-    from wbworldgen.worldgen.facade import build_world_questions_messages
-    # Draft + scenario + history: everything appears, scenario marked decided.
-    msgs = build_world_questions_messages(
-        "A drowned city of rival guilds.",
-        history=[{"question": "What era?", "answer": "Late medieval."},
-                 {"question": "Any magic?", "answer": ""}],
+def test_build_ideation_turn_messages():
+    from wbworldgen.worldgen.prompts import build_ideation_turn_messages
+    msgs = build_ideation_turn_messages(
+        [{"role": "player", "text": "Something with drowned gods."},
+         {"role": "assistant", "text": "Sunken temples, then — who drowned them?"},
+         {"role": "player", "text": "The tide itself. It's alive."}],
+        prompt_draft="A drowned world.",
+        rules_draft=["The tide is a living god.", "  "],
         scenario={"name": "The Sunken Court"},
     )
     assert msgs[0]["role"] == "system"
-    assert "questions" in msgs[0]["content"]
-    # World-scoped: the interview must never drift into story territory.
-    assert "ONLY about the world itself" in msgs[0]["content"]
-    assert "Never ask about protagonists" in msgs[0]["content"]
+    system = msgs[0]["content"]
+    # Rules-first, with the doctrine shared with the world_rules step, the
+    # two-draft contract, and the ready/offer protocol.
+    assert "FIRST" in system
+    assert "world rule is a practical statement" in system
+    assert '"ready"' in system and "offer" in system
+    assert "replacements, not diffs" in system
+    # World-scoped, like the interview it replaces.
+    assert "protagonists" in system
     user = msgs[1]["content"]
-    assert "A drowned city of rival guilds." in user
-    assert "The Sunken Court" in user
-    assert "already decided" in user
-    assert "never about the scenario's people or plot" in user
-    assert "What era?" in user and "Late medieval." in user
-    # Skipped answers are rendered as skipped, not blank.
-    assert "Any magic?" in user and "skipped" in user
-    assert "do not repeat" in user
+    assert "The Sunken Court" in user and "already decided" in user
+    assert "A drowned world." in user
+    assert "- The tide is a living god." in user
+    # Transcript rendered in order, blank rules dropped.
+    assert "Player: Something with drowned gods." in user
+    assert "You: Sunken temples, then — who drowned them?" in user
+    assert user.index("Something with drowned gods.") < user.index("The tide itself.")
 
-    # Empty prompt is allowed: the interview starts from scratch.
-    msgs2 = build_world_questions_messages("")
+    # From scratch: empty drafts render as such; no scenario block.
+    msgs2 = build_ideation_turn_messages([{"role": "player", "text": "Surprise me."}])
     user2 = msgs2[1]["content"]
-    assert "empty" in user2 and "from scratch" in user2
-    assert "previous_rounds" not in user2
+    assert "(empty — no seed prompt yet)" in user2
+    assert "(none agreed yet)" in user2
+    assert "<scenario>" not in user2
 
 
-def test_build_world_prompt_fold_messages():
-    from wbworldgen.worldgen.facade import build_world_prompt_fold_messages
-    msgs = build_world_prompt_fold_messages(
-        "A drowned city of rival guilds.",
-        [{"question": "What era?", "answer": "Late medieval."}],
-        scenario={"name": "The Sunken Court"},
-    )
-    # Every answer must land; untouched text keeps the player's wording.
-    assert "Every answer must end up reflected" in msgs[0]["content"]
-    assert "never a reason to leave an answer out" in msgs[0]["content"]
-    user = msgs[1]["content"]
-    assert "A drowned city of rival guilds." in user
-    assert "The Sunken Court" in user
-    assert "What era?" in user and "Late medieval." in user
-    assert "every answer is fully incorporated" in user
+def test_world_rules_generate_honors_brief_mock_path(builder):
+    from wbworldgen.worldgen.steps.world_rules import WorldRulesStep
+    builder.register_step(_make_step("world_form", after=None))
+    builder.register_step(WorldRulesStep())
+    agreed = ["The tide is a living god.", "Iron rusts overnight."]
+    state = {"steps": {}, "seed_prompt": "a drowned world",
+             "brief": {"prompt": "a drowned world", "rules": agreed}}
+    data = asyncio.run(builder.generate_step("world_rules", state, "a drowned world"))
+    # Co-authored rules lead verbatim; the mock's own rules still follow.
+    assert data["custom_rules"][:2] == agreed
+    assert "Magic always has a cost" in data["custom_rules"]
 
-    # Empty draft: the answers become the first version.
-    msgs2 = build_world_prompt_fold_messages(
-        "", [{"question": "Genre?", "answer": "Grim fantasy."}])
-    assert "write the first draft from the answers" in msgs2[1]["content"]
-    assert "Grim fantasy." in msgs2[1]["content"]
+    # Without a brief the declarative mock output is untouched.
+    plain = asyncio.run(builder.generate_step("world_rules", {"steps": {}}, "x"))
+    assert plain["custom_rules"][0] == "Magic always has a cost"
+
+
+def test_world_rules_generate_injects_brief_into_llm_prompt(builder):
+    from wbworldgen.worldgen.steps.world_rules import WorldRulesStep
+    builder.register_step(_make_step("world_form", after=None))
+    builder.register_step(WorldRulesStep())
+    captured = {}
+
+    class FakeLLMGen:
+        async def generate(self, step, context, user_prompt, user_note="", **kw):
+            captured["guidance"] = step.guidance
+            captured["context"] = context
+            return {"genre": "dark",
+                    "custom_rules": ["Iron rusts overnight.", "Storms sing."]}
+
+    builder._llm_service = types.SimpleNamespace(mode="live")
+    builder._llm_gen = FakeLLMGen()
+    agreed = ["The tide is a living god.", "Iron rusts overnight."]
+    state = {"steps": {"world_form": {"data": {"world_kind": "a drowned world"},
+                                      "approved": True}},
+             "brief": {"prompt": "p", "rules": agreed}}
+    data = asyncio.run(builder.generate_step("world_rules", state, "a drowned world"))
+    # The generation prompt carries the fixed-input doctrine and every rule…
+    assert "verbatim" in captured["guidance"]
+    for r in agreed:
+        assert r in captured["guidance"]
+    # …the declarative path's chain context still flows (not a bare {})…
+    assert "world_form" in captured["context"]
+    # …and enforcement leads with the agreed order, deduped, extras kept.
+    assert data["custom_rules"] == agreed + ["Storms sing."]
 
 
 def test_compile_world_carries_scenario(builder_with_steps):

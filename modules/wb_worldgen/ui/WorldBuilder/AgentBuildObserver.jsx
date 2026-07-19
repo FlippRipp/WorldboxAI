@@ -304,6 +304,17 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
             <p className="text-sm text-gray-400 border-l-2 border-gray-700 pl-3">{meta.seed_prompt}</p>
           )}
 
+          {meta?.brief?.rules?.length > 0 && (
+            <div className="text-xs border-l-2 border-emerald-900 pl-3 space-y-0.5">
+              <p className="text-gray-400 font-medium">
+                Co-authored rules <span className="text-gray-600">— the build is judged against these</span>
+              </p>
+              {meta.brief.rules.map((r, i) => (
+                <p key={i} className="text-gray-500">• {r}</p>
+              ))}
+            </div>
+          )}
+
           {gone && (
             <p className="text-sm text-gray-400">
               No agent build exists for this world — it may have been deleted.

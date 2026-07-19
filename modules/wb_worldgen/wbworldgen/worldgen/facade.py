@@ -39,9 +39,7 @@ logger = logging.getLogger(__name__)
 # Re-exported for compatibility: routes, tests and older callers import
 # these from the facade; they live in prompts.py now.
 from wbworldgen.worldgen.prompts import (  # noqa: F401
-    build_world_prompt_fold_messages,
     build_world_prompt_messages,
-    build_world_questions_messages,
     scenario_grounding_text,
     scenario_start_brief,
     seed_with_scenario,
@@ -250,21 +248,30 @@ class WorldBuilder:
             return await loop.run_in_executor(
                 None, lambda: self._map_gen.generate(world_state, config, root_gen))
 
+        data = await self.generate_declarative(step, world_state, user_prompt,
+                                               user_note, force_mock=force_mock)
+        await self._hook_registry.dispatch_step(step_id, data, world_state, user_prompt)
+        return data
+
+    async def generate_declarative(self, step, world_state: dict, user_prompt: str,
+                                   user_note: str = "", force_mock: bool = False) -> dict:
+        """The declarative generation body: the step's schema+guidance prompt
+        over the chain context on the live LLM, or the mock generator
+        offline. Public so a custom ``generate(ctx)`` override can compose
+        it — run the normal generation, then post-process — instead of
+        duplicating the path (precedent: world_rules' brief-input handling,
+        C4)."""
         # Duck-typed steps (tests, legacy) may predate the per-world view hook.
         view = getattr(step, "view_for", None)
         if callable(view):
             step = view(world_state)
         if not force_mock and self._llm_service and self._llm_service.mode != "mock":
-            context = self._build_chain_context(world_state, step_id)
-            data = await self._llm_gen.generate(
+            context = self._build_chain_context(world_state, step.id)
+            return await self._llm_gen.generate(
                 step, context, user_prompt, user_note,
                 system_framing=self.system_framing_for(world_state),
-                coverage_directive=_design.coverage_directive(world_state, step_id))
-        else:
-            data = self._mock_gen.generate(step, world_state, user_prompt, user_note)
-
-        await self._hook_registry.dispatch_step(step_id, data, world_state, user_prompt)
-        return data
+                coverage_directive=_design.coverage_directive(world_state, step.id))
+        return self._mock_gen.generate(step, world_state, user_prompt, user_note)
 
     async def regenerate_list_item(
         self, step_id: str, field: str, items: list, index: int,
