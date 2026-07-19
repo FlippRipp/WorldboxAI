@@ -18,8 +18,9 @@ being stopped on request; see C2's landed note). C4 (ideation) LANDED
 DISABLED (decided with Filip at C4 start; see C4's landed note) — agent
 mode is the one way to build a new world, "for now". Outstanding: Filip's
 live test (build + conversation check). v2a (structural surgery toolset)
-DESIGNED 2026-07-19 and begun on Filip's go, ahead of the original
-evidence gate — see the v2a section in Arc C.
+DESIGNED and LANDED 2026-07-19 (51e8c0d) on Filip's go, ahead of the
+original evidence gate — see the v2a section in Arc C; the live test now
+exercises the 18-tool catalog.
 Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
@@ -953,6 +954,38 @@ new budget classes):
   `save_node_enrichment` path (`_persist_generated_start` already writes
   both fields through it).
 
+*Landed 2026-07-19 (51e8c0d), with recorded refinements against the
+sketch. (1) `add_node` has NO region argument — the node inherits its
+anchor's region and `_append_to_partner_region` handles membership; with
+two region representations (node.region strings vs regions[].node_ids
+lists) an explicit override was a silent-mismatch trap. Placement
+anchors are the whole edge-target set (centroid step), not just
+`near_node_id`. (2) Step-data connections turned out to be
+legacy-LayerConnection-shaped (fresh worlds included — migrate converts
+at every compile), so root↔root additions get a NEW home instead of
+writing legacy records: the `world_connections` metadata key (native-v2
+ConnectionRecords, C4's `brief` round-trip precedent), folded into
+`compiled["connections"]` post-migrate with id dedupe. Child-touching
+connections land in the to-side bundle. New connections fix
+`travel={"mode": "instant"}`, `origin: "surgery"`. (3)
+`remove_connection` serves all three homes — metadata key, child
+bundles, and the legacy step-data list (clearing the endpoints'
+`interlayer_connection_id` stamps); a migrated record whose compiled id
+was synthesized (id-less legacy input) is refused loudly with a
+regenerate-the-step pointer, per P7. An anchored child map never warns
+unreachable on connection removal — the parent anchor keeps it
+attached, by design. (4) The enabling promotions: `grow_position` →
+`mapmodel` (removing `start_locations`' private
+`MapExpansionEngine._grow_position` import), `connected_components` /
+`unreachable_maps` / `connection_endpoints` → `mapspace` (lints import
+them now), the `LINK_TOKEN` scan regex → `enrichment/context.py`. (5)
+S2 confirmed in code while implementing: `migrate_session_state`
+operates on the session's own `world_data` copy. Verified by 18 tests in
+`test_agent_surgery.py` (per-tool happy paths + every refusal + all
+three connection homes) plus the module-by-path and root suites; a
+scripted five-op live sequence (add node, add portal, split-warn remove,
+healing edge, refused endpoint removal) rendered for Filip in chat.*
+
 ### Superseded: the plan-artifact design (refined and replaced 2026-07-19)
 
 The original Arc C made the plan a step: a `build_plan` artifact authored
@@ -989,6 +1022,7 @@ file, before the 2026-07-19 Arc C rewrite).
 | 10 | C2 agent harness + evaluator | L | ✓ landed (275d8b9) | agentic mode v1 |
 | 11 | C3 build observer UI | M | ✓ landed (f039a87); live test = Filip's | watching the build |
 | 12 | C4 ideation conversation | L | ✓ landed (b73c275); classic entry disabled | the front door |
+| 13 | v2a structural surgery toolset | M–L | ✓ landed (51e8c0d) | the agent's structure fix instrument |
 
 (A5 landed before B1 — the reverse of the original ordering; nothing
 depended on the order.) RuntimeHost (`backend.py` half of A1) can ride along
