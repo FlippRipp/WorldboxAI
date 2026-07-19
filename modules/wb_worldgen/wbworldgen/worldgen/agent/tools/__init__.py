@@ -7,3 +7,4 @@ node edit tool. Adding a tool = drop a module here and import it below
 from wbworldgen.worldgen.agent.tools import read  # noqa: F401
 from wbworldgen.worldgen.agent.tools import build  # noqa: F401
 from wbworldgen.worldgen.agent.tools import edit  # noqa: F401
+from wbworldgen.worldgen.agent.tools import verify  # noqa: F401

@@ -189,6 +189,12 @@ export const api = {
   // Re-enter an interrupted one-shot generation (backend was killed mid-run
   // while the app was minimized); no-op if it's running, complete, or review-mode.
   continueWorldGeneration: () => request('/api/world/continue', { method: 'POST' }),
+  // Agent builds (C2): a server-side agent plans, builds and verifies the
+  // whole world on its own. Launch returns the new world id immediately;
+  // poll status (or stream the events endpoint) to watch, cancel any time.
+  agentBuild:             (seedPrompt, scenarioId = null) => request('/api/world/agent/build', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, ...(scenarioId ? { scenario_id: scenarioId } : {}) }) }),
+  agentBuildStatus:       (worldId) => request(`/api/world/${worldId}/agent/status`),
+  agentBuildCancel:       (worldId) => request(`/api/world/${worldId}/agent/cancel`, { method: 'POST' }),
   compileWorld:           (saveId = null) => request('/api/world/compile', { method: 'POST', body: JSON.stringify(saveId ? { save_id: saveId } : {}) }),
   saveWorld:              (worldId) => request('/api/world/save', { method: 'POST', body: JSON.stringify({ world_id: worldId }) }),
   discardWorld:           () => request('/api/world/discard', { method: 'POST' }),

@@ -32,6 +32,10 @@ class ToolContext:
 
     builder: Any
     world_id: str
+    #: Optional async event sink long-running tools thread into their inner
+    #: runs (enrichment node/phase events stream to the build observer;
+    #: they never enter the persisted action log).
+    on_event: Any = None
 
 
 @dataclass(frozen=True)

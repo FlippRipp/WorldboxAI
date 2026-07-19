@@ -205,22 +205,28 @@ async def _run_one_shot_generation(state: dict, session_id: str):
     _auto_save_draft(session_id)
 
 
-@router.post("/api/world/generate")
-async def generate_world(request: WorldGenerateRequest, session_id: str = "default"):
-    state = {"seed_prompt": request.seed_prompt, "steps": {}}
-    if request.scenario_id:
+def _apply_scenario(state: dict, scenario_id: Optional[str], scenario: str):
+    """Resolve a request's scenario link/text onto a generation state
+    (shared by the wizard and the agent-build launch)."""
+    if scenario_id:
         from backend.engine.scenario import ScenarioStore
         from wbworldgen.worldgen.prompts import scenario_grounding_text
         try:
-            record = ScenarioStore(session_manager.data_dir).load_scenario(request.scenario_id)
+            record = ScenarioStore(session_manager.data_dir).load_scenario(scenario_id)
         except (FileNotFoundError, ValueError):
-            raise HTTPException(status_code=404, detail=f"Scenario '{request.scenario_id}' not found.")
-        state["scenario_id"] = record.get("id", request.scenario_id)
+            raise HTTPException(status_code=404, detail=f"Scenario '{scenario_id}' not found.")
+        state["scenario_id"] = record.get("id", scenario_id)
         grounding = scenario_grounding_text(record)
         if grounding:
             state["scenario"] = grounding
-    elif request.scenario.strip():
-        state["scenario"] = request.scenario.strip()
+    elif scenario.strip():
+        state["scenario"] = scenario.strip()
+
+
+@router.post("/api/world/generate")
+async def generate_world(request: WorldGenerateRequest, session_id: str = "default"):
+    state = {"seed_prompt": request.seed_prompt, "steps": {}}
+    _apply_scenario(state, request.scenario_id, request.scenario)
     # Persisted so a relaunched client (Android kills the backgrounded PWA)
     # can restore the right screen and keep polling for progress. While a
     # generation is in flight, state["_generating"] names the running step
@@ -1068,6 +1074,113 @@ async def enrich_run(world_id: str, request: EnrichRunRequest, session_id: str =
 async def enrich_cancel(world_id: str):
     world_builder.enrich_cancel(world_id)
     return {"world_id": world_id, "cancelling": True}
+
+
+# === Agent builds (C2: the agentic builder) ===
+
+class AgentBuildRequest(BaseModel):
+    seed_prompt: str
+    scenario_id: Optional[str] = None
+    scenario: str = ""
+
+
+@router.post("/api/world/agent/build")
+async def agent_build_start(request: AgentBuildRequest):
+    """Launch a server-side agent build from a prompt ("let the AI build
+    it"). Returns immediately with the new world id; the loop keeps running
+    server-side — watch it via the status/events endpoints, cancel any time.
+    The finished world saves itself; until then it lives as an in-progress
+    draft."""
+    from wbworldgen.worldgen.agent import harness as agent_harness
+    if not request.seed_prompt.strip():
+        raise HTTPException(status_code=400, detail="seed_prompt is required")
+    scenario_state: dict = {}
+    _apply_scenario(scenario_state, request.scenario_id, request.scenario)
+    handle = agent_harness.start_agent_build(
+        world_builder, request.seed_prompt.strip(),
+        scenario=scenario_state.get("scenario", ""),
+        scenario_id=scenario_state.get("scenario_id"))
+    return {"world_id": handle.world_id, "status": handle.status}
+
+
+@router.get("/api/world/{world_id}/agent/status")
+async def agent_build_status(world_id: str):
+    """Current build snapshot (status, turn/tool counters, todo, result).
+    Serves the live handle when the build's backend is still up, else the
+    persisted artifact (finished builds survive a restart)."""
+    from wbworldgen.worldgen.agent import harness as agent_harness
+    handle = agent_harness.get_build(world_id)
+    if handle is not None:
+        return handle.snapshot()
+    artifact = agent_harness.load_build_artifact(world_builder, world_id)
+    if artifact is None:
+        raise HTTPException(status_code=404,
+                            detail=f"No agent build for world '{world_id}'.")
+    artifact.pop("log", None)
+    return artifact
+
+
+class AgentEventsRequest(BaseModel):
+    #: Replay persisted events with index >= after, then stream live. A
+    #: reattaching client passes the last index it saw plus one.
+    after: int = 0
+
+
+@router.post("/api/world/{world_id}/agent/events")
+async def agent_build_events(world_id: str, request: AgentEventsRequest = None):
+    """SSE stream of one build's events: replays the persisted action log
+    from ``after``, then streams live (persisted events carry their index
+    ``i``; transient progress events don't and are never replayed). Ends
+    after the terminal {type:"done"} event."""
+    from wbworldgen.worldgen.agent import harness as agent_harness
+    after = max(0, request.after if request else 0)
+    handle = agent_harness.get_build(world_id)
+
+    if handle is None:
+        artifact = agent_harness.load_build_artifact(world_builder, world_id)
+        if artifact is None:
+            raise HTTPException(status_code=404,
+                                detail=f"No agent build for world '{world_id}'.")
+
+        async def replay_stream():
+            for evt in (artifact.get("log") or [])[after:]:
+                yield "data: " + json.dumps(evt) + "\n\n"
+
+        return StreamingResponse(replay_stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
+
+    queue = handle.subscribe()
+    finished_at_subscribe = handle.status != "running"
+    replay_end = len(handle.log)
+
+    async def event_stream():
+        try:
+            for evt in handle.log[after:replay_end]:
+                yield "data: " + json.dumps(evt) + "\n\n"
+            if finished_at_subscribe:
+                return
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                i = item.get("i")
+                if i is not None and i < replay_end:
+                    continue  # landed in the replay window already
+                yield "data: " + json.dumps(item) + "\n\n"
+        finally:
+            handle.unsubscribe(queue)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+@router.post("/api/world/{world_id}/agent/cancel")
+async def agent_build_cancel(world_id: str):
+    from wbworldgen.worldgen.agent import harness as agent_harness
+    return {"world_id": world_id,
+            "cancelling": agent_harness.cancel_build(world_id)}
 
 
 @router.get("/api/world/{world_id}/enrich/passes")

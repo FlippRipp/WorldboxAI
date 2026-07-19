@@ -311,6 +311,11 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
   const [scenarios, setScenarios] = useState([]);
   const [scenarioId, setScenarioId] = useState(() => readSavedForm().scenarioId || null);
   const [started, setStarted] = useState(false);
+  // A running (or finished, not yet dismissed) agent build owned by this
+  // client. The id is mirrored to localStorage so a relaunched client
+  // reattaches — the loop runs server-side and survives the frontend.
+  const [agentWorldId, setAgentWorldId] = useState(() => readSavedForm().agentWorldId || null);
+  const [agentStatus, setAgentStatus] = useState(null);
   // The effective (post-skip) step order for the running session: the world's
   // own World Design step can turn steps off, which the statically-fetched
   // pipeline can't know. null until the server has told us.
@@ -329,9 +334,30 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
   // Mirror the form so a relaunch before generation starts loses nothing.
   useEffect(() => {
     try {
-      localStorage.setItem(FORM_KEY, JSON.stringify({ seedPrompt, scenarioId, skipReview }));
+      localStorage.setItem(FORM_KEY, JSON.stringify({ seedPrompt, scenarioId, skipReview, agentWorldId }));
     } catch { /* storage unavailable — the server draft still covers started runs */ }
-  }, [seedPrompt, scenarioId, skipReview]);
+  }, [seedPrompt, scenarioId, skipReview, agentWorldId]);
+
+  // Follow an agent build: poll its status while it runs; reattach after a
+  // relaunch (404 = the world/build is gone — drop the stale reference).
+  useEffect(() => {
+    if (!agentWorldId) { setAgentStatus(null); return undefined; }
+    let alive = true;
+    const poll = async () => {
+      try {
+        const st = await api.agentBuildStatus(agentWorldId);
+        if (alive) setAgentStatus(st);
+      } catch (e) {
+        if (alive && e.status === 404) setAgentWorldId(null);
+      }
+    };
+    poll();
+    const t = setInterval(() => {
+      // Keep polling until a terminal status has been painted.
+      if (!agentStatus || agentStatus.status === 'running') poll();
+    }, 2000);
+    return () => { alive = false; clearInterval(t); };
+  }, [agentWorldId, agentStatus?.status]);
 
   useEffect(() => {
     api.getWorldPipeline()
@@ -428,6 +454,20 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
       }
     } catch (e) {
       alert('Failed to start world generation: ' + e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAgentStart = async () => {
+    if (!seedPrompt.trim()) return;
+    setLoading(true);
+    try {
+      const result = await api.agentBuild(seedPrompt.trim(), scenarioId);
+      setAgentStatus(null);
+      setAgentWorldId(result.world_id);
+    } catch (e) {
+      alert('Failed to start the agent build: ' + e.message);
     } finally {
       setLoading(false);
     }
@@ -554,6 +594,101 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
     }
   };
 
+  if (agentWorldId) {
+    // Minimal agent-build watch card (the full observer UI is C3): live
+    // status + todo from the server-side loop, cancel, reattach-safe.
+    const st = agentStatus;
+    const running = !st || st.status === 'running';
+    const statusLabel = !st ? 'connecting…' : {
+      running: 'building…', done: 'finished', cancelled: 'cancelled',
+      failed: 'failed', budget_exhausted: 'stopped (budget exhausted)',
+    }[st.status] || st.status;
+    const todoIcon = { done: '✓', in_progress: '➤', pending: '○' };
+    const dismiss = () => { setAgentWorldId(null); setAgentStatus(null); };
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center p-6">
+        <div className="w-full max-w-lg mt-16">
+          <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-6 space-y-4">
+            <div>
+              <h2 className="text-2xl font-bold text-gray-100 mb-1 flex items-center gap-3">
+                {running && (
+                  <span className="inline-block w-5 h-5 border-2 border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin" />
+                )}
+                Agent build — {statusLabel}
+              </h2>
+              <p className="text-gray-500 text-xs">
+                World <span className="text-gray-400">{agentWorldId}</span>
+                {st ? ` · turn ${st.turns} · ${st.tool_calls} tool calls` : ''}
+              </p>
+            </div>
+            {st?.seed_prompt && (
+              <p className="text-sm text-gray-400 border-l-2 border-gray-700 pl-3">{st.seed_prompt}</p>
+            )}
+            {(st?.todo?.length ?? 0) > 0 && (
+              <ul className="space-y-1">
+                {st.todo.map((item, i) => (
+                  <li
+                    key={i}
+                    className={`text-sm flex gap-2 ${
+                      item.status === 'done' ? 'text-gray-500 line-through'
+                        : item.status === 'in_progress' ? 'text-emerald-300'
+                          : 'text-gray-300'
+                    }`}
+                  >
+                    <span className="w-4 text-center">{todoIcon[item.status] || '○'}</span>
+                    {item.text}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {running && st?.last_event && (
+              <p className="text-xs text-gray-500">
+                {st.last_event.type === 'action'
+                  ? `Running ${st.last_event.tool}…`
+                  : st.last_event.type === 'eval'
+                    ? `Evaluating — ${st.last_event.blocking ?? 0} blocking finding(s)`
+                    : st.last_event.type === 'turn' && st.last_event.thought
+                      ? st.last_event.thought
+                      : null}
+              </p>
+            )}
+            {st?.status === 'done' && st?.result?.summary && (
+              <p className="text-sm text-emerald-300">{st.result.summary}</p>
+            )}
+            {st?.error && <p className="text-sm text-red-400">{st.error}</p>}
+            <div className="flex gap-3 pt-1">
+              {running ? (
+                <button
+                  onClick={() => api.agentBuildCancel(agentWorldId).catch(() => {})}
+                  className="px-4 py-2 rounded-lg border border-red-900 text-red-300 hover:bg-red-950/40 text-sm transition-colors"
+                >
+                  Cancel build
+                </button>
+              ) : (
+                <>
+                  {st?.status === 'done' && (
+                    <button
+                      onClick={() => { dismiss(); onWorldCreated?.(); }}
+                      className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-sm font-medium transition-colors"
+                    >
+                      Open world list
+                    </button>
+                  )}
+                  <button
+                    onClick={dismiss}
+                    className="px-4 py-2 rounded-lg border border-gray-700 text-gray-400 hover:bg-gray-700 text-sm transition-colors"
+                  >
+                    {st?.status === 'done' ? 'Dismiss' : 'Back to the prompt'}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (!started) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center p-6">
@@ -658,6 +793,21 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
               )}
               {loading ? 'Generating...' : 'Generate World'}
             </button>
+
+            <div>
+              <button
+                onClick={handleAgentStart}
+                disabled={loading || !seedPrompt.trim()}
+                className="w-full py-3 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 rounded-lg font-medium text-lg transition-colors"
+              >
+                Let the AI build it
+              </button>
+              <p className="text-xs text-gray-500 mt-2">
+                An agent plans, builds and verifies the whole world on its own —
+                watch it work, or come back later. It runs server-side, so
+                closing the app doesn't stop it.
+              </p>
+            </div>
           </div>
         </div>
       </div>

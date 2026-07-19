@@ -162,7 +162,7 @@ async def run_pass(ctx, pass_id: str, map_id: str = None, node_ids: list = None,
     summary = await builder.enrich_run(
         ctx.world_id, phase=pass_id, count=count, layer_filter=map_id,
         rework=rework, node_ids=node_ids, importance_floor=importance_floor,
-        guidance=guidance or None)
+        guidance=guidance or None, on_event=ctx.on_event)
     return {"pass_id": pass_id, "summary": summary}
 
 
@@ -258,7 +258,8 @@ async def run_custom_pass(ctx, prompt: str, slot: str, map_id: str = None,
 
     summary = await builder.enrich_run(
         ctx.world_id, spec=spec, count=count, layer_filter=map_id,
-        rework=rework, node_ids=node_ids, importance_floor=importance_floor)
+        rework=rework, node_ids=node_ids, importance_floor=importance_floor,
+        on_event=ctx.on_event)
     return {"pass_id": spec.id, "field": f"custom_{slot}", "summary": summary}
 
 

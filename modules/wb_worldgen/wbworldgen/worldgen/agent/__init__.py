@@ -21,3 +21,11 @@ from wbworldgen.worldgen.agent.registry import (  # noqa: F401
     validate_args,
 )
 from wbworldgen.worldgen.agent.lints import lint_world  # noqa: F401
+from wbworldgen.worldgen.agent.evaluator import evaluate_world  # noqa: F401
+from wbworldgen.worldgen.agent.harness import (  # noqa: F401
+    AgentBuild,
+    cancel_build,
+    get_build,
+    load_build_artifact,
+    start_agent_build,
+)

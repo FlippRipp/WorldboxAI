@@ -55,6 +55,12 @@ class WorldPersistence:
 
     # --- world CRUD ---------------------------------------------------------
 
+    def world_dir(self, world_id: str) -> Path:
+        """The world's on-disk directory. Public for module-internal
+        consumers that persist per-world artifacts beside the step files
+        (the agent harness writes ``agent_build.json`` here)."""
+        return self._dir / safe_world_id(world_id)
+
     def list_worlds(self) -> list[dict]:
         worlds = []
         for world_dir in self._dir.iterdir():
