@@ -2301,11 +2301,24 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
                 state["history"] = [intro_text]
                 state["chat_messages"] = [ai_message]
+                # The narration is final — finalize it on the client now, the
+                # same way a normal turn does, so the opening renders while
+                # the post-storyteller passes below run.
+                await _stream_message_complete(intro_text, intro_reasoning)
                 # One-shot post-opening pass: modules may extend state now
                 # that the opening message exists (wb_worldgen reveals the
                 # map locations the character would already know about).
                 # Runs before save_turn so turn 0 persists the result.
                 state = await engine.run_intro_complete_hooks(state)
+                # The opening feeds the same post-storyteller phases as every
+                # later turn (reader extraction + on_mutate_state, librarian
+                # memory + on_librarian), so NPCs, time, and memories from the
+                # opening scene exist before the first player turn.
+                # Best-effort: the opening must still save if the pass fails.
+                try:
+                    state = await engine.run_post_intro_pipeline(state)
+                except Exception as exc:
+                    print(f"Post-intro pipeline failed: {exc}")
                 session_manager.save_manager.save_turn(
                     session_manager.active_save_id, state, 0
                 )

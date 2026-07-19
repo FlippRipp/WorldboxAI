@@ -532,6 +532,25 @@ class EngineGraph:
                 print(f"Error in {mod_id} on_intro_complete: {e}")
         return state
 
+    async def run_post_intro_pipeline(self, state: dict) -> dict:
+        """Run the post-storyteller phases (reader + librarian) over the
+        opening message, so it feeds the same module processing as every
+        later storyteller output (NPC tracking, time, memories, ...).
+
+        Reuses the graph nodes directly; their partial updates replace state
+        keys wholesale, the same way the LangGraph channels merge them.
+        Mutates and returns ``state``.
+
+        The opening is not a numbered turn: the reader advances the turn
+        counter as it does mid-graph, but swipes, regenerate and delete all
+        rely on turn 0 identifying the opening scene, so the counter is
+        pinned back to 0 before the librarian runs and the state is saved.
+        """
+        state.update(await self.reader_node(state))
+        state["turn"] = 0
+        state.update(await self.librarian_node(state))
+        return state
+
     async def _rewrite_scenario_description(self, scenario_data: dict, request_text: str) -> dict:
         """Apply a player's modification request to the save's scenario copy.
 
@@ -1110,8 +1129,12 @@ class EngineGraph:
             chunk_size = min(self.settings.get("librarian.chunk_size"), len(history))
             recent_texts = history[-chunk_size:]
             combined_text = "\n".join(recent_texts)
-            turn_start = max(1, turn - chunk_size + 1)
-            turn_range = f"turns {turn_start}-{turn}"
+            if turn <= 0:
+                # Post-intro pass: the opening scene is turn 0, not a span.
+                turn_range = "the opening scene"
+            else:
+                turn_start = max(1, turn - chunk_size + 1)
+                turn_range = f"turns {turn_start}-{turn}"
             
             try:
                 memory_summary = await self.llm.summarize_memory_structured(combined_text, turn_range,

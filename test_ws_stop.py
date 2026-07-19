@@ -129,6 +129,31 @@ def test_intro_skips_module_reinit_for_existing_story(tmp_path, monkeypatch):
     assert done["state"]["swipes"] is not None
 
 
+def test_intro_runs_post_storyteller_pipeline(tmp_path, monkeypatch):
+    # The opening message must feed the same post-storyteller phases as any
+    # later turn (reader extraction + librarian): nothing used to run after
+    # the intro, so state generated from the opening scene (NPCs, time,
+    # memories) didn't exist until turn 1.
+    client, session_manager = make_client(tmp_path, monkeypatch)
+
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"action": "intro"})
+        # The opening finalizes on the client before the post pass runs,
+        # exactly like a normal turn's narration.
+        first = receive_until(ws, {"message_complete", "done", "error"})
+        assert first["type"] == "message_complete"
+        done = receive_until(ws, {"done", "error"})
+
+    assert done["type"] == "done"
+    # The opening keeps its turn-0 identity — swipes, regenerate and delete
+    # all rely on it — even though the reader normally advances the counter.
+    assert done["state"]["turn"] == 0
+    # The librarian ran over the opening scene and memorized it.
+    assert done["state"].get("last_stored_memory_id")
+    memories = server.engine.memory.list_all_memories()
+    assert any(m["turn_generated"] == 0 for m in memories)
+
+
 def test_npc_delete_command_removes_character_end_to_end(tmp_path, monkeypatch):
     # Deleting a character must survive the command write-back. module_data is
     # deep-merged (additive), so without the module_data_replace opt-in the
