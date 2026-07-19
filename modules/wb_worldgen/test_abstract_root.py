@@ -165,6 +165,121 @@ def test_layout_positions_regions_and_repairs_connectivity():
     assert result["config"]["generated_from"] == "seed"
 
 
+def test_normalize_carries_orbital_structure_and_links_satellites():
+    parsed = {"nodes": [
+        {"name": "Lustra", "kind": "star", "importance": 10, "center": True,
+         "adjacent": []},
+        {"name": "Cinder", "kind": "planet", "importance": 7, "orbit": 1,
+         "adjacent": ["Lustra"]},
+        {"name": "Mirage", "kind": "planet", "importance": 9, "orbit": 3,
+         "adjacent": []},
+        {"name": "The Slick", "kind": "moon", "importance": 6,
+         "parent": "mirage", "adjacent": []},
+        {"name": "Ghost Moon", "kind": "moon", "importance": 3,
+         "parent": "Nowhere", "adjacent": []},
+    ]}
+    graph = normalize_abstract_graph(parsed, [], [])
+    by = {n["name"]: n for n in graph["nodes"]}
+    assert by["Lustra"]["center"] is True
+    assert by["Cinder"]["orbit"] == 1 and by["Mirage"]["orbit"] == 3
+    # parent resolves tolerantly; unknown parents drop.
+    assert by["The Slick"]["parent_id"] == by["Mirage"]["id"]
+    assert "parent_id" not in by["Ghost Moon"]
+    # A satellite always has a travel route to its parent.
+    assert any({e["from"], e["to"]} == {by["The Slick"]["id"], by["Mirage"]["id"]}
+               for e in graph["edges"])
+
+
+def test_normalize_keeps_only_the_most_important_center():
+    parsed = {"nodes": [
+        {"name": "False Sun", "importance": 6, "center": True, "adjacent": []},
+        {"name": "True Sun", "importance": 10, "center": True, "adjacent": []},
+    ]}
+    graph = normalize_abstract_graph(parsed, [], [])
+    by = {n["name"]: n for n in graph["nodes"]}
+    assert by["True Sun"].get("center") is True
+    assert "center" not in by["False Sun"]
+    assert by["False Sun"]["orbit"] == 1  # demoted to the innermost ring
+
+
+def test_orbital_layout_rings_center_and_satellites():
+    import math
+    parsed = {"nodes": [
+        {"name": "Lustra", "kind": "star", "importance": 10, "center": True,
+         "adjacent": []},
+        {"name": "Cinder", "kind": "planet", "importance": 7, "orbit": 1,
+         "adjacent": ["Lustra"]},
+        {"name": "Verdantia", "kind": "planet", "importance": 8, "orbit": 2,
+         "adjacent": []},
+        {"name": "Mirage", "kind": "planet", "importance": 9, "orbit": 5,
+         "adjacent": []},
+        {"name": "The Slick", "kind": "moon", "importance": 6,
+         "parent": "Mirage", "adjacent": []},
+        {"name": "Neon Docks", "kind": "station", "importance": 8,
+         "parent": "Mirage", "adjacent": []},
+        {"name": "Drifter Relay", "kind": "gate", "importance": 4,
+         "adjacent": []},  # no orbit: lands on an added outermost ring
+    ]}
+    graph = normalize_abstract_graph(parsed, [], [])
+    result = layout_abstract_graph(graph, [], generated_from="seed")
+    by = {n["name"]: n for n in result["nodes"]}
+
+    def dist_from_center(n):
+        return math.hypot(n["x"] - 500.0, n["y"] - 500.0)
+
+    # Hub in the middle; ring order follows orbit order, not absolute values.
+    assert dist_from_center(by["Lustra"]) < 1.0
+    assert dist_from_center(by["Cinder"]) < dist_from_center(by["Verdantia"]) \
+        < dist_from_center(by["Mirage"])
+    assert dist_from_center(by["Drifter Relay"]) > dist_from_center(by["Mirage"]) - 25
+    # Satellites hug their parent.
+    for moon in ("The Slick", "Neon Docks"):
+        d = math.hypot(by[moon]["x"] - by["Mirage"]["x"],
+                       by[moon]["y"] - by["Mirage"]["y"])
+        assert d <= 110
+    # Ring metadata for renderers; graph fully connected.
+    orbits = result["config"]["orbits"]
+    assert orbits["center_node_id"] == by["Lustra"]["id"]
+    assert [r["orbit"] for r in orbits["rings"]] == [1, 2, 5, 6]
+    radii = [r["radius"] for r in orbits["rings"]]
+    assert radii == sorted(radii)
+    assert _components(result["nodes"], result["edges"]) == 1
+
+
+def test_layout_without_structure_hints_stays_in_cluster_mode():
+    parsed = {"nodes": [
+        {"name": f"Node {i}", "importance": 6, "region": AREAS[i % 2]["name"],
+         "adjacent": []} for i in range(6)
+    ]}
+    graph = normalize_abstract_graph(parsed, [], AREAS)
+    result = layout_abstract_graph(graph, AREAS)
+    assert "orbits" not in result["config"]
+
+
+def test_cluster_mode_satellites_hug_their_parent_too():
+    import math
+    parsed = {"nodes": [
+        {"name": "Fleshport", "importance": 9, "region": AREAS[1]["name"],
+         "adjacent": []},
+        {"name": "Chop Dock", "importance": 5, "parent": "Fleshport",
+         "adjacent": []},
+        {"name": "Halo Ring", "importance": 8, "region": AREAS[0]["name"],
+         "adjacent": ["Fleshport"]},
+    ]}
+    graph = normalize_abstract_graph(parsed, [], AREAS)
+    result = layout_abstract_graph(graph, AREAS)
+    by = {n["name"]: n for n in result["nodes"]}
+    d = math.hypot(by["Chop Dock"]["x"] - by["Fleshport"]["x"],
+                   by["Chop Dock"]["y"] - by["Fleshport"]["y"])
+    assert d <= 110
+    assert "orbits" not in result["config"]
+    # Satellites still count as region members.
+    belt = next(r for r in result["regions"]
+                if r["region_name"] == AREAS[1]["name"])
+    assert by["Chop Dock"]["id"] in belt["node_ids"] or \
+        by["Chop Dock"]["region"] == ""
+
+
 def test_mock_parsed_covers_named_locations_and_areas():
     parsed = mock_abstract_parsed("Testworld", AREAS, NAMED)
     names = [n["name"] for n in parsed["nodes"]]

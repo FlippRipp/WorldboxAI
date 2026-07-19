@@ -816,12 +816,21 @@ station, moon, gate, dream...); "region" (one of the areas above, or empty);
 "importance" 1-10 (how central it is); "description" (1-2 vivid sentences);
 "adjacent" (names of nodes it has direct travel routes to — every node must be
 reachable); "contains" (names of authored places from the list above that live
-inside/on this node).{crossing_block}
+inside/on this node).
+
+Structural hints — use them ONLY when the premise implies that shape, else
+omit them and nodes simply cluster by region: "center": true on the ONE node
+everything arranges around (a system's star, a realm's citadel); "orbit"
+(1 = innermost) on nodes that sit on concentric rings around the center —
+planets' orbital rings, ringed wards; "parent" naming the node this one is a
+satellite of (a moon of its planet, a station over a world) — it is placed
+hugging that node.{crossing_block}
 
 Output ONLY valid JSON:
 {{"description": "2-3 sentences on this map's overall shape",
 "nodes": [{{"name": "...", "kind": "...", "region": "...", "importance": 5,
-"description": "...", "adjacent": ["..."], "contains": ["..."], "crossing": ""}}]}}""",
+"description": "...", "adjacent": ["..."], "contains": ["..."],
+"center": false, "orbit": 0, "parent": "", "crossing": ""}}]}}""",
             world_name=name,
             world_premise=user_prompt,
             map_label=label,

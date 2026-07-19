@@ -121,6 +121,24 @@ carry the world's own noun in a new `kind` field ("planet", "station",
 authored path and the procedural parallel-maps path (worldgen/generation/
 maps.py). Tests: test_abstract_root.py.
 
+**Orbital structure hints.** The authoring contract carries three optional
+fields the layout honors, following the same pattern as the interior
+generator (authored content contract + deterministic layout, never crossing
+into other generators' contracts): `center: true` on the single hub node (a
+system's star, a realm's citadel — extras demote to the innermost ring),
+`orbit: 1..N` (ring number; distinct values map to ordered, evenly spaced
+radii — absolute numbers don't matter; hint-less nodes share an added
+outermost ring), and `parent: "<name>"` (satellite placed hugging that node
+with an automatic travel edge — moons of a planet, a station over a world;
+dangling/cyclic references degrade to normal placement). When any node
+declares `center`/`orbit` the layout switches to hub-and-rings — same-ring
+nodes grouped into contiguous region arcs, per-ring angular stagger, hub
+pinned during relaxation — and records `config.orbits` ({center_node_id,
+rings: [{orbit, radius}]}) so the map renderer can draw orbit guides.
+Without the hints (and in the offline author) the region-cluster layout is
+unchanged; `parent` satellites work in both modes. The prompt marks the
+hints as premise-dependent — a dream web is not forced into rings.
+
 ## Result on the Lustra data
 
 Regenerating Lustra's root map through the new pipeline (offline author,
