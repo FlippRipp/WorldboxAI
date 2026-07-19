@@ -132,6 +132,10 @@ class WorldPersistence:
             # The ideation brief (C4): prompt + co-authored world rules — the
             # agent's standing instructions, part of the world's record.
             metadata["brief"] = world_state["brief"]
+        if world_state.get("world_connections"):
+            # Surgery-authored root/parallel-map connections (v2a): native
+            # ConnectionRecords the compiler folds in post-migrate.
+            metadata["world_connections"] = world_state["world_connections"]
         if world_state.get("template_id"):
             metadata["template_id"] = world_state["template_id"]
             # Snapshot the vocabulary at creation time so a later template
@@ -187,6 +191,8 @@ class WorldPersistence:
             world_state["scenario_id"] = metadata["scenario_id"]
         if isinstance(metadata.get("brief"), dict):
             world_state["brief"] = metadata["brief"]
+        if metadata.get("world_connections"):
+            world_state["world_connections"] = metadata["world_connections"]
         if metadata.get("template_id"):
             world_state["template_id"] = metadata["template_id"]
             if isinstance(metadata.get("template_vocab"), dict):
@@ -307,17 +313,8 @@ class WorldPersistence:
     # --- enrichment write cache --------------------------------------------
 
     def save_node_enrichment(self, world_id: str, node_id: str, field: str, value: str):
-        step_path = self._dir / world_id / "step_map_generation.json"
-        if step_path.exists():
-            step_data = self._enrichment_cache.get(world_id)
-            if step_data is None:
-                if len(self._enrichment_cache) >= self._enrichment_cache_max:
-                    oldest = next(iter(self._enrichment_cache))
-                    self.write_enrichment_to_disk(oldest, evict=True)
-                with open(step_path, "r", encoding="utf-8") as f:
-                    step_data = json.load(f)
-                self._enrichment_cache[world_id] = step_data
-
+        step_data = self._step_data_cached(world_id)
+        if step_data is not None:
             node_index = step_data.get("_node_index")
             if node_index is None:
                 node_index = self.build_enrichment_node_index(step_data.get("data", {}))
@@ -379,19 +376,11 @@ class WorldPersistence:
         return self._append_root_map_node(world_id, map_id, node, edges)
 
     def _append_root_map_node(self, world_id: str, map_id: str, node: dict, edges: list) -> bool:
-        step_path = self._dir / world_id / "step_map_generation.json"
-        if not step_path.exists():
-            return False
         # Go through the enrichment write cache so a pending cached state and
         # this append never clobber each other.
-        step_data = self._enrichment_cache.get(world_id)
+        step_data = self._step_data_cached(world_id)
         if step_data is None:
-            if len(self._enrichment_cache) >= self._enrichment_cache_max:
-                oldest = next(iter(self._enrichment_cache))
-                self.write_enrichment_to_disk(oldest, evict=True)
-            with open(step_path, "r", encoding="utf-8") as f:
-                step_data = json.load(f)
-            self._enrichment_cache[world_id] = step_data
+            return False
         target = self._step_map_for_id(step_data.get("data", {}), map_id)
         if target is None:
             return False
@@ -437,6 +426,221 @@ class WorldPersistence:
                 if node.get("id") not in ids:
                     ids.append(node["id"])
                 return
+
+    # --- structural surgery write paths (v2a) ------------------------------
+    #
+    # The removal/rewiring mirror of ``append_map_node``: same dual dispatch
+    # (child-map bundle vs the map_generation step data through the
+    # enrichment write cache), same write-through discipline. Validation is
+    # the caller's job (worldgen/surgery.py) — these do the mechanical
+    # mutation only.
+
+    def _step_data_cached(self, world_id: str) -> dict | None:
+        """The map_generation step data through the enrichment write cache
+        (loading and caching on miss), or None when the world has none."""
+        step_path = self._dir / world_id / "step_map_generation.json"
+        if not step_path.exists():
+            return None
+        step_data = self._enrichment_cache.get(world_id)
+        if step_data is None:
+            if len(self._enrichment_cache) >= self._enrichment_cache_max:
+                oldest = next(iter(self._enrichment_cache))
+                self.write_enrichment_to_disk(oldest, evict=True)
+            with open(step_path, "r", encoding="utf-8") as f:
+                step_data = json.load(f)
+            self._enrichment_cache[world_id] = step_data
+        return step_data
+
+    def _step_maps(self, step_data: dict):
+        """Yield (map_id, map dict) for every map in the step data, using the
+        same id rule as ``_step_map_for_id``."""
+        map_data = step_data.get("data", {})
+        if not isinstance(map_data, dict):
+            return
+        if "layers" in map_data:
+            for i, layer in enumerate(map_data.get("layers") or []):
+                lid = layer.get("layer_id") or ("root" if i == 0 else f"layer_{i}")
+                yield ("root" if i == 0 else lid), layer.setdefault("map", {})
+        elif "nodes" in map_data:
+            yield "root", map_data
+
+    @staticmethod
+    def _remove_node_from_record(record: dict, node_id: str) -> dict | None:
+        """Drop one node from a map record, cascading its edges and region
+        membership (a region centered on it gets its first remaining member,
+        or an empty center). Returns {"node", "edges_removed"} or None."""
+        nodes = record.get("nodes") or []
+        node = next((n for n in nodes if n.get("id") == node_id), None)
+        if node is None:
+            return None
+        nodes.remove(node)
+        edges = record.get("edges") or []
+        dropped = [e for e in edges if node_id in (e.get("from"), e.get("to"))]
+        for e in dropped:
+            edges.remove(e)
+        for region in record.get("regions") or []:
+            ids = region.get("node_ids")
+            if isinstance(ids, list) and node_id in ids:
+                ids.remove(node_id)
+            if region.get("center_node_id") == node_id:
+                region["center_node_id"] = (ids[0] if isinstance(ids, list) and ids else "")
+        return {"node": node, "edges_removed": len(dropped)}
+
+    def remove_map_node(self, world_id: str, node_id: str) -> dict | None:
+        """Remove a node (and its edges/region membership) from whichever map
+        owns it — child bundle or step data. Returns {"map_id", "node",
+        "edges_removed"} or None when no stored map carries the node."""
+        step_data = self._step_data_cached(world_id)
+        if step_data is not None:
+            for map_id, record in self._step_maps(step_data):
+                removed = self._remove_node_from_record(record, node_id)
+                if removed is not None:
+                    index = step_data.get("_node_index")
+                    if index is not None:
+                        index.pop(node_id, None)
+                    self.write_enrichment_to_disk(world_id)
+                    return {"map_id": map_id, **removed}
+        safe_id = safe_world_id(world_id)
+        for bundle in self.load_child_maps(world_id):
+            record = bundle.get("map") or {}
+            removed = self._remove_node_from_record(record, node_id)
+            if removed is not None:
+                self.save_child_map(world_id, bundle)
+                self._child_node_index.pop(safe_id, None)
+                return {"map_id": record.get("map_id", ""), **removed}
+        return None
+
+    def _mutate_map_record(self, world_id: str, map_id: str, mutate):
+        """Apply ``mutate(record)`` to the persisted map record owning
+        ``map_id`` and write it back through that home's path. Returns
+        mutate's result; None when no such map is stored. A falsy result
+        means nothing changed and skips the write."""
+        bundle = self.load_child_map(world_id, map_id)
+        if bundle is not None:
+            result = mutate(bundle["map"])
+            if result:
+                self.save_child_map(world_id, bundle)
+            return result
+        step_data = self._step_data_cached(world_id)
+        if step_data is None:
+            return None
+        target = self._step_map_for_id(step_data.get("data", {}), map_id)
+        if target is None:
+            return None
+        result = mutate(target)
+        if result:
+            self.write_enrichment_to_disk(world_id)
+        return result
+
+    def add_map_edge(self, world_id: str, map_id: str, from_id: str, to_id: str) -> dict | None:
+        """Append an intra-map edge with the map's distance convention.
+        Idempotent (an existing edge in either direction is returned as-is);
+        None when no such map is stored."""
+        def _add(record: dict):
+            for e in record.get("edges") or []:
+                if {e.get("from"), e.get("to")} == {from_id, to_id}:
+                    return e
+            by_id = {n.get("id"): n for n in record.get("nodes") or []}
+            a, b = by_id.get(from_id), by_id.get(to_id)
+            dist = 1.0
+            if a is not None and b is not None:
+                dist = ((a.get("x", 0.0) - b.get("x", 0.0)) ** 2
+                        + (a.get("y", 0.0) - b.get("y", 0.0)) ** 2) ** 0.5
+            edge = {"from": from_id, "to": to_id,
+                    "distance": round(max(dist, 1.0), 2)}
+            record.setdefault("edges", []).append(edge)
+            return edge
+
+        return self._mutate_map_record(world_id, map_id, _add)
+
+    def remove_map_edge(self, world_id: str, map_id: str, from_id: str, to_id: str):
+        """Drop every edge joining the pair (either direction). Returns the
+        number removed (0 = no such edge); None when no such map is stored."""
+        def _remove(record: dict):
+            edges = record.get("edges") or []
+            dropped = [e for e in edges
+                       if {e.get("from"), e.get("to")} == {from_id, to_id}]
+            for e in dropped:
+                edges.remove(e)
+            return len(dropped)
+
+        result = self._mutate_map_record(world_id, map_id, _remove)
+        return result
+
+    def _read_metadata(self, world_id: str) -> dict:
+        meta_path = self._dir / safe_world_id(world_id) / "metadata.json"
+        if not meta_path.exists():
+            return {}
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def _write_metadata(self, world_id: str, metadata: dict):
+        meta_path = self._dir / safe_world_id(world_id) / "metadata.json"
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2, default=str)
+
+    def add_world_connection(self, world_id: str, connection: dict,
+                             owner_map_id: str = None) -> str | None:
+        """Persist a native-v2 ConnectionRecord. ``owner_map_id`` names the
+        child-map bundle that owns it; None stores it under the world's
+        ``world_connections`` metadata key (root/parallel-map connections —
+        the compiler folds them in post-migrate). Returns the home
+        ("child:<map_id>" | "world") or None when the owner bundle is
+        missing."""
+        if owner_map_id:
+            bundle = self.load_child_map(world_id, owner_map_id)
+            if bundle is None:
+                return None
+            bundle.setdefault("connections", []).append(connection)
+            self.save_child_map(world_id, bundle)
+            return f"child:{owner_map_id}"
+        metadata = self._read_metadata(world_id)
+        metadata.setdefault("world_connections", []).append(connection)
+        self._write_metadata(world_id, metadata)
+        return "world"
+
+    def remove_world_connection(self, world_id: str, connection_id: str) -> str | None:
+        """Remove one persisted connection by id, wherever it lives: the
+        ``world_connections`` metadata key, a child-map bundle, or the legacy
+        layer-connection list inside the map_generation step data (fresh
+        worlds' plane crossings — their nodes' ``interlayer_connection_id``
+        stamps are cleared too). Returns the home it was removed from, or
+        None when no persisted record carries the id (e.g. a migrated
+        connection with a synthesized id)."""
+        metadata = self._read_metadata(world_id)
+        world_conns = metadata.get("world_connections") or []
+        kept = [c for c in world_conns if c.get("id") != connection_id]
+        if len(kept) != len(world_conns):
+            metadata["world_connections"] = kept
+            self._write_metadata(world_id, metadata)
+            return "world"
+
+        for bundle in self.load_child_maps(world_id):
+            conns = bundle.get("connections") or []
+            kept = [c for c in conns if c.get("id") != connection_id]
+            if len(kept) != len(conns):
+                bundle["connections"] = kept
+                self.save_child_map(world_id, bundle)
+                return f"child:{bundle.get('map', {}).get('map_id', '')}"
+
+        step_data = self._step_data_cached(world_id)
+        if step_data is not None:
+            map_data = step_data.get("data", {})
+            conns = map_data.get("connections") if isinstance(map_data, dict) else None
+            if isinstance(conns, list):
+                kept = [c for c in conns if c.get("id") != connection_id]
+                if len(kept) != len(conns):
+                    map_data["connections"] = kept
+                    for _mid, record in self._step_maps(step_data):
+                        for n in record.get("nodes") or []:
+                            if n.get("interlayer_connection_id") == connection_id:
+                                n["interlayer_connection_id"] = ""
+                    self.write_enrichment_to_disk(world_id)
+                    return "step"
+        return None
 
     def flush_enrichment_cache(self, world_id: str = None):
         if world_id:

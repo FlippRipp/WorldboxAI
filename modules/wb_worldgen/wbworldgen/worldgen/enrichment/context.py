@@ -4,6 +4,10 @@ import re
 
 from wbworldgen.mapmodel import compass_direction as _compass_direction
 
+#: ``${link_<id>}`` (unresolved) or ``${link_<id>|<label>}`` (resolved) — the
+#: one scan pattern shared by lints, the edit tool and structural surgery.
+LINK_TOKEN = re.compile(r"\$\{link_([^}|]+)(\|[^}]*)?\}")
+
 
 def collect_nodes_by_layer(compiled: dict, layer_filter: str = None) -> tuple:
     """Return (all_nodes, layer_map). Each node is a copy tagged with its

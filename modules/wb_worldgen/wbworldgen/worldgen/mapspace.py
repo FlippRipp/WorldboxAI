@@ -156,6 +156,79 @@ def children_by_anchor(wd: dict) -> dict:
     return idx
 
 
+def connection_endpoints(wd: dict) -> set:
+    """{(map_id, node_id)} across every connection's both ends."""
+    endpoints = set()
+    for c in connections(wd):
+        for end in (c.get("from") or {}, c.get("to") or {}):
+            if end.get("map_id") and end.get("node_id"):
+                endpoints.add((end["map_id"], end["node_id"]))
+    return endpoints
+
+
+def connected_components(nodes: list, edges: list) -> list:
+    """Connected components (lists of node ids) over one map's undirected
+    edge list, largest first. Edge endpoints not in ``nodes`` are ignored."""
+    ids = [n.get("id") for n in nodes if n.get("id")]
+    idset = set(ids)
+    adjacency = {nid: [] for nid in ids}
+    for e in edges:
+        a, b = e.get("from"), e.get("to")
+        if a in idset and b in idset:
+            adjacency[a].append(b)
+            adjacency[b].append(a)
+    seen = set()
+    components = []
+    for nid in ids:
+        if nid in seen:
+            continue
+        stack, comp = [nid], []
+        seen.add(nid)
+        while stack:
+            cur = stack.pop()
+            comp.append(cur)
+            for nb in adjacency[cur]:
+                if nb not in seen:
+                    seen.add(nb)
+                    stack.append(nb)
+        components.append(comp)
+    components.sort(key=len, reverse=True)
+    return components
+
+
+def unreachable_maps(wd: dict, maps: dict = None) -> set:
+    """Map ids not reachable from the root map over connections (either
+    direction) and parent-child anchoring. The root is the ``root`` map when
+    present, else the first parentless map, else the first map."""
+    if maps is None:
+        maps = maps_by_id(wd)
+    if len(maps) < 2:
+        return set()
+    start = ROOT_MAP_ID if ROOT_MAP_ID in maps else next(
+        (mid for mid, m in maps.items() if not m.get("parent_map_id")),
+        next(iter(maps)))
+    adjacency: dict = {mid: set() for mid in maps}
+    for c in connections(wd):
+        a = (c.get("from") or {}).get("map_id")
+        b = (c.get("to") or {}).get("map_id")
+        if a in adjacency and b in adjacency:
+            adjacency[a].add(b)
+            adjacency[b].add(a)
+    for mid, m in maps.items():
+        parent = m.get("parent_map_id")
+        if parent in adjacency and m.get("anchor_node_id"):
+            adjacency[parent].add(mid)
+            adjacency[mid].add(parent)
+    seen = {start}
+    stack = [start]
+    while stack:
+        for nb in adjacency[stack.pop()]:
+            if nb not in seen:
+                seen.add(nb)
+                stack.append(nb)
+    return set(maps) - seen
+
+
 def parallel_siblings(wd: dict, map_id: str) -> list[dict]:
     """Other maps sharing this map's parent with no anchor (parallel planes),
     plus the parent-anchored view for the root's parallels."""

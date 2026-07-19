@@ -26,6 +26,7 @@ import hashlib
 import logging
 import re
 
+from wbworldgen.mapmodel import grow_position
 from wbworldgen.worldgen.generation.llm import json_retry_completion
 from wbworldgen.worldgen.generation.abstract_graph import (
     MAX_PLANE_NODES, MAX_ROOT_NODES, ensure_crossing_nodes,
@@ -338,7 +339,7 @@ class MapExpansionEngine:
             "label_description": "",
             "importance": min(10, max(1, 3 + len(anchors))),
         }
-        node["x"], node["y"] = self._grow_position(map_record, anchors)
+        node["x"], node["y"] = grow_position(map_record, anchors)
 
         edges = []
         for anchor in anchors:
@@ -349,35 +350,6 @@ class MapExpansionEngine:
         nodes.append(node)
         map_record.setdefault("edges", []).extend(edges)
         return {"node": node, "edges": edges, "created": True}
-
-    @staticmethod
-    def _grow_position(map_record: dict, anchors: list) -> tuple:
-        """Deterministic spot for a grown node: one typical-edge-length step
-        away from its anchors' centroid, in whichever direction keeps it
-        farthest from the existing nodes (so it doesn't land on one)."""
-        import math
-        nodes = map_record.get("nodes") or []
-        cfg = map_record.get("config") or {}
-        width = float(cfg.get("map_width", 100.0) or 100.0)
-        height = float(cfg.get("map_height", 100.0) or 100.0)
-        if not anchors:
-            return round(width / 2, 2), round(height / 2, 2)
-        cx = sum(a.get("x", 0.0) for a in anchors) / len(anchors)
-        cy = sum(a.get("y", 0.0) for a in anchors) / len(anchors)
-        distances = [e.get("distance") for e in map_record.get("edges", []) if e.get("distance")]
-        spacing = (sum(distances) / len(distances)) if distances else min(width, height) / 8
-        best = (cx, cy)
-        best_score = -1.0
-        for i in range(12):
-            angle = 2 * math.pi * i / 12
-            x = min(width * 0.95, max(width * 0.05, cx + spacing * math.cos(angle)))
-            y = min(height * 0.95, max(height * 0.05, cy + spacing * math.sin(angle)))
-            score = min((math.hypot(x - n.get("x", 0.0), y - n.get("y", 0.0))
-                         for n in nodes), default=spacing)
-            if score > best_score:
-                best_score = score
-                best = (x, y)
-        return round(best[0], 2), round(best[1], 2)
 
     async def _live_grow(self, compiled: dict, map_record: dict, named_nodes: list,
                          description: str, near_node: dict = None,

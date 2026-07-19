@@ -17,12 +17,14 @@ from wbworldgen.worldgen.enrichment.context import postprocess_links
 
 
 async def edit_node(ctx, node_id: str, name: str = None, description: str = None,
-                    label_description: str = None) -> dict:
+                    label_description: str = None, type: str = None,
+                    importance: int = None) -> dict:
     builder = ctx.builder
-    if name is None and description is None and label_description is None:
+    if (name is None and description is None and label_description is None
+            and type is None and importance is None):
         raise ToolError(
-            "edit_node: nothing to change — provide name, description "
-            "and/or label_description.")
+            "edit_node: nothing to change — provide name, description, "
+            "label_description, type and/or importance.")
 
     compiled = builder.services.compiled.load(ctx.world_id)
     node = builder.get_map_node(ctx.world_id, node_id)
@@ -65,6 +67,15 @@ async def edit_node(ctx, node_id: str, name: str = None, description: str = None
     if label_description is not None:
         updates["label_description"] = label_description
 
+    if type is not None:
+        type = type.strip()
+        if not type:
+            raise ToolError("edit_node: a node's type cannot be empty.")
+        updates["type"] = type
+
+    if importance is not None:
+        updates["importance"] = importance
+
     store = builder.services.enrichment_store
     for field_name, value in updates.items():
         store.save_node_enrichment(ctx.world_id, node_id, field_name, value)
@@ -79,11 +90,12 @@ register_tool(ToolSpec(
     id="edit_node",
     label="Edit a node",
     description=(
-        "Directly set a node's name, description and/or label_description "
-        "through the app's own enrichment write path. Enforces world-wide "
-        "name uniqueness and validates description link tokens "
-        "(${link_<node_id>}), resolving bare ones. For wholesale content "
-        "regeneration prefer run_pass with rework and guidance."
+        "Directly set a node's name, description, label_description, type "
+        "and/or importance through the app's own enrichment write path. "
+        "Enforces world-wide name uniqueness and validates description "
+        "link tokens (${link_<node_id>}), resolving bare ones. For "
+        "wholesale content regeneration prefer run_pass with rework and "
+        "guidance."
     ),
     invoke=edit_node,
     mutates=True,
@@ -98,5 +110,11 @@ register_tool(ToolSpec(
                                        "${link_<node_id>}."},
         "label_description": {"type": "string",
                               "description": "New one-line label."},
+        "type": {"type": "string",
+                 "description": "New node type (settlement, landmark, "
+                                "waypoint, ...)."},
+        "importance": {"type": "integer", "min": 1, "max": 10,
+                       "description": "New importance (1-10; majors get "
+                                      "upfront enrichment)."},
     },
 ))

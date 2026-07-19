@@ -261,8 +261,8 @@ def _found_new_node(compiled: dict, authored: dict,
     description = (str(authored.get("description", "")).strip()
                    or str(authored.get("label_description", "")).strip())
 
-    from wbworldgen.worldgen.expansion.maps_expand import MapExpansionEngine
-    x, y = MapExpansionEngine._grow_position(anchor_map, [anchor])
+    from wbworldgen.mapmodel import grow_position
+    x, y = grow_position(anchor_map, [anchor])
     taken = {n.get("id") for n in _ms.all_nodes(compiled)}
     k = len(anchor_map.get("nodes") or []) + 1
     while f"{anchor_map_id}:g{k}" in taken:

@@ -69,7 +69,10 @@ class GenServices:
     #: Enrichment write path: ``save_node_enrichment(world_id, node_id,
     #: field, value)`` and ``flush_enrichment_cache(world_id=None)``; the
     #: start-location authoring path additionally uses
-    #: ``append_map_node(world_id, map_id, node, edges)``.
+    #: ``append_map_node(world_id, map_id, node, edges)``, and structural
+    #: surgery (worldgen/surgery.py) the mirror set ``remove_map_node``,
+    #: ``add_map_edge``/``remove_map_edge``, ``load_child_map`` and
+    #: ``add_world_connection``/``remove_world_connection``.
     enrichment_store: Any = None
     #: Compiled-world cache shared by every engine (see compiled_cache.py).
     compiled: CompiledWorldCache = None

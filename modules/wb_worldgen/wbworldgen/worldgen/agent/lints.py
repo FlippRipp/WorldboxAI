@@ -13,85 +13,9 @@ and enough ids to act on (``map_id``, ``node_ids``…). Aggregate kinds
 a fresh pre-enrichment world lints readable instead of drowning (P9:
 structural budgets)."""
 
-import re
-
 from wbworldgen.mapmodel import join_key
 from wbworldgen.worldgen import mapspace as _ms
-
-#: ``${link_<id>}`` (unresolved) or ``${link_<id>|<label>}`` (resolved).
-_LINK_TOKEN = re.compile(r"\$\{link_([^}|]+)(\|[^}]*)?\}")
-
-
-def _connection_endpoints(compiled: dict) -> set:
-    """{(map_id, node_id)} across every connection's both ends."""
-    endpoints = set()
-    for c in _ms.connections(compiled):
-        for end in (c.get("from") or {}, c.get("to") or {}):
-            if end.get("map_id") and end.get("node_id"):
-                endpoints.add((end["map_id"], end["node_id"]))
-    return endpoints
-
-
-def _unreachable_maps(compiled: dict, maps: dict) -> set:
-    """Map ids not reachable from the root map over connections (either
-    direction) and parent-child anchoring. The root is the ``root`` map when
-    present, else the first parentless map, else the first map."""
-    if len(maps) < 2:
-        return set()
-    start = _ms.ROOT_MAP_ID if _ms.ROOT_MAP_ID in maps else next(
-        (mid for mid, m in maps.items() if not m.get("parent_map_id")),
-        next(iter(maps)))
-    adjacency: dict = {mid: set() for mid in maps}
-    for c in _ms.connections(compiled):
-        a = (c.get("from") or {}).get("map_id")
-        b = (c.get("to") or {}).get("map_id")
-        if a in adjacency and b in adjacency:
-            adjacency[a].add(b)
-            adjacency[b].add(a)
-    for mid, m in maps.items():
-        parent = m.get("parent_map_id")
-        if parent in adjacency and m.get("anchor_node_id"):
-            adjacency[parent].add(mid)
-            adjacency[mid].add(parent)
-    seen = {start}
-    stack = [start]
-    while stack:
-        for nb in adjacency[stack.pop()]:
-            if nb not in seen:
-                seen.add(nb)
-                stack.append(nb)
-    return set(maps) - seen
-
-
-def _components(nodes: list, edges: list) -> list:
-    """Connected components (lists of node ids) over one map's undirected
-    edge list, largest first. Edge endpoints not on the map are ignored
-    here — they are reported separately as dangling edges."""
-    ids = [n.get("id") for n in nodes if n.get("id")]
-    idset = set(ids)
-    adjacency = {nid: [] for nid in ids}
-    for e in edges:
-        a, b = e.get("from"), e.get("to")
-        if a in idset and b in idset:
-            adjacency[a].append(b)
-            adjacency[b].append(a)
-    seen = set()
-    components = []
-    for nid in ids:
-        if nid in seen:
-            continue
-        stack, comp = [nid], []
-        seen.add(nid)
-        while stack:
-            cur = stack.pop()
-            comp.append(cur)
-            for nb in adjacency[cur]:
-                if nb not in seen:
-                    seen.add(nb)
-                    stack.append(nb)
-        components.append(comp)
-    components.sort(key=len, reverse=True)
-    return components
+from wbworldgen.worldgen.enrichment.context import LINK_TOKEN as _LINK_TOKEN
 
 
 def lint_world(compiled: dict, map_id: str = None, major_floor: int = None) -> dict:
@@ -104,8 +28,8 @@ def lint_world(compiled: dict, map_id: str = None, major_floor: int = None) -> d
     maps = _ms.maps_by_id(compiled)
     scoped = {map_id: maps[map_id]} if map_id is not None else maps
     index = _ms.node_index(compiled)
-    endpoints = _connection_endpoints(compiled)
-    unreachable = _unreachable_maps(compiled, maps)
+    endpoints = _ms.connection_endpoints(compiled)
+    unreachable = _ms.unreachable_maps(compiled, maps)
     problems = []
 
     # Duplicate names — global grouping by the same normalization every
@@ -159,7 +83,7 @@ def lint_world(compiled: dict, map_id: str = None, major_floor: int = None) -> d
                                    "unreachable."})
 
         # Connectivity: one map should be one component.
-        components = _components(nodes, edges)
+        components = _ms.connected_components(nodes, edges)
         if len(components) > 1:
             problems.append({
                 "kind": "disconnected_map", "map_id": mid,

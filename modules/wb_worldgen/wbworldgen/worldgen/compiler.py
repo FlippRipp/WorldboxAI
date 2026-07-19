@@ -446,4 +446,13 @@ def compile_world(world_state: dict, steps: Optional[dict] = None) -> dict:
             existing_ids = {c.get("id") for c in compiled.setdefault("connections", [])}
             compiled["connections"].extend(
                 c for c in bundle.get("connections", []) if c.get("id") not in existing_ids)
+
+    # Fold in world-level authored connections (native v2 records added by
+    # structural surgery between root/parallel maps; the world_connections
+    # metadata key is their persisted home).
+    extra = world_state.get("world_connections") or []
+    if extra:
+        existing_ids = {c.get("id") for c in compiled.setdefault("connections", [])}
+        compiled["connections"].extend(
+            c for c in extra if c.get("id") not in existing_ids)
     return compiled
