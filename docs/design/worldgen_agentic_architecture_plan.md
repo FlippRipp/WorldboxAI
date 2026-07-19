@@ -4,8 +4,12 @@
 2026-07-19; RuntimeHost still pending, rides along with the next backend.py
 change), and Arc B verified end-to-end on live LLMs the same day (see "Live
 verification of Arc B" — three follow-up discussion items surfaced). Arc C
-refined into C1a/C1b; its four open questions are deliberately STILL OPEN —
-settle them with Filip before C1a starts. Next: that discussion. Records the structural assessment of
+REDESIGNED 2026-07-19 with Filip: the plan-artifact approach (old C1a/C1b/C2)
+is superseded by a tool-calling agent loop plus a conversational ideation
+phase — settled choices are recorded as D1–D5 in Arc C, the old four open
+questions are resolved or dissolved there (module capabilities survives as
+the one open question, deferred, non-blocking). Next item: C1 (toolbox
+registry). Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
 agentic builder — an LLM receives a world idea and figures out what it needs
@@ -64,7 +68,8 @@ deviate. Cite them by number in reviews.
 **Architecture:**
 
 - **P1 — A capability is a catalog entry.** Every unit of build behavior
-  (step, generator, pass) is a self-describing registry entry: id, label, a
+  (step, generator, pass — and, with Arc C, agent tool) is a
+  self-describing registry entry: id, label, a
   description that doubles as the planner's selection text, declared
   contracts. Unknown ids fail loudly, always. If a behavior can't be
   described as a catalog entry, it isn't a capability yet — don't bolt it on
@@ -85,15 +90,21 @@ deviate. Cite them by number in reviews.
   this world" has exactly one query surface. Core never imports step
   internals; the import direction is steps → core, never back.
 - **P5 — One execution path, many sources.** Classic wizard, seeded worlds,
-  and planned (agentic) builds all drive the same orchestration
+  and agent-driven builds all drive the same orchestration
   (`generate_step`, the generators, the pass engine) — what varies is the
-  source (live LLM vs `force_mock`, default plan vs authored plan). Never a
-  second execution engine, never a duplicated walk. (Precedent: A5's
-  `seed_world`.)
-- **P6 — AI generates, user steers.** Every stage is editable, rerollable,
-  approvable. Agent decisions are persisted artifacts the UI can show and
-  the user can veto — never conversation state inside one long LLM call.
-  Executed work is immutable; revisions may only add or narrow future work.
+  source (live LLM vs `force_mock`, fixed default pipeline vs agent-chosen
+  actions). Never a second execution engine, never a duplicated walk.
+  (Precedent: A5's `seed_world`.)
+- **P6 — AI generates, user steers — at the boundaries the mode defines.**
+  *(Rescoped 2026-07-19 with the Arc C redesign.)* Classic mode: every
+  stage editable, rerollable, approvable, as today. Agent mode: steering
+  concentrates in the ideation conversation (co-authored brief + world
+  rules), the explicit go-ahead, and unrestricted post-build editing;
+  during the build the user is deliberately out of the loop — steering is
+  replaced by *observability* (persisted todo/action-log artifacts
+  streamed live, cancel always available), not approval gates. In both
+  modes, AI decisions are persisted artifacts the UI can show — never
+  conversation state inside one long LLM call.
 - **P7 — Loud validation, never silent repair.** A plan or request that
   references an unknown capability or an unsatisfied dependency is rejected
   before execution. Validation errors are surfaced, not patched around.
@@ -106,7 +117,8 @@ deviate. Cite them by number in reviews.
   own tests.
 - **P9 — Structural budgets, not token caps.** Never cap tokens/characters
   when assembling LLM context (project rule). Budget plans in structural
-  units: max items, max passes per scope, max revision rounds.
+  units: max items, max passes per scope, max revision rounds, max agent
+  turns / tool calls / fix rounds per build.
 - **P10 — Boundaries are drawn once.** Shared types stay dependency-free
   (`mapmodel` is stdlib-only — keep it that way). When two roadmap items
   would redraw the same line, the later item owns it (precedent: A4 skipped
@@ -184,6 +196,7 @@ wb_worldgen/
       generation/           # generator catalog + overworld/city/interior builders + binding (A4 ✓)
       enrichment/           # B1: engine.py (scheduler) + passes/{label,describe,review}.py + context.py
       expansion/            # A4 ✓ maps_expand + sites (child-map/site generation)
+      agent/                # C1–C2: toolbox registry (the 4th catalog) + lints + harness + evaluator
       design.py             # A3 ✓ the one query surface over the AI's world design
       services.py           # A1 ✓ GenServices — the explicit engine contract
       compiled_cache.py     # A2 ✓ CompiledWorldCache
@@ -192,9 +205,11 @@ wb_worldgen/
   wbruntime/                # unchanged internally; explicit RuntimeHost instead of _HOST (pending)
 ```
 
-Three catalogs — **steps** (pipeline stages), **generators** (map builders),
-**passes** (node-level LLM work) — each self-describing, each with loud
-failure on unknown ids. Arc C's planner reads all three.
+Four catalogs — **steps** (pipeline stages), **generators** (map builders),
+**passes** (node-level LLM work), and, with C1, **tools** (the agent's
+action surface, wrapping the other three plus reads and targeted writes) —
+each self-describing, each with loud failure on unknown ids. Arc C's agent
+reads them all, rendered into its system prompt.
 
 ---
 
@@ -300,7 +315,7 @@ callers and stayed.*
 ## Arc B — Self-describing capabilities
 
 Arc B is where the two extension axes get their payoff, and it produces the
-catalog the agentic planner will read.
+catalog the agentic builder will read.
 
 ### B1. Enrichment pass registry — size L
 
@@ -424,7 +439,8 @@ renders the combined catalog (steps + generators + passes) as the document
 an LLM — or a human — reads, in both structured (JSON) and human-readable
 (markdown) forms. `hierarchy_design` already consumes the generator slice
 (`list_generators()` is already describe-shaped); B2 makes the full catalog
-a first-class artifact that C1's planner reads whole. Module-contributed
+a first-class artifact that Arc C's agent reads whole (rendered into its
+system prompt). Module-contributed
 hooks (`HOOK_NAMES`) are explicitly *out* for now — that is Arc C open
 question 4.
 
@@ -453,8 +469,10 @@ Two guard rails from the review:
   asserting the exact current order *before* switching the derivation.
 - **Validation is the executor's, not the sorter's.** The dependency checker
   is a standalone function evaluated against the *effective* item list
-  (after `dynamic_skips`) — C1's executor calls it (P7). `resolve_order`
-  itself keeps its current behavior and API.
+  (after `dynamic_skips`) — Arc C's tool layer calls it (P7; in agent mode
+  the "list" is what the world has produced so far plus the requested
+  action — a per-action precondition check). `resolve_order` itself keeps
+  its current behavior and API.
 
 *Landed 2026-07-19 (0b0cab0): `requires`/`produces` on `Step` and
 `PassSpec` (both, not requires-only — the plan's own "describe requires
@@ -526,155 +544,222 @@ by authored-location binding. Pipeline 398s; enrichment ~3.5 min.
    `all_nodes` copies, so a `phase="all"` run can describe a relabeled
    node under its pre-review name.
 
+*(Arc C's agent mode subsumes #1 and #2 for agent-built worlds — the agent
+schedules enrichment and review explicitly and the done-gate checks the
+result. Classic-mode worlds still carry both.)*
+
 ---
 
 ## Arc C — The agentic builder
 
-### The framing decision
+*Redesigned 2026-07-19 with Filip, superseding the plan-artifact design
+(old C1a/C1b/C2 — see "Superseded" at the end of this arc). No code from
+the old design existed; the pivot cost one rewrite of this section.*
 
-An agentic builder must not sacrifice the three properties the current
-system gets right:
+### The shape
 
-- **User steering.** The philosophy is "AI generates, user steers" — every
-  stage editable, rerollable, approvable. An opaque tool-calling loop breaks
-  this.
-- **Resumability.** Worlds persist per-step (`world_state["steps"]`), drafts
-  resume mid-build. Whatever the agent decides must be a persisted artifact,
-  not conversation state inside one long LLM call.
-- **Loud validation.** `get_generator` fails loudly on unknown ids; the
-  planner gets the same treatment — a plan referencing an unknown capability
-  or an unsatisfied dependency is rejected before execution, never silently
-  patched.
+Building a world has two phases with one explicit gate between them:
 
-The proposal that satisfies all three: **the plan is itself a step.**
+1. **Ideation (C4).** The user and the AI converge on what the world *is*,
+   conversationally — a natural back-and-forth that is part of the flow,
+   replacing today's optional, button-initiated `WorldPromptInterview`
+   rounds. The first work item is co-authoring a few **world rules** that
+   define the world; they double as the build's evaluation rubric (D3/D4).
+   The AI judges when the idea feels settled and *offers* the go prompt;
+   the user's go-ahead is the approval moment.
+2. **The build (C1–C3).** After the go-ahead the user is out of the loop.
+   A server-side agent works the way a coding agent does: it keeps a todo
+   list, calls tools, verifies its own output against the rules, fixes
+   what verification finds, and repeats until the done-gate passes. The
+   user watches — the todo list and action log stream live — and can
+   cancel; they do not approve steps.
 
-### C1a. Build-plan step + plan executor (server) — size L
+The three properties the original framing protected, re-resolved:
 
-*Blocked on the open questions below — do not start until they are settled
-with Filip.*
+- **User steering** moves to the boundaries: the co-authored brief, the
+  explicit go-ahead, and unrestricted post-build editing through every
+  existing surface. Mid-build approval gates are deliberately gone;
+  observability replaces them (P6, rescoped accordingly).
+- **Resumability**: the loop runs in the backend, which survives Android
+  killing the PWA (Termux keeps the process alive — only the frontend
+  dies). The client *reattaches* to a running build exactly as the
+  one-shot path already does (`_generating` disk metadata).
+  Backend-restart resume is a recorded v2 nicety, not a v1 requirement.
+- **Loud validation** does more work than ever: every tool validates its
+  arguments against its registry entry and the engines' invariants, and a
+  rejected action returns to the agent as an observation it must react to.
+  The error-feedback loop is the mechanism, not an exception path (P7).
 
-Insert a `build_plan` step after `world_form` (which already decides
-per-world skips and map style — a proto-plan). Its generation reads the B2
-catalog and the world idea and authors a plan artifact:
+The convergence thesis survives intact — the B2 catalog and B3 dependency
+data stop being a document a planner reads once and become the agent's
+toolbox: rendered into its system prompt, callable as tools, driving the
+same orchestration as the wizard (P5). Nothing from Arcs A–B is discarded.
 
-```jsonc
-{
-  "items": [
-    {"id": "it_01", "capability": "step:lore", "config": {...},
-     "note": "creation myth as corporate founding",
-     "origin": "planned", "status": "pending"},
-    {"id": "it_02", "capability": "step:hierarchy_design",
-     "origin": "planned", "status": "pending"},
-    {"id": "it_03", "capability": "step:map_generation",
-     "origin": "planned", "status": "pending"},
-    {"id": "it_04", "capability": "pass:label", "scope": {"layer": "root"},
-     "origin": "planned", "status": "pending"},
-    {"id": "it_05", "capability": "pass:history", "scope": {"importance_min": 3},
-     "origin": "planned", "status": "pending"},
-    {"id": "it_06", "capability": "pass:review",
-     "origin": "planned", "status": "pending"}
-  ],
-  "notes": "why this shape"
-}
-```
+### Decisions (settled with Filip, 2026-07-19)
 
-- **Per-item execution state lives on the artifact.** Step items still
-  persist their outputs into `world_state["steps"]` exactly as today; pass
-  items have no step data, so their completion record is the item's
-  `status` (`pending | running | done | failed | skipped`). That is what
-  makes a planned build resumable mid-flight (P6), and `origin`
-  (`default | planned | revision`) is the attribution trail C2 needs.
-- **The executor validates, then reuses.** Validation = catalog membership
-  (P1/P7) + the B3 dependency check against the effective item list + scope
-  shape. It runs at authoring *and again at execution* — the module set may
-  have changed between the two (a plan referencing a capability that
-  disappeared fails loudly, never silently skips). Execution drives the
-  *same* orchestration that exists today — `generate_step` for step items,
-  generator builds, the pass engine with the item's scope mapped onto
-  selector arguments — no second execution engine (P5).
-- **The default plan — produced without an LLM call — is exactly today's
-  pipeline** (`ordered_ids_for` + dynamic skips rendered as plan items with
-  `origin: "default"`), so classic mode and agentic mode are one code path
-  with two plan sources, and old worlds replay unchanged.
-- `seed_world` becomes "execute the default plan with `force_mock`",
-  closing the loop A5 opened (its pipeline-driving rewrite and the
-  `force_mock` thread through `generate_step` are the ready seam).
+**D1 — Tool surface v1: the agent's write surface = the user's existing
+write surface + the capability catalog.**
 
-**Verify:** `test_build_plan.py` — default-plan parity (a default plan
-executes byte-identical to today's wizard flow in mock mode), validation
-rejections (unknown capability, unmet dependency, bad scope), resume from a
-half-executed plan, seed-world-as-plan parity. Plus a visual check of a
-planned world's map output before pushing.
+- *Read everything:* compiled world, step data, `design.py` queries, the
+  capability catalog, the world rules, the lint report.
+- *Catalog capabilities, full parameter surface:* run a step (config +
+  steering note), run a pass (scope, count, rework, plus a new **guidance
+  channel** — generalizing the objection-steering the review repair path
+  already threads into label/describe). Steered rework is the agent's
+  primary fix instrument: most evaluator findings are content findings,
+  and steered regeneration is the invariant-safe repair for LLM content.
+- *One ad-hoc capability:* `pass:custom` — agent-authored prompt + scope
+  + namespaced output slot. Bespoke content goes through a registered,
+  budgeted, validated capability, not around it.
+- *User-parity writes:* `edit_node` (name/description through the
+  enrichment store's existing write path, enforcing name dedup and
+  link-token validation) and step-data patches (through the save-step
+  surface the wizard already uses). Parity with what the app already
+  trusts a human to do — no new invariant exposure.
+- *Deliberately withheld in v1:* structural surgery — add/remove nodes,
+  connection rewiring, terrain edits. No existing surface offers it and
+  it carries the heaviest invariants (terrain layers, hierarchy
+  consistency, compiled-cache coherence). The v1 recourse is regenerating
+  the owning step with a steering note; structural tools are the
+  designed-not-improvised v2 extension if evaluation shows a recurring
+  wall.
+- *Extensibility requirement (Filip):* the toolbox is itself a
+  self-describing registry — the fourth catalog, P1/P2 applied to tools.
+  A v2 tool is a file drop, not a harness edit.
 
-### C1b. Plan editor UI — size M–L
+**D2 — Loop mechanics: JSON action loop, not native tool-calling.**
+`LLMService` has zero tool-call plumbing on any provider path — every LLM
+interaction in the app is a JSON-structured completion — and the slot
+rule (modules never name models) means the loop must work with whatever
+`fastest/balanced/smartest` resolve to. One agent turn = one structured
+completion: system prompt (brief + rules + toolbox catalog) + todo state
++ recent observations in; `{"tool": ..., "args": ...}` or a done claim
+out. This inherits the existing hardening stack — fallback JSON parsing,
+retries, the inspector, and the mock layer, which makes the harness
+testable without tokens (canned action sequences). Accepted costs: no
+parallel tool calls, and schema enforcement is the harness's job
+(validate loudly, feed the rejection back as the next observation). The
+smartest slot drives the loop (~tens of turns per build); the engines
+keep the bulk token work on the fast slot exactly as today, so agent-mode
+cost stays dominated by the same work the pipeline already does.
 
-The wizard already renders per-world step lists (`ordered_ids_for` +
-dynamic skips → `effectiveIds`/`skippedIds` in `WorldBuilderWizard.jsx`),
-but two things are genuinely new, which is why the UI is its own item
-rather than a C1a footnote:
+**D3 — Verification: deterministic lints + a rules-based evaluator, with
+an end gate.** The lint report is a pure function over the compiled world
+(duplicate names, orphan nodes, unresolved link tokens, connectivity) —
+cheap ground truth. The child evaluator v1 is a single structured
+critique call — world rules + lint report + content excerpts in, findings
+out — not a tool-looping sub-agent (that is the v2 upgrade if it proves
+too shallow). `evaluate(scope)` is a tool the agent may invoke at any
+time; the harness enforces the gate: a build cannot be declared done
+until a final evaluation runs clean or the agent explicitly accepts the
+remaining findings with a recorded note.
 
-- **Editing the plan artifact.** Free-text capability ids in the generic
-  schema form would be unvalidated typing; the editor is catalog-driven —
-  pick a capability from the B2 catalog, get its config/scope form, reorder,
-  per-item reroll/veto/approve (P6). Until C1b lands, the plan artifact
-  renders read-only through the existing step-data view.
-- **Mixed progression.** A plan interleaves step items (today's form-per-step
-  flow) with pass items (progress-bar work, EnrichmentPanel-style rows from
-  B1.5). How the wizard's current-step/approval loop presents that mix is
-  real UX design — sequence it after C1a proves the artifact shape.
+**D4 — Ideation handoff: the brief.** Ideation distills into a persisted
+world-brief artifact — the enriched prompt plus the co-authored world
+rules and key constraints. The agreed rules feed the existing
+`world_rules` step as *input* (the step expands them; downstream
+consumers keep their contract; the co-authored core stays visibly
+primary). The brief is the agent's standing instructions, re-read every
+turn.
 
-### C2. Reactive loop — size L, exploratory
+**D5 — Budgets are harness-enforced (P9).** Max agent turns per build,
+max tool calls, max fix rounds per finding — structural units, never
+trusted to the prompt. Cancel is always available.
 
-C1 is plan-then-execute. The genuinely agentic version lets the builder look
-at what it made and revise: after `map_generation`, notice the world is an
-archipelago and add a `pass:naval_routes` item; after `review`, decide a
-region needs a dedicated culture pass. Concretely: an optional
-`review_plan` capability that runs between items, receives compact summaries
-of produced artifacts (the `context_view` trimming mechanism already exists
-on steps for exactly this), and may append/modify *not-yet-executed* items —
-edits to the plan artifact, persisted, visible and vetoable in the UI, with
-executed items immutable.
+### The old open questions — resolved or dissolved
 
-Guardrails — decided in principle (P6/P7/P9), with the addition from the
-review that they are **enforced by the executor, not trusted to the
-prompt**:
+1. **Planner freedom** → resolved by D1: catalog + `pass:custom` +
+   user-parity writes.
+2. **Granularity of scopes** → dissolved into tool arguments: pass scopes
+   stay per-map / per-layer / per-importance-band, plus explicit node-id
+   lists for rework. No plan artifact exists to explode.
+3. **Where interleaving lives** → the agent governs build time only;
+   play-time lazy detail is unchanged. A world-level play-time policy
+   remains future work, and nothing here blocks it.
+4. **Module capabilities** → the one that survives, now phrased "which
+   tools does the agent get": modules registering steps/passes would
+   extend the toolbox automatically. Changes the module contract —
+   separate discussion, does not block Arc C.
 
-- **Budgets in structural units** (P9): max items, max passes per scope,
-  max revision rounds — plus the existing concurrency settings.
-- **Convergence, enforced:** the executor rejects a revision that touches an
-  executed item or exceeds the round budget — monotonicity is validation,
-  not instruction-following.
-- **Attribution:** `origin: "revision"` on everything a revision adds
-  (mirrors the `origin` field on ConnectionRecords).
+### C1. Toolbox registry + tools + lints (server) — size M–L
 
-### Open questions — STILL OPEN (settle with Filip before C1a)
+The fourth catalog: a `ToolSpec` registry (id, label, description that
+doubles as prompt text, parameter schema, invoke) with `describe_tools()`
+joining the B2 catalog render. Every v1 tool wraps an existing surface —
+`generate_step`, `enrich_run`, the enrichment store, save-step,
+`design.py`, the compiled cache — no new orchestration (P5). Includes the
+two small engine extensions: the rework guidance channel (D1) and the
+lint report (D3). B3's dependency data becomes per-action precondition
+checks: a step tool call is validated against what the world has produced
+so far, loudly (P7). Unknown tool, bad args, unmet requires — all
+rejected with errors shaped for the agent to read.
 
-*Reviewed 2026-07-19 and deliberately left open rather than adopted; each
-has a working proposal, but the proposals are inputs to that discussion, not
-decisions.*
+**Verify:** unit tests per tool (validation rejections + happy path on a
+seeded world), lint fixtures with known defects, catalog-render test.
 
-1. **Planner freedom.** Does `build_plan` choose only *which* capabilities
-   and their configs/scopes (proposal), or can it also author new pass
-   prompts ad hoc? Proposal: catalog-only at first; "ad-hoc pass authored
-   from a prompt" can later be one registered capability
-   (`pass:custom_prompt`) rather than a hole in the validation story.
-   *Blocks: the plan schema (whether items may carry prompt text) and the
-   validator's strictness.*
-2. **Granularity of scopes.** Per-map, per-layer, per-importance-band
-   selectors for passes (proposal); per-node plans would explode the
-   artifact. *Blocks: the `scope` field shape and its mapping onto pass
-   selectors.*
-3. **Where interleaving lives.** Enrichment runs both inside the pipeline
-   (upfront detail) and lazily at play time (backfill, expansion). Does the
-   plan govern only build time (proposal for C1), or eventually also
-   play-time policy ("this world backfills history lazily")? *Blocks:
-   whether the artifact carries a play-time section C1a must not invent
-   ad hoc later.*
-4. **Module capabilities.** Should other modules (`wb_core_rpg`, ...) be
-   able to register passes/steps into the catalogs directly, superseding
-   some of the bespoke `HOOK_NAMES`? Powerful, but changes the module
-   contract — separate discussion. *Blocks: B2's hook visibility and the
-   catalog's namespace rules.*
+### C2. Agent harness + evaluator (server) — size L
+
+The loop itself: brief + toolbox + todo in, actions out, budgets around
+it (D5). The todo list is a persisted per-world artifact, updated by the
+agent through todo tools and streamed over SSE with the same event
+discipline as enrichment runs; the evaluator and done-gate (D3); cancel;
+client reattach via the `_generating` metadata pattern. Launch
+affordance: a "let the AI build it" action from the existing prompt box —
+agent mode exists before ideation does, in the same slot `skip_review`'s
+one-shot occupies today.
+
+**Verify:** mock-driven harness tests — canned action sequences covering
+budget exhaustion, invalid-action recovery, done-gate refusal, todo
+round-trip, reattach — plus one recorded live run (Arc B's verification
+pattern).
+
+### C3. Build observer UI — size M
+
+The watching surface: live todo list, current action, streamed action
+log, evaluator findings, cancel, reattach-on-relaunch. Builds on the
+B1.5/EnrichmentPanel event patterns. Verify in real Chrome (project
+memory: the Preview pane is unreliable for this UI).
+
+### C4. Ideation — conversational world definition — size L
+
+The new front door: a chat-shaped flow replacing the button-initiated
+`WorldPromptInterview` rounds — part of the flow, not an optional
+affordance. Rules-first: the first converged artifact is the handful of
+world rules that define the world (D4). The AI decides when the idea
+feels settled and offers the go prompt; the go-ahead hands the brief to
+the harness. The classic wizard remains available unchanged (P5).
+Sequenced last so an end-to-end agent mode exists early; C3/C4 have no
+dependency on each other and can swap if the front door starts to matter
+more.
+
+### v2 extensions (recorded, deliberately unscheduled)
+
+- Structural surgery tools (add/remove nodes, connection rewiring,
+  terrain edits) with deliberately designed invariant validation.
+- A tool-looping evaluator (read tools, multi-step critique).
+- Backend-restart resume (re-derive agent context from todo + world
+  state).
+- Play-time policy in the brief (old question 3's other half).
+- Module-contributed tools (old question 4) — after the module-contract
+  discussion.
+
+### Superseded: the plan-artifact design (refined and replaced 2026-07-19)
+
+The original Arc C made the plan a step: a `build_plan` artifact authored
+by an LLM from the B2 catalog, edited and approved by the user in a
+catalog-driven editor (old C1b), walked by a validating executor, with a
+bounded reactive loop (old C2) appending revisions between items. It was
+replaced before any code existed, on Filip's clarified vision: steering
+belongs in the ideation conversation and at the go-gate, not mid-build,
+and the builder should have a coding agent's freedom — todo list, tools,
+verify-and-fix — rather than a pre-approved item list. What the old
+design got right was absorbed: its validation story became C1's
+tool/precondition validation, its budgets became D5, its
+persisted-artifact discipline became the todo and brief artifacts, and
+its default-plan-parity guarantee became the untouched classic mode (P5).
+`seed_world` stays as A5 left it — with no plan artifact there is nothing
+for it to become. The full superseded design is in git history (this
+file, before the 2026-07-19 Arc C rewrite).
 
 ---
 
@@ -690,9 +775,10 @@ decisions.*
 | 6 | B1.5 panel over the pass catalog | S | ✓ landed (301f3c1) | UI keeps the P2 promise |
 | 7 | B2 catalog | S | ✓ landed (22954e9) | agentic substrate |
 | 8 | B3 dependencies (+ order-pin test first) | M | ✓ landed (0b0cab0) | plan validation |
-| 9 | C1a build-plan step + executor (server) | L | ⛔ open questions first | agentic mode v1 |
-| 10 | C1b plan editor UI | M–L | after C1a | steering the plan |
-| 11 | C2 reactive loop | L | exploratory | agentic mode v2 |
+| 9 | C1 toolbox registry + tools + lints | M–L | next | the agent's action surface |
+| 10 | C2 agent harness + evaluator | L | after C1 | agentic mode v1 |
+| 11 | C3 build observer UI | M | after C2 | watching the build |
+| 12 | C4 ideation conversation | L | after C3 (swappable) | the front door |
 
 (A5 landed before B1 — the reverse of the original ordering; nothing
 depended on the order.) RuntimeHost (`backend.py` half of A1) can ride along
@@ -702,5 +788,8 @@ to `main` before the next begins. Arc B changes no behavior (its
 verification is the existing per-feature test files plus new unit tests for
 the extracted contracts — pass-spec registration, event-stream compat,
 dependency checking); the one deliberate exception is B1's decided removal
-of the dead legacy endpoints. C1a adds behavior and gets `test_build_plan.py`
-plus a visual check of a planned world's map output before pushing.
+of the dead legacy endpoints. Arc C items add behavior: C1 gets per-tool
+contract tests and lint fixtures, C2 gets mock-driven harness tests plus
+one recorded live run (Arc B's verification pattern), C3 is verified in
+real Chrome, C4 with a live conversation check; the first agent-built world
+gets the same visual map check before pushing.
