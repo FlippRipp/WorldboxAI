@@ -130,15 +130,18 @@ async def create_world_story_source(*, save_id, source_id, start_preference, ses
 
     start_location = None
     if start_location_node_id:
-        locations = world_builder.get_start_locations(world_id)
-        start_location = next((l for l in locations if l.get("node_id") == start_location_node_id), None)
+        # An explicit pick may point anywhere in the map hierarchy (the
+        # start-screen LLM pick can descend into interiors), so resolve it
+        # against every map, not just the type-filtered candidate list.
+        start_location = world_builder.find_start_location(world_id, start_location_node_id)
     if start_location is None:
         pick_request = (start_preference or "").strip() or (scenario_start_brief(scenario) if scenario else "")
         if pick_request:
             start_location = await world_builder.llm_pick_start_location(world_id, pick_request, engine.llm)
-            if start_location and start_location.get("generated"):
-                # The pick authored a brand-new start location onto the map —
-                # recompile so the save's world_data carries it.
+            if start_location and (start_location.get("generated")
+                                   or start_location.get("world_modified")):
+                # The pick authored a brand-new start location or expanded an
+                # interior — recompile so the save's world_data carries it.
                 world_state = world_builder.load_world(world_id)
                 compiled = world_builder.compile_world(world_state)
     if start_location is None:
@@ -155,8 +158,13 @@ async def create_world_story_source(*, save_id, source_id, start_preference, ses
         player_location_map_id = start_location.get("map_id") or compiled.get("root_map_id", "root")
         # Only the start node itself is fully known; its neighbors show up on
         # the map as the faded name-only fringe, and the known-locations pass
-        # fully reveals whatever the character genuinely knows about.
+        # fully reveals whatever the character genuinely knows about. A start
+        # reached by descending into interiors also knows its container chain
+        # (the building it is in, the city that is in...).
         revealed_node_ids = [player_location_node_id]
+        for ancestor_id in start_location.get("ancestor_node_ids") or []:
+            if ancestor_id and ancestor_id not in revealed_node_ids:
+                revealed_node_ids.append(ancestor_id)
 
     state = session_manager.create_save(
         save_id,

@@ -24,6 +24,18 @@ def _find_node_region(node_id: str, compiled: dict) -> str:
     return ""
 
 
+def _candidate(node: dict, map_id: str, map_label: str, compiled: dict) -> dict:
+    return {
+        "node_id": node.get("id"),
+        "name": node.get("name"),
+        "type": node.get("type", "location"),
+        "description": node.get("description", "")[:300],
+        "region": _find_node_region(node.get("id"), compiled),
+        "map_id": map_id,
+        "map_label": map_label,
+    }
+
+
 def get_start_locations(compiled: dict) -> list[dict]:
     from wbworldgen.worldgen import mapspace as _ms
     nodes = []
@@ -31,37 +43,72 @@ def get_start_locations(compiled: dict) -> list[dict]:
         for node in m.get("nodes", []):
             nodes.append((node, mid, m.get("label", mid)))
 
-    def build(entry, default_type):
-        node, map_id, map_label = entry
-        c = {
-            "node_id": node.get("id"),
-            "name": node.get("name"),
-            "type": node.get("type", default_type),
-            "description": node.get("description", "")[:300],
-            "region": _find_node_region(node.get("id"), compiled),
-            "map_id": map_id,
-            "map_label": map_label,
-        }
-        return c
-
     candidates = [
-        build(entry, entry[0].get("type"))
+        _candidate(entry[0], entry[1], entry[2], compiled)
         for entry in nodes
         if entry[0].get("type") in ("settlement", "landmark") and entry[0].get("name")
     ]
     if not candidates:
-        candidates = [build(entry, "location") for entry in nodes if entry[0].get("name")]
+        candidates = [_candidate(entry[0], entry[1], entry[2], compiled)
+                      for entry in nodes if entry[0].get("name")]
     return candidates
 
 
+def map_candidates(compiled: dict, map_ids: list[str]) -> list[dict]:
+    """Start candidates drawn from the given maps only — one level of the
+    hierarchical descent. Top-level maps keep the settlement/landmark
+    preference (minor named waypoints only appear when nothing better
+    exists); anchored child maps (interiors) offer every named node, since
+    rooms and halls carry types of their own."""
+    from wbworldgen.worldgen import mapspace as _ms
+    out = []
+    for mid in map_ids:
+        m = _ms.get_map(compiled, mid)
+        if m is None:
+            continue
+        named = [n for n in m.get("nodes", []) if n.get("name")]
+        if not m.get("anchor_node_id"):
+            preferred = [n for n in named
+                         if n.get("type") in ("settlement", "landmark")]
+            named = preferred or named
+        label = m.get("label", mid)
+        out.extend(_candidate(n, mid, label, compiled) for n in named)
+    return out
+
+
+def find_start_candidate(compiled: dict, node_id: str) -> Optional[dict]:
+    """Candidate-shaped entry for one named node, wherever it lives — used to
+    resolve an explicitly pre-picked start node id (which may point into an
+    interior map that the type-filtered candidate list never offers)."""
+    from wbworldgen.worldgen import mapspace as _ms
+    for mid, m in _ms.maps_by_id(compiled).items():
+        for node in m.get("nodes", []):
+            if node.get("id") == node_id and node.get("name"):
+                return _candidate(node, mid, m.get("label", mid), compiled)
+    return None
+
+
 async def llm_pick_start_location(compiled: dict, candidates: list[dict], preference: str, llm,
-                                  allow_no_match: bool = False) -> Optional[dict]:
+                                  allow_no_match: bool = False,
+                                  inside_of: dict = None,
+                                  scene_hint: str = "") -> Optional[dict]:
     """Pick the candidate best matching the player's preference.
 
     With ``allow_no_match`` the LLM may instead declare that nothing genuinely
     fits, returning ``{"no_match": True, "wanted": "<short spec>"}`` so the
     caller can author a fitting start location on demand instead of forcing
     the least-bad existing one.
+
+    ``inside_of`` marks a descent step: the candidates are the places inside
+    that already-chosen location, and the LLM may answer ``EXTERIOR``
+    (returned as ``{"exterior": True}``) when the scene happens at the
+    location itself rather than at any interior spot. ``scene_hint`` is the
+    part named by the previous level's pick ("the living room"), carried down
+    as extra context.
+
+    A pick may carry an ``inside_hint`` — the LLM naming the specific part of
+    the chosen location where the scene takes place — which the caller uses
+    to keep descending (or to expand an interior that doesn't exist yet).
     """
     if not candidates:
         return None
@@ -69,7 +116,7 @@ async def llm_pick_start_location(compiled: dict, candidates: list[dict], prefer
         if len(candidates) == 1:
             return candidates[0]
         return random.choice(candidates)
-    if len(candidates) == 1 and not allow_no_match:
+    if len(candidates) == 1 and not allow_no_match and inside_of is None:
         return candidates[0]
 
     world_name = compiled.get("lore", {}).get("world_name", "the world")
@@ -82,24 +129,59 @@ async def llm_pick_start_location(compiled: dict, candidates: list[dict], prefer
         f"You are helping a player choose a starting location in the world of {world_name}. "
         "Pick the best match based on their preference. Output only valid JSON."
     )
-    if allow_no_match:
-        no_match_instruction = (
-            "\nIf NONE of the locations genuinely fits the preference, do not force a poor match: "
-            'return {"node_id": "NONE", "wanted": "one short phrase describing the kind of place the player wants"}.'
-            "\nBut a preference naming a PART of a listed location (its rooftop, storage building, "
-            "courtyard, a room inside it) is NOT a no-match — pick that location; the scene simply "
-            "plays out in that part of it."
+    parent_name = (inside_of or {}).get("name", "")
+    inside_context = ""
+    exterior_instruction = ""
+    if inside_of is not None:
+        inside_context = (
+            f"\nThe start is at {parent_name}; the locations listed below are "
+            "the known places INSIDE it. Choose the spot where the opening "
+            "scene takes place.\n"
         )
+        candidates_summary += (
+            f"\n- EXTERIOR: none of the above — the opening scene happens at "
+            f"{parent_name} itself (or just outside it), not at any specific "
+            "spot inside"
+        )
+        exterior_instruction = (
+            '\n"EXTERIOR" is a valid node_id: use it when the scene plays out at '
+            f"{parent_name} in general or outside it, rather than at a listed spot."
+        )
+    hint_line = (
+        f'\nThe opening scene is specifically at: "{scene_hint}".\n'
+        if scene_hint else "")
+    inside_capture = (
+        "\nIf the opening scene takes place in a specific PART of your chosen "
+        "location that is not itself in the list (a particular room, cellar, "
+        'rooftop, a building on its grounds...), add "inside": "<that part in a '
+        'few words>" to your answer.'
+    )
+    if allow_no_match:
+        if inside_of is not None:
+            no_match_instruction = (
+                "\nIf the scene happens at a specific spot inside "
+                f"{parent_name} that is NOT in the list (and EXTERIOR does not "
+                'fit either), return {"node_id": "NONE", "wanted": "one short '
+                'phrase describing that spot"} and it will be created.'
+            )
+        else:
+            no_match_instruction = (
+                "\nIf NONE of the locations genuinely fits the preference, do not force a poor match: "
+                'return {"node_id": "NONE", "wanted": "one short phrase describing the kind of place the player wants"}.'
+                "\nBut a preference naming a PART of a listed location (its rooftop, storage building, "
+                "courtyard, a room inside it) is NOT a no-match — pick that location and name the part "
+                'in "inside"; the scene plays out in that part of it.'
+            )
     else:
         no_match_instruction = ""
     user_msg = f"""World premise: {world_premise}
 
 Player's starting location preference: "{preference}"
-
+{inside_context}{hint_line}
 Available locations:
 {candidates_summary}
 
-Pick the single best matching location. Return JSON: {{"node_id": "...", "name": "...", "reason": "one sentence why"}}{no_match_instruction}"""
+Pick the single best matching location. Return JSON: {{"node_id": "...", "name": "...", "reason": "one sentence why"}}{exterior_instruction}{inside_capture}{no_match_instruction}"""
     try:
         content = await llm.simple_completion(
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
@@ -109,15 +191,24 @@ Pick the single best matching location. Return JSON: {{"node_id": "...", "name":
         )
         choice = json.loads(content)
         chosen_id = choice.get("node_id", "")
+        if inside_of is not None and str(chosen_id).upper() == "EXTERIOR":
+            return {"exterior": True}
         if allow_no_match and str(chosen_id).upper() == "NONE":
             return {"no_match": True, "wanted": choice.get("wanted") or preference}
         for c in candidates:
             if c["node_id"] == chosen_id:
                 c["reason"] = choice.get("reason", "")
+                hint = str(choice.get("inside", "") or "").strip()
+                if hint:
+                    c["inside_hint"] = hint
                 return c
         return candidates[0]
     except Exception as e:
         logger.error(f"LLM start location pick failed: {e}")
+        if inside_of is not None:
+            # A failed descent pick must not strand the start at a random
+            # room — staying at the (already well-chosen) parent is safe.
+            return {"exterior": True}
         return random.choice(candidates)
 
 
@@ -386,7 +477,8 @@ Found a new location matching the request at the best-fitting position. Return J
 {{"node_id": "<one of the ids above, or NEW>", "near_node_id": "<only with NEW: a named place id>",
 "name": "...", "type": "settlement" or "landmark",
 "label_description": "one-line label", "description": "2-3 sentence flavor description",
-"reason": "one sentence why this position fits"}}"""
+"reason": "one sentence why this position fits",
+"scene_inside": "<ONLY when the requested scene happens at a specific spot INSIDE the new location (a room, hall, deck...): that spot in a few words — otherwise omit>"}}"""
     try:
         content = await llm.simple_completion(
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
@@ -410,9 +502,13 @@ Found a new location matching the request at the best-fitting position. Return J
         if parent is not None and parent.get("name"):
             return {"belongs_inside": inside_ref}
         logger.warning("belongs_inside answer names no known place (%r); ignoring", inside_ref)
+    scene_inside = str(authored.get("scene_inside", "") or "").strip()
     node_id = str(authored.get("node_id", ""))
     if node_id.upper() == "NEW":
-        return _found_new_node(compiled, authored, fallback_anchor_id=anchor_node_id)
+        founded = _found_new_node(compiled, authored, fallback_anchor_id=anchor_node_id)
+        if founded is not None and scene_inside:
+            founded["scene_inside"] = scene_inside
+        return founded
     name = str(authored.get("name", "")).strip()
     if node_id not in slot_ids or not name:
         logger.warning("Start location generation returned invalid node_id/name; falling back")
@@ -421,7 +517,7 @@ Found a new location matching the request at the best-fitting position. Return J
     if loc_type not in ("settlement", "landmark"):
         loc_type = "landmark"
     description = str(authored.get("description", "")).strip() or str(authored.get("label_description", "")).strip()
-    return {
+    result = {
         "node_id": node_id,
         "name": name,
         "type": loc_type,
@@ -429,3 +525,6 @@ Found a new location matching the request at the best-fitting position. Return J
         "description": description,
         "reason": str(authored.get("reason", "")).strip(),
     }
+    if scene_inside:
+        result["scene_inside"] = scene_inside
+    return result

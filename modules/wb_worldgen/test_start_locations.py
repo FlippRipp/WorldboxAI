@@ -471,6 +471,202 @@ def test_append_map_node_dispatches_to_layer_and_child_bundle(builder):
     assert not builder._persistence.append_map_node(wid, "nowhere", dict(node), [])
 
 
+def _add_interior(builder, wid, anchor="s1", map_id="m_manor"):
+    """Persist a child map (interior) anchored to a root node, the way
+    expand_node caches one under the world's maps/ directory."""
+    bundle = {
+        "map": {"map_id": map_id, "label": "Havenport Manor — interior",
+                "level_type": "interior", "parent_map_id": "root",
+                "anchor_node_id": anchor,
+                "nodes": [
+                    {"id": f"{map_id}:n1", "name": "Entry Hall", "type": "room",
+                     "description": "A tiled entry hall.", "x": 0.0, "y": 0.0},
+                    {"id": f"{map_id}:n2", "name": "Living Room", "type": "room",
+                     "description": "A couch and a low coffee table.", "x": 1.0, "y": 0.0},
+                ],
+                "edges": [{"from": f"{map_id}:n1", "to": f"{map_id}:n2", "distance": 1.0}]},
+        "connections": [],
+    }
+    builder._persistence.save_child_map(wid, bundle)
+    return bundle
+
+
+def test_pick_descends_into_existing_interior(builder):
+    # The scene names a spot inside a mapped building: the pick descends into
+    # the building's interior map and starts at the matching room.
+    wid = _start_world(builder)
+    _add_interior(builder, wid)
+    llm = ScriptedLLM([
+        {"node_id": "s1", "name": "Havenport", "reason": "the opening is here",
+         "inside": "the living room"},
+        {"node_id": "m_manor:n2", "name": "Living Room",
+         "reason": "the scene is on the couch"},
+    ])
+
+    location = asyncio.run(builder.llm_pick_start_location(
+        wid, "the living room couch in Havenport manor", llm))
+
+    assert location["node_id"] == "m_manor:n2"
+    assert location["map_id"] == "m_manor"
+    assert location["ancestor_node_ids"] == ["s1"]
+    assert not location.get("world_modified")
+    # Top-level candidates never include interior rooms.
+    top_msg = llm.calls[0][1]["content"]
+    assert "m_manor:n2" not in top_msg
+    # The descent prompt offers the rooms, the EXTERIOR stop, and carries the
+    # part named by the level above.
+    sub_msg = llm.calls[1][1]["content"]
+    assert "Living Room" in sub_msg and "Entry Hall" in sub_msg
+    assert "EXTERIOR" in sub_msg
+    assert 'specifically at: "the living room"' in sub_msg
+
+
+def test_descent_exterior_answer_stays_at_parent(builder):
+    # A building's interior exists, but the scene happens outside it: the
+    # EXTERIOR answer stops the descent at the building itself.
+    wid = _start_world(builder)
+    _add_interior(builder, wid)
+    llm = ScriptedLLM([
+        {"node_id": "s1", "name": "Havenport", "reason": "a port town"},
+        {"node_id": "EXTERIOR"},
+    ])
+
+    location = asyncio.run(builder.llm_pick_start_location(wid, "a port town", llm))
+
+    assert location["node_id"] == "s1"
+    assert "ancestor_node_ids" not in location
+
+
+def test_descent_no_match_grows_room_onto_interior(builder, monkeypatch):
+    # The wanted room is missing from an existing interior map: it is grown
+    # onto that map and becomes the start.
+    wid = _start_world(builder)
+    _add_interior(builder, wid)
+    llm = ScriptedLLM([
+        {"node_id": "s1", "name": "Havenport", "reason": "the manor",
+         "inside": "the wine cellar"},
+        {"node_id": "NONE", "wanted": "the wine cellar"},
+    ])
+    grow_calls = []
+
+    async def fake_grow(world_id, map_id, description, near_node_id=None):
+        grow_calls.append((world_id, map_id, description))
+        return {"node": {"id": "m_manor:g9", "name": "Wine Cellar", "type": "room",
+                         "description": "Dusty racks under the manor."},
+                "edges": [], "created": True}
+
+    monkeypatch.setattr(builder, "grow_child_map", fake_grow)
+
+    location = asyncio.run(builder.llm_pick_start_location(
+        wid, "the wine cellar of Havenport manor", llm))
+
+    assert grow_calls == [(wid, "m_manor", "the wine cellar")]
+    assert location["node_id"] == "m_manor:g9"
+    assert location["map_id"] == "m_manor"
+    assert location["generated"] is True
+    assert location["world_modified"] is True
+    assert location["ancestor_node_ids"] == ["s1"]
+
+
+def test_descent_expands_missing_interior_with_must_include(builder, monkeypatch):
+    # The scene names a spot inside a building with no interior map: the
+    # interior is expanded on the spot, required to contain that spot, and
+    # the descent continues into it.
+    from wbworldgen.worldgen.enrichment import maps_expand
+
+    wid = _start_world(builder)
+    llm = ScriptedLLM([
+        {"node_id": "s1", "name": "Havenport", "reason": "the office is here",
+         "inside": "the harbor master's office"},
+        {"node_id": "m_new:n1", "name": "Harbor Master's Office", "reason": "fits"},
+    ])
+    monkeypatch.setattr(maps_expand, "is_expandable", lambda *a, **k: True)
+    expand_calls = []
+
+    async def fake_expand(world_id, map_id, node_id, force=False,
+                          level_type=None, must_include=None):
+        expand_calls.append((map_id, node_id, must_include))
+        return {"map": {"map_id": "m_new", "label": "Havenport — interior",
+                        "level_type": "interior", "parent_map_id": map_id,
+                        "anchor_node_id": node_id,
+                        "nodes": [{"id": "m_new:n1", "name": "Harbor Master's Office",
+                                   "type": "room",
+                                   "description": "Ledgers and salt air."}],
+                        "edges": []},
+                "connections": []}
+
+    monkeypatch.setattr(builder, "expand_node", fake_expand)
+
+    location = asyncio.run(builder.llm_pick_start_location(
+        wid, "the harbor master's office in Havenport", llm))
+
+    assert expand_calls == [("root", "s1", "the harbor master's office")]
+    assert location["node_id"] == "m_new:n1"
+    assert location["map_id"] == "m_new"
+    assert location["world_modified"] is True
+    assert location["ancestor_node_ids"] == ["s1"]
+
+
+def test_authored_start_descends_into_its_scene_part(builder, monkeypatch):
+    # Nothing matches, so a brand-new place is authored — and the scene opens
+    # in a specific part of it: its interior is expanded and the start lands
+    # on that part, several loop moves chained together.
+    from wbworldgen.worldgen.enrichment import maps_expand
+
+    wid = _start_world(builder)
+    llm = ScriptedLLM([
+        {"node_id": "NONE", "wanted": "the bridge of a smuggler ship"},
+        {"node_id": "w1", "name": "The Rustbucket", "type": "landmark",
+         "label_description": "A grounded smuggler ship.",
+         "description": "A beached freighter turned den.",
+         "reason": "the highlands hide wrecks",
+         "scene_inside": "the bridge"},
+        {"node_id": "m_ship:n1", "name": "The Bridge",
+         "reason": "the scene opens at the helm"},
+    ])
+    monkeypatch.setattr(maps_expand, "is_expandable", lambda *a, **k: True)
+
+    async def fake_expand(world_id, map_id, node_id, force=False,
+                          level_type=None, must_include=None):
+        assert node_id == "w1"
+        assert must_include == "the bridge"
+        return {"map": {"map_id": "m_ship", "label": "The Rustbucket — interior",
+                        "level_type": "interior", "parent_map_id": map_id,
+                        "anchor_node_id": node_id,
+                        "nodes": [{"id": "m_ship:n1", "name": "The Bridge",
+                                   "type": "room", "description": "A cracked helm."}],
+                        "edges": []},
+                "connections": []}
+
+    monkeypatch.setattr(builder, "expand_node", fake_expand)
+
+    location = asyncio.run(builder.llm_pick_start_location(
+        wid, "the bridge of a smuggler ship", llm))
+
+    assert location["node_id"] == "m_ship:n1"
+    assert location["map_id"] == "m_ship"
+    assert location["world_modified"] is True
+    assert location["ancestor_node_ids"] == ["w1"]
+    # The authored node itself was persisted onto the world map first.
+    nodes = {n["id"]: n for n in
+             builder.load_world(wid)["steps"]["map_generation"]["data"]["nodes"]}
+    assert nodes["w1"]["name"] == "The Rustbucket"
+
+
+def test_find_start_location_resolves_interior_nodes(builder):
+    # Explicit picks (start screen) may point into an interior map — they
+    # resolve even though the type-filtered candidate list excludes rooms.
+    wid = _start_world(builder)
+    _add_interior(builder, wid)
+
+    hit = builder.find_start_location(wid, "m_manor:n2")
+
+    assert hit["node_id"] == "m_manor:n2"
+    assert hit["name"] == "Living Room"
+    assert hit["map_id"] == "m_manor"
+    assert builder.find_start_location(wid, "nope") is None
+
+
 def test_generate_start_location_prompt_is_anchor_aware(builder):
     # Authoring "the school's storage building" from the player's position:
     # slots come annotated with nearest named places and player distance, and
