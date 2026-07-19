@@ -25,7 +25,12 @@ review gate) DESIGNED and LANDED 2026-07-19 with Filip (36a32db…903bca4,
 five commits) — scoped brief notes (N1–N3), a read-only note-verifier
 agent the builder can argue with (N4–N6), and an end-of-build review
 gate whose veto relaunches a fix run (N7); the catalog is now 19 tools
-and the outstanding live test covers notes end to end.
+and the outstanding live test covers notes end to end. C6 (world
+explorer + classic-system removal) LANDED 2026-07-19: the post-creation
+list view is replaced by a map-first explorer over the compiled world,
+the classic sequential wizard/review system is deleted UI+routes deep,
+and in-progress worlds recover through agent-build adoption — see the
+C6 section.
 Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
@@ -1109,6 +1114,87 @@ files (45 tests) + module-by-path and root suites green; the live
 conversation + build check rides Filip's outstanding C2–C4 live test,
 which now exercises notes end to end.*
 
+### C6 — World explorer + classic-system removal (landed 2026-07-19)
+
+*Decided with Filip 2026-07-19 ("complete rip-out if we can do that since
+it's a legacy system"; recovery lands on the agent flow; node editing
+deferred; collapsible drawers on mobile). Two commits: the additive
+explorer, then the rip.*
+
+**The explorer.** The post-creation world view is now
+`ui/WorldExplorer/WorldExplorerScreen.jsx`: the map fills the screen
+(MapRenderer, double-click descends), an elements panel on the left
+lists everything the current map contains — nodes with inline detail
+(description, `additional_details`, ways out, enter-child), regions,
+ways in/out with hidden badges (author view — only the player overlay
+filters hidden), child maps, and the C5 notes bound to the map
+(client-side join_key approximation, exact + containment tiers; the
+lints stay the binding authority) — and a global panel on the right
+holds expandable entries: brief (with per-subject bound/unbound hints),
+every info step via SchemaForm with edit/save and regenerate-with-note,
+terrain preview, the EnrichmentPanel (now hosted step-free — the
+"one-shot worlds have no enrichment-panel host" follow-up is moot for
+saved worlds), and interior pre-expansion. Selection syncs list↔map
+both ways (`MapRenderer` gained an `onNodeSelect` callback). Panels
+collapse; on small screens they are slide-over drawers.
+
+**The read surface fixed a real gap.** The explorer reads a new
+`GET /api/world/{id}/compiled` — compiled fresh from disk (never through
+the size-1 cache: a browse must not evict the actively-enriched world or
+decompress terrain rasters; private keys stripped). The old review
+screen rendered `map_generation` step data and could never show
+post-generation child bundles or surgery connections.
+
+**World-scoped regenerate.** `POST /api/world/{id}/regenerate-step/{step}`
+loads the world from disk, runs `generate_step` with full chain context
+(brief included, so world_rules keeps its agreed-rules enforcement),
+persists that one step, invalidates the compiled cache. It refuses
+map/terrain/enrichment steps loudly (D1's withholding, restated at the
+route). The old session route's `_auto_save_draft` used to create a
+phantom "In Progress" duplicate when re-rolling a loaded world — the
+session machinery is simply not involved anymore.
+
+**The rip.** The wizard's sequential flow, StepCard, the step-UI
+registry, MapStepView, EnrichmentStepView and WorldReviewScreen are
+deleted; WorldBuilderWizard slimmed into `WorldCreateScreen` (prompt +
+scenario + ideation + observer, which gained an Explore-world action).
+Server side every classic session route died — generate, continue,
+generate-step, regenerate-item, approve-step, state, debug/skip-to,
+compile, save, discard, resume, enrich/commit — along with
+`world_gen_sessions`, auto-save-draft, the enrichment→draft sync and
+dynamic-skip pruning. P5 holds: `generate_step` and the pass engine are
+untouched, driven by the agent, the explorer and tests.
+
+**Recovery lands on the agent flow.** `agent/build` now exposes the
+harness's existing `world_id` adoption; `/world/list` carries
+`has_agent_build` (artifact presence). An in-progress world's primary
+affordance is "View build" (reattach observer) or "Finish with AI"
+(adopt build); Explore stays available read-only.
+
+**Recorded consequences, deliberately accepted:**
+
+- `pregenerate_planned_maps` lost its last route call site (it lived in
+  the removed `enrich/commit`, itself UI-dead since B1.5). The Crucible
+  Stars open item — expose the expansion/pregenerate phase as agent
+  tools — is now the *only* path to planned child maps, unchanged in
+  urgency.
+- Regenerating a design step on a saved world does not prune data of
+  steps the new design skips (the pruning was wizard-approval machinery);
+  the agent's `run_step` has had the same behavior since C1. Stale
+  skipped-step data still compiles in — a lint or a prune-on-write is
+  the fix if it bites.
+- `skip_review` and one-shot mode are gone as behaviors; the metadata
+  key survives only as inert legacy passthrough in persistence.
+- Pre-C4 classic drafts lost their step-review resume; their recovery
+  is adoption ("Finish with AI"), which preserves content and brief.
+
+**Verify:** module suite (543) + root suite (688) green;
+`test_explorer_routes.py` covers compiled/regenerate/adopt/recovery
+routing; driven in real Chromium against a seeded, hand-decorated world
+(desktop three-pane, node selection sync, child-map descent, brief
+binding badges, mobile drawers, edit round-trip persisted to disk,
+recovery buttons on the world list).
+
 ### Live-run findings — the Crucible Stars build (2026-07-19)
 
 The first full live agent build (Filip's C2/C3 test; cancelled at turn
@@ -1190,6 +1276,7 @@ file, before the 2026-07-19 Arc C rewrite).
 | 12 | C4 ideation conversation | L | ✓ landed (b73c275); classic entry disabled | the front door |
 | 13 | v2a structural surgery toolset | M–L | ✓ landed (51e8c0d) | the agent's structure fix instrument |
 | 14 | C5 ideation notes + note verifier + review gate | L | ✓ landed (36a32db…903bca4) | detail survives Go, scoped; the user gets what they asked for |
+| 15 | C6 world explorer + classic-system removal | L | ✓ landed (2 commits, 2026-07-19) | the world is a map, not a list; one build system left |
 
 (A5 landed before B1 — the reverse of the original ordering; nothing
 depended on the order.) RuntimeHost (`backend.py` half of A1) can ride along

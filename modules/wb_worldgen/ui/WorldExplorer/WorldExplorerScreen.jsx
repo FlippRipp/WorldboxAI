@@ -174,7 +174,7 @@ export default function WorldExplorerScreen({ worldId, onBack }) {
         </button>
         <div className="flex-1 min-w-0 flex items-baseline gap-2">
           <h1 className="text-base font-bold text-gray-100 truncate">{worldName}</h1>
-          {crumbs.length > 0 && (
+          {crumbs.length > 1 && (
             <span className="text-xs text-gray-500 truncate hidden sm:inline">
               {crumbs.map((m, i) => (
                 <span key={m.map_id}>
