@@ -18,6 +18,8 @@ from pathlib import Path
 import pytest
 
 from wbworldgen.worldgen import WorldBuilder
+from wbworldgen.worldgen.enrichment.passes import describe as describe_pass
+from wbworldgen.worldgen.enrichment.passes import label as label_pass
 
 # The module file is named backend.py, which collides with the core `backend`
 # package — load it explicitly by path under a private name.
@@ -70,24 +72,24 @@ def _mixed_world(builder, world_id="lazy_world"):
     return world_id
 
 
-def _fake_enrichment(builder):
-    async def fake_label(node, context, used_names=None):
+def _fake_enrichment(monkeypatch):
+    async def fake_label(services, node, context, used_names=None, problem_note=None):
         return f"Name {node['id']}", f"snippet {node['id']}"
 
-    async def fake_desc(node, context, existing_description=""):
+    async def fake_desc(services, node, context, existing_description=""):
         return f"Flavor text for {node['id']}"
 
-    builder._enrichment._live_label = fake_label
-    builder._enrichment._live_description = fake_desc
+    monkeypatch.setattr(label_pass, "generate_label", fake_label)
+    monkeypatch.setattr(describe_pass, "generate_description", fake_desc)
 
 
 # ---------------------------------------------------------------------------
 # Engine: importance floor + targeted node runs
 # ---------------------------------------------------------------------------
 
-def test_run_importance_floor_details_only_majors(builder):
+def test_run_importance_floor_details_only_majors(builder, monkeypatch):
     wid = _mixed_world(builder)
-    _fake_enrichment(builder)
+    _fake_enrichment(monkeypatch)
     events = []
 
     async def on_event(evt):
@@ -113,9 +115,9 @@ def test_run_importance_floor_details_only_majors(builder):
     assert last_node_evt["per_layer"]["root"]["total"] == 2
 
 
-def test_run_node_ids_targets_specific_nodes(builder):
+def test_run_node_ids_targets_specific_nodes(builder, monkeypatch):
     wid = _mixed_world(builder)
-    _fake_enrichment(builder)
+    _fake_enrichment(monkeypatch)
 
     summary = asyncio.run(builder.enrich_run(wid, phase="all", node_ids=["n3"]))
 
@@ -128,9 +130,9 @@ def test_run_node_ids_targets_specific_nodes(builder):
     assert not nodes["n0"]["name"]  # floor-qualified but not targeted
 
 
-def test_detail_nodes_and_get_map_node(builder):
+def test_detail_nodes_and_get_map_node(builder, monkeypatch):
     wid = _mixed_world(builder)
-    _fake_enrichment(builder)
+    _fake_enrichment(monkeypatch)
 
     asyncio.run(builder.detail_nodes(wid, ["n2"]))
     node = builder.get_map_node(wid, "n2")
@@ -212,9 +214,9 @@ def clean_backfill():
     wbg._services = None
 
 
-def test_arrival_at_undetailed_node_waits_and_syncs(builder, tmpdir):
+def test_arrival_at_undetailed_node_waits_and_syncs(builder, tmpdir, monkeypatch):
     wid = _mixed_world(builder)
-    _fake_enrichment(builder)
+    _fake_enrichment(monkeypatch)
     sm, engine, state = _play_session(builder, tmpdir, wid)
     state["player_location_node_id"] = "n2"  # minor node: no name/description
     wbg._services["settings"].values["world.backfill_per_turn"] = 0  # no trickle noise
@@ -236,9 +238,9 @@ def test_arrival_at_undetailed_node_waits_and_syncs(builder, tmpdir):
                for e in engine.memory.entries)
 
 
-def test_idle_trickle_details_pending_nodes(builder, tmpdir):
+def test_idle_trickle_details_pending_nodes(builder, tmpdir, monkeypatch):
     wid = _mixed_world(builder)
-    _fake_enrichment(builder)
+    _fake_enrichment(monkeypatch)
     # Majors upfront: n0/n1 already detailed, three minors pending.
     asyncio.run(builder.enrich_run(wid, phase="all", importance_floor=6))
     sm, engine, state = _play_session(builder, tmpdir, wid)
@@ -255,9 +257,9 @@ def test_idle_trickle_details_pending_nodes(builder, tmpdir):
     assert len(detailed) == 4
 
 
-def test_reveal_queues_backfill_on_teleport(builder, tmpdir):
+def test_reveal_queues_backfill_on_teleport(builder, tmpdir, monkeypatch):
     wid = _mixed_world(builder)
-    _fake_enrichment(builder)
+    _fake_enrichment(monkeypatch)
     sm, engine, state = _play_session(builder, tmpdir, wid)
     wbg._services["settings"].values["world.travel_minutes_per_edge"] = 0  # instant moves
     wbg._services["settings"].values["world.backfill_per_turn"] = 0

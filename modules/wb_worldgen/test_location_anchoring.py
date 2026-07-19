@@ -17,6 +17,9 @@ import pytest
 from wbworldgen.worldgen.generation.binding import bind_named_locations
 from wbworldgen.worldgen import WorldBuilder, register_default_steps
 from wbworldgen.worldgen.compiler import collect_scope_content, merge_geography_steps
+from wbworldgen.worldgen.enrichment.passes import describe as describe_pass
+from wbworldgen.worldgen.enrichment.passes import label as label_pass
+from wbworldgen.worldgen.enrichment.passes import review as review_pass
 
 
 @pytest.fixture
@@ -338,7 +341,7 @@ def _map_world(builder, world_id="rev_world"):
     })
 
 
-def test_review_relabels_flagged_node(builder):
+def test_review_relabels_flagged_node(builder, monkeypatch):
     wid = _map_world(builder)
     review_calls = []
 
@@ -354,17 +357,17 @@ def test_review_relabels_flagged_node(builder):
 
     label_calls = []
 
-    async def fake_label(node, context, used_names=None, problem_note=None):
+    async def fake_label(services, node, context, used_names=None, problem_note=None):
         label_calls.append((node["id"], problem_note))
         return "Riverside Atelier", "a quiet workshop"
 
-    async def fake_desc(node, context, existing_description=""):
+    async def fake_desc(services, node, context, existing_description=""):
         return f"Rewritten around {node['name']}."
 
-    builder._enrichment._live_label = fake_label
-    builder._enrichment._live_description = fake_desc
+    monkeypatch.setattr(label_pass, "generate_label", fake_label)
+    monkeypatch.setattr(describe_pass, "generate_description", fake_desc)
 
-    summary = asyncio.run(builder.review_enrichment_labels(wid))
+    summary = asyncio.run(builder.enrich_run(wid, phase="review"))["review"]
 
     assert summary["reviewed_maps"] == 1
     assert summary["flagged"] == 1
@@ -381,7 +384,7 @@ def test_review_relabels_flagged_node(builder):
     assert fixed["description"] == "Rewritten around Riverside Atelier."
 
 
-def test_enrich_run_reviews_maps_it_completes(builder):
+def test_enrich_run_reviews_maps_it_completes(builder, monkeypatch):
     wid = _map_world(builder, world_id="rev_world2")
     # Strip names so the run has labeling work to finish the map with.
     world = builder.load_world(wid)
@@ -394,22 +397,21 @@ def test_enrich_run_reviews_maps_it_completes(builder):
         mode="live", module_fast_model="fast-slot", reader_model="reader-slot")
     builder._enrichment_batch_size = 1
 
-    async def fake_label(node, context, used_names=None):
+    async def fake_label(services, node, context, used_names=None, problem_note=None):
         return f"Name {node['id']}", ""
 
     reviewed = []
 
-    async def fake_review(world_id, layer_filter=None, map_ids=None, on_event=None,
-                          compiled=None, all_nodes=None):
-        reviewed.append(map_ids)
-        return {"reviewed_maps": len(map_ids or []), "flagged": 0, "relabeled": []}
+    async def fake_review_map(services, rec, state):
+        reviewed.append(rec.get("map_id"))
+        return {"reviewed_maps": 1, "flagged": 0, "relabeled": []}
 
-    builder._enrichment._live_label = fake_label
-    builder._enrichment.review_labels = fake_review
+    monkeypatch.setattr(label_pass, "generate_label", fake_label)
+    monkeypatch.setattr(review_pass, "review_map", fake_review_map)
 
     summary = asyncio.run(builder.enrich_run(wid, phase="label"))
     assert summary["labeled"] == 6
-    assert len(reviewed) == 1 and len(reviewed[0]) == 1
+    assert len(reviewed) == 1  # exactly the one map this run completed
     assert summary["review"] == {"reviewed_maps": 1, "flagged": 0, "relabeled": []}
 
 

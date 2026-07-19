@@ -62,8 +62,7 @@ class WorldBuilder:
         self._enrichment_cache_max = self._persistence._enrichment_cache_max
         self._enrichment_prompts = self._persistence._enrichment_prompts
         self._enrichment_delay_ms = 300
-        # Global ceiling on concurrent enrichment LLM calls (legacy per-node
-        # endpoints + batch runs share it). Resized from the
+        # Global ceiling on concurrent enrichment LLM calls. Resized from the
         # world.enrichment_concurrency setting at run start.
         self._enrichment_concurrency = 3
         self._enrichment_batch_size = 8
@@ -439,18 +438,6 @@ class WorldBuilder:
         return collect_nodes_by_layer(compiled, layer_filter)
 
     # --- enrichment generation (delegated) ---------------------------------
-
-    async def enrich_next_label(self, world_id: str, labeled_node_ids: list = None, layer_filter: str = None, rework: bool = False) -> dict:
-        return await self._enrichment.label_next(world_id, labeled_node_ids, layer_filter, rework=rework)
-
-    async def enrich_next_description(self, world_id: str, labeled_node_ids: list = None, layer_filter: str = None, rework: bool = False) -> dict:
-        return await self._enrichment.describe_next(world_id, labeled_node_ids, layer_filter, rework=rework)
-
-    async def review_enrichment_labels(self, world_id: str, layer_filter: str = None) -> dict:
-        """Coherence-review the enriched names (one map, or every map when no
-        filter): flag names that don't make sense where they sit and relabel
-        them. Runs automatically when an enrichment run completes a map."""
-        return await self._enrichment.review_labels(world_id, layer_filter=layer_filter)
 
     def _resolve_enrichment_setting(self, key: str, current: int, lo: int, hi: int) -> int:
         """Live-read an integer enrichment setting; clamp to a sane range."""

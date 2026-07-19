@@ -16,6 +16,8 @@ import pytest
 
 from wbworldgen.worldgen import WorldBuilder
 from wbworldgen.worldgen.enrichment.context import collect_nodes_by_layer
+from wbworldgen.worldgen.enrichment.passes import describe as describe_pass
+from wbworldgen.worldgen.enrichment.passes import label as label_pass
 
 
 @pytest.fixture
@@ -52,13 +54,13 @@ def _map_world(builder, n_nodes=6, world_id="run_world"):
 # engine.run — phases, concurrency, ordering, failures, flushes, cancellation
 # ---------------------------------------------------------------------------
 
-def test_run_all_labels_then_describes(builder):
+def test_run_all_labels_then_describes(builder, monkeypatch):
     wid = _map_world(builder, 6)
     builder._enrichment_batch_size = 1  # single-node path for this test
     calls = {"label": [], "desc": []}
     active = {"now": 0, "max": 0}
 
-    async def fake_label(node, context, used_names=None):
+    async def fake_label(services, node, context, used_names=None, problem_note=None):
         active["now"] += 1
         active["max"] = max(active["max"], active["now"])
         await asyncio.sleep(0.01)
@@ -66,12 +68,12 @@ def test_run_all_labels_then_describes(builder):
         calls["label"].append(node["id"])
         return f"Name {node['id']}", f"snippet {node['id']}"
 
-    async def fake_desc(node, context, existing_description=""):
+    async def fake_desc(services, node, context, existing_description=""):
         calls["desc"].append(node["id"])
         return f"Flavor text for {node['name']}"
 
-    builder._enrichment._live_label = fake_label
-    builder._enrichment._live_description = fake_desc
+    monkeypatch.setattr(label_pass, "generate_label", fake_label)
+    monkeypatch.setattr(describe_pass, "generate_description", fake_desc)
 
     events = []
 
@@ -99,16 +101,16 @@ def test_run_all_labels_then_describes(builder):
     assert all("per_layer" in e and "total_labeled" in e for e in node_events)
 
 
-def test_run_partial_failure_continues(builder):
+def test_run_partial_failure_continues(builder, monkeypatch):
     wid = _map_world(builder, 4)
     builder._enrichment_batch_size = 1
 
-    async def fake_label(node, context, used_names=None):
+    async def fake_label(services, node, context, used_names=None, problem_note=None):
         if node["id"] == "n1":
             raise ValueError("boom")
         return f"Name {node['id']}", ""
 
-    builder._enrichment._live_label = fake_label
+    monkeypatch.setattr(label_pass, "generate_label", fake_label)
     events = []
 
     async def on_event(evt):
@@ -123,16 +125,16 @@ def test_run_partial_failure_continues(builder):
     assert sum(1 for n in nodes if n["name"]) == 3
 
 
-def test_run_cancel_stops_midway(builder):
+def test_run_cancel_stops_midway(builder, monkeypatch):
     wid = _map_world(builder, 12)
     builder._enrichment_batch_size = 1
     builder._enrichment_concurrency = 1
 
-    async def fake_label(node, context, used_names=None):
+    async def fake_label(services, node, context, used_names=None, problem_note=None):
         await asyncio.sleep(0.005)
         return f"Name {node['id']}", ""
 
-    builder._enrichment._live_label = fake_label
+    monkeypatch.setattr(label_pass, "generate_label", fake_label)
 
     async def main():
         seen = []
@@ -157,10 +159,10 @@ def test_run_flushes_every_ten_not_every_node(builder, monkeypatch):
     wid = _map_world(builder, 25)
     builder._enrichment_batch_size = 1
 
-    async def fake_label(node, context, used_names=None):
+    async def fake_label(services, node, context, used_names=None, problem_note=None):
         return f"Name {node['id']}", ""
 
-    builder._enrichment._live_label = fake_label
+    monkeypatch.setattr(label_pass, "generate_label", fake_label)
 
     writes = []
     orig = builder._persistence.write_enrichment_to_disk
@@ -179,14 +181,14 @@ def test_run_flushes_every_ten_not_every_node(builder, monkeypatch):
     assert all(n["name"] for n in nodes)
 
 
-def test_run_respects_count_and_exclude(builder):
+def test_run_respects_count_and_exclude(builder, monkeypatch):
     wid = _map_world(builder, 6)
     builder._enrichment_batch_size = 1
 
-    async def fake_label(node, context, used_names=None):
+    async def fake_label(services, node, context, used_names=None, problem_note=None):
         return f"Name {node['id']}", ""
 
-    builder._enrichment._live_label = fake_label
+    monkeypatch.setattr(label_pass, "generate_label", fake_label)
 
     summary = asyncio.run(builder.enrich_run(
         wid, phase="label", count=2, exclude_node_ids=["n0"]))
@@ -201,10 +203,10 @@ def test_run_respects_count_and_exclude(builder):
 # Batched labeling
 # ---------------------------------------------------------------------------
 
-def test_run_label_batch_partial_validation(builder):
+def test_run_label_batch_partial_validation(builder, monkeypatch):
     wid = _map_world(builder, 4)
 
-    async def fake_batch(batch, contexts, used_names):
+    async def fake_batch(services, batch, contexts, used_names):
         return {"nodes": [
             {"id": "n0", "name": "The Emberfall", "label_description": "d0"},  # strips to Emberfall
             {"id": "n1", "name": "Emberfall", "label_description": "dup"},     # duplicate after strip
@@ -212,50 +214,50 @@ def test_run_label_batch_partial_validation(builder):
             {"id": "zz", "name": "Ghost", "label_description": ""},            # id never requested
         ]}  # n2 missing entirely
 
-    builder._enrichment._live_label_batch = fake_batch
+    monkeypatch.setattr(label_pass, "generate_label_batch", fake_batch)
     compiled = builder._enrichment._load_compiled(wid)
     all_nodes, _ = collect_nodes_by_layer(compiled)
 
     results, leftovers = asyncio.run(
-        builder._enrichment._run_label_batch(all_nodes, all_nodes, compiled, []))
+        label_pass.run_label_batch(builder._services, all_nodes, all_nodes, compiled, []))
 
-    assert results == {"n0": ("Emberfall", "d0")}
+    assert results == {"n0": {"name": "Emberfall", "label_description": "d0"}}
     assert {n["id"] for n in leftovers} == {"n1", "n2", "n3"}
 
 
-def test_run_label_batch_failure_bisects_then_singles(builder):
+def test_run_label_batch_failure_bisects_then_singles(builder, monkeypatch):
     wid = _map_world(builder, 8)
     attempts = []
 
-    async def fake_batch(batch, contexts, used_names):
+    async def fake_batch(services, batch, contexts, used_names):
         attempts.append(len(batch))
         raise ValueError("malformed json")
 
-    builder._enrichment._live_label_batch = fake_batch
+    monkeypatch.setattr(label_pass, "generate_label_batch", fake_batch)
     compiled = builder._enrichment._load_compiled(wid)
     all_nodes, _ = collect_nodes_by_layer(compiled)
 
     results, leftovers = asyncio.run(
-        builder._enrichment._run_label_batch(all_nodes, all_nodes, compiled, []))
+        label_pass.run_label_batch(builder._services, all_nodes, all_nodes, compiled, []))
 
     assert results == {}
     assert len(leftovers) == 8  # everything falls back to single-node calls
     assert attempts == [8, 4, 4]  # full batch, then one bisect of each half
 
 
-def test_run_batched_labels_end_to_end(builder):
+def test_run_batched_labels_end_to_end(builder, monkeypatch):
     wid = _map_world(builder, 10)
     builder._enrichment_batch_size = 8
     batch_sizes = []
 
-    async def fake_batch(batch, contexts, used_names):
+    async def fake_batch(services, batch, contexts, used_names):
         batch_sizes.append(len(batch))
         return {"nodes": [
             {"id": n["id"], "name": f"Uniq {n['id']}", "label_description": "x"}
             for n in batch
         ]}
 
-    builder._enrichment._live_label_batch = fake_batch
+    monkeypatch.setattr(label_pass, "generate_label_batch", fake_batch)
 
     summary = asyncio.run(builder.enrich_run(wid, phase="label"))
     assert summary["labeled"] == 10
@@ -283,7 +285,7 @@ def test_live_label_prompt_carries_containment_rule(builder):
     ctx = build_enrichment_context(node, all_nodes, compiled)
 
     name, _snippet = asyncio.run(
-        builder._enrichment._live_label(node, ctx, ["Northgate School"]))
+        label_pass.generate_label(builder._services, node, ctx, ["Northgate School"]))
 
     assert name == "Mill Row"
     system = captured["messages"][0]["content"]
@@ -308,7 +310,7 @@ def test_live_label_batch_prompt_far_apart_rule_and_full_avoid_list(builder):
     # 45 used names: the old prompt truncated to the last 40, hiding the first.
     used = [f"Oldtown {i}" for i in range(45)]
 
-    asyncio.run(builder._enrichment._live_label_batch(all_nodes, contexts, used))
+    asyncio.run(label_pass.generate_label_batch(builder._services, all_nodes, contexts, used))
 
     system = captured["messages"][0]["content"]
     assert "far apart on the map" in system
@@ -319,19 +321,20 @@ def test_live_label_batch_prompt_far_apart_rule_and_full_avoid_list(builder):
 
 
 # ---------------------------------------------------------------------------
-# Compiled-world cache (legacy per-node endpoints)
+# Compiled-world cache (single-node runs)
 # ---------------------------------------------------------------------------
 
-def test_label_next_reuses_compiled_and_sees_prior_labels(builder):
+def test_single_node_runs_reuse_compiled_and_see_prior_labels(builder, monkeypatch):
     wid = _map_world(builder, 3)
+    builder._enrichment_batch_size = 1
     names = iter(["Alpha", "Beta", "Gamma"])
     labeled = []
 
-    async def fake_label(node, context, used_names=None):
+    async def fake_label(services, node, context, used_names=None, problem_note=None):
         labeled.append(node["id"])
         return next(names), ""
 
-    builder._enrichment._live_label = fake_label
+    monkeypatch.setattr(label_pass, "generate_label", fake_label)
 
     loads = []
     real_load = WorldBuilder.load_world
@@ -343,23 +346,24 @@ def test_label_next_reuses_compiled_and_sees_prior_labels(builder):
     builder.load_world = counting_load
 
     for _ in range(3):
-        result = asyncio.run(builder.enrich_next_label(wid))
-        assert result["node_id"] is not None
-    done = asyncio.run(builder.enrich_next_label(wid))
+        summary = asyncio.run(builder.enrich_run(wid, phase="label", count=1))
+        assert summary["labeled"] == 1
+    done = asyncio.run(builder.enrich_run(wid, phase="label", count=1))
 
-    assert labeled == ["n0", "n1", "n2"]  # each call advanced; no repeats
-    assert done["complete"] is True
+    assert labeled == ["n0", "n1", "n2"]  # each run advanced; no repeats
+    assert done["labeled"] == 0  # nothing left to label
     assert len(loads) == 1  # world read from disk once, then served from cache
 
 
-def test_save_step_invalidates_compiled_cache(builder):
+def test_save_step_invalidates_compiled_cache(builder, monkeypatch):
     wid = _map_world(builder, 2)
+    builder._enrichment_batch_size = 1
 
-    async def fake_label(node, context, used_names=None):
+    async def fake_label(services, node, context, used_names=None, problem_note=None):
         return f"Name {node['id']}", ""
 
-    builder._enrichment._live_label = fake_label
-    asyncio.run(builder.enrich_next_label(wid))
+    monkeypatch.setattr(label_pass, "generate_label", fake_label)
+    asyncio.run(builder.enrich_run(wid, phase="label", count=1))
     assert wid in builder._compiled
 
     step_data = builder.load_world(wid)["steps"]["map_generation"]

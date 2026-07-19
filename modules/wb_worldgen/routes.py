@@ -970,38 +970,10 @@ async def pick_start_location(world_id: str, request: PickStartRequest = None):
 
 class EnrichRequest(BaseModel):
     layer_id: Optional[str] = None
-    labeled_node_ids: Optional[list[str]] = None
-    rework: bool = False
 
 
 class EnrichCommitRequest(BaseModel):
     step_id: str
-
-
-@router.post("/api/world/{world_id}/enrich/label-next")
-async def enrich_label_next(world_id: str, request: EnrichRequest = None, session_id: str = "default"):
-    try:
-        layer_filter = request.layer_id if request else None
-        labeled_ids = request.labeled_node_ids if request else None
-        rework = request.rework if request else False
-        result = await world_builder.enrich_next_label(world_id, labeled_node_ids=labeled_ids, layer_filter=layer_filter, rework=rework)
-        _sync_enrichment_result_to_draft(session_id, world_id, result)
-        return {"world_id": world_id, **result}
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-
-
-@router.post("/api/world/{world_id}/enrich/describe-next")
-async def enrich_describe_next(world_id: str, request: EnrichRequest = None, session_id: str = "default"):
-    try:
-        layer_filter = request.layer_id if request else None
-        labeled_ids = request.labeled_node_ids if request else None
-        rework = request.rework if request else False
-        result = await world_builder.enrich_next_description(world_id, labeled_node_ids=labeled_ids, layer_filter=layer_filter, rework=rework)
-        _sync_enrichment_result_to_draft(session_id, world_id, result)
-        return {"world_id": world_id, **result}
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @router.post("/api/world/{world_id}/enrich/review")
@@ -1009,19 +981,22 @@ async def enrich_review(world_id: str, request: EnrichRequest = None):
     """Coherence-review enriched names (one map via layer_id, or all maps):
     an LLM flags names that don't make sense where they sit (e.g. a place
     implying membership of an institution far across the map) and each
-    flagged node is relabeled. Also runs automatically whenever an
-    enrichment run completes a map's naming."""
+    flagged node is relabeled. Runs the registered review pass standalone;
+    the same pass also fires automatically whenever an enrichment run
+    completes a map's naming."""
     try:
         layer_filter = request.layer_id if request else None
-        result = await world_builder.review_enrichment_labels(
-            world_id, layer_filter=layer_filter)
+        summary = await world_builder.enrich_run(
+            world_id, phase="review", layer_filter=layer_filter)
+        result = summary.get("review") or {"reviewed_maps": 0, "flagged": 0,
+                                           "relabeled": []}
         return {"world_id": world_id, **result}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
 
 class EnrichRunRequest(BaseModel):
-    phase: str = "all"  # "label" | "describe" | "all"
+    phase: str = "all"  # a registered pass id ("label" | "describe" | "review") or "all"
     count: Optional[int] = None
     layer_id: Optional[str] = None
     rework: bool = False

@@ -22,6 +22,7 @@ import pytest
 from wbworldgen.worldgen import WorldBuilder
 from wbworldgen.worldgen.compiled_cache import CompiledWorldCache
 from wbworldgen.worldgen.enrichment import EnrichmentEngine
+from wbworldgen.worldgen.enrichment.passes import label as label_pass
 from wbworldgen.worldgen.services import GenServices, RateLimitBackoff
 
 
@@ -127,7 +128,7 @@ def test_backoff_wait_returns_once_cooldown_passed():
 # Engines run on a hand-built GenServices (no facade involved)
 # ---------------------------------------------------------------------------
 
-def test_enrichment_engine_runs_on_fake_services():
+def test_enrichment_engine_runs_on_fake_services(monkeypatch):
     store = FakeStore()
     cache = CompiledWorldCache(load_world=lambda wid: _world_state(2))
     services = GenServices(
@@ -140,14 +141,15 @@ def test_enrichment_engine_runs_on_fake_services():
     )
     engine = EnrichmentEngine(services)
 
-    async def fake_label(node, context, used_names=None):
+    async def fake_label(services_, node, context, used_names=None, problem_note=None):
         return f"Name {node['id']}", f"snippet {node['id']}"
 
-    engine._live_label = fake_label
-    result = asyncio.run(engine.label_next("w1"))
+    monkeypatch.setattr(label_pass, "generate_label", fake_label)
+    result = asyncio.run(engine.run("w1", phase="label", count=1, batch_size=1))
 
-    assert result["label"] == "Name n0"
+    assert result["labeled"] == 1
     assert ("w1", "n0", "name", "Name n0") in store.writes
+    assert ("w1", "n0", "label_description", "snippet n0") in store.writes
     assert store.flushes == ["w1"]
     # The write was mirrored onto the shared compiled cache.
     assert cache.get_node("w1", "n0")["name"] == "Name n0"
