@@ -8,6 +8,7 @@ class SocietyFactionsStep(Step):
     description = ("Define the people: the organizations, communities, circles and powers "
                    "of this world, and the places they hold.")
     after = "natural_landmarks"
+    produces = ("factions",)
     guidance = (
         "Set region to the name of one of the areas the Notable Features step "
         "authored (copy it EXACTLY) where the group is based, so its places "

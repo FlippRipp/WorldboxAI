@@ -188,6 +188,7 @@ class HierarchyDesignStep(Step):
                    "smallest scale, which map generator draws each, plus parallel "
                    "planes and pre-built sub-maps.")
     after = "lore"
+    produces = ("hierarchy",)
     guidance = _GUIDANCE
     schema = {
         "notes": {

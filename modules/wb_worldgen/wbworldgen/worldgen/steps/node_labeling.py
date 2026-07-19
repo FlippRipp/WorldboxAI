@@ -8,6 +8,8 @@ class NodeLabelingStep(Step):
     description = "Generate short labels for map nodes using a lighter LLM, from most to least important."
     after = "map_generation"
     uses = USES_ENRICHMENT
+    requires = ("maps",)
+    produces = ("labels",)
     schema = {
         "total_nodes": {"type": "number", "label": "Nodes to Label", "default": 0},
         "labeled_count": {"type": "number", "label": "Total Labeled", "default": 0},

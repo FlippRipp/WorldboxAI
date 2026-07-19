@@ -91,6 +91,7 @@ class WorldFormStep(Step):
         "step should cover for THIS specific world."
     )
     after = None
+    produces = ("form",)
     guidance = _GUIDANCE
     schema = {
         "world_kind": {

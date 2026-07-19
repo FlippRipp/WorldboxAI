@@ -182,5 +182,7 @@ SPEC = register_pass(PassSpec(
     is_done=lambda n: bool(n.get("description")),
     in_domain=lambda n: bool(n.get("name")),
     after=("label",),
+    requires=("maps", "labels"),
+    produces=("descriptions",),
     summary_key="described",
 ))

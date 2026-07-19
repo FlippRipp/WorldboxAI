@@ -175,5 +175,6 @@ SPEC = register_pass(PassSpec(
     run=_run_map,
     after=("label",),
     triggers={"on_map_complete": "label"},
+    requires=("maps", "labels"),
     summary_key="review",
 ))

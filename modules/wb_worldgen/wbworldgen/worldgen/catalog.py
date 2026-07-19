@@ -14,7 +14,7 @@ catalog — whether other modules may register capabilities directly is Arc C
 open question 4.
 """
 
-from wbworldgen.worldgen.base import describe_steps
+from wbworldgen.worldgen.base import STEP_REGISTRY, describe_steps
 from wbworldgen.worldgen.enrichment.registry import describe_passes
 from wbworldgen.worldgen.generation.registry import describe_generators
 
@@ -39,12 +39,22 @@ def capability_catalog() -> dict:
     }
 
 
+def _data_notes(entry: dict) -> list:
+    notes = []
+    if entry.get("requires"):
+        notes.append(f"requires {'+'.join(entry['requires'])}")
+    if entry.get("produces"):
+        notes.append(f"produces {'+'.join(entry['produces'])}")
+    return notes
+
+
 def _step_notes(entry: dict) -> str:
     notes = []
     if entry.get("after"):
         notes.append(f"after {entry['after']}")
     if entry.get("uses") and entry["uses"] != "llm":
         notes.append(f"engine: {entry['uses']}")
+    notes.extend(_data_notes(entry))
     return f" [{', '.join(notes)}]" if notes else ""
 
 
@@ -66,6 +76,7 @@ def _pass_notes(entry: dict) -> str:
         notes.append(f"auto-runs when {triggers['on_map_complete']} completes a map")
     if entry.get("batchable"):
         notes.append("batchable")
+    notes.extend(_data_notes(entry))
     return f" [{', '.join(notes)}]"
 
 
@@ -94,3 +105,49 @@ def render_catalog_markdown(catalog: dict = None) -> str:
                 f"{entry['description']}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def check_data_dependencies(items: list, steps: dict = None) -> list:
+    """Validate an ordered capability list against the declared data
+    contracts (B3): every item's ``requires`` must name artifacts some
+    earlier item ``produces``.
+
+    ``items``: ``[{"kind": "step"|"pass", "id": ...}, ...]`` in execution
+    order — the shape of an effective (post-``dynamic_skips``) pipeline or a
+    C1 plan's item list. ``steps`` optionally maps step ids to step objects
+    (a builder's registered instances, module-contributed steps included);
+    when omitted, the built-in step classes are used. Pass ids always
+    resolve against the pass registry.
+
+    This checker belongs to the *executor*, not the sorter: ``resolve_order``
+    keeps its behavior and ``after`` chains keep ordering execution — this
+    function only answers "is every data need met by the items actually in
+    the list". Returns a list of human-readable problems (empty = valid);
+    an item referencing an unknown capability raises ``ValueError`` (P1/P7).
+    """
+    from wbworldgen.worldgen.enrichment.registry import get_pass
+
+    if steps is None:
+        import wbworldgen.worldgen.steps  # noqa: F401 — registration side effect
+        steps = {cls.id: cls for cls in STEP_REGISTRY}
+
+    problems = []
+    available = set()
+    for item in items:
+        kind = item.get("kind")
+        item_id = item.get("id")
+        if kind == "step":
+            cap = steps.get(item_id)
+            if cap is None:
+                raise ValueError(f"Unknown step capability: {item_id}")
+        elif kind == "pass":
+            cap = get_pass(item_id)  # raises on unknown ids
+        else:
+            raise ValueError(f"Unknown capability kind: {kind!r} (item {item_id!r})")
+        for needed in getattr(cap, "requires", ()) or ():
+            if needed not in available:
+                problems.append(
+                    f"{kind}:{item_id} requires '{needed}', which nothing "
+                    f"earlier in the list produces")
+        available.update(getattr(cap, "produces", ()) or ())
+    return problems

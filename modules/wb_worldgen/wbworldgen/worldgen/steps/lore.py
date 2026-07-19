@@ -8,6 +8,7 @@ class LoreStep(Step):
     description = ("Establish the world's identity: its name, premise, origins, "
                    "defining periods of its past, and the central tension of the present.")
     after = "world_rules"
+    produces = ("lore",)
     schema = {
         "world_name": {"type": "string", "label": "World Name"},
         "premise": {"type": "text", "label": "Premise"},

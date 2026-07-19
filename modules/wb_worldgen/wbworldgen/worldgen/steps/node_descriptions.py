@@ -8,6 +8,8 @@ class NodeDescriptionsStep(Step):
     description = "Generate rich flavor descriptions for labeled map nodes."
     after = "node_labeling"
     uses = USES_ENRICHMENT
+    requires = ("maps", "labels")
+    produces = ("descriptions",)
     schema = {
         "total_nodes": {"type": "number", "label": "Nodes to Describe", "default": 0},
         "described_count": {"type": "number", "label": "Total Described", "default": 0},

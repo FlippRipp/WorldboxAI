@@ -38,6 +38,8 @@ class TerrainGenerationStep(Step):
     )
     after = "hierarchy_design"
     uses = USES_MAP  # no LLM; bespoke generate below
+    requires = ("hierarchy",)
+    produces = ("terrain",)
     schema = {
         "layers": {"type": "list", "label": "Terrain Layers", "item_schema": {
             "layer_id": {"type": "string", "label": "Layer ID"},

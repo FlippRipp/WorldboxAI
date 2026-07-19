@@ -54,6 +54,9 @@ class NaturalLandmarksStep(Step):
     description = ("Place the world's notable physical features and places: natural landmarks, "
                    "districts, waterfronts, striking locations — whatever fits this world.")
     after = "terrain_generation"
+    # No hard requires: abstract/city worlds skip terrain and this step
+    # still runs (terrain is a soft prompt-context read).
+    produces = ("landmarks",)
     guidance = _GUIDANCE_TERRAIN
     schema = {
         "areas": {"type": "list", "label": "Areas", "rerollable": True, "item_schema": {

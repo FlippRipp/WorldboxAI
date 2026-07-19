@@ -30,6 +30,15 @@ class Step:
     schema: dict[str, Any] = {}
     guidance: str = ""
     uses: str = USES_LLM
+    #: Declared data contract (B3): names of the world artifacts this step
+    #: consumes and contributes ("hierarchy", "maps", "labels", ...).
+    #: ``requires`` lists only HARD needs — artifacts without which the step
+    #: is meaningless — never soft prompt-context reads, so a dependency
+    #: check can run against any effective (post-dynamic-skips) step list
+    #: today's wizard legitimately produces. Execution order stays ``after``'s
+    #: business; the checker (worldgen/catalog.py) is the C1 executor's.
+    requires: tuple = ()
+    produces: tuple = ()
     #: Legacy-compatible field; a real callable override shadows this.
     generate = None
 
@@ -43,6 +52,8 @@ class Step:
         self.schema = copy.deepcopy(type(self).schema)
         self.guidance = type(self).guidance
         self.uses = type(self).uses
+        self.requires = tuple(type(self).requires)
+        self.produces = tuple(type(self).produces)
 
     def to_frontend(self) -> dict:
         return {
@@ -86,7 +97,8 @@ def describe_steps() -> list[dict]:
     (the catalog does)."""
     return [
         {"kind": "step", "id": cls.id, "label": cls.label,
-         "description": cls.description, "after": cls.after, "uses": cls.uses}
+         "description": cls.description, "after": cls.after, "uses": cls.uses,
+         "requires": list(cls.requires), "produces": list(cls.produces)}
         for cls in STEP_REGISTRY
     ]
 

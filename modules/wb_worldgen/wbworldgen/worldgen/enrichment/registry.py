@@ -81,6 +81,12 @@ class PassSpec:
     #: standalone phase. Triggered passes are excluded from phase="all" but
     #: still runnable explicitly (phase="review").
     triggers: Optional[dict] = None
+    #: Declared data contract (B3): world artifacts this pass consumes and
+    #: contributes ("maps", "labels", ...). Hard needs only — the C1
+    #: executor's dependency check reads these; ordering *within* enrichment
+    #: stays ``after``'s business.
+    requires: tuple = ()
+    produces: tuple = ()
     #: May share one LLM call across several units (label batching).
     batchable: bool = False
     #: Batchable passes: ``run_batch(services, batch, state)`` returns
@@ -184,6 +190,7 @@ def describe_passes() -> list[dict]:
          "description": s.description, "unit": s.unit,
          "after": list(s.after),
          "triggers": dict(s.triggers) if s.triggers else None,
-         "batchable": s.batchable}
+         "batchable": s.batchable,
+         "requires": list(s.requires), "produces": list(s.produces)}
         for s in _PASS_REGISTRY.values()
     ]
