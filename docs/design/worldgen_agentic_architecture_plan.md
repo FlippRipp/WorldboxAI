@@ -21,10 +21,11 @@ live test (build + conversation check). v2a (structural surgery toolset)
 DESIGNED and LANDED 2026-07-19 (51e8c0d) on Filip's go, ahead of the
 original evidence gate — see the v2a section in Arc C; the live test now
 exercises the 18-tool catalog. C5 (ideation notes + note verifier +
-review gate) DESIGNED 2026-07-19 with Filip and begun on his go — scoped
-brief notes (N1–N3), a read-only note-verifier agent the builder can
-argue with (N4–N6), and an end-of-build review gate whose veto relaunches
-a fix run (N7).
+review gate) DESIGNED and LANDED 2026-07-19 with Filip (36a32db…903bca4,
+five commits) — scoped brief notes (N1–N3), a read-only note-verifier
+agent the builder can argue with (N4–N6), and an end-of-build review
+gate whose veto relaunches a fix run (N7); the catalog is now 19 tools
+and the outstanding live test covers notes end to end.
 Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
@@ -1079,6 +1080,35 @@ no cross-world concept library — and binding granularity is per-map.*
   vetoed notes as the work list — same loop, same gate, same review if
   new compromises appear.
 
+*Landed 2026-07-19 in five commits (36a32db notes core, 6f25793
+verifier, 8e8713d dialogue, f7ba87a review gate, 903bca4 frontend), with
+refinements recorded against the sketch. (1) Binding resolves in four
+tiers — exact join_key on map label/id, exact on a named node (its map),
+containment on map labels, containment on node names — and a tie WITHIN
+a tier is ambiguity: reported unbound with the candidates listed, never
+guessed. Note finding keys carry no map (``note:<id>:-:-``) so a
+binding change cannot reset fix-round tracking. (2) Loud degradation
+gained a second leg: a verifier that exhausts its turn budget (setting
+``world.note_verifier_max_turns``, default 16) reports every unchecked
+note as a blocking ``note_unverified`` finding — never a silent pass.
+(3) ``discuss_finding`` is build-scoped through a new
+``ToolContext.build`` field (rejects invocations outside a build);
+exchanges budget via ``world.note_discussion_rounds`` (default 3);
+inside one exchange the verifier gets ``DEFAULT_DISCUSSION_TURNS`` (6)
+read/answer turns, and budget exhaustion upholds. A withdrawal records
+``verifier_context`` on the note itself, so later verification runs see
+the resolution (the world, not the handle, is the memory — it survives
+the fix-run relaunch). (4) Both note-obligation key shapes share the N6
+exemption: verifier findings (``note:*``) and the ``note_unbound`` lint.
+(5) The compiled world carries the brief through (compiler copy, the
+scenario precedent), which is what lets enrichment context, the lints
+and the passes read notes with only the compiled dict in hand; the
+observer streams ``verifier_action`` progress lines and renders the
+review panel from ``result.pending_review``. Suite: 4 new module test
+files (45 tests) + module-by-path and root suites green; the live
+conversation + build check rides Filip's outstanding C2–C4 live test,
+which now exercises notes end to end.*
+
 ### Superseded: the plan-artifact design (refined and replaced 2026-07-19)
 
 The original Arc C made the plan a step: a `build_plan` artifact authored
@@ -1116,7 +1146,7 @@ file, before the 2026-07-19 Arc C rewrite).
 | 11 | C3 build observer UI | M | ✓ landed (f039a87); live test = Filip's | watching the build |
 | 12 | C4 ideation conversation | L | ✓ landed (b73c275); classic entry disabled | the front door |
 | 13 | v2a structural surgery toolset | M–L | ✓ landed (51e8c0d) | the agent's structure fix instrument |
-| 14 | C5 ideation notes + note verifier + review gate | L | designed, in progress | detail survives Go, scoped; the user gets what they asked for |
+| 14 | C5 ideation notes + note verifier + review gate | L | ✓ landed (36a32db…903bca4) | detail survives Go, scoped; the user gets what they asked for |
 
 (A5 landed before B1 — the reverse of the original ordering; nothing
 depended on the order.) RuntimeHost (`backend.py` half of A1) can ride along
