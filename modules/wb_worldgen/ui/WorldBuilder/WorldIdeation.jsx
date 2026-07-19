@@ -31,6 +31,7 @@ export function clearSavedIdeation() {
 export default function WorldIdeation({ promptText, onPromptChange, scenarioId, onGo, starting }) {
   const [messages, setMessages] = useState(() => readSavedIdeation().messages || []);
   const [rules, setRules] = useState(() => readSavedIdeation().rules || []);
+  const [notes, setNotes] = useState(() => readSavedIdeation().notes || []);
   const [ready, setReady] = useState(() => !!readSavedIdeation().ready);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -39,13 +40,13 @@ export default function WorldIdeation({ promptText, onPromptChange, scenarioId, 
 
   useEffect(() => {
     try {
-      if (messages.length || rules.length) {
-        localStorage.setItem(IDEATION_KEY, JSON.stringify({ messages, rules, ready }));
+      if (messages.length || rules.length || notes.length) {
+        localStorage.setItem(IDEATION_KEY, JSON.stringify({ messages, rules, notes, ready }));
       } else {
         localStorage.removeItem(IDEATION_KEY);
       }
     } catch { /* storage unavailable */ }
-  }, [messages, rules, ready]);
+  }, [messages, rules, notes, ready]);
 
   // Keep the transcript pinned to the newest message (and the thinking bubble).
   useEffect(() => {
@@ -66,11 +67,13 @@ export default function WorldIdeation({ promptText, onPromptChange, scenarioId, 
         messages: next,
         prompt: (promptText || '').trim() || null,
         rules,
+        notes,
         scenarioId: scenarioId || null,
       });
       setMessages([...next, { role: 'assistant', text: res.reply }]);
       onPromptChange(res.prompt || '');
       setRules(res.rules || []);
+      setNotes(res.notes || []);
       setReady(!!res.ready);
     } catch (e) {
       // Unanswered message comes back out of the transcript and into the
@@ -87,6 +90,7 @@ export default function WorldIdeation({ promptText, onPromptChange, scenarioId, 
     if (busy) return;
     setMessages([]);
     setRules([]);
+    setNotes([]);
     setReady(false);
     setError('');
     clearSavedIdeation();
@@ -95,6 +99,7 @@ export default function WorldIdeation({ promptText, onPromptChange, scenarioId, 
   // Dropping a rule is a hand edit like any other: the next turn's drafts
   // round-trip it, and Go sends exactly what is on screen.
   const removeRule = (i) => setRules((rs) => rs.filter((_, j) => j !== i));
+  const removeNote = (i) => setNotes((ns) => ns.filter((_, j) => j !== i));
 
   const canGo = !!(promptText || '').trim() && !busy && !starting;
 
@@ -189,6 +194,33 @@ export default function WorldIdeation({ promptText, onPromptChange, scenarioId, 
         </div>
       )}
 
+      {notes.length > 0 && (
+        <div className="rounded-lg border border-gray-700 bg-gray-900/50 p-3 space-y-1.5">
+          <p className="text-xs font-medium text-gray-400">
+            Design notes <span className="text-gray-600">— established facts the build must honor; notes about a specific place steer only that place</span>
+          </p>
+          {notes.map((n, i) => (
+            <div key={i} className="flex items-start gap-2">
+              <span className="text-sm text-gray-300 flex-1">
+                {n.subject && (
+                  <span className="text-emerald-400/80 text-xs mr-1.5 border border-emerald-900 rounded px-1 py-0.5">{n.subject}</span>
+                )}
+                {n.text}
+              </span>
+              <button
+                type="button"
+                onClick={() => removeNote(i)}
+                disabled={busy || starting}
+                title="Drop this note"
+                className="shrink-0 text-gray-600 hover:text-red-400 disabled:opacity-50 text-xs transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {ready && (
         <p className="text-xs text-emerald-300">
           The AI thinks this is ready to build — your call.
@@ -198,7 +230,7 @@ export default function WorldIdeation({ promptText, onPromptChange, scenarioId, 
       <div>
         <button
           type="button"
-          onClick={() => onGo(rules)}
+          onClick={() => onGo(rules, notes)}
           disabled={!canGo}
           className={`w-full py-3 rounded-lg font-medium text-lg transition-colors flex items-center justify-center gap-2 ${
             ready

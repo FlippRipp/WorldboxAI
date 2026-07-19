@@ -84,7 +84,72 @@ function progressLine(evt) {
   if (evt.type === 'phase') return `${evt.phase}: ${evt.pending} pending`;
   if (evt.type === 'review_fix') return `review fix: ${evt.old} → ${evt.new}`;
   if (evt.type === 'pregenerated') return `pregenerated ${evt.name}`;
+  if (evt.type === 'verifier_action') {
+    return `note verifier: ${evt.tool}${evt.discussing ? ` (discussing ${evt.discussing})` : ''}`;
+  }
   return null;
+}
+
+// The end-of-build review (C5/N7): compromises and accepted note
+// obligations, each vetoable. Doing nothing keeps the world as built; a
+// veto relaunches the agent with the original notes binding.
+function NotesReviewPanel({ review, onVeto, vetoing }) {
+  const [checked, setChecked] = useState({});
+  const items = [
+    ...(review.amended || []).map((a) => ({ ...a, kind: 'amended' })),
+    ...(review.accepted_notes || []).map((a) => ({ ...a, kind: 'accepted' })),
+  ];
+  if (!items.length) return null;
+  const ids = items.filter((it) => checked[it.id]).map((it) => it.id);
+  return (
+    <div className="text-sm bg-amber-950/20 border border-amber-900/60 rounded-lg p-3 space-y-2">
+      <p className="text-amber-200 font-medium">
+        Review: the build changed or gave up on {items.length} of your notes
+      </p>
+      <p className="text-xs text-gray-500">
+        Keeping the world as built needs no action. Tick what you reject and
+        enforce it — the agent rebuilds until the original note is honored,
+        and a vetoed note can never be compromised again.
+      </p>
+      <ul className="space-y-2">
+        {items.map((it) => (
+          <li key={it.id} className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              checked={!!checked[it.id]}
+              onChange={(e) => setChecked((c) => ({ ...c, [it.id]: e.target.checked }))}
+              disabled={vetoing}
+              className="mt-1 accent-amber-500"
+            />
+            <div className="text-xs flex-1 space-y-0.5">
+              {it.subject && (
+                <span className="text-emerald-400/80 border border-emerald-900 rounded px-1 py-0.5 mr-1.5">{it.subject}</span>
+              )}
+              {it.kind === 'amended' ? (
+                <>
+                  <span className="text-gray-500 line-through">{it.original_text}</span>
+                  <span className="text-gray-300"> → {it.amended_text}</span>
+                  {it.rationale && <p className="text-gray-500 italic">verifier: {it.rationale}</p>}
+                </>
+              ) : (
+                <>
+                  <span className="text-gray-300">{it.text}</span>
+                  <p className="text-amber-400/80">not honored — accepted by the agent{it.reason ? `: ${it.reason}` : ''}</p>
+                </>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+      <button
+        onClick={() => onVeto(ids)}
+        disabled={!ids.length || vetoing}
+        className="px-3 py-1.5 rounded-lg border border-amber-800 text-amber-300 hover:bg-amber-950/40 disabled:opacity-50 disabled:cursor-not-allowed text-sm transition-colors"
+      >
+        {vetoing ? 'Relaunching…' : `Veto ${ids.length || ''} and rebuild`}
+      </button>
+    </div>
+  );
 }
 
 function LogRow({ evt }) {
@@ -166,6 +231,10 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
   const [terminal, setTerminal] = useState(null);
   const [gone, setGone] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [vetoing, setVetoing] = useState(false);
+  // Bumped when a veto relaunches the build: both effects re-run and the
+  // observer follows the fix run from its first event.
+  const [streamEpoch, setStreamEpoch] = useState(0);
   const lastIRef = useRef(-1);
   const logRef = useRef(null);
 
@@ -177,7 +246,7 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
       .then((st) => { if (alive) setMeta(st); })
       .catch((e) => { if (alive && e.status === 404) setGone(true); });
     return () => { alive = false; };
-  }, [worldId]);
+  }, [worldId, streamEpoch]);
 
   // The event stream: full replay on mount, cursor replay + live after
   // drops. The loop runs server-side — closing this view changes nothing.
@@ -215,7 +284,7 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
     };
     connect();
     return () => { alive = false; clearTimeout(timer); ctrl?.abort(); };
-  }, [worldId]);
+  }, [worldId, streamEpoch]);
 
   // Keep the log pinned to the newest entry.
   useEffect(() => {
@@ -237,6 +306,26 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
   const cancel = async () => {
     setCancelling(true);
     try { await api.agentBuildCancel(worldId); } catch { /* build may already be over */ }
+  };
+
+  // The veto (N7): relaunch with the rejected notes binding, then follow
+  // the fix run from scratch — same world id, a fresh build and stream.
+  const veto = async (noteIds) => {
+    setVetoing(true);
+    try {
+      await api.agentVeto(worldId, noteIds);
+      lastIRef.current = -1;
+      setEvents([]);
+      setTerminal(null);
+      setProgress(null);
+      setMeta(null);
+      setCancelling(false);
+      setStreamEpoch((n) => n + 1);
+    } catch (e) {
+      alert('Veto failed: ' + e.message);
+    } finally {
+      setVetoing(false);
+    }
   };
 
   return (
@@ -315,6 +404,23 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
             </div>
           )}
 
+          {meta?.brief?.notes?.length > 0 && (
+            <div className="text-xs border-l-2 border-emerald-900 pl-3 space-y-0.5">
+              <p className="text-gray-400 font-medium">
+                Design notes <span className="text-gray-600">— verified before the build can finish</span>
+              </p>
+              {meta.brief.notes.map((n, i) => (
+                <p key={i} className="text-gray-500">
+                  •{' '}
+                  {n.subject && <span className="text-emerald-500/80">[{n.subject}]</span>}
+                  {' '}{n.text}
+                  {n.status === 'amended' && <span className="text-amber-500/90"> (amended — review pending)</span>}
+                  {n.no_compromise && <span className="text-amber-500/90"> (vetoed — binding as written)</span>}
+                </p>
+              ))}
+            </div>
+          )}
+
           {gone && (
             <p className="text-sm text-gray-400">
               No agent build exists for this world — it may have been deleted.
@@ -371,6 +477,9 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
                 </div>
               )}
             </div>
+          )}
+          {status === 'done' && result?.pending_review && (
+            <NotesReviewPanel review={result.pending_review} onVeto={veto} vetoing={vetoing} />
           )}
           {status === 'failed' && (
             <p className="text-sm text-red-400">{terminal?.error || meta?.error || 'The build failed.'}</p>

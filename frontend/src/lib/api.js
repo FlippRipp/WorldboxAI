@@ -177,7 +177,7 @@ export const api = {
   // player and returns the updated seed-prompt + world-rules drafts, plus
   // `ready` (its judgment that the idea is settled — the go offer). The
   // client holds the conversation and the drafts round-trip every turn.
-  ideationTurn:           ({ messages = [], prompt = null, rules = [], scenarioId = null }) => request('/api/world/ideation-turn', { method: 'POST', body: JSON.stringify({ messages, prompt, rules, scenario_id: scenarioId }) }),
+  ideationTurn:           ({ messages = [], prompt = null, rules = [], notes = [], scenarioId = null }) => request('/api/world/ideation-turn', { method: 'POST', body: JSON.stringify({ messages, prompt, rules, notes, scenario_id: scenarioId }) }),
   generateWorldStep:      (stepId, note = '', data = null) => {
     const body = { note };
     if (data) body.data = data;
@@ -193,7 +193,8 @@ export const api = {
   // whole world on its own, from the ideation brief (seed prompt + the
   // co-authored world rules). Launch returns the new world id immediately;
   // poll status (or stream the events endpoint) to watch, cancel any time.
-  agentBuild:             (seedPrompt, scenarioId = null, rules = []) => request('/api/world/agent/build', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, rules, ...(scenarioId ? { scenario_id: scenarioId } : {}) }) }),
+  agentBuild:             (seedPrompt, scenarioId = null, rules = [], notes = []) => request('/api/world/agent/build', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, rules, notes, ...(scenarioId ? { scenario_id: scenarioId } : {}) }) }),
+  agentVeto:              (worldId, noteIds) => request(`/api/world/${worldId}/agent/veto`, { method: 'POST', body: JSON.stringify({ note_ids: noteIds }) }),
   agentBuildStatus:       (worldId) => request(`/api/world/${worldId}/agent/status`),
   agentBuildCancel:       (worldId) => request(`/api/world/${worldId}/agent/cancel`, { method: 'POST' }),
   // Agent build event stream: replays the persisted action log from `after`

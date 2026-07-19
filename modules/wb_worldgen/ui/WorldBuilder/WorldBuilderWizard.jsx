@@ -278,14 +278,15 @@ export default function WorldBuilderWizard({ onBack, onWorldCreated }) {
     return () => { alive = false; clearInterval(t); };
   }, [started, polling]);
 
-  // The go-ahead (C4): hand the ideation brief — prompt + co-authored rules
-  // — to the server-side agent. The conversation is done its job once the
-  // build owns the brief, so its saved state clears here.
-  const handleAgentStart = async (rules = []) => {
+  // The go-ahead (C4/C5): hand the ideation brief — prompt + co-authored
+  // rules + design notes — to the server-side agent. The conversation is
+  // done its job once the build owns the brief, so its saved state clears
+  // here.
+  const handleAgentStart = async (rules = [], notes = []) => {
     if (!seedPrompt.trim()) return;
     setLoading(true);
     try {
-      const result = await api.agentBuild(seedPrompt.trim(), scenarioId, rules);
+      const result = await api.agentBuild(seedPrompt.trim(), scenarioId, rules, notes);
       clearSavedIdeation();
       setAgentWorldId(result.world_id);
     } catch (e) {
