@@ -891,3 +891,49 @@ def test_evaluator_excerpt_marks_truncation():
         "nodes": [{"id": "a", "name": "A", "importance": 5,
                    "description": "d"}]}}}
     assert "excerpt truncated" not in _content_excerpts(small)
+
+
+# ---------------------------------------------------------------------------
+# revert (v2c): build-scoped byte-exact restore of pre-action checkpoints
+# ---------------------------------------------------------------------------
+
+def _build_ctx(builder, world_id):
+    """A ToolContext inside an agent build — revert is build-scoped and
+    only needs the handle as a scope token."""
+    return ToolContext(builder=builder, world_id=world_id,
+                       build=types.SimpleNamespace())
+
+
+def test_revert_requires_build_scope(builder):
+    wid = _map_world(builder, named=True)
+    with pytest.raises(ToolError, match="inside an agent build"):
+        run(invoke_tool(_ctx(builder, wid), "revert", {"checkpoint": 1}))
+
+
+def test_revert_unknown_checkpoint_lists_available(builder):
+    wid = _map_world(builder, named=True)
+    ctx = _build_ctx(builder, wid)
+    with pytest.raises(ToolError, match="No checkpoints exist yet"):
+        run(invoke_tool(ctx, "revert", {"checkpoint": 3}))
+    builder.services.enrichment_store.snapshot_world(wid, "4")
+    with pytest.raises(ToolError) as err:
+        run(invoke_tool(ctx, "revert", {"checkpoint": 9}))
+    assert "No checkpoint '9'" in str(err.value) and "4" in str(err.value)
+
+
+def test_revert_restores_world_and_compiled_cache(builder):
+    wid = _map_world(builder, named=True)
+    store = builder.services.enrichment_store
+    store.snapshot_world(wid, "2")
+    run(invoke_tool(_ctx(builder, wid), "edit_node",
+                    {"node_id": "n0", "name": "Renamed Keep"}))
+    assert builder.services.compiled.get_node(wid, "n0")["name"] == "Renamed Keep"
+
+    result = run(invoke_tool(_build_ctx(builder, wid), "revert",
+                             {"checkpoint": 2}))
+    assert result["reverted_to_before_action"] == 2
+    assert result["maps"][0]["named"] == result["maps"][0]["nodes"]
+    # Disk AND the compiled cache serve the restored timeline.
+    nodes = builder.load_world(wid)["steps"]["map_generation"]["data"]["nodes"]
+    assert nodes[0]["name"] == "Town 0"
+    assert builder.services.compiled.get_node(wid, "n0")["name"] == "Town 0"

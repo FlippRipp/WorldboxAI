@@ -14,6 +14,16 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+#: Per-world checkpoint store (v2c): byte-exact world snapshots the agent
+#: harness takes before mutating tool actions. Lives inside the world
+#: directory but is never itself part of a snapshot.
+CHECKPOINTS_DIRNAME = "_checkpoints"
+
+#: Top-level entries excluded from snapshot AND left untouched by restore:
+#: the checkpoint store itself and the agent build's observability artifact
+#: — the action log is history, not world content, and must never rewind.
+CHECKPOINT_EXCLUDE = (CHECKPOINTS_DIRNAME, "agent_build.json")
+
 
 def safe_world_id(world_id: str) -> str:
     """Normalize a world id into a filesystem-safe slug, matching the rule used
@@ -641,6 +651,93 @@ class WorldPersistence:
                     self.write_enrichment_to_disk(world_id)
                     return "step"
         return None
+
+    # --- world checkpoints (v2c: the agent's revert safety net) -------------
+    #
+    # A checkpoint is a byte-exact copy of the world's persisted content
+    # (metadata, step files, child-map bundles, sites, terrain rasters).
+    # The harness snapshots before every mutating agent action; the revert
+    # tool restores. Restore rewinds world CONTENT only — the current brief
+    # (the user's contract: rules and notes, amendments, verifier context
+    # and veto locks included) is carried forward, because the agreement is
+    # not the agent's work product to roll back.
+
+    def checkpoints_dir(self, world_id: str) -> Path:
+        return self.world_dir(world_id) / CHECKPOINTS_DIRNAME
+
+    def snapshot_world(self, world_id: str, tag: str) -> str:
+        """Copy the world's persisted content into checkpoint ``tag``
+        (replacing a same-tag leftover). Flushes the enrichment write cache
+        first so pending node writes are part of the snapshot. Returns the
+        normalized tag; unknown worlds raise FileNotFoundError."""
+        world_dir = self.world_dir(world_id)
+        if not world_dir.is_dir():
+            raise FileNotFoundError(f"World '{world_id}' not found.")
+        safe_tag = safe_world_id(str(tag))
+        self.write_enrichment_to_disk(world_id)
+        dest = self.checkpoints_dir(world_id) / safe_tag
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(world_dir, dest,
+                        ignore=shutil.ignore_patterns(*CHECKPOINT_EXCLUDE))
+        return safe_tag
+
+    def list_checkpoints(self, world_id: str) -> list:
+        """Existing checkpoint tags, numerically ordered for the digit tags
+        the harness uses (action-log indices)."""
+        d = self.checkpoints_dir(world_id)
+        if not d.is_dir():
+            return []
+        return sorted((p.name for p in d.iterdir() if p.is_dir()),
+                      key=lambda t: (len(t), t))
+
+    def restore_world(self, world_id: str, tag: str):
+        """Replace the world's persisted content with checkpoint ``tag``'s.
+
+        The world rewinds; the agreement does not: the current metadata
+        ``brief`` survives the restore. Cache coherence: the write-cache
+        entry is invalidated BEFORE files are replaced — a later flush must
+        never resurrect post-checkpoint state over the restored files (the
+        exact hazard ``invalidate_enrichment_cache`` exists for) — and the
+        child-node index is dropped. Compiled-cache invalidation is the
+        caller's job (that cache is facade-owned)."""
+        world_dir = self.world_dir(world_id)
+        snap = self.checkpoints_dir(world_id) / safe_world_id(str(tag))
+        if not snap.is_dir():
+            raise FileNotFoundError(
+                f"World '{world_id}' has no checkpoint '{tag}'.")
+        current_brief = self._read_metadata(world_id).get("brief")
+
+        self.invalidate_enrichment_cache(world_id)
+        self._child_node_index.pop(safe_world_id(world_id), None)
+
+        for entry in world_dir.iterdir():
+            if entry.name in CHECKPOINT_EXCLUDE:
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        for entry in snap.iterdir():
+            target = world_dir / entry.name
+            if entry.is_dir():
+                shutil.copytree(entry, target)
+            else:
+                shutil.copy2(entry, target)
+
+        if isinstance(current_brief, dict):
+            metadata = self._read_metadata(world_id)
+            metadata["brief"] = current_brief
+            self._write_metadata(world_id, metadata)
+
+    def clear_checkpoints(self, world_id: str):
+        """Drop the world's whole checkpoint store. The revert window is
+        build-scoped: a new build clears leftovers up front (stale tags
+        would collide with its fresh action indices) and every terminal
+        build state clears them behind itself."""
+        shutil.rmtree(self.checkpoints_dir(world_id), ignore_errors=True)
+
+    # --- enrichment write cache (flush/invalidate) --------------------------
 
     def flush_enrichment_cache(self, world_id: str = None):
         if world_id:

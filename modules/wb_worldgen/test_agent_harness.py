@@ -557,3 +557,97 @@ def test_brief_rules_persist_and_reach_the_prompt(builder, monkeypatch):
     h2 = run(adopt())
     assert h2.brief["rules"] == cleaned
     assert builder.load_world(handle.world_id)["brief"]["rules"] == cleaned
+
+
+# ---------------------------------------------------------------------------
+# World checkpoints + revert (v2c): every mutating action snapshots first
+# ---------------------------------------------------------------------------
+
+def _store(builder):
+    return builder.services.enrichment_store
+
+
+def test_mutating_action_checkpoints_and_revert_restores(builder, monkeypatch):
+    wid = _content_world(builder)
+    _canned(monkeypatch, [
+        # Log: turn i=0, action i=1 → the edit is checkpointed as "1".
+        {"thought": "rename",
+         "action": {"tool": "edit_node",
+                    "args": {"node_id": "n0", "name": "Renamed Keep"}}},
+        {"thought": "that made it worse — go back",
+         "action": {"tool": "revert", "args": {"checkpoint": 1}}},
+        {"thought": "back on the good timeline",
+         "done": {"summary": "Six quiet towns, as they were."}},
+    ])
+    handle, _ = _run_build(builder, world_id=wid)
+    assert handle.status == "done"
+
+    observations = _events_of(handle, "observation")
+    assert observations[0]["ok"] is True
+    assert observations[0]["checkpoint"] == 1        # the agent's handle
+    assert observations[1]["ok"] is True
+    assert observations[1]["result"]["reverted_to_before_action"] == 1
+
+    # The rename is gone from disk; the revert window closed with the build.
+    nodes = builder.load_world(wid)["steps"]["map_generation"]["data"]["nodes"]
+    assert nodes[0]["name"] == "Town 0"
+    assert _store(builder).list_checkpoints(wid) == []
+
+
+def test_read_actions_do_not_checkpoint(builder, monkeypatch):
+    wid = _content_world(builder)
+    seen_during = {}
+
+    def snoop():
+        seen_during["tags"] = _store(builder).list_checkpoints(wid)
+        return {"thought": "done", "done": {"summary": "A quiet land."}}
+
+    _canned(monkeypatch, [
+        {"thought": "look", "action": {"tool": "read_lint"}},
+        snoop,
+    ])
+    handle, _ = _run_build(builder, world_id=wid)
+    assert handle.status == "done"
+    assert seen_during["tags"] == []                 # read-only: no snapshot
+    assert all("checkpoint" not in o for o in _events_of(handle, "observation"))
+
+
+def test_stale_checkpoints_cleared_at_launch(builder, monkeypatch):
+    wid = _content_world(builder)
+    _store(builder).snapshot_world(wid, "99")        # a previous build's leftover
+
+    def first_turn():
+        # Cleared before the first agent turn: stale tags must never
+        # collide with this build's fresh action indices.
+        assert _store(builder).list_checkpoints(wid) == []
+        return {"thought": "done", "done": {"summary": "A quiet land."}}
+
+    _canned(monkeypatch, [first_turn])
+    handle, _ = _run_build(builder, world_id=wid)
+    assert handle.status == "done"
+
+
+def test_checkpoint_failure_blocks_the_mutation(builder, monkeypatch):
+    wid = _content_world(builder)
+
+    def broken_snapshot(world_id, tag):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(_store(builder), "snapshot_world", broken_snapshot)
+    _canned(monkeypatch, [
+        {"thought": "rename",
+         "action": {"tool": "edit_node",
+                    "args": {"node_id": "n0", "name": "Renamed Keep"}}},
+        {"thought": "give up", "done": {"summary": "A quiet land."}},
+    ])
+    handle, _ = _run_build(builder, world_id=wid)
+    assert handle.status == "done"
+
+    failed = _events_of(handle, "observation")[0]
+    assert failed["ok"] is False
+    assert "checkpoint before 'edit_node' failed" in failed["error"]
+    assert "NOT run" in failed["error"]
+    # The world is untouched and the unprotected call cost no budget.
+    nodes = builder.load_world(wid)["steps"]["map_generation"]["data"]["nodes"]
+    assert nodes[0]["name"] == "Town 0"
+    assert handle.tool_calls == 0

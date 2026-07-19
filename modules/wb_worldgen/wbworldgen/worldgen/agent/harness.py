@@ -17,7 +17,10 @@ todo can never drift from the action stream.
 
 Budgets are harness-enforced structural units (D5): max turns, max tool
 calls, max fix rounds per finding (a blocking finding still standing after
-that many evaluation rounds is auto-accepted and recorded). The user is
+that many evaluation rounds is auto-accepted and recorded). Every mutating
+tool call is preceded by a world checkpoint keyed by its action index
+(v2c) — the revert tool's restore targets; the store is per-build, cleared
+at launch and on every terminal state. The user is
 out of the loop during the build (P6): steering happened at the go-gate,
 observability is the persisted todo/action-log artifact
 (``agent_build.json`` in the world directory) streamed live over SSE, and
@@ -176,6 +179,40 @@ async def _emit(handle: AgentBuild, evt: dict, persist: bool = True):
         q.put_nowait(evt)
 
 
+def _clear_checkpoints(builder, world_id: str):
+    """Drop the world's checkpoint store (v2c). Best-effort like the
+    artifact writes — and a no-op for test rigs whose fake store has no
+    checkpoint surface."""
+    try:
+        builder.services.enrichment_store.clear_checkpoints(world_id)
+    except Exception:
+        pass
+
+
+def _checkpoint_before(handle: AgentBuild, tool_id: str, action_i: int):
+    """World snapshot before a mutating tool call (v2c) — the revert
+    tool's restore target, keyed by the action's log index. Returns
+    ``(tag, error)``: ``(None, None)`` for read-only/unknown tools and for
+    stores without a checkpoint surface (test rigs); a real store that
+    fails to snapshot is an ERROR the loop surfaces instead of running the
+    action — running a mutation without its safety net would silently
+    break revert's contract (P7)."""
+    from wbworldgen.worldgen.agent.registry import get_tool
+    try:
+        if not get_tool(tool_id).mutates:
+            return None, None
+    except ToolError:
+        return None, None  # unknown tool: invoke_tool rejects it next
+    store = handle.builder.services.enrichment_store
+    snapshot = getattr(store, "snapshot_world", None)
+    if snapshot is None:
+        return None, None
+    try:
+        return snapshot(handle.world_id, str(action_i)), None
+    except Exception as e:
+        return None, f"world checkpoint before '{tool_id}' failed: {e}"
+
+
 # --- the agent turn (the mock seam) ----------------------------------------
 
 async def agent_turn(services, messages: list) -> dict:
@@ -272,6 +309,12 @@ major findings show the gap).
 - Fix content findings with steered regeneration: run_pass with rework, \
 node_ids and a guidance note is your primary fix instrument. Regenerating \
 a step with a steering note is the recourse for structural problems.
+- Every mutating action is checkpointed first; its observation carries the \
+checkpoint id. When a mutation made the world WORSE — a regeneration \
+replaced content you needed, an edit or surgery broke structure — revert \
+to the state before it (the revert tool) instead of rebuilding lost \
+content from memory, then take a better path. Revert rewinds world \
+content only; your todo, observations and the brief stay as they are.
 - Note findings (note:*) are the user's contract and are never \
 auto-accepted. Fix the world — or, if you believe the verifier is wrong \
 or the note genuinely conflicts with the design, contest the finding with \
@@ -597,14 +640,30 @@ async def _run_build(handle: AgentBuild):
                 await _emit(handle, {"type": "observation", "turn": handle.turns,
                                      "ok": False, **observation})
                 continue
-            handle.tool_calls += 1
             await _emit(handle, {"type": "action", "turn": handle.turns,
                                  "tool": tool_id, "args": args})
+            # The world snapshot rides the action's log index (v2c): the id
+            # the revert tool restores by, echoed in the observation.
+            action_i = handle.log[-1]["i"] if handle.log else 0
+            checkpoint, cp_error = _checkpoint_before(handle, tool_id, action_i)
+            if cp_error is not None:
+                observation = {
+                    "action": {"tool": tool_id, "args": args},
+                    "error": (cp_error + "; the action was NOT run — the "
+                              "world is unchanged.")}
+                handle.recent.append({"turn": handle.turns, **observation})
+                await _emit(handle, {"type": "observation", "turn": handle.turns,
+                                     "ok": False,
+                                     "error": observation["error"]})
+                continue
+            handle.tool_calls += 1
             try:
                 result = await invoke_tool(ctx, tool_id, args)
                 ok = True
                 observation = {"action": {"tool": tool_id, "args": args},
                                "result": result}
+                if checkpoint is not None:
+                    observation["checkpoint"] = action_i
                 if tool_id == "evaluate":
                     _track_findings(handle, result)
                     await _emit(handle, {"type": "eval", "trigger": "tool",
@@ -618,6 +677,8 @@ async def _run_build(handle: AgentBuild):
             handle.recent.append({"turn": handle.turns, **observation})
             await _emit(handle, {"type": "observation", "turn": handle.turns,
                                  "ok": ok,
+                                 **({"checkpoint": action_i}
+                                    if ok and checkpoint is not None else {}),
                                  **({"result": observation.get("result")} if ok
                                     else {"error": observation.get("error")})})
         else:
@@ -630,6 +691,9 @@ async def _run_build(handle: AgentBuild):
         handle.error = str(e)
     finally:
         handle.finished_at = datetime.utcnow().isoformat() + "Z"
+        # Every terminal state closes the revert window (v2c): checkpoints
+        # are build-scoped scaffolding, not world content.
+        _clear_checkpoints(builder, handle.world_id)
         await _emit(handle, {"type": "done", "status": handle.status,
                              "turns": handle.turns,
                              "tool_calls": handle.tool_calls,
@@ -689,6 +753,11 @@ def start_agent_build(builder, seed_prompt: str, scenario: str = "",
     # read as finished before the agent did anything.
     state["complete"] = False
     world_id = builder.save_draft(world_id or "", state)
+    # Leftover checkpoints from an earlier build on this world (adopt/veto
+    # relaunch, or a crash that skipped terminal cleanup) would collide
+    # with this build's fresh action indices — the revert window is
+    # strictly per-build (v2c).
+    _clear_checkpoints(builder, world_id)
 
     handle = AgentBuild(world_id, state.get("seed_prompt", seed_prompt), builder,
                         brief=state.get("brief"))
