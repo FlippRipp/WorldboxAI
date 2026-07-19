@@ -14,6 +14,7 @@ import tempfile
 import pytest
 
 from wbworldgen.worldgen import WorldBuilder, register_default_steps
+from wbworldgen.worldgen import design
 from wbworldgen.worldgen.steps import world_form as wf
 
 
@@ -54,18 +55,18 @@ def _state_with_form(data):
 
 def test_dynamic_skips_allowlist_and_backcompat():
     # No world_form data (old worlds, seeded worlds) -> nothing skipped.
-    assert wf.dynamic_skips({}) == set()
-    assert wf.dynamic_skips({"steps": {}}) == set()
+    assert design.dynamic_skips({}) == set()
+    assert design.dynamic_skips({"steps": {}}) == set()
 
     # Abstract map style turns terrain off; allowlisted skips pass through.
     state = _state_with_form({"map_style": "abstract", "skip_steps": ["society_factions"]})
-    assert wf.dynamic_skips(state) == {"terrain_generation", "society_factions"}
+    assert design.dynamic_skips(state) == {"terrain_generation", "society_factions"}
 
     # Structural steps can never be skipped, whatever the LLM wrote.
     state = _state_with_form({"map_style": "terrain",
                               "skip_steps": ["world_rules", "lore", "map_generation",
                                              "node_labeling", "natural_landmarks"]})
-    assert wf.dynamic_skips(state) == {"natural_landmarks"}
+    assert design.dynamic_skips(state) == {"natural_landmarks"}
 
 
 def test_coverage_directive_lookup():
@@ -73,10 +74,10 @@ def test_coverage_directive_lookup():
         {"step_id": "lore", "directive": "Recent city history, no myths."},
         {"step_id": "society_factions", "directive": "  clubs and workplaces  "},
     ]})
-    assert wf.coverage_directive(state, "lore") == "Recent city history, no myths."
-    assert wf.coverage_directive(state, "society_factions") == "clubs and workplaces"
-    assert wf.coverage_directive(state, "natural_landmarks") == ""
-    assert wf.coverage_directive({}, "lore") == ""
+    assert design.coverage_directive(state, "lore") == "Recent city history, no myths."
+    assert design.coverage_directive(state, "society_factions") == "clubs and workplaces"
+    assert design.coverage_directive(state, "natural_landmarks") == ""
+    assert design.coverage_directive({}, "lore") == ""
 
 
 def test_normalize_world_form_clamps_junk():
@@ -153,7 +154,7 @@ def test_world_form_mock_path_matches_todays_behavior(builder):
     assert data["skip_steps"] == []
     assert all(d["step_id"] in builder._steps for d in data["step_directives"])
     state = {"seed_prompt": "s", "steps": {"world_form": {"data": data, "approved": True}}}
-    assert wf.dynamic_skips(state) == set()
+    assert design.dynamic_skips(state) == set()
 
 
 def test_world_form_live_path_catalog_and_normalization(builder):
@@ -216,10 +217,10 @@ def test_city_map_style_normalizes_and_skips_terrain():
     data = wf.normalize_world_form({"map_style": "city"}, known)
     assert data["map_style"] == "city"
     state = _state_with_form({"map_style": "city"})
-    assert "terrain_generation" in wf.dynamic_skips(state)
-    assert wf.map_generator_override(state) == "city_roadnet"
-    assert wf.map_generator_override(_state_with_form({"map_style": "terrain"})) == ""
-    assert wf.map_generator_override({"seed_prompt": "s", "steps": {}}) == ""
+    assert "terrain_generation" in design.dynamic_skips(state)
+    assert design.map_generator_override(state) == "city_roadnet"
+    assert design.map_generator_override(_state_with_form({"map_style": "terrain"})) == ""
+    assert design.map_generator_override({"seed_prompt": "s", "steps": {}}) == ""
 
 
 def test_city_map_style_routes_map_generation_to_roadnet(builder):

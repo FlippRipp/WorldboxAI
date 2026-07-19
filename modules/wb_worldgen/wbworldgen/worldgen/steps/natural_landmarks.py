@@ -109,7 +109,7 @@ class NaturalLandmarksStep(Step):
         runs on worlds whose creation generates terrain rasters. On abstract
         and city worlds the tag would be authored and then never read — so
         drop the field and its guidance there."""
-        from wbworldgen.worldgen.steps.world_form import dynamic_skips
+        from wbworldgen.worldgen.design import dynamic_skips
         if "terrain_generation" not in dynamic_skips(world_state):
             return self
         view = copy.copy(self)

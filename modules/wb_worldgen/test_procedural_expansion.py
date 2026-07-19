@@ -228,13 +228,14 @@ def test_authored_root_for_interior_root_level(builder):
     assert is_expandable(compiled, compiled["root_map_id"], root["nodes"][1])
 
 
-def test_procedural_roots_keep_the_procedural_path(builder):
+def test_procedural_roots_keep_the_procedural_path():
+    from wbworldgen.worldgen.design import authored_root_level
     # A terrain/abstract/city root never routes through the authored flow.
-    assert builder._authored_root_level({"seed_prompt": "s", "steps": {}}, "world_map") is None
-    assert builder._authored_root_level({"seed_prompt": "s", "steps": {}}, "city_roadnet") is None
+    assert authored_root_level({"seed_prompt": "s", "steps": {}}, "world_map") is None
+    assert authored_root_level({"seed_prompt": "s", "steps": {}}, "city_roadnet") is None
     state = {"seed_prompt": "s", "steps": {"hierarchy_design": {"data": {"levels": [
         {"level_type": "interior", "generator_id": "interior"}]}}}}
-    level = builder._authored_root_level(state, "interior")
+    level = authored_root_level(state, "interior")
     assert level and level["level_type"] == "interior"
 
 

@@ -12,6 +12,7 @@ import asyncio
 import logging
 
 from wbworldgen.worldgen import compiler
+from wbworldgen.worldgen import design as _design
 from wbworldgen.worldgen import mapspace as _mapspace
 from wbworldgen.worldgen import pipeline as _pipeline
 from wbworldgen.worldgen import start_locations as _start
@@ -25,8 +26,6 @@ from wbworldgen.worldgen.hooks import HookRegistry
 from wbworldgen.worldgen.persistence import WorldPersistence
 from wbworldgen.worldgen.services import GenServices
 from wbworldgen.worldgen.base import USES_MAP
-from wbworldgen.worldgen.steps import hierarchy_design as _hierarchy_design
-from wbworldgen.worldgen.steps import world_form as _world_form
 from wbworldgen.worldgen.fixtures.mock_data import (
     mock_hierarchy_design, mock_layer_design, mock_layer_rules, mock_lore,
     mock_natural_landmarks, mock_rules, mock_society_factions,
@@ -403,7 +402,7 @@ class WorldBuilder:
         the skips its own world_form design decided (abstract map style,
         AI-skipped optional steps). `resolve_order` itself stays untouched, so
         `after` chains keep resolving against the full registry."""
-        skip = _world_form.dynamic_skips(world_state)
+        skip = _design.dynamic_skips(world_state)
         return [sid for sid in self._ordered_ids if sid not in skip]
 
     def system_framing_for(self, world_state: dict) -> str:
@@ -411,7 +410,7 @@ class WorldBuilder:
         own design (world_form's world_kind) as the genre voice. Worlds
         without a design (old worlds, the world_form step itself) keep the
         historical default framing byte-identical."""
-        kind = _world_form.world_kind(world_state)
+        kind = _design.world_kind(world_state)
         if kind:
             return f"{DEFAULT_SYSTEM_FRAMING} This world: {kind}"
         return DEFAULT_SYSTEM_FRAMING
@@ -436,8 +435,8 @@ class WorldBuilder:
 
         uses = getattr(step, "uses", "llm")
         if step_id == "map_generation" or uses == USES_MAP:
-            root_gen = self._root_generator_for(world_state)
-            level = self._authored_root_level(world_state, root_gen)
+            root_gen = _design.root_generator_for(world_state)
+            level = _design.authored_root_level(world_state, root_gen)
             if level is not None:
                 # Root-as-first-expansion: the whole world is one authored
                 # place (an interior-style root level) — the same authored
@@ -447,7 +446,7 @@ class WorldBuilder:
                 return await self._maps_expand.expand_root(
                     world_state, user_prompt, level,
                     max_locations=max(8, max_locations))
-            abstract_level = self._abstract_root_level(world_state, root_gen)
+            abstract_level = _design.abstract_root_level(world_state, root_gen)
             if abstract_level is not None:
                 # Abstract worlds (a solar system, a dream web) get an
                 # AUTHORED root graph: real named places from the hierarchy
@@ -455,8 +454,8 @@ class WorldBuilder:
                 # a procedural scatter that ignores both.
                 return await self._maps_expand.expand_abstract_root(
                     world_state, user_prompt, abstract_level,
-                    directive=_world_form.coverage_directive(world_state, "map_generation"),
-                    world_kind=_world_form.world_kind(world_state))
+                    directive=_design.coverage_directive(world_state, "map_generation"),
+                    world_kind=_design.world_kind(world_state))
             # Delaunay + road pathfinding are CPU-bound; keep the event loop free.
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
@@ -471,7 +470,7 @@ class WorldBuilder:
             data = await self._llm_gen.generate(
                 step, context, user_prompt, user_note,
                 system_framing=self.system_framing_for(world_state),
-                coverage_directive=_world_form.coverage_directive(world_state, step_id))
+                coverage_directive=_design.coverage_directive(world_state, step_id))
         else:
             data = self._mock_gen.generate(step, world_state, user_prompt, user_note)
 
@@ -507,7 +506,7 @@ class WorldBuilder:
         if self._llm_service and self._llm_service.mode != "mock":
             context = self._build_chain_context(world_state, step_id)
             framing = self.system_framing_for(world_state)
-            directive = _world_form.coverage_directive(world_state, step_id)
+            directive = _design.coverage_directive(world_state, step_id)
             if is_structured:
                 return await self._llm_gen.generate_structured_item(
                     step, field, field_schema, items, index, context, user_prompt,
@@ -561,49 +560,6 @@ class WorldBuilder:
     def _merge_geography_steps(self, steps_data: dict) -> dict:
         return compiler.merge_geography_steps(steps_data)
 
-    def _authored_root_level(self, world_state: dict, root_gen: str) -> dict | None:
-        """The designed root level when its generator needs authored (LLM)
-        content — a world whose whole playable space is one interior-style
-        map. None for procedural roots (terrain, abstract, city)."""
-        from wbworldgen.worldgen.generation.registry import GENERATOR_REGISTRY
-        spec = GENERATOR_REGISTRY.get(root_gen)
-        if spec is None or not spec.needs_llm_content:
-            return None
-        designed = _hierarchy_design.designed_levels(world_state)
-        if designed:
-            return designed[0]
-        return {"level_type": "interior", "label": "Interior", "generator_id": root_gen}
-
-    def _abstract_root_level(self, world_state: dict, root_gen: str) -> dict | None:
-        """The designed root level when the world's own design declared the
-        map abstract — a conceptual graph of places (a solar system, a dream
-        web) with no procedural landscape. The root map is then AUTHORED by
-        an LLM call reading the hierarchy guidance and map directive instead
-        of scattered procedurally. None for terrain/city roots,
-        terrain-flagged root levels, and worlds predating the design step
-        (their maps stay procedural, exactly as before)."""
-        if root_gen != "world_map":
-            return None
-        if _world_form.map_style(world_state) != "abstract":
-            return None
-        designed = _hierarchy_design.designed_levels(world_state)
-        level = designed[0] if designed else {
-            "level_type": "world", "label": "World", "generator_id": "world_map"}
-        if level.get("terrain"):
-            return None
-        return level
-
-    def _root_generator_for(self, world_state: dict) -> str:
-        """The generator that draws a world's root map. The world's own
-        designed structure (hierarchy_design levels) is authoritative when
-        present; worlds without one (old worlds, junk design output) fall
-        back to the world_form "city" override over the default overworld
-        generator, exactly as before the structure step existed."""
-        designed = _hierarchy_design.designed_levels(world_state)
-        if designed:
-            return designed[0].get("generator_id") or "world_map"
-        return _world_form.map_generator_override(world_state) or "world_map"
-
     def compile_world(self, world_state: dict) -> dict:
         # Hierarchy levels resolve inside the pure compiler (the world's own
         # AI-designed structure, default [world, interior] when absent) so
@@ -649,9 +605,9 @@ class WorldBuilder:
         note_for_layer = ""
         for step_id in self._ordered_ids:
             if step_id == "map_generation":
-                root_gen = self._root_generator_for(world_state)
-                level = self._authored_root_level(world_state, root_gen)
-                abstract_level = self._abstract_root_level(world_state, root_gen)
+                root_gen = _design.root_generator_for(world_state)
+                level = _design.authored_root_level(world_state, root_gen)
+                abstract_level = _design.abstract_root_level(world_state, root_gen)
                 if level is not None:
                     data = self._maps_expand.mock_root_map(world_state, level)
                 elif abstract_level is not None:
@@ -872,8 +828,7 @@ class WorldBuilder:
         (seed-central locations). One full-attention call per map, serialized.
         Unmatched names are skipped with a warning — they expand lazily later."""
         world_state = self.load_world(world_id)
-        planned = (world_state.get("steps", {}).get("hierarchy_design", {})
-                   .get("data", {}) or {}).get("pregenerate") or []
+        planned = _design.pregenerate_plans(world_state)
         summary = {"built": [], "skipped": []}
         if not planned:
             return summary

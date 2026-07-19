@@ -436,7 +436,7 @@ def compile_world(world_state: dict, steps: Optional[dict] = None) -> dict:
     # hierarchy.
     levels = world_state.get("hierarchy_levels")
     if not levels:
-        from wbworldgen.worldgen.steps.hierarchy_design import designed_levels
+        from wbworldgen.worldgen.design import designed_levels
         levels = designed_levels(world_state)
     if levels:
         compiled["hierarchy"] = {

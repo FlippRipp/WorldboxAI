@@ -9,21 +9,18 @@ for what it should cover (``step_directives``). A modern Tokyo slice-of-life
 world gets an abstract city map and "clubs and workplaces" instead of a
 fantasy overworld with kingdoms; the AI, not the template, makes that call.
 
-Downstream, ``dynamic_skips``/``coverage_directive`` are the pure read seams:
-the facade merges the skips into the effective step order and injects each
-directive into that step's prompt. Worlds with no world_form data (old worlds,
-seeded worlds) get an empty skip set and empty directives — full back-compat.
+Downstream, ``design.dynamic_skips``/``design.coverage_directive`` (the
+worldgen design module — the one query surface over this step's output) are
+the pure read seams: the facade merges the skips into the effective step
+order and injects each directive into that step's prompt. Worlds with no
+world_form data (old worlds, seeded worlds) get an empty skip set and empty
+directives — full back-compat.
 """
 
 import copy
 
 from wbworldgen.worldgen.base import Step, register
-
-#: Steps the AI may skip outright. Everything else is structural: world_rules /
-#: lore / hierarchy_design / map_generation feed the compiled contract (world
-#: ids, hierarchy, the map itself) and enrichment steps are engine-driven.
-#: terrain_generation is controlled by ``map_style``, not listed here.
-AI_SKIPPABLE = {"natural_landmarks", "society_factions"}
+from wbworldgen.worldgen.design import AI_SKIPPABLE
 
 #: Never presented in the step catalog: the step itself, and the engine-driven
 #: enrichment passes the AI has no say over.
@@ -52,53 +49,6 @@ quiet neighborhood? Then:
   mythic world, lean the other way. The directives you write here steer every
   later generation call.
 """
-
-
-def _step_data(world_state: dict) -> dict:
-    data = ((world_state or {}).get("steps", {}).get("world_form", {}) or {}).get("data")
-    return data if isinstance(data, dict) else {}
-
-
-def dynamic_skips(world_state: dict) -> set:
-    """Step ids the world's own design turns off. Empty when no world_form
-    data exists (old worlds, seeded worlds) so everything else behaves exactly
-    as before this step existed."""
-    data = _step_data(world_state)
-    if not data:
-        return set()
-    skips = {s for s in (data.get("skip_steps") or []) if s in AI_SKIPPABLE}
-    if data.get("map_style") in ("abstract", "city"):
-        skips.add("terrain_generation")
-    return skips
-
-
-def world_kind(world_state: dict) -> str:
-    """The design's one-line reading of what this world is ("" when absent).
-    The facade appends it to the system framing, giving every later
-    generation call a per-world genre voice."""
-    return str(_step_data(world_state).get("world_kind") or "").strip()
-
-
-def map_style(world_state: dict) -> str:
-    """The design's root map style ("" when absent — old worlds)."""
-    return str(_step_data(world_state).get("map_style") or "").strip()
-
-
-def map_generator_override(world_state: dict) -> str:
-    """Generator id the world's own design imposes on the root map ("" when
-    the template's level default should stand). A "city" map style routes
-    map generation to the street-network generator."""
-    if _step_data(world_state).get("map_style") == "city":
-        return "city_roadnet"
-    return ""
-
-
-def coverage_directive(world_state: dict, step_id: str) -> str:
-    """The world-design directive for one step ("" when none)."""
-    for entry in _step_data(world_state).get("step_directives") or []:
-        if isinstance(entry, dict) and entry.get("step_id") == step_id:
-            return str(entry.get("directive") or "").strip()
-    return ""
 
 
 def normalize_world_form(data, known_step_ids) -> dict:

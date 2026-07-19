@@ -19,10 +19,8 @@ import pytest
 from wbworldgen.worldgen import WorldBuilder, register_default_steps
 from wbworldgen.worldgen.enrichment.maps_expand import allowed_child_levels
 from wbworldgen.worldgen.migrate import DEFAULT_LEVELS
-from wbworldgen.worldgen.steps.hierarchy_design import (
-    designed_levels,
-    normalize_hierarchy_design,
-)
+from wbworldgen.worldgen.design import designed_levels, root_generator_for
+from wbworldgen.worldgen.steps.hierarchy_design import normalize_hierarchy_design
 
 IMPLEMENTED = ["world_map", "city_roadnet", "interior"]
 
@@ -172,7 +170,7 @@ def test_designed_root_generator_drives_map_generation(builder):
         {"level_type": "city", "generator_id": "city_roadnet"},
         {"level_type": "interior", "generator_id": "interior"},
     ])
-    assert builder._root_generator_for(state) == "city_roadnet"
+    assert root_generator_for(state) == "city_roadnet"
     data = asyncio.run(builder.generate_step(
         "map_generation", state, "a city", config={"total_nodes": 40}))
     assert data.get("generator_id") == "city_roadnet"
@@ -181,17 +179,17 @@ def test_designed_root_generator_drives_map_generation(builder):
 def test_worlds_without_design_keep_default_and_city_override(builder):
     # Old world, no designed levels: default overworld root.
     old = {"seed_prompt": "s", "steps": {}}
-    assert builder._root_generator_for(old) == "world_map"
+    assert root_generator_for(old) == "world_map"
     # world_form "city" override still applies without a designed structure.
     city = {"seed_prompt": "s", "steps": {
         "world_form": {"data": {"map_style": "city"}}}}
-    assert builder._root_generator_for(city) == "city_roadnet"
+    assert root_generator_for(city) == "city_roadnet"
     # A designed structure wins over the override.
     designed = _state_with_levels([
         {"level_type": "world", "generator_id": "world_map"},
         {"level_type": "interior", "generator_id": "interior"}])
     designed["steps"]["world_form"] = {"data": {"map_style": "city"}}
-    assert builder._root_generator_for(designed) == "world_map"
+    assert root_generator_for(designed) == "world_map"
 
 
 def test_designed_levels_ride_into_compiled_world(builder):
@@ -245,7 +243,7 @@ def test_template_era_world_still_compiles_and_expands(builder):
     }
     state["steps"]["map_generation"] = {"data": asyncio.run(builder.generate_step(
         "map_generation", state, state["seed_prompt"], config={"total_nodes": 40}))}
-    assert builder._root_generator_for(state) == "world_map"
+    assert root_generator_for(state) == "world_map"
     compiled = builder.compile_world(state)
     assert [l["level_type"] for l in compiled["hierarchy"]["levels"]] == ["world", "interior"]
     assert compiled["template_id"] == "interplanetary_scifi"

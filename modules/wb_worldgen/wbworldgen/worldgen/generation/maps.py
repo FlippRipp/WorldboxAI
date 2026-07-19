@@ -41,7 +41,7 @@ class MapStepGenerator:
         connections}) that compile_world already migrates into world_format 2
         maps + connections — same as the world_map multilayer path."""
         from wbworldgen.worldgen.generation.registry import GENERATOR_REGISTRY, get_generator
-        from wbworldgen.worldgen.steps.hierarchy_design import designed_levels
+        from wbworldgen.worldgen.design import designed_levels
 
         levels = designed_levels(world_state)
         gen_by_level = {l.get("level_type"): l.get("generator_id") for l in levels}
@@ -197,7 +197,7 @@ class MapStepGenerator:
             return result
 
         if parallel_maps:
-            from wbworldgen.worldgen.steps.hierarchy_design import designed_levels
+            from wbworldgen.worldgen.design import designed_levels
             levels = designed_levels(world_state)
             root_layer_type = (levels[0].get("level_type") if levels else "world") or "world"
             layer_specs = [{"layer_id": "root", "name": "",

@@ -123,7 +123,7 @@ def _prune_dynamic_skips(state: dict):
     otherwise stale entries would still compile into the world and the step
     cards would linger in the UI."""
     try:
-        from wbworldgen.worldgen.steps.world_form import dynamic_skips
+        from wbworldgen.worldgen.design import dynamic_skips
     except ImportError:  # fakes/legacy builders in tests
         return
     for sid in dynamic_skips(state):

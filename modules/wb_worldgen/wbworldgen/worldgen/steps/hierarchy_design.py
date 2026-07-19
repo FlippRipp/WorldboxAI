@@ -9,17 +9,18 @@ exactly like the pre-design era. Non-root levels only take effect at
 play-time expansion (interiors today; wider scales arrive with the unified
 generation rework — see docs/design/ai_world_structure_plan.md).
 
-``designed_levels``/``contribute_to_compiled`` are the read seams: the facade
-resolves a world's levels through the former (falling back to the default
-[world, interior] pair for old worlds), and the compiler picks up the
-AI-authored vocabulary through the latter, filling the same
+``design.designed_levels`` (the worldgen design module — the one query
+surface over this step's output) and ``contribute_to_compiled`` are the read
+seams: the facade resolves a world's levels through the former (falling back
+to the default [world, interior] pair for old worlds), and the compiler
+picks up the AI-authored vocabulary through the latter, filling the same
 ``template_vocab`` seam template-era worlds' snapshots still use.
 """
 
 import copy
 
+from wbworldgen.worldgen import design as _design
 from wbworldgen.worldgen.base import Step, register
-from wbworldgen.worldgen.steps import world_form as _world_form
 
 #: Where an unknown or unimplemented generator id lands — decision 6: the
 #: existing world_map is the abstract fallback (without terrain it draws a
@@ -77,32 +78,6 @@ courts", "decks, domes and installations"); connection_looks describe how
 each kind of crossing between maps reads in prose (kind "cave_mouth" ->
 "a cave mouth yawning into the dark").
 """
-
-
-def _step_data(world_state: dict) -> dict:
-    data = ((world_state or {}).get("steps", {}).get("hierarchy_design", {}) or {}).get("data")
-    return data if isinstance(data, dict) else {}
-
-
-def designed_levels(world_state: dict) -> list:
-    """The world's own AI-authored hierarchy levels ([] when absent — old
-    worlds and pre-design step data keep the default levels)."""
-    levels = _step_data(world_state).get("levels")
-    if not isinstance(levels, list):
-        return []
-    out = []
-    for level in levels:
-        if not isinstance(level, dict):
-            continue
-        if not level.get("level_type") or not level.get("generator_id"):
-            continue
-        entry = dict(level)
-        if entry["generator_id"] == "interior":
-            # Player-added form entries have no nestable flag; interior-style
-            # levels always nest (a vault inside a castle).
-            entry.setdefault("nestable", True)
-        out.append(entry)
-    return out
 
 
 def normalize_hierarchy_design(data, implemented_generator_ids,
@@ -264,7 +239,7 @@ class HierarchyDesignStep(Step):
         from wbworldgen.worldgen.generation.registry import list_generators
         implemented = [g for g in list_generators() if g["implemented"]]
         implemented_ids = [g["id"] for g in implemented]
-        map_style = str(_world_form._step_data(ctx.world_state).get("map_style") or "")
+        map_style = _design.map_style(ctx.world_state)
 
         # Custom-generate steps bypass the facade's mock branch, so handle
         # mock mode here (precedent: world_form).
@@ -279,7 +254,7 @@ class HierarchyDesignStep(Step):
             f"- {g['id']}: {g['label']} — {g['description']}" for g in implemented)
         style_note = ""
         if map_style:
-            aligned = {"terrain": "world_map", "city": "city_roadnet"}.get(map_style)
+            aligned = _design.aligned_root_generator(map_style)
             style_note = (
                 f"\n\nThe World Design step chose map_style \"{map_style}\" for the root map"
                 + (f" — the FIRST level's generator_id must be {aligned}." if aligned
@@ -294,7 +269,7 @@ class HierarchyDesignStep(Step):
         data = await services._llm_gen.generate(
             effective, context, ctx.user_prompt, ctx.user_note,
             system_framing=services.system_framing_for(ctx.world_state),
-            coverage_directive=_world_form.coverage_directive(ctx.world_state, self.id))
+            coverage_directive=_design.coverage_directive(ctx.world_state, self.id))
         return normalize_hierarchy_design(data, implemented_ids, map_style)
 
     def contribute_to_compiled(self, steps_data: dict, compiled: dict):

@@ -545,15 +545,14 @@ Output ONLY valid JSON:
     def _abstract_inputs(self, world_state: dict) -> tuple:
         """(seed_prompt, lore, rules, areas, scopes, parallel_maps) for the
         authored abstract root flow."""
+        from wbworldgen.worldgen import design as _design
         from wbworldgen.worldgen.compiler import collect_scope_content
         steps_data = world_state.get("steps", {})
         landmarks_data = steps_data.get("natural_landmarks", {}).get("data", {}) or {}
         areas = [a for a in landmarks_data.get("areas", []) or []
                  if isinstance(a, dict) and str(a.get("name", "")).strip()]
         scopes = collect_scope_content(steps_data)
-        hierarchy = steps_data.get("hierarchy_design", {}).get("data", {}) or {}
-        parallel = [p for p in hierarchy.get("parallel_maps") or []
-                    if isinstance(p, dict) and str(p.get("label", "")).strip()]
+        parallel = _design.parallel_maps(world_state)
         lore = steps_data.get("lore", {}).get("data", {}) or {}
         rules = steps_data.get("world_rules", {}).get("data", {}) or {}
         return world_state.get("seed_prompt", ""), lore, rules, areas, scopes, parallel
@@ -1052,7 +1051,7 @@ Output ONLY valid JSON:
         persistence = self._services.terrain_store
         if persistence is None or not world_id:
             return None, None
-        from wbworldgen.worldgen.steps.terrain_generation import _build_layer_terrain
+        from wbworldgen.worldgen.terrain_build import build_layer_terrain
         from wbworldgen.worldgen import terrain_store as _ts
         # 256 keeps a lazy planet expansion under ~10s of CPU; the root map's
         # creation-time rasters stay at 1024. Raise the setting for
@@ -1060,7 +1059,7 @@ Output ONLY valid JSON:
         resolution = self._services.resolve_int_setting(
             "world.child_terrain_resolution", 256, 128, 2048)
         try:
-            entry = _build_layer_terrain(
+            entry = build_layer_terrain(
                 world_id,
                 {"layer_id": map_id, "name": name, "layer_type": "surface",
                  "index": seed % 1000},
