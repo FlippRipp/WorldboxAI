@@ -8,8 +8,9 @@ REDESIGNED 2026-07-19 with Filip: the plan-artifact approach (old C1a/C1b/C2)
 is superseded by a tool-calling agent loop plus a conversational ideation
 phase — settled choices are recorded as D1–D5 in Arc C, the old four open
 questions are resolved or dissolved there (module capabilities survives as
-the one open question, deferred, non-blocking). Next item: C1 (toolbox
-registry). Records the structural assessment of
+the one open question, deferred, non-blocking). C1 (toolbox registry +
+tools + lints) LANDED 2026-07-19 (e989488). Next item: C2 (agent harness +
+evaluator). Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
 agentic builder — an LLM receives a world idea and figures out what it needs
@@ -697,6 +698,34 @@ rejected with errors shaped for the agent to read.
 **Verify:** unit tests per tool (validation rejections + happy path on a
 seeded world), lint fixtures with known defects, catalog-render test.
 
+*Landed 2026-07-19 (e989488): ``worldgen/agent/`` — ``registry.py``
+(ToolSpec + typed argument validation + ``invoke_tool`` raising
+agent-readable ``ToolError``), ``lints.py``, ``tools/{read,build,edit}.py``
+(11 tools), with three recorded refinements against the sketch. (1) The
+guidance channel rides ``RunState.guidance`` → each pass's per-call
+``context["guidance"]`` instead of new kwargs on ``generate_label``/
+``generate_description`` — B1 made those functions the test patch points,
+and a signature change would have broken every existing patcher; threaded
+through single, batched, describe, review-critique and repair paths.
+(2) `pass:custom` runs as an *ephemeral* ``PassSpec`` through the same
+engine via new ``enrich_run(spec=)``/``engine.run(specs=)`` rather than a
+globally registered pass — a global entry would render a bogus B1.5 panel
+row and has no meaningful world-level ``is_done``; output lands namespaced
+(``custom_<slot>``) so core fields cannot be clobbered by construction.
+(3) ``patch_step`` excludes ``map_generation`` and the engine-driven
+enrichment steps: a raw map patch is structural surgery through a side
+door, which D1 explicitly withholds — map content goes through
+``edit_node``/``run_pass``/regeneration. Preconditions are B3's
+executor-side check via new ``catalog.produced_artifacts()`` (step
+artifacts from non-empty step data, pass artifacts from node predicates)
+diffed against ``requires``. The lint's map-isolation check is reachability
+from the root over connections + parent anchors (a local
+"has connections?" test would flag the root map itself). ``run_step`` pins
+``_draft_id`` so terrain rasters land in the world's directory. Facade
+additions: ``steps_by_id()``, ``enrich_run(guidance=, spec=)``. The B2
+catalog renders the tools as its fourth section (per-argument lines
+included — that render is the C2 system prompt's toolbox text).*
+
 ### C2. Agent harness + evaluator (server) — size L
 
 The loop itself: brief + toolbox + todo in, actions out, budgets around
@@ -775,8 +804,8 @@ file, before the 2026-07-19 Arc C rewrite).
 | 6 | B1.5 panel over the pass catalog | S | ✓ landed (301f3c1) | UI keeps the P2 promise |
 | 7 | B2 catalog | S | ✓ landed (22954e9) | agentic substrate |
 | 8 | B3 dependencies (+ order-pin test first) | M | ✓ landed (0b0cab0) | plan validation |
-| 9 | C1 toolbox registry + tools + lints | M–L | next | the agent's action surface |
-| 10 | C2 agent harness + evaluator | L | after C1 | agentic mode v1 |
+| 9 | C1 toolbox registry + tools + lints | M–L | ✓ landed (e989488) | the agent's action surface |
+| 10 | C2 agent harness + evaluator | L | next | agentic mode v1 |
 | 11 | C3 build observer UI | M | after C2 | watching the build |
 | 12 | C4 ideation conversation | L | after C3 (swappable) | the front door |
 
