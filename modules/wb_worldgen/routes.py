@@ -1113,6 +1113,34 @@ async def agent_build_start(request: AgentBuildRequest):
     return {"world_id": handle.world_id, "status": handle.status}
 
 
+class AgentVetoRequest(BaseModel):
+    #: Ids of the brief notes whose compromise/acceptance the user rejects.
+    note_ids: list[str] = []
+
+
+@router.post("/api/world/{world_id}/agent/veto")
+async def agent_build_veto(world_id: str, request: AgentVetoRequest):
+    """The end-of-build review's veto (C5/N7): re-assert the vetoed notes
+    as binding (a vetoed compromise restores the original text and can
+    never be amended again) and relaunch the agent on the finished world
+    as a bounded fix run. Not vetoing needs no call at all — the world is
+    done."""
+    from wbworldgen.worldgen.agent import harness as agent_harness
+    try:
+        world_builder.load_world(world_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Unknown world: {world_id}")
+    try:
+        handle = agent_harness.veto_notes(
+            world_builder, world_id, [str(n).strip() for n in request.note_ids
+                                      if str(n).strip()])
+    except ValueError as exc:
+        status = 409 if "already running" in str(exc) else 400
+        raise HTTPException(status_code=status, detail=str(exc))
+    return {"world_id": handle.world_id, "status": handle.status,
+            "vetoed": request.note_ids}
+
+
 @router.get("/api/world/{world_id}/agent/status")
 async def agent_build_status(world_id: str):
     """Current build snapshot (status, turn/tool counters, todo, result).

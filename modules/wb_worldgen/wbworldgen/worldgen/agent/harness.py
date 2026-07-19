@@ -375,6 +375,45 @@ def _is_note_finding(key: str) -> bool:
     return key.startswith("note:") or ":note_unbound:" in key
 
 
+def _note_id_of(key: str):
+    """The note id a note finding key carries (either shape), else None."""
+    parts = str(key or "").split(":")
+    if parts and parts[0] == "note" and len(parts) >= 2:
+        return parts[1]
+    if len(parts) >= 4 and parts[1] == "note_unbound":
+        return parts[3]
+    return None
+
+
+def _pending_review(world_state: dict, accepted: list) -> dict:
+    """The end-of-build review payload (N7): compromises (amended notes)
+    and explicitly accepted note obligations, each with enough context for
+    the user to veto. Empty dict when the user got every note as agreed."""
+    brief = world_state.get("brief") if isinstance(world_state.get("brief"), dict) else {}
+    notes_by_id = {n.get("id"): n for n in (brief.get("notes") or [])
+                   if isinstance(n, dict)}
+    amended = [
+        {"id": n.get("id"), "subject": n.get("subject", ""),
+         "original_text": n.get("original_text", ""),
+         "amended_text": n.get("text", ""),
+         "rationale": n.get("rationale", "")}
+        for n in notes_by_id.values() if n.get("status") == "amended"]
+    accepted_notes = []
+    for a in accepted:
+        nid = _note_id_of(a.get("key", ""))
+        if nid is None:
+            continue
+        note = notes_by_id.get(nid, {})
+        accepted_notes.append({
+            "id": nid, "subject": note.get("subject", ""),
+            "text": note.get("text", ""),
+            "finding": a.get("finding", ""),
+            "reason": a.get("note", "")})
+    if not amended and not accepted_notes:
+        return {}
+    return {"amended": amended, "accepted_notes": accepted_notes}
+
+
 async def _done_gate(handle: AgentBuild, done_claim: dict, budgets: dict):
     """Final evaluation on a done claim (D3). Returns (result, rejection):
     result when the gate passes — blocking findings all fixed, accepted by
@@ -438,14 +477,21 @@ async def _done_gate(handle: AgentBuild, done_claim: dict, budgets: dict):
          "note": str(done_claim.get("note", ""))}
         for f in blocking]
     nits = [f for f in eval_result["findings"] if f["severity"] == "nit"]
-    return {
+    result = {
         "summary": str(done_claim.get("summary", "")),
         "accepted_findings": accepted,
         "open_nits": [{"key": f["key"], "finding": f["finding"]} for f in nits],
         "eval": {"clean": eval_result["clean"],
                  "blocking": eval_result["blocking"],
                  "findings": len(eval_result["findings"])},
-    }, None
+    }
+    # The review gate (N7): compromises and accepted note obligations go to
+    # the user — at the absolute end, never mid-build. The world completes
+    # and saves regardless; not vetoing means done.
+    review = _pending_review(world_state, accepted)
+    if review:
+        result["pending_review"] = review
+    return result, None
 
 
 # --- the loop ---------------------------------------------------------------
@@ -638,6 +684,47 @@ def start_agent_build(builder, seed_prompt: str, scenario: str = "",
     _persist_artifact(handle)
     handle.task = asyncio.create_task(_run_build(handle))
     return handle
+
+
+def veto_notes(builder, world_id: str, note_ids: list) -> AgentBuild:
+    """The user's veto (N7): re-assert the vetoed notes as binding and
+    relaunch the agent on the finished world as a normal bounded build (the
+    adopt-a-world path — same loop, same gate, same review if new
+    compromises appear).
+
+    For an amended note the original text is restored; every vetoed note is
+    marked ``no_compromise`` — it can never be amended again (the discuss
+    channel refuses). Unknown ids and worlds without a brief fail loudly
+    (P7); a still-running build raises ValueError like any double launch.
+    """
+    if not note_ids:
+        raise ValueError("No note ids to veto.")
+    existing = _BUILDS.get(world_id)
+    if existing is not None and existing.status == "running":
+        raise ValueError(f"An agent build is already running for '{world_id}'")
+    world_state = builder.load_world(world_id)
+    brief = world_state.get("brief") if isinstance(world_state.get("brief"), dict) else None
+    if not brief:
+        raise ValueError(f"World '{world_id}' has no ideation brief — "
+                         "nothing to veto.")
+    notes_by_id = {n.get("id"): n for n in (brief.get("notes") or [])
+                   if isinstance(n, dict)}
+    unknown = [nid for nid in note_ids if nid not in notes_by_id]
+    if unknown:
+        raise ValueError(f"No such note(s) in the brief: {', '.join(unknown)}")
+
+    for nid in note_ids:
+        note = notes_by_id[nid]
+        if note.get("status") == "amended":
+            note["text"] = note.get("original_text") or note["text"]
+            note.pop("status", None)
+            note.pop("original_text", None)
+            note.pop("rationale", None)
+        note["no_compromise"] = True
+    builder.save_world(world_id, world_state)
+
+    return start_agent_build(
+        builder, world_state.get("seed_prompt", ""), world_id=world_id)
 
 
 def cancel_build(world_id: str) -> bool:
