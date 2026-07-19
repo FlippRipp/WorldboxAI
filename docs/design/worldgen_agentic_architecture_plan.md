@@ -4,9 +4,9 @@
 along with the next backend.py change). Arc B refined and DECIDED with Filip
 (2026-07-19): unit+trigger pass model, legacy per-node endpoints removed in
 B1, panel generalization as B1.5. B1 landed 2026-07-19 (d169491); B1.5
-landed 2026-07-19 (301f3c1) — next item B2. Arc C refined into C1a/C1b; its
-four open questions are deliberately STILL OPEN — settle them with Filip
-before C1a starts. Records the structural assessment of
+landed 2026-07-19 (301f3c1); B2 landed 2026-07-19 (22954e9) — next item B3.
+Arc C refined into C1a/C1b; its four open questions are deliberately STILL
+OPEN — settle them with Filip before C1a starts. Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
 agentic builder — an LLM receives a world idea and figures out what it needs
@@ -429,6 +429,13 @@ a first-class artifact that C1's planner reads whole. Module-contributed
 hooks (`HOOK_NAMES`) are explicitly *out* for now — that is Arc C open
 question 4.
 
+*Landed 2026-07-19 (22954e9): `describe_steps` / `describe_generators` /
+`describe_passes` on their registries (every entry: kind, id, label,
+description, declared contracts), aggregated by `worldgen/catalog.py` —
+`capability_catalog()` (complete from a cold start via the
+`register_default_steps` lazy-import idiom) + `render_catalog_markdown()`.
+The B1.5 `/enrich/passes` route now serves the shared pass slice.*
+
 ### B3. Declared data dependencies — size M
 
 Steps today declare ordering (`after`); they don't declare *data*. Add
@@ -612,8 +619,8 @@ decisions.*
 | 4 | A5 facade slimming | M | ✓ landed (9cf5ad4) | hygiene; staged C1 |
 | 5 | B1 pass registry (+ engine split, legacy endpoint removal) | L | ✓ landed (d169491) | new LLM passes |
 | 6 | B1.5 panel over the pass catalog | S | ✓ landed (301f3c1) | UI keeps the P2 promise |
-| 7 | B2 catalog | S | next | agentic substrate |
-| 8 | B3 dependencies (+ order-pin test first) | M | | plan validation |
+| 7 | B2 catalog | S | ✓ landed (22954e9) | agentic substrate |
+| 8 | B3 dependencies (+ order-pin test first) | M | next | plan validation |
 | 9 | C1a build-plan step + executor (server) | L | ⛔ open questions first | agentic mode v1 |
 | 10 | C1b plan editor UI | M–L | after C1a | steering the plan |
 | 11 | C2 reactive loop | L | exploratory | agentic mode v2 |
