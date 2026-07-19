@@ -26,7 +26,9 @@ async def generate_label(services, node: dict, context: dict, used_names=None,
                          problem_note: str = None) -> tuple:
     """One labeling LLM call. Returns (name, label_description); raises on
     failure. ``problem_note`` carries a reviewer's objection when relabeling
-    a rejected name."""
+    a rejected name; ``context["guidance"]`` carries the run-level steering
+    note (C1's guidance channel — a context key so this signature, a test
+    patch point, stays stable)."""
     node_type = node.get("type", "waypoint")
     node_id = node.get("id", "")
     importance = node.get("importance", 0)
@@ -76,6 +78,8 @@ async def generate_label(services, node: dict, context: dict, used_names=None,
             f'This node was previously named "{node.get("name", "")}" but that '
             f"name was rejected on review: {problem_note} Author a different "
             "name that does not have this problem.")
+    if context.get("guidance"):
+        guidance.append(f"Steering note for this run: {context['guidance']}")
     named_elsewhere = [str(n) for n in (used_names or []) if n]
     if named_elsewhere:
         guidance.append(
@@ -162,12 +166,14 @@ async def generate_label_batch(services, batch: list, contexts: dict,
                                used_names: list) -> dict:
     """One batched labeling LLM call for several nodes. Returns the parsed
     {"nodes": [{"id", "name", "label_description"}, ...]} payload; raises on
-    failure."""
+    failure. Run-level steering arrives as ``contexts[*]["guidance"]`` (the
+    same key the single-node call reads)."""
     model = services.llm.module_fast_model or services.llm.reader_model
     temperature = services.temperature or 0.9
 
-    # Same world for every node in the batch.
+    # Same world (and run guidance) for every node in the batch.
     world = contexts.get(batch[0].get("id"), {}).get("world", {})
+    run_guidance = contexts.get(batch[0].get("id"), {}).get("guidance", "")
 
     lines = []
     for i, node in enumerate(batch, 1):
@@ -223,6 +229,8 @@ async def generate_label_batch(services, batch: list, contexts: dict,
         "of a hospital, a dock of a harbor) unless a fitting parent is in that "
         "location's near list — otherwise pick a place that stands on its own."
     )
+    if run_guidance:
+        system += f"\n\nSteering note for this run: {run_guidance}"
     user_msg = services.prompts(
         "enrich_label_batch_user",
         f"""World: {world.get('name', 'Unknown')} ({world.get('genre', '')}, {world.get('tone', '')})
@@ -258,7 +266,8 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
 
 
 async def run_label_batch(services, batch: list, all_nodes: list, compiled: dict,
-                          used_names: list, _depth: int = 0) -> tuple:
+                          used_names: list, _depth: int = 0,
+                          guidance: str = "") -> tuple:
     """One batched labeling call. Returns (results, leftovers): results maps
     node_id -> {"name", "label_description"} for entries that validated;
     leftovers are nodes to re-run as single-node calls (missing/invalid/
@@ -270,6 +279,9 @@ async def run_label_batch(services, batch: list, all_nodes: list, compiled: dict
         n.get("id"): build_enrichment_context(n, all_nodes, compiled, include_descriptions=False)
         for n in batch
     }
+    if guidance:
+        for ctx in contexts.values():
+            ctx["guidance"] = guidance
     try:
         await services.backoff.wait()
         async with services.semaphore:
@@ -279,8 +291,8 @@ async def run_label_batch(services, batch: list, all_nodes: list, compiled: dict
         if _depth == 0 and len(batch) >= 4:
             logger.warning("Batch labeling failed (%d nodes), bisecting: %s", len(batch), e)
             mid = len(batch) // 2
-            res_a, left_a = await run_label_batch(services, batch[:mid], all_nodes, compiled, used_names, _depth=1)
-            res_b, left_b = await run_label_batch(services, batch[mid:], all_nodes, compiled, used_names, _depth=1)
+            res_a, left_a = await run_label_batch(services, batch[:mid], all_nodes, compiled, used_names, _depth=1, guidance=guidance)
+            res_b, left_b = await run_label_batch(services, batch[mid:], all_nodes, compiled, used_names, _depth=1, guidance=guidance)
             res_a.update(res_b)
             return res_a, left_a + left_b
         logger.warning("Batch labeling failed (%d nodes), falling back to single calls: %s", len(batch), e)
@@ -317,6 +329,8 @@ def _used_names(state) -> list:
 async def _run_node(services, node: dict, state) -> dict:
     context = build_enrichment_context(node, state.all_nodes, state.compiled,
                                        include_descriptions=False)
+    if state.guidance:
+        context["guidance"] = state.guidance
     name, snippet = await label_with_retries(services, node, context,
                                              used_names=_used_names(state))
     if name is None:
@@ -326,7 +340,8 @@ async def _run_node(services, node: dict, state) -> dict:
 
 async def _run_batch(services, batch: list, state) -> tuple:
     return await run_label_batch(services, batch, state.all_nodes,
-                                 state.compiled, _used_names(state))
+                                 state.compiled, _used_names(state),
+                                 guidance=state.guidance)
 
 
 def _event_fields(fields: dict) -> dict:

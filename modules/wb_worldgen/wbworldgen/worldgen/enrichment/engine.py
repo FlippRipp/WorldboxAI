@@ -185,7 +185,8 @@ class EnrichmentEngine:
                   layer_filter: str = None, rework: bool = False,
                   exclude_node_ids: list = None, concurrency: int = 3,
                   batch_size: int = 8, on_event=None,
-                  importance_floor: int = None, node_ids: list = None) -> dict:
+                  importance_floor: int = None, node_ids: list = None,
+                  guidance: str = None, specs: list = None) -> dict:
         """Run enrichment passes in one server-driven run with bounded
         concurrency.
 
@@ -202,10 +203,16 @@ class EnrichmentEngine:
         (importance >= floor); ``node_ids`` limits them to an explicit target
         set and wins over the floor. See ``_pending_for_pass``. Map passes
         (review) run over the maps in scope and ignore both.
+
+        ``guidance`` is the run-level steering note handed to every pass via
+        ``RunState.guidance`` (C1's guidance channel). ``specs`` runs an
+        explicit spec list instead of resolving ``phase`` against the
+        registry — the ad-hoc capability path (`pass:custom` builds a
+        per-run PassSpec); everything else about the run is identical.
         """
         if not self._llm or self._llm.mode == "mock":
             raise RuntimeError("Enrichment requires an LLM service. The mock enrichment has been removed.")
-        specs = resolve_phases(phase)
+        specs = resolve_phases(phase) if specs is None else list(specs)
 
         async def emit(evt: dict):
             if on_event is None:
@@ -224,7 +231,7 @@ class EnrichmentEngine:
         all_nodes, layer_map = collect_nodes_by_layer(compiled)
         state = RunState(world_id=world_id, compiled=compiled,
                          all_nodes=all_nodes, layer_map=layer_map,
-                         rework=rework, emit=emit)
+                         rework=rework, emit=emit, guidance=guidance or "")
 
         summary = {s.summary_field: 0 for s in node_passes()}
         summary["failed_node_ids"] = []

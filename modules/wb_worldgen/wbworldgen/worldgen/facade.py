@@ -173,6 +173,13 @@ class WorldBuilder:
     def get_pipeline(self) -> list[dict]:
         return [self._steps[sid].to_frontend() for sid in self._ordered_ids]
 
+    def steps_by_id(self) -> dict:
+        """The registered step instances, id → step, in registration order
+        (module-contributed steps included). A copy — the registry itself is
+        only mutated through ``register_step``. Public so the agent toolbox
+        (C1) resolves and describes steps without reaching into privates."""
+        return dict(self._steps)
+
     def _build_chain_context(self, world_state: dict, up_to_step_id: str) -> dict:
         return _pipeline.build_chain_context(self._ordered_ids, world_state, up_to_step_id, self._steps)
 
@@ -454,7 +461,11 @@ class WorldBuilder:
     async def enrich_run(self, world_id: str, phase: str = "all", count: int = None,
                          layer_filter: str = None, rework: bool = False,
                          exclude_node_ids: list = None, on_event=None,
-                         importance_floor: int = None, node_ids: list = None) -> dict:
+                         importance_floor: int = None, node_ids: list = None,
+                         guidance: str = None, spec=None) -> dict:
+        """``guidance`` is the run-level steering note threaded to every pass
+        (C1's guidance channel); ``spec`` runs one explicit ``PassSpec``
+        instead of resolving ``phase`` — the ad-hoc `pass:custom` path."""
         # 1 keeps the old fully-serialized behavior for rate-limited providers.
         concurrency = self._resolve_enrichment_setting(
             "world.enrichment_concurrency", self._enrichment_concurrency, 1, 8)
@@ -472,6 +483,7 @@ class WorldBuilder:
             rework=rework, exclude_node_ids=exclude_node_ids,
             concurrency=concurrency, batch_size=batch_size, on_event=on_event,
             importance_floor=importance_floor, node_ids=node_ids,
+            guidance=guidance, specs=[spec] if spec is not None else None,
         )
 
     def enrich_cancel(self, world_id: str):

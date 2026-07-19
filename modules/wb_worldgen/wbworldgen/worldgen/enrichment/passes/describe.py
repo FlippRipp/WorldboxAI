@@ -27,7 +27,10 @@ async def generate_description(services, node: dict, context: dict,
                                existing_description: str = "") -> str:
     """One description LLM call (with its own short-content/transient retry
     loop and a label-based fallback). ``existing_description`` switches the
-    prompt into revise-and-enrich mode (rework, review repairs)."""
+    prompt into revise-and-enrich mode (rework, review repairs);
+    ``context["guidance"]`` carries the run-level steering note (C1's
+    guidance channel — a context key so this signature, a test patch point,
+    stays stable)."""
     node_id = node.get("id", "")
     node_name = node.get("name", "Unnamed")
     node_type = node.get("type", "waypoint")
@@ -71,6 +74,8 @@ async def generate_description(services, node: dict, context: dict,
     connection_str = connection_block(context.get("connection", {}), context.get("vocab"))
     if connection_str:
         system = system + "\n\n" + connection_str
+    if context.get("guidance"):
+        system = system + f"\n\nSteering note for this run: {context['guidance']}"
     user_msg = services.prompts(
         "enrich_description_user",
         f"""World: {world.get('name', 'Unknown')} ({world.get('genre', '')}, {world.get('tone', '')})
@@ -161,6 +166,8 @@ async def describe_with_retries(services, node: dict, context: dict,
 async def _run_node(services, node: dict, state) -> dict:
     context = build_enrichment_context(node, state.all_nodes, state.compiled,
                                        include_descriptions=True)
+    if state.guidance:
+        context["guidance"] = state.guidance
     existing = node.get("description", "") if state.rework else ""
     desc_with_links = await describe_with_retries(services, node, context,
                                                   existing_description=existing)

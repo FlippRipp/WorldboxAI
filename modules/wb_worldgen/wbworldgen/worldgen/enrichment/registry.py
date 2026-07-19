@@ -38,6 +38,12 @@ class RunState:
     calls see fresh neighbor names without re-loading the world. ``emit``
     is the engine's safe event callback — passes may use it for custom
     events (review emits ``review_fix``); it never raises.
+
+    ``guidance`` is the run-level steering channel (C1/D1): a caller-authored
+    note generalizing the objection-steering the review repair path threads
+    into label/describe. Passes hand it to their prompt builders through the
+    per-call context dict (``context["guidance"]``) so the patchable
+    ``generate_*`` functions keep their signatures.
     """
 
     world_id: str
@@ -46,6 +52,7 @@ class RunState:
     layer_map: dict
     rework: bool = False
     emit: Callable = _noop_emit
+    guidance: str = ""
 
 
 @dataclass(frozen=True)

@@ -28,9 +28,12 @@ from wbworldgen.worldgen.enrichment.passes import describe, label
 logger = logging.getLogger(__name__)
 
 
-async def generate_review(services, rec: dict, compiled: dict) -> list:
+async def generate_review(services, rec: dict, compiled: dict,
+                          guidance: str = "") -> list:
     """One review LLM call for one map. Returns [{"id", "problem"}, ...];
-    raises on failure."""
+    raises on failure. ``guidance`` is the run-level steering note (C1's
+    guidance channel) — extra reviewer focus, appended to the critique
+    prompt."""
     adjacency: dict = {}
     for e in rec.get("edges", []) or []:
         a, b = e.get("from"), e.get("to")
@@ -74,6 +77,8 @@ Do NOT flag names for style, quality or taste. Output ONLY valid JSON:
         map_label=rec.get("label", ""),
         map_level=rec.get("level_type", ""),
     )
+    if guidance:
+        user_msg += f"\n\nSteering note for this review: {guidance}"
     await services.backoff.wait()
     async with services.semaphore:
         parsed = await json_retry_completion(
@@ -102,7 +107,8 @@ async def review_map(services, rec: dict, state) -> dict:
     if len(named) < 2:
         return result
     try:
-        issues = await generate_review(services, rec, state.compiled)
+        issues = await generate_review(services, rec, state.compiled,
+                                       guidance=state.guidance)
     except Exception as e:
         services.backoff.note_rate_limit(e)
         logger.warning("Label review failed for map %s: %s", mid, e)
@@ -120,6 +126,8 @@ async def review_map(services, rec: dict, state) -> dict:
         old_name = node.get("name", "")
         context = build_enrichment_context(node, state.all_nodes, state.compiled,
                                            include_descriptions=False)
+        if state.guidance:
+            context["guidance"] = state.guidance
         used = [n["name"] for n in state.all_nodes if n.get("name")]
         name, snippet = await label.label_with_retries(
             services, node, context, used_names=used, problem_note=problem)
@@ -138,6 +146,8 @@ async def review_map(services, rec: dict, state) -> dict:
             # it with the fresh one so the two never disagree.
             dctx = build_enrichment_context(node, state.all_nodes, state.compiled,
                                             include_descriptions=True)
+            if state.guidance:
+                dctx["guidance"] = state.guidance
             desc_links = await describe.describe_with_retries(
                 services, node, dctx, existing_description=node.get("description", ""))
             if desc_links is not None:
