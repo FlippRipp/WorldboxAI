@@ -9,9 +9,9 @@ capability (`pass:custom`): an agent-authored instruction run as an
 ephemeral ``PassSpec`` through the same enrichment engine — same scheduler,
 retries, flush and cancel — writing a namespaced ``custom_<slot>`` node
 field so core fields cannot be clobbered by construction. ``patch_step``
-is the user-parity step-data edit; map data is deliberately not patchable
-(structural surgery is withheld in v1 — regenerate the owning step or use
-edit_node instead)."""
+is the user-parity step-data edit; map and terrain data are deliberately
+not patchable (structural surgery and terrain edits are withheld in v1 —
+regenerate the owning step or use edit_node instead)."""
 
 import re
 
@@ -27,7 +27,12 @@ _SLOT_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 
 #: Step entries the engine writes through its own paths; raw patches would
 #: bypass their invariants (enrichment cache coherence, map structure).
-_UNPATCHABLE_STEPS = ("map_generation", "node_labeling", "node_descriptions")
+#: terrain_generation is here because its entries are records of rasters on
+#: disk — a patch would fabricate geography no raster backs, and downstream
+#: steps trust those summaries as generated ground truth (terrain edits are
+#: withheld until v2b).
+_UNPATCHABLE_STEPS = ("map_generation", "node_labeling", "node_descriptions",
+                      "terrain_generation")
 
 
 def _require_artifacts(kind: str, cap, world_state: dict, compiled: dict, steps: dict):
@@ -117,10 +122,11 @@ async def patch_step(ctx, step_id: str, data: dict) -> dict:
             f"Unknown step '{step_id}'. Registered steps: {', '.join(steps)}")
     if step_id in _UNPATCHABLE_STEPS:
         raise ToolError(
-            f"Step '{step_id}' is not patchable: map structure and enrichment "
-            "state have their own write paths. Use edit_node for names/"
-            "descriptions, run_pass for enrichment, or run_step to regenerate "
-            "the map (structural surgery is deliberately withheld in v1).")
+            f"Step '{step_id}' is not patchable: map structure, terrain "
+            "rasters and enrichment state have their own write paths. Use "
+            "edit_node for names/descriptions, run_pass for enrichment, or "
+            "run_step to regenerate (structural surgery and terrain edits "
+            "are deliberately withheld in v1).")
     if not data:
         raise ToolError("patch_step: 'data' must carry at least one key to set.")
 
@@ -304,9 +310,9 @@ register_tool(ToolSpec(
     label="Patch step data",
     description=(
         "Set (or remove, via null) top-level keys of one step's saved data "
-        "— the same write surface the wizard's editor uses. Map structure "
-        "and enrichment state are not patchable; use edit_node, run_pass, "
-        "or regenerate instead."
+        "— the same write surface the wizard's editor uses. Map structure, "
+        "terrain and enrichment state are not patchable; use edit_node, "
+        "run_pass, or regenerate instead."
     ),
     invoke=patch_step,
     mutates=True,

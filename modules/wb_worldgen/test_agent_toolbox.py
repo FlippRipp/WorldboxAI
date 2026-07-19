@@ -421,6 +421,13 @@ def test_patch_step_merges_creates_and_guards(mock_builder):
     with pytest.raises(ToolError, match="not patchable"):
         run(invoke_tool(ctx, "patch_step",
                         {"step_id": "map_generation", "data": {"nodes": []}}))
+    # Terrain entries are records of rasters on disk — patching them would
+    # fabricate geography no raster backs (the Crucible Stars failure mode).
+    with pytest.raises(ToolError, match="not patchable"):
+        run(invoke_tool(ctx, "patch_step",
+                        {"step_id": "terrain_generation",
+                         "data": {"layers": [{"layer_id": "venus_m",
+                                              "seed": 2001001001}]}}))
     with pytest.raises(ToolError, match="at least one key"):
         run(invoke_tool(ctx, "patch_step", {"step_id": "world_rules", "data": {}}))
 

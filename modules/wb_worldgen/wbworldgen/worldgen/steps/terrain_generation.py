@@ -1,11 +1,17 @@
-"""Terrain generation step — builds raster terrain for surface-like layers.
+"""Terrain generation step — builds the root map's raster terrain.
 
-Runs right after ``hierarchy_design`` so later authoring steps can
-author regions/landmarks that fit the actual generated geography. Every layer is
-a separate area, so each one gets its own heightmap/biome raster (reusing
-``wbworldgen.terrain``) seeded distinctly; the arrays + rendered images are
-persisted under the world's terrain directory and a small per-layer summary flows
-into downstream prompts via the normal chain context.
+Runs right after ``hierarchy_design`` so later authoring steps can author
+regions/landmarks that fit the actual generated geography. For every world
+built today this step produces exactly one raster stack: the root map's,
+keyed ``main`` (the id ``map_generation`` and the terrain-image routes
+load). Terrain-flagged child maps — a planet opened from a star system —
+get their rasters from the map-expansion engine when the child map is
+built (``terrain_build.build_layer_terrain``), never from this step, and
+parallel maps are currently placed without rasters. The multi-layer branch
+in ``_layer_specs`` serves only pre-hierarchy worlds carrying data from
+the deprecated ``layer_design`` step. The arrays + rendered images are
+persisted under the world's terrain directory and a per-layer summary
+flows into downstream prompts via the normal chain context.
 """
 
 import asyncio
@@ -21,7 +27,12 @@ _TERRAIN_RESOLUTION = 1024
 
 
 def _layer_specs(world_state: dict) -> list[dict]:
-    """Resolve the list of layers to consider, single-layer worlds included."""
+    """The layer list to rasterize. Modern worlds always take the fallback:
+    the single root entry keyed ``main``. The multi-layer branch reads the
+    deprecated ``layer_design`` step and is reachable only when re-running
+    terrain on a pre-hierarchy world that still carries its data —
+    hierarchy_design's parallel/child maps are deliberately not rasterized
+    here (terrain-flagged children get expansion-time terrain instead)."""
     ld = world_state.get("steps", {}).get("layer_design", {}).get("data", {})
     if isinstance(ld, dict) and ld.get("has_multiple_layers") and ld.get("layers"):
         return [s for s in ld["layers"] if isinstance(s, dict)]
@@ -33,8 +44,12 @@ class TerrainGenerationStep(Step):
     id = "terrain_generation"
     label = "Terrain"
     description = (
-        "Generate the physical terrain (elevation, biomes, rivers) for each "
-        "surface layer. Drives where settlements, landmarks and roads are placed."
+        "Generate the physical terrain raster (elevation, biomes, rivers) for "
+        "the world's ROOT map. Drives where settlements, landmarks and roads "
+        "are placed. Never produces per-planet or per-parallel-map layers — "
+        "terrain-flagged child maps get their own rasters at expansion time, "
+        "when the child map itself is built; re-running this step cannot add "
+        "layers."
     )
     after = "hierarchy_design"
     uses = USES_MAP  # no LLM; bespoke generate below
