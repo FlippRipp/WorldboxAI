@@ -33,7 +33,7 @@ const RUN_INTENT_KEY = 'wb_worldgen_enrich_run_intent';
 // run affordance per map pass, and per-pass progress merged live from the
 // run's SSE events (which carry the pass id in their "phase" field). A pass
 // module dropped into the backend appears here without frontend edits.
-export default function EnrichmentPanel({ stepId, stepLabel, data, state, worldId, onEnrich, onCommit, loading: parentLoading, enriching, onEnrichingChange, onResult }) {
+export default function EnrichmentPanel({ stepId, stepLabel, data, worldId, loading: parentLoading, enriching, onEnrichingChange, onResult }) {
   const [passes, setPasses] = useState([]);
   const [selectedPassId, setSelectedPassId] = useState(null);
   const [targetCount, setTargetCount] = useState(30);

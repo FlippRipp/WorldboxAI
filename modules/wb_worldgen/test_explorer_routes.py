@@ -97,11 +97,10 @@ def test_regenerate_step_persists_in_place(routed):
     after = routed.load_world(wid)
     assert after["steps"]["lore"]["data"] == resp["data"]
     assert after["steps"]["lore"]["note"] == "saltier"
-    # World-scoped on purpose: completion survives and the session-draft
-    # machinery never runs (the session route used to phantom-draft here).
+    # World-scoped on purpose: completion survives and no phantom draft
+    # copy appears (the old session route's auto-draft used to make one).
     assert after["complete"] is True
     assert [w["id"] for w in routed.list_worlds()] == [wid]
-    assert not world_routes.world_draft_ids
 
 
 def test_regenerate_step_refusals(routed):

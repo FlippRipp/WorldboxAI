@@ -193,21 +193,6 @@ def test_compiled_world_carries_world_design(builder):
 # Routes: prune stale data for steps a re-rolled design turned off
 # ---------------------------------------------------------------------------
 
-def test_prune_dynamic_skips_removes_stale_step_data():
-    import routes as world_routes
-
-    state = _state_with_form({"map_style": "abstract", "skip_steps": ["society_factions"]})
-    state["steps"]["society_factions"] = {"data": {"factions": []}, "approved": True}
-    state["steps"]["terrain_generation"] = {"data": {"layers": []}, "approved": True}
-    state["steps"]["lore"] = {"data": {"world_name": "W"}, "approved": True}
-
-    world_routes._prune_dynamic_skips(state)
-    assert "society_factions" not in state["steps"]
-    assert "terrain_generation" not in state["steps"]
-    assert "lore" in state["steps"]           # never dynamically skippable
-    assert "world_form" in state["steps"]
-
-
 # ---------------------------------------------------------------------------
 # "city" map style -> street-network generator
 # ---------------------------------------------------------------------------

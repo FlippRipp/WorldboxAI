@@ -224,7 +224,7 @@ function LogRow({ evt }) {
   return null;
 }
 
-export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, onBack }) {
+export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, onExplore, onBack }) {
   const [meta, setMeta] = useState(null);        // status snapshot (seed prompt etc.)
   const [events, setEvents] = useState([]);      // persisted, i-ordered
   const [progress, setProgress] = useState(null);
@@ -370,12 +370,20 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
                   {cancelling ? 'Cancelling…' : 'Cancel build'}
                 </button>
               )}
+              {!running && status === 'done' && onExplore && (
+                <button
+                  onClick={onExplore}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-sm font-medium transition-colors"
+                >
+                  Explore world
+                </button>
+              )}
               {!running && status === 'done' && (
                 <button
                   onClick={onOpenWorlds}
-                  className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-sm font-medium transition-colors"
+                  className="px-3 py-1.5 rounded-lg border border-emerald-800 text-emerald-300 hover:bg-emerald-950/40 text-sm transition-colors"
                 >
-                  Open world list
+                  World list
                 </button>
               )}
               {!running && (

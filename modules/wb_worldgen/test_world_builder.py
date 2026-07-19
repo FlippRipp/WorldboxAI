@@ -1053,3 +1053,33 @@ def test_custom_step_generate_override(builder):
     assert data["made_by"] == "custom"
     assert data["prompt"] == "seedprompt"
     assert data["note"] == "guidance"
+
+
+# ---------------------------------------------------------------------------
+# Draft persistence round-trip (agent builds draft through save_draft)
+# ---------------------------------------------------------------------------
+
+def test_draft_round_trips_completion(tmp_path):
+    from wbworldgen.worldgen.persistence import WorldPersistence
+    persistence = WorldPersistence(worlds_dir=str(tmp_path / "worlds"),
+                                   prompt_library_path=str(tmp_path / "prompts.json"))
+    state = {
+        "seed_prompt": "a fungal empire",
+        "steps": {"world_rules": {"data": {"x": 1}, "approved": True}},
+    }
+
+    # Interrupted mid-build: resumes incomplete.
+    wid = persistence.save_draft("", state)
+    loaded = persistence.load_world(wid)
+    assert loaded["complete"] is False
+
+    # Finished but not finally saved: reads complete (draft_complete marker).
+    state["complete"] = True
+    persistence.save_draft(wid, state)
+    loaded = persistence.load_world(wid)
+    assert loaded["complete"] is True
+
+    # A final save clears the draft markers entirely.
+    final = persistence.save_world(wid, state)
+    loaded = persistence.load_world(final)
+    assert loaded["complete"] is True

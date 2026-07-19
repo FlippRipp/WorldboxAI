@@ -1,52 +1,61 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { api } from 'api';
 import WorldListScreen from './WorldBuilder/WorldListScreen';
-import WorldBuilderWizard, { readSavedForm, clearAgentBuildPin } from './WorldBuilder/WorldBuilderWizard';
-import WorldReviewScreen from './WorldBuilder/WorldReviewScreen';
+import WorldCreateScreen, { readSavedForm, pinAgentBuild } from './WorldBuilder/WorldCreateScreen';
+import WorldExplorerScreen from './WorldExplorer/WorldExplorerScreen';
 
-// Entry screen for the "World Generation" module mode. Owns the list/create/
-// review navigation that used to live in App.jsx as separate top-level modes.
+// Entry screen for the "World Generation" module mode: the world list, the
+// create flow (ideation → agent build observer), and the world explorer.
 export default function WorldGenScreen({ onBack }) {
   // A pinned agent build (running, or terminal and not yet dismissed) takes
-  // the user straight back to its observer inside the wizard — the loop
-  // runs server-side and must be findable after a relaunch. The pin
-  // releases on the observer's Dismiss, or on an explicit classic resume
-  // below. Synchronous (localStorage) so the list never flashes first.
-  const [view, setView] = useState(() => (readSavedForm().agentWorldId ? 'create' : 'list')); // 'list' | 'create' | 'review'
-  const [reviewWorldId, setReviewWorldId] = useState(null);
-  const [wizardKey, setWizardKey] = useState(0);
+  // the user straight back to its observer inside the create screen — the
+  // loop runs server-side and must be findable after a relaunch. Synchronous
+  // (localStorage) so the list never flashes first.
+  const [view, setView] = useState(() => (readSavedForm().agentWorldId ? 'create' : 'list')); // 'list' | 'create' | 'explore'
+  const [exploreWorldId, setExploreWorldId] = useState(null);
+  const [createKey, setCreateKey] = useState(0);
 
-  // Any live session — a generation still running server-side, or unsaved
-  // work sitting in memory (it may have finished while the app was minimized;
-  // Android kills the backgrounded PWA) — drops straight back into the
-  // wizard, which restores the session, shows every step generated so far,
-  // and follows a still-running run via polling. The list stays one "Exit"
-  // tap away; only sessions with no work at all land on it directly.
-  useEffect(() => {
-    api.getWorldState().then((d) => {
-      const st = d.state;
-      // seed_prompt alone counts: a run interrupted during its very first
-      // step has a session (and an eager draft) but no finished steps yet.
-      if (st?._generating || st?.seed_prompt || Object.keys(st?.steps || {}).length > 0) {
-        setView((v) => (v === 'list' ? 'create' : v));
-      }
-    }).catch(() => {});
-  }, []);
+  const openObserver = (worldId) => {
+    pinAgentBuild(worldId);
+    setCreateKey((k) => k + 1);
+    setView('create');
+  };
+
+  // Recovery for an in-progress world: reattach to its recorded build's
+  // observer, or — for worlds no agent build ever touched (interrupted or
+  // pre-agent-era drafts) — adopt it into a fresh build that finishes it.
+  // The adopted world's own seed prompt and brief win server-side; the
+  // prompt passed here only seeds worlds that never recorded one.
+  const handleRecover = async (world) => {
+    if (world.has_agent_build) {
+      openObserver(world.id);
+      return;
+    }
+    try {
+      const res = await api.agentBuild(
+        world.seed_prompt || world.name || 'Finish building this world.',
+        world.scenario_id || null, [], [], world.id);
+      openObserver(res.world_id);
+    } catch (e) {
+      alert('Failed to start the finishing build: ' + e.message);
+    }
+  };
 
   if (view === 'create') {
     return (
-      <WorldBuilderWizard
-        key={wizardKey}
+      <WorldCreateScreen
+        key={createKey}
         onBack={() => setView('list')}
-        onWorldCreated={() => setView('list')}
+        onOpenWorlds={() => setView('list')}
+        onExploreWorld={(id) => { setExploreWorldId(id); setView('explore'); }}
       />
     );
   }
 
-  if (view === 'review') {
+  if (view === 'explore') {
     return (
-      <WorldReviewScreen
-        worldId={reviewWorldId}
+      <WorldExplorerScreen
+        worldId={exploreWorldId}
         onBack={() => setView('list')}
       />
     );
@@ -55,28 +64,16 @@ export default function WorldGenScreen({ onBack }) {
   return (
     <WorldListScreen
       onBack={onBack}
-      onOpenWorld={(id, resume = false) => {
+      onOpenWorld={(id) => {
         if (id) {
-          if (resume) {
-            // Explicit intent wins: resuming a draft in the classic wizard
-            // releases any pinned agent observer (which would otherwise
-            // hijack the wizard view). Stopped agent builds are finished
-            // by hand through exactly this path.
-            clearAgentBuildPin();
-            api.resumeWorld(id).then(() => {
-              setWizardKey((k) => k + 1);
-              setView('create');
-            }).catch((e) => alert('Failed to resume: ' + e.message));
-          } else {
-            setReviewWorldId(id);
-            setView('review');
-          }
+          setExploreWorldId(id);
+          setView('explore');
         } else {
-          api.discardWorld();
-          setWizardKey((k) => k + 1);
+          setCreateKey((k) => k + 1);
           setView('create');
         }
       }}
+      onRecoverWorld={handleRecover}
     />
   );
 }

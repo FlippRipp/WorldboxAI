@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from 'api';
 
-export default function WorldListScreen({ onOpenWorld, onBack }) {
+export default function WorldListScreen({ onOpenWorld, onRecoverWorld, onBack }) {
+  const [recoveringId, setRecoveringId] = useState(null);
   const [worlds, setWorlds] = useState([]);
   const [loading, setLoading] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState(null);
@@ -101,21 +102,29 @@ export default function WorldListScreen({ onOpenWorld, onBack }) {
                   )}
                 </div>
                 <div className="flex gap-2">
-                  {world.in_progress ? (
+                  {world.in_progress && (
+                    // Recovery lands on the agent flow: reattach to the
+                    // recorded build's observer, or adopt the draft into a
+                    // fresh build that finishes it.
                     <button
-                      onClick={() => onOpenWorld(world.id, true)}
-                      className="flex-1 px-3 py-1.5 bg-amber-700 hover:bg-amber-600 rounded text-sm font-medium transition-colors"
+                      onClick={async () => {
+                        setRecoveringId(world.id);
+                        try { await onRecoverWorld?.(world); } finally { setRecoveringId(null); }
+                      }}
+                      disabled={recoveringId !== null}
+                      className="flex-1 px-3 py-1.5 bg-amber-700 hover:bg-amber-600 disabled:opacity-50 rounded text-sm font-medium transition-colors"
                     >
-                      Resume
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => onOpenWorld(world.id)}
-                      className="flex-1 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-sm font-medium transition-colors"
-                    >
-                      Open
+                      {recoveringId === world.id
+                        ? 'Starting…'
+                        : world.has_agent_build ? 'View build' : 'Finish with AI'}
                     </button>
                   )}
+                  <button
+                    onClick={() => onOpenWorld(world.id)}
+                    className={`${world.in_progress ? '' : 'flex-1 '}px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-sm font-medium transition-colors`}
+                  >
+                    {world.in_progress ? 'Explore' : 'Open'}
+                  </button>
                   <button
                     onClick={() => setConfirmDelete(world.id)}
                     className="px-3 py-1.5 bg-gray-700 hover:bg-red-900/50 hover:text-red-300 rounded text-sm transition-colors"

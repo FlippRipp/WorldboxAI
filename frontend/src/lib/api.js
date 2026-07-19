@@ -169,7 +169,6 @@ export const api = {
 
   // World Builder
   getWorldPipeline:       () => request('/api/world/pipeline'),
-  generateWorld:          (seedPrompt, skipReview = false, scenarioId = null) => request('/api/world/generate', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, skip_review: skipReview, ...(scenarioId ? { scenario_id: scenarioId } : {}) }) }),
   // LLM-as-author: write/rewrite the World Prompt from the player's notes
   // (instruction), the current draft, and an optional linked scenario.
   rewriteWorldPrompt:     ({ instruction = '', currentText = null, scenarioId = null }) => request('/api/world/rewrite-prompt', { method: 'POST', body: JSON.stringify({ instruction, current_text: currentText, scenario_id: scenarioId }) }),
@@ -178,17 +177,6 @@ export const api = {
   // `ready` (its judgment that the idea is settled — the go offer). The
   // client holds the conversation and the drafts round-trip every turn.
   ideationTurn:           ({ messages = [], prompt = null, rules = [], notes = [], scenarioId = null }) => request('/api/world/ideation-turn', { method: 'POST', body: JSON.stringify({ messages, prompt, rules, notes, scenario_id: scenarioId }) }),
-  generateWorldStep:      (stepId, note = '', data = null) => {
-    const body = { note };
-    if (data) body.data = data;
-    return request(`/api/world/generate-step/${stepId}`, { method: 'POST', body: JSON.stringify(body) });
-  },
-  approveWorldStep:       (stepId, data = null) => request(`/api/world/approve-step/${stepId}`, { method: 'POST', body: JSON.stringify(data ? { data } : {}) }),
-  regenerateWorldItem:    (stepId, field, index, items, note = '', subfield = null) => request(`/api/world/regenerate-item/${stepId}`, { method: 'POST', body: JSON.stringify({ field, index, items, note, subfield }) }),
-  getWorldState:          () => request('/api/world/state'),
-  // Re-enter an interrupted one-shot generation (backend was killed mid-run
-  // while the app was minimized); no-op if it's running, complete, or review-mode.
-  continueWorldGeneration: () => request('/api/world/continue', { method: 'POST' }),
   // Agent builds (C2): a server-side agent plans, builds and verifies the
   // whole world on its own, from the ideation brief (seed prompt + the
   // co-authored world rules). Launch returns the new world id immediately;
@@ -240,9 +228,6 @@ export const api = {
     }
     return final;
   },
-  compileWorld:           (saveId = null) => request('/api/world/compile', { method: 'POST', body: JSON.stringify(saveId ? { save_id: saveId } : {}) }),
-  saveWorld:              (worldId) => request('/api/world/save', { method: 'POST', body: JSON.stringify({ world_id: worldId }) }),
-  discardWorld:           () => request('/api/world/discard', { method: 'POST' }),
   listWorlds:             () => request('/api/world/list'),
   loadWorld:              (worldId) => request(`/api/world/load/${worldId}`),
   // The compiled (game-ready) view of a saved world — child-map bundles,
@@ -252,7 +237,6 @@ export const api = {
   // Regenerate one step of a SAVED world in place (with an optional
   // steering note); world-scoped — never touches the session machinery.
   regenerateWorldStep:    (worldId, stepId, note = '') => request(`/api/world/${worldId}/regenerate-step/${stepId}`, { method: 'POST', body: JSON.stringify({ note }) }),
-  resumeWorld:            (worldId) => request('/api/world/resume', { method: 'POST', body: JSON.stringify({ world_id: worldId }) }),
   deleteWorld:            (worldId) => request(`/api/world/${worldId}`, { method: 'DELETE' }),
   saveWorldStep:          (worldId, stepId, data) => request(`/api/world/save-step/${worldId}/${stepId}`, { method: 'POST', body: JSON.stringify({ data }) }),
   getStartLocations:      (worldId) => request(`/api/world/${worldId}/start-locations`),
@@ -308,7 +292,6 @@ export const api = {
   expandWorldSite:        (worldId, nodeId, force = false) => request(`/api/world/${worldId}/site/${nodeId}/expand`, { method: 'POST', body: JSON.stringify({ force }) }),
   getWorldSites:          (worldId) => request(`/api/world/${worldId}/sites`),
   expandSessionSite:      (nodeId) => request('/api/world/session/expand-site', { method: 'POST', body: JSON.stringify({ node_id: nodeId }) }),
-  enrichCommit:           (worldId, stepId) => request(`/api/world/${worldId}/enrich/commit`, { method: 'POST', body: JSON.stringify({ step_id: stepId }) }),
   // Debug / seed
   debugSeedWorld:         (seedPrompt, worldId = null, totalNodes = 60) => request('/api/world/debug/seed', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, world_id: worldId, total_nodes: totalNodes }) }),
   debugSkipTo:            (stepId, worldId, totalNodes = 60) => request(`/api/world/debug/skip-to/${stepId}`, { method: 'POST', body: JSON.stringify({ world_id: worldId, total_nodes: totalNodes }) }),

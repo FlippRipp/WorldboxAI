@@ -376,7 +376,7 @@ def test_save_step_invalidates_compiled_cache(builder, monkeypatch):
 # Routes: SSE enrichment stream + skip_review terrain pre-warm
 # ---------------------------------------------------------------------------
 
-def test_enrich_run_route_streams_sse_and_syncs_draft():
+def test_enrich_run_route_streams_sse():
     import routes as world_routes
 
     class FakeBuilder:
@@ -396,22 +396,12 @@ def test_enrich_run_route_streams_sse_and_syncs_draft():
                             "failed_node_ids": [], "cancelled": False})
             return {"labeled": 1, "described": 0, "failed_node_ids": [], "cancelled": False}
 
-        def sync_enrichment_to_map_state(self, map_data, node_map):
-            for n in map_data.get("nodes", []):
-                if n["id"] in node_map:
-                    n.update(node_map[n["id"]])
-
     old_builder = world_routes.world_builder
     world_routes.world_builder = FakeBuilder()
-    world_routes.world_gen_sessions["sse_test"] = {
-        "steps": {"map_generation": {"data": {"nodes": [{"id": "n1", "name": ""}]},
-                                     "approved": False}},
-    }
-    world_routes.world_draft_ids["sse_test"] = "wid1"
     try:
         async def main():
             resp = await world_routes.enrich_run(
-                "wid1", world_routes.EnrichRunRequest(phase="all"), session_id="sse_test")
+                "wid1", world_routes.EnrichRunRequest(phase="all"))
             assert resp.media_type == "text/event-stream"
             chunks = []
             async for chunk in resp.body_iterator:
@@ -422,117 +412,9 @@ def test_enrich_run_route_streams_sse_and_syncs_draft():
         frames = [json.loads(block[len("data: "):])
                   for block in body.strip().split("\n\n")]
         assert [f["type"] for f in frames] == ["phase", "node", "done"]
-        # The node event was mirrored into the in-memory draft.
-        synced = world_routes.world_gen_sessions["sse_test"]["steps"]["map_generation"]["data"]["nodes"][0]
-        assert synced["name"] == "Emberhold"
     finally:
         world_routes.world_builder = old_builder
-        world_routes.world_gen_sessions.pop("sse_test", None)
-        world_routes.world_draft_ids.pop("sse_test", None)
 
-
-def test_skip_review_prewarms_terrain_during_layer_rules():
-    import routes as world_routes
-
-    class FakeBuilder:
-        def __init__(self):
-            self._ordered_ids = ["world_rules", "lore", "layer_design", "layer_rules",
-                                 "terrain_generation", "terrain_regions", "map_generation",
-                                 "node_labeling", "node_descriptions"]
-            self._steps = {sid: object() for sid in self._ordered_ids}
-            self.timeline = {}
-
-        async def generate_step(self, step_id, state, prompt, user_note="", config=None):
-            loop = asyncio.get_running_loop()
-            self.timeline[step_id] = {"start": loop.time()}
-            if step_id == "terrain_generation":
-                assert state.get("_draft_id"), "_draft_id must be pinned before the pre-warm"
-                await asyncio.sleep(0.03)
-            elif step_id == "layer_rules":
-                await asyncio.sleep(0.03)
-            else:
-                await asyncio.sleep(0.001)
-            self.timeline[step_id]["end"] = loop.time()
-            return {"step": step_id}
-
-    fake = FakeBuilder()
-    old_builder = world_routes.world_builder
-    world_routes.world_builder = fake
-    try:
-        resp = asyncio.run(world_routes.generate_world(
-            world_routes.WorldGenerateRequest(seed_prompt="seed", skip_review=True),
-            session_id="prewarm_test"))
-    finally:
-        world_routes.world_builder = old_builder
-        world_routes.world_gen_sessions.pop("prewarm_test", None)
-
-    assert resp["complete"] is True
-    generated = set(resp["state"]["steps"])
-    assert generated == set(fake._ordered_ids) - {"node_labeling", "node_descriptions"}
-    # Terrain ran concurrently with the layer_rules "LLM call": it started
-    # before layer_rules finished instead of waiting its turn in the chain.
-    assert fake.timeline["terrain_generation"]["start"] < fake.timeline["layer_rules"]["end"]
-    # And downstream steps only started after terrain completed.
-    assert fake.timeline["terrain_regions"]["start"] >= fake.timeline["terrain_generation"]["end"]
-
-
-def test_generating_flag_visible_to_polling_clients():
-    """While a step generates, /api/world/state (the same session dict) carries
-    ``_generating`` + ``skip_review`` so a relaunched client (Android killed
-    the PWA mid-run) can restore the wizard and poll; both the review and
-    one-shot paths clear the flag when the run ends."""
-    import routes as world_routes
-
-    class FakeBuilder:
-        def __init__(self):
-            self._ordered_ids = ["world_rules", "lore"]
-            self._steps = {sid: object() for sid in self._ordered_ids}
-            self.mid_generation = {}
-
-        async def generate_step(self, step_id, state, prompt, user_note="", config=None):
-            # Snapshot what a concurrent poll of the session state would see.
-            self.mid_generation[step_id] = dict(state)
-            await asyncio.sleep(0)
-            return {"step": step_id}
-
-    fake = FakeBuilder()
-    old_builder = world_routes.world_builder
-    world_routes.world_builder = fake
-    try:
-        resp = asyncio.run(world_routes.generate_world(
-            world_routes.WorldGenerateRequest(seed_prompt="p"), session_id="gen_flag"))
-        assert fake.mid_generation["world_rules"]["_generating"] == "world_rules"
-        assert fake.mid_generation["world_rules"]["skip_review"] is False
-        assert "_generating" not in resp["state"]
-
-        # Reroll route flags the step it is regenerating.
-        resp2 = asyncio.run(world_routes.generate_world_step("lore", session_id="gen_flag"))
-        assert fake.mid_generation["lore"]["_generating"] == "lore"
-        assert "_generating" not in resp2["state"]
-
-        # Approve flags the NEXT step while it generates.
-        fake.mid_generation.clear()
-        resp3 = asyncio.run(world_routes.approve_world_step("world_rules", session_id="gen_flag"))
-        assert fake.mid_generation["lore"]["_generating"] == "lore"
-        assert "_generating" not in resp3["state"]
-
-        # One-shot mode flags "all" for the whole run.
-        resp4 = asyncio.run(world_routes.generate_world(
-            world_routes.WorldGenerateRequest(seed_prompt="p", skip_review=True),
-            session_id="gen_flag_all"))
-        assert fake.mid_generation["world_rules"]["_generating"] == "all"
-        assert fake.mid_generation["world_rules"]["skip_review"] is True
-        assert resp4["complete"] is True
-        assert "_generating" not in resp4["state"]
-    finally:
-        world_routes.world_builder = old_builder
-        world_routes.world_gen_sessions.pop("gen_flag", None)
-        world_routes.world_gen_sessions.pop("gen_flag_all", None)
-
-
-# ---------------------------------------------------------------------------
-# Route: LLM-as-author world prompt rewrite
-# ---------------------------------------------------------------------------
 
 def test_rewrite_world_prompt_route():
     import routes as world_routes
