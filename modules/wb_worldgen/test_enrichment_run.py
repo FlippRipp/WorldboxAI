@@ -360,11 +360,11 @@ def test_save_step_invalidates_compiled_cache(builder):
 
     builder._enrichment._live_label = fake_label
     asyncio.run(builder.enrich_next_label(wid))
-    assert wid in builder._enrichment._compiled_cache
+    assert wid in builder._compiled
 
     step_data = builder.load_world(wid)["steps"]["map_generation"]
     builder.save_step(wid, "map_generation", step_data)
-    assert wid not in builder._enrichment._compiled_cache
+    assert wid not in builder._compiled
 
 
 # ---------------------------------------------------------------------------

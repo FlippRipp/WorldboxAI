@@ -15,6 +15,7 @@ from wbworldgen.worldgen import compiler
 from wbworldgen.worldgen import mapspace as _mapspace
 from wbworldgen.worldgen import pipeline as _pipeline
 from wbworldgen.worldgen import start_locations as _start
+from wbworldgen.worldgen.compiled_cache import CompiledWorldCache
 from wbworldgen.worldgen.generation.llm import DEFAULT_SYSTEM_FRAMING
 from wbworldgen.worldgen.enrichment import EnrichmentEngine, SiteExpansionEngine, collect_nodes_by_layer
 from wbworldgen.worldgen.enrichment import maps_expand as _maps_expand
@@ -22,6 +23,7 @@ from wbworldgen.worldgen.enrichment import sites as _sites_mod
 from wbworldgen.worldgen.generation import LLMStepGenerator, MapStepGenerator, MockStepGenerator
 from wbworldgen.worldgen.hooks import HookRegistry
 from wbworldgen.worldgen.persistence import WorldPersistence
+from wbworldgen.worldgen.services import GenServices
 from wbworldgen.worldgen.base import USES_MAP
 from wbworldgen.worldgen.steps import hierarchy_design as _hierarchy_design
 from wbworldgen.worldgen.steps import world_form as _world_form
@@ -280,11 +282,7 @@ class WorldBuilder:
     def __init__(self, worlds_dir: str = "data/worlds"):
         self._steps: dict = {}
         self._ordered_ids: list[str] = []
-
-        self._llm_service = None
         self._settings = None
-        self._world_builder_temperature = None
-        self._json_retry_attempts = 2
 
         self._persistence = WorldPersistence(worlds_dir)
         self._worlds_dir = self._persistence._dir
@@ -298,7 +296,26 @@ class WorldBuilder:
         # world.enrichment_concurrency setting at run start.
         self._enrichment_concurrency = 3
         self._enrichment_batch_size = 8
-        self._enrichment_semaphore = asyncio.Semaphore(self._enrichment_concurrency)
+
+        # The explicit engine contract: every dependency the engines read is
+        # a named field on GenServices (facade privates delegate below, so
+        # legacy attribute access keeps working and engines see every write).
+        # load_world resolves late so callers that rebind the facade's loader
+        # are seen by cached compiled loads too.
+        self._compiled = CompiledWorldCache(
+            load_world=lambda world_id: self.load_world(world_id),
+            steps=self._steps,
+            terrain_store=self._persistence,
+        )
+        self._services = GenServices(
+            prompts=self._get_prompt,
+            enrichment_store=self._persistence,
+            compiled=self._compiled,
+            load_world=lambda world_id: self.load_world(world_id),
+            terrain_store=self._persistence,
+            resolve_setting=self._resolve_enrichment_setting,
+            semaphore=asyncio.Semaphore(self._enrichment_concurrency),
+        )
 
         self._hook_registry = HookRegistry()
         self._module_hooks = self._hook_registry.hooks
@@ -306,9 +323,46 @@ class WorldBuilder:
         self._mock_gen = MockStepGenerator()
         self._map_gen = MapStepGenerator(worlds_dir=str(self._worlds_dir))
         self._llm_gen = LLMStepGenerator(settings=None, retry_attempts=self._json_retry_attempts)
-        self._enrichment = EnrichmentEngine(host=self)
-        self._sites = SiteExpansionEngine(host=self)
-        self._maps_expand = _maps_expand.MapExpansionEngine(host=self)
+        self._enrichment = EnrichmentEngine(self._services)
+        self._sites = SiteExpansionEngine(self._services)
+        self._maps_expand = _maps_expand.MapExpansionEngine(self._services)
+
+    # --- engine-shared config -----------------------------------------------
+    # GenServices is the single source of truth; these properties keep the
+    # legacy private names readable AND assignable (tests set them directly)
+    # while the engines see every write.
+
+    @property
+    def _llm_service(self):
+        return self._services.llm
+
+    @_llm_service.setter
+    def _llm_service(self, service):
+        self._services.llm = service
+
+    @property
+    def _world_builder_temperature(self):
+        return self._services.temperature
+
+    @_world_builder_temperature.setter
+    def _world_builder_temperature(self, temperature):
+        self._services.temperature = temperature
+
+    @property
+    def _json_retry_attempts(self):
+        return self._services.json_retry_attempts
+
+    @_json_retry_attempts.setter
+    def _json_retry_attempts(self, attempts):
+        self._services.json_retry_attempts = attempts
+
+    @property
+    def _enrichment_semaphore(self):
+        return self._services.semaphore
+
+    @_enrichment_semaphore.setter
+    def _enrichment_semaphore(self, semaphore):
+        self._services.semaphore = semaphore
 
     # --- configuration ------------------------------------------------------
 
@@ -563,12 +617,12 @@ class WorldBuilder:
 
     def save_world(self, world_id: str, world_state: dict) -> str:
         saved_id = self._persistence.save_world(world_id, world_state)
-        self._enrichment.invalidate_compiled(saved_id)
+        self._compiled.invalidate(saved_id)
         return saved_id
 
     def save_draft(self, world_id: str, world_state: dict) -> str:
         saved_id = self._persistence.save_draft(world_id, world_state)
-        self._enrichment.invalidate_compiled(saved_id)
+        self._compiled.invalidate(saved_id)
         return saved_id
 
     def load_world(self, world_id: str) -> dict:
@@ -576,12 +630,12 @@ class WorldBuilder:
 
     def save_step(self, world_id: str, step_id: str, step_data: dict):
         result = self._persistence.save_step(world_id, step_id, step_data)
-        self._enrichment.invalidate_compiled(world_id)
+        self._compiled.invalidate(world_id)
         return result
 
     def delete_world(self, world_id: str):
         result = self._persistence.delete_world(world_id)
-        self._enrichment.invalidate_compiled(world_id)
+        self._compiled.invalidate(world_id)
         return result
 
     def seed_world(self, seed_prompt: str, world_id: str = None, total_nodes: int = 60) -> dict:
@@ -725,7 +779,7 @@ class WorldBuilder:
 
     def get_map_node(self, world_id: str, node_id: str) -> dict | None:
         """Current state of one map node (enrichment fields included)."""
-        return self._enrichment.get_node(world_id, node_id)
+        return self._compiled.get_node(world_id, node_id)
 
     async def detail_nodes(self, world_id: str, node_ids: list) -> dict:
         """Label + describe an explicit set of nodes (play-time backfill).
@@ -757,8 +811,8 @@ class WorldBuilder:
             existing = self.get_child_map(world_id, map_id, node_id)
             if existing:
                 return existing
-        compiled = self._enrichment._load_compiled(world_id)
-        node = self._enrichment.get_node(world_id, node_id)
+        compiled = self._compiled.load(world_id)
+        node = self._compiled.get_node(world_id, node_id)
         if node is None:
             raise ValueError(f"Unknown map node: {node_id}")
         max_locations = self._resolve_enrichment_setting("world.site_max_sublocations", 10, 4, 16)
@@ -796,7 +850,7 @@ class WorldBuilder:
         bundle = self._persistence.load_child_map(world_id, map_id)
         if not bundle:
             return None
-        compiled = self._enrichment._load_compiled(world_id)
+        compiled = self._compiled.load(world_id)
         try:
             grown = await self._maps_expand.grow(
                 compiled, bundle["map"], description, near_node_id=near_node_id,
@@ -810,7 +864,7 @@ class WorldBuilder:
             self._persistence.save_child_map(world_id, bundle)
             # The bundle's record is a fresh read, not the cached compiled's —
             # drop the cache so the next load sees the grown map.
-            self._enrichment.invalidate_compiled(world_id)
+            self._compiled.invalidate(world_id)
         return grown
 
     async def pregenerate_planned_maps(self, world_id: str, on_event=None) -> dict:
@@ -823,7 +877,7 @@ class WorldBuilder:
         summary = {"built": [], "skipped": []}
         if not planned:
             return summary
-        compiled = self._enrichment._load_compiled(world_id)
+        compiled = self._compiled.load(world_id)
         from wbworldgen.worldgen import mapspace as _ms
         by_name = {}
         for mid, m in _ms.maps_by_id(compiled).items():
@@ -1033,7 +1087,7 @@ class WorldBuilder:
         (node_id, map_id, ...) or None when no slot fits or the call fails."""
         if not self._llm_service or self._llm_service.mode == "mock":
             return None
-        compiled = self._enrichment._load_compiled(world_id)
+        compiled = self._compiled.load(world_id)
         try:
             authored = await _start.generate_start_location(
                 compiled, description, description, self._llm_service,
@@ -1048,7 +1102,7 @@ class WorldBuilder:
             # site, not on the overworld — the caller grows that interior.
             return {"belongs_inside": authored["belongs_inside"]}
         result = self._persist_generated_start(world_id, authored)
-        self._enrichment.invalidate_compiled(world_id)
+        self._compiled.invalidate(world_id)
         return result
 
     def _persist_generated_start(self, world_id: str, authored: dict) -> dict:
@@ -1078,7 +1132,7 @@ class WorldBuilder:
             for field, value in writes.items():
                 self._save_node_enrichment(world_id, node_id, field, value)
             self._flush_enrichment_cache(world_id)
-        self._enrichment.invalidate_compiled(world_id)
+        self._compiled.invalidate(world_id)
 
         compiled = self.compile_world(self.load_world(world_id))
         for entry in _start.get_start_locations(compiled):

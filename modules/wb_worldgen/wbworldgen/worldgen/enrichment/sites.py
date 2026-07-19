@@ -63,17 +63,17 @@ def site_world_entries(parent_node_id: str, site: dict) -> list[dict]:
 
 
 class SiteExpansionEngine:
-    """One-call interior expansion for a major location. Shares the host's
-    (WorldBuilder facade) LLM service, prompt library, temperature and the
-    enrichment engine's semaphore/backoff so play-time expansion never
-    competes uncontrolled with other enrichment traffic."""
+    """One-call interior expansion for a major location. Shares the
+    ``GenServices`` LLM service, prompt library, temperature and
+    semaphore/backoff so play-time expansion never competes uncontrolled
+    with other enrichment traffic."""
 
-    def __init__(self, host):
-        self._host = host
+    def __init__(self, services):
+        self._services = services
 
     @property
     def _llm(self):
-        return self._host._llm_service
+        return self._services.llm
 
     async def expand(self, compiled: dict, node: dict, *, max_sub_locations: int = 10,
                      template_vocab: dict = None) -> dict:
@@ -162,8 +162,7 @@ class SiteExpansionEngine:
 
     async def _live_expand(self, node: dict, context: dict, max_sub_locations: int,
                            template_vocab: dict = None) -> dict:
-        host = self._host
-        enrichment = host._enrichment
+        services = self._services
         node_id = node.get("id", "")
         node_name = node.get("name", "Unnamed")
         node_type = node.get("type", "settlement")
@@ -185,14 +184,14 @@ class SiteExpansionEngine:
         if isinstance(template_vocab, dict) and template_vocab.get("site_sub_noun"):
             sub_noun = str(template_vocab["site_sub_noun"])
 
-        system = host._get_prompt(
+        system = services.prompts(
             "site_expand_system",
             "You are a world-building AI. Expand one major location into its interior detail: "
             "a compact layout overview and its distinct sub-locations, so a storyteller can set "
             "scenes inside it. Ground everything in the provided world, region and location "
             "context. Output ONLY valid JSON.",
         )
-        user_msg = host._get_prompt(
+        user_msg = services.prompts(
             "site_expand_user",
             f"""World: {world.get('name', 'Unknown')} ({world.get('genre', '')}, {world.get('tone', '')})
 World premise: {world.get('premise', '')}
@@ -230,19 +229,19 @@ Output ONLY valid JSON:
             {"role": "system", "content": system},
             {"role": "user", "content": user_msg},
         ]
-        await enrichment._wait_for_backoff()
-        async with host._enrichment_semaphore:
+        await services.backoff.wait()
+        async with services.semaphore:
             try:
                 return await json_retry_completion(
                     self._llm,
                     messages=messages,
                     model=self._llm.reader_model,
-                    temperature=host._world_builder_temperature or 0.9,
+                    temperature=services.temperature or 0.9,
                     inspector_ctx={"call_type": "world_build", "step": "site:expand"},
                     step_label=f"site:expand:{node_id}",
-                    retry_attempts=host._json_retry_attempts,
+                    retry_attempts=services.json_retry_attempts,
                 )
             except Exception as e:
-                enrichment._note_rate_limit(e)
+                services.backoff.note_rate_limit(e)
                 logger.error("Site expansion failed for node %s: %s", node_id, e)
                 raise

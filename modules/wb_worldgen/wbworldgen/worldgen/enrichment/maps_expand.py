@@ -162,17 +162,16 @@ def map_world_entries(map_record: dict, connections: list = None,
 
 
 class MapExpansionEngine:
-    """One-call child-map expansion. Shares the host's (WorldBuilder facade)
-    LLM service, prompt library, temperature and the enrichment engine's
-    semaphore/backoff, exactly like the (deprecated) SiteExpansionEngine it
-    replaces."""
+    """One-call child-map expansion. Shares the ``GenServices`` LLM service,
+    prompt library, temperature and semaphore/backoff, exactly like the
+    (deprecated) SiteExpansionEngine it replaces."""
 
-    def __init__(self, host):
-        self._host = host
+    def __init__(self, services):
+        self._services = services
 
     @property
     def _llm(self):
-        return self._host._llm_service
+        return self._services.llm
 
     async def expand(self, compiled: dict, parent_map_id: str, node: dict, *,
                      max_locations: int = 10, template_vocab: dict = None,
@@ -383,8 +382,7 @@ class MapExpansionEngine:
     async def _live_grow(self, compiled: dict, map_record: dict, named_nodes: list,
                          description: str, near_node: dict = None,
                          template_vocab: dict = None) -> dict:
-        host = self._host
-        enrichment = host._enrichment
+        services = self._services
         lore = compiled.get("lore", {}) or {}
         rules = compiled.get("rules", {}) or {}
         label = map_record.get("label", map_record.get("map_id", ""))
@@ -396,13 +394,13 @@ class MapExpansionEngine:
         near_line = (f"The player is currently at: {near_node['name']}.\n"
                      if near_node and near_node.get("name") else "")
 
-        system = host._get_prompt(
+        system = services.prompts(
             "map_grow_system",
             "You are a world-building AI adding ONE new location to an existing map "
             "because the story needs it. Keep it consistent with the place it is part "
             "of and the locations already there. Output ONLY valid JSON.",
         )
-        user_msg = host._get_prompt(
+        user_msg = services.prompts(
             "map_grow_user",
             f"""World: {lore.get('world_name', 'Unknown')} ({rules.get('genre', '')}, {rules.get('tone', '')})
 
@@ -433,20 +431,20 @@ Output ONLY valid JSON:
             {"role": "system", "content": system},
             {"role": "user", "content": user_msg},
         ]
-        await enrichment._wait_for_backoff()
-        async with host._enrichment_semaphore:
+        await services.backoff.wait()
+        async with services.semaphore:
             try:
                 return await json_retry_completion(
                     self._llm,
                     messages=messages,
                     model=self._llm.reader_model,
-                    temperature=host._world_builder_temperature or 0.9,
+                    temperature=services.temperature or 0.9,
                     inspector_ctx={"call_type": "world_build", "step": "map:grow"},
                     step_label=f"map:grow:{map_record.get('map_id', '')}",
-                    retry_attempts=host._json_retry_attempts,
+                    retry_attempts=services.json_retry_attempts,
                 )
             except Exception as e:
-                enrichment._note_rate_limit(e)
+                services.backoff.note_rate_limit(e)
                 logger.error("Map grow failed for %s: %s", map_record.get("map_id"), e)
                 raise
 
@@ -497,17 +495,17 @@ Output ONLY valid JSON:
 
     async def _live_expand_root(self, compiled: dict, user_prompt: str,
                                 level: dict, max_locations: int) -> dict:
-        host = self._host
+        services = self._services
         lore = compiled.get("lore", {}) or {}
         name = lore.get("world_name") or "the world"
-        system = host._get_prompt(
+        system = services.prompts(
             "map_root_system",
             "You are a world-building AI designing the single playable map an entire "
             "interactive story takes place on: one contained place — a building, complex, "
             "vessel or compound — whose rooms and areas ARE the whole world. Ground "
             "everything in the provided world context. Output ONLY valid JSON.",
         )
-        user_msg = host._get_prompt(
+        user_msg = services.prompts(
             "map_root_user",
             f"""World: {name} ({lore.get('genre', '')}, {lore.get('tone', '')})
 World premise: {user_prompt}
@@ -536,10 +534,10 @@ Output ONLY valid JSON:
             self._llm,
             messages=messages,
             model=self._llm.reader_model,
-            temperature=host._world_builder_temperature or 0.9,
+            temperature=services.temperature or 0.9,
             inspector_ctx={"call_type": "world_build", "step": "map:root"},
             step_label="map:root",
-            retry_attempts=host._json_retry_attempts,
+            retry_attempts=services.json_retry_attempts,
         )
 
     # --- authored abstract root (map_style "abstract") ----------------------
@@ -742,7 +740,7 @@ Output ONLY valid JSON:
                                    named_locations: list, crossing_specs: list,
                                    max_nodes: int, plane_description: str,
                                    step_label: str) -> dict:
-        host = self._host
+        services = self._services
         name = lore.get("world_name") or "the world"
 
         kind_line = f"World kind: {world_kind}\n" if world_kind else ""
@@ -794,7 +792,7 @@ Output ONLY valid JSON:
                 f"({spec['description']}). Mark each of them with "
                 f"\"crossing\": \"{spec['label']}\".")
 
-        system = host._get_prompt(
+        system = services.prompts(
             "map_abstract_system",
             "You are a world-building AI designing a map as a graph of real places. "
             "This map is ABSTRACT: no procedural terrain, no filler — every node is "
@@ -803,7 +801,7 @@ Output ONLY valid JSON:
             "dreams), and every edge is a real travel route. Ground everything in "
             "the provided world context and authored places. Output ONLY valid JSON.",
         )
-        user_msg = host._get_prompt(
+        user_msg = services.prompts(
             "map_abstract_user",
             f"""World: {name} ({rules.get('genre', '')}, {rules.get('tone', '')})
 {kind_line}World premise: {user_prompt}
@@ -846,10 +844,10 @@ Output ONLY valid JSON:
                 self._llm,
                 messages=messages,
                 model=self._llm.reader_model,
-                temperature=host._world_builder_temperature or 0.9,
+                temperature=services.temperature or 0.9,
                 inspector_ctx={"call_type": "world_build", "step": "map:abstract"},
                 step_label=step_label,
-                retry_attempts=host._json_retry_attempts,
+                retry_attempts=services.json_retry_attempts,
             )
         except Exception as e:
             logger.error("Abstract map authoring failed for %s: %s — layer "
@@ -1051,7 +1049,7 @@ Output ONLY valid JSON:
         terrain-image route and enrichment sampling use. Returns
         (layers, config_meta); (None, None) when the world can't persist
         terrain (no world id yet) — the map degrades to abstract."""
-        persistence = getattr(self._host, "_persistence", None)
+        persistence = self._services.terrain_store
         if persistence is None or not world_id:
             return None, None
         from wbworldgen.worldgen.steps.terrain_generation import _build_layer_terrain
@@ -1059,10 +1057,8 @@ Output ONLY valid JSON:
         # 256 keeps a lazy planet expansion under ~10s of CPU; the root map's
         # creation-time rasters stay at 1024. Raise the setting for
         # root-quality planets at the cost of slower expansions.
-        resolution = 256
-        resolver = getattr(self._host, "_resolve_enrichment_setting", None)
-        if callable(resolver):
-            resolution = resolver("world.child_terrain_resolution", 256, 128, 2048)
+        resolution = self._services.resolve_int_setting(
+            "world.child_terrain_resolution", 256, 128, 2048)
         try:
             entry = _build_layer_terrain(
                 world_id,
@@ -1134,8 +1130,7 @@ Output ONLY valid JSON:
                            levels: list, max_locations: int,
                            template_vocab: dict = None,
                            must_include: list = None) -> dict:
-        host = self._host
-        enrichment = host._enrichment
+        services = self._services
         node_id = node.get("id", "")
         node_name = node.get("name", "Unnamed")
         node_type = node.get("type", "settlement")
@@ -1173,13 +1168,13 @@ Output ONLY valid JSON:
                 f"how one arrives there from {node_name}'s surroundings (a landing site, a "
                 "harbor, a city gate...).\n")
 
-        system = host._get_prompt(
+        system = services.prompts(
             "map_expand_system",
             "You are a world-building AI designing one map of a larger world: the interior "
             "or sub-area of a single location, so a storyteller can set scenes inside it. "
             "Ground everything in the provided world and location context. Output ONLY valid JSON.",
         )
-        user_msg = host._get_prompt(
+        user_msg = services.prompts(
             "map_expand_user",
             f"""World: {world.get('name', 'Unknown')} ({world.get('genre', '')}, {world.get('tone', '')})
 World premise: {world.get('premise', '')}
@@ -1223,19 +1218,19 @@ Output ONLY valid JSON:
             {"role": "system", "content": system},
             {"role": "user", "content": user_msg},
         ]
-        await enrichment._wait_for_backoff()
-        async with host._enrichment_semaphore:
+        await services.backoff.wait()
+        async with services.semaphore:
             try:
                 return await json_retry_completion(
                     self._llm,
                     messages=messages,
                     model=self._llm.reader_model,
-                    temperature=host._world_builder_temperature or 0.9,
+                    temperature=services.temperature or 0.9,
                     inspector_ctx={"call_type": "world_build", "step": "map:expand"},
                     step_label=f"map:expand:{node_id}",
-                    retry_attempts=host._json_retry_attempts,
+                    retry_attempts=services.json_retry_attempts,
                 )
             except Exception as e:
-                enrichment._note_rate_limit(e)
+                services.backoff.note_rate_limit(e)
                 logger.error("Map expansion failed for node %s: %s", node_id, e)
                 raise

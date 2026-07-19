@@ -2,16 +2,15 @@
 
 The ``EnrichmentEngine`` orchestrates one-node-at-a-time LLM enrichment over a
 generated map, with importance ordering, transient-error retries and rate
-limiting. It reads shared services (LLM, persistence, model config, prompt
-templates) from a ``host`` object (the WorldBuilder facade).
+limiting. Its dependencies (LLM, enrichment store, compiled-world cache,
+prompt templates, throttling) are the named fields of a ``GenServices``
+object built by the WorldBuilder facade.
 """
 
 import asyncio
 import logging
 import re
-import time
 
-from wbworldgen.worldgen.compiler import compile_world
 from wbworldgen.worldgen.generation.llm import json_retry_completion
 from wbworldgen.worldgen.enrichment.context import (
     build_enrichment_context,
@@ -78,128 +77,25 @@ def _strip_leading_the(name: str) -> str:
     return stripped or name.strip()
 
 
-# Substrings that identify a provider rate-limit error; when one is seen all
-# in-flight enrichment workers back off together instead of hammering the API.
-_RATE_LIMIT_MARKERS = ("429", "rate limit", "rate_limit", "quota",
-                       "resource_exhausted", "too many requests")
-
-
 class EnrichmentEngine:
-    def __init__(self, host):
-        self._host = host
+    def __init__(self, services):
+        self._services = services
         self._cancel_flags: set = set()
-        self._backoff_until: float = 0.0
-        # Compiled-world cache (size 1: the actively-enriched world). Skips the
-        # full world re-read + compile + terrain npz decompress per node call.
-        # Entries are mutated in place as enrichment lands and dropped whenever
-        # the world's step files are written by anything else.
-        self._compiled_cache: dict = {}
 
     @property
     def _llm(self):
-        return self._host._llm_service
+        return self._services.llm
 
-    # --- shared throttling ---------------------------------------------------
+    # --- shared throttling (delegates to the services-owned backoff) ---------
 
     def _note_rate_limit(self, exc) -> bool:
-        msg = str(exc).lower()
-        if any(marker in msg for marker in _RATE_LIMIT_MARKERS):
-            self._backoff_until = max(self._backoff_until, time.monotonic() + 5.0)
-            return True
-        return False
+        return self._services.backoff.note_rate_limit(exc)
 
     async def _wait_for_backoff(self):
-        while True:
-            delay = self._backoff_until - time.monotonic()
-            if delay <= 0:
-                return
-            await asyncio.sleep(min(delay, 5.0))
+        await self._services.backoff.wait()
 
     def _load_compiled(self, world_id: str) -> dict:
-        compiled = self._compiled_cache.get(world_id)
-        if compiled is None:
-            world_data = self._host.load_world(world_id)
-            compiled = compile_world(world_data, getattr(self._host, "_steps", None))
-            tg = world_data.get("steps", {}).get("terrain_generation", {}).get("data", {})
-            compiled["_terrain_meta"] = tg.get("layers", []) if isinstance(tg, dict) else []
-            self._compiled_cache.clear()
-            self._compiled_cache[world_id] = compiled
-        self._ensure_terrain(world_id, compiled)
-        return compiled
-
-    def invalidate_compiled(self, world_id: str = None):
-        """Drop cached compiled state (after the world's step files were written
-        by something other than enrichment, or the world was deleted)."""
-        if world_id is None:
-            self._compiled_cache.clear()
-        else:
-            self._compiled_cache.pop(world_id, None)
-
-    def release_terrain(self, world_id: str):
-        """Free the decompressed terrain rasters (tens of MB) while keeping the
-        cheap compiled JSON cached; they lazily re-attach on the next call."""
-        compiled = self._compiled_cache.get(world_id)
-        if compiled is not None:
-            compiled.pop("_terrain_layers", None)
-
-    def _node_index(self, compiled: dict) -> dict:
-        """Lazily-built {node_id: node dict} index over the compiled world's own
-        node dicts (not the per-call copies handed to prompts)."""
-        index = compiled.get("_node_by_id")
-        if index is None:
-            from wbworldgen.worldgen import mapspace as _ms
-            index = {n.get("id"): n for n in _ms.all_nodes(compiled)}
-            compiled["_node_by_id"] = index
-        return index
-
-    def get_node(self, world_id: str, node_id: str) -> dict | None:
-        """Current state of one map node (post-enrichment fields included)."""
-        compiled = self._load_compiled(world_id)
-        return self._node_index(compiled).get(node_id)
-
-    def _update_cached_node(self, compiled: dict, node_id: str, field: str, value: str):
-        """Mirror an enrichment write onto the compiled world's own node dicts
-        so the cached compiled state stays truthful across calls/runs (the node
-        lists handed to prompts are per-call copies)."""
-        node = self._node_index(compiled).get(node_id)
-        if node is not None:
-            node[field] = value
-
-    def _ensure_terrain(self, world_id: str, compiled: dict):
-        """Load persisted terrain rasters per layer so enrichment context can
-        sample biome/elevation at each node's coordinate. Best-effort; no-op
-        when already attached."""
-        if "_terrain_layers" in compiled:
-            return
-        try:
-            from wbworldgen.worldgen import terrain_store as _ts
-            persistence = getattr(self._host, "_persistence", None)
-            if persistence is None:
-                return
-            terrain_by_layer = {}
-            for tl in compiled.get("_terrain_meta", []):
-                lid = tl.get("layer_id", "main")
-                out_dir = persistence.terrain_dir(world_id, lid)
-                layers = _ts.load_terrain(str(out_dir))
-                if layers:
-                    # Keyed by the terrain step's layer id; nodes are tagged
-                    # with their map's legacy_layer_id, and the single-entry
-                    # fallback in _terrain_for_node covers any mismatch.
-                    terrain_by_layer[lid] = layers
-            # Terrain-flagged child maps (a planet opened from a star system)
-            # carry a terrain marker in their config, keyed by their map id —
-            # the same id their nodes are tagged with.
-            from wbworldgen.worldgen import mapspace as _ms
-            for mid, m in _ms.maps_by_id(compiled).items():
-                if mid in terrain_by_layer or not (m.get("config") or {}).get("terrain"):
-                    continue
-                layers = _ts.load_terrain(str(persistence.terrain_dir(world_id, mid)))
-                if layers:
-                    terrain_by_layer[mid] = layers
-            if terrain_by_layer:
-                compiled["_terrain_layers"] = terrain_by_layer
-        except Exception as e:
-            logger.warning("attach terrain for enrichment failed (%s): %s", world_id, e)
+        return self._services.compiled.load(world_id)
 
     async def label_next(self, world_id: str, labeled_node_ids: list = None, layer_filter: str = None, rework: bool = False) -> dict:
         if not self._llm or self._llm.mode == "mock":
@@ -257,12 +153,14 @@ class EnrichmentEngine:
 
         node_id = node.get("id")
         lid = node.get("map_id", node.get("layer_id", ""))
-        self._host._save_node_enrichment(world_id, node_id, "name", name)
-        self._update_cached_node(compiled, node_id, "name", name)
+        store = self._services.enrichment_store
+        cache = self._services.compiled
+        store.save_node_enrichment(world_id, node_id, "name", name)
+        cache.update_node(compiled, node_id, "name", name)
         if snippet:
-            self._host._save_node_enrichment(world_id, node_id, "label_description", snippet)
-            self._update_cached_node(compiled, node_id, "label_description", snippet)
-        self._host._flush_enrichment_cache(world_id)
+            store.save_node_enrichment(world_id, node_id, "label_description", snippet)
+            cache.update_node(compiled, node_id, "label_description", snippet)
+        store.flush_enrichment_cache(world_id)
 
         if lid in per_layer:
             per_layer[lid]["done"] = per_layer[lid]["done"] + 1
@@ -333,9 +231,10 @@ class EnrichmentEngine:
         desc = postprocess_links(desc_with_links, node, all_nodes)
         node_id = node.get("id")
         lid = node.get("map_id", node.get("layer_id", ""))
-        self._host._save_node_enrichment(world_id, node_id, "description", desc)
-        self._update_cached_node(compiled, node_id, "description", desc)
-        self._host._flush_enrichment_cache(world_id)
+        store = self._services.enrichment_store
+        store.save_node_enrichment(world_id, node_id, "description", desc)
+        self._services.compiled.update_node(compiled, node_id, "description", desc)
+        store.flush_enrichment_cache(world_id)
 
         if lid in per_layer:
             per_layer[lid]["done"] = per_layer[lid].get("done", 0) + 1
@@ -352,7 +251,7 @@ class EnrichmentEngine:
         for attempt in range(3):
             try:
                 await self._wait_for_backoff()
-                async with self._host._enrichment_semaphore:
+                async with self._services.semaphore:
                     if problem_note:
                         return await self._live_label(node, context, used_names,
                                                       problem_note=problem_note)
@@ -372,7 +271,7 @@ class EnrichmentEngine:
         for attempt in range(3):
             try:
                 await self._wait_for_backoff()
-                async with self._host._enrichment_semaphore:
+                async with self._services.semaphore:
                     return await self._live_description(node, context, existing_description=existing_description)
             except (asyncio.TimeoutError, ConnectionError, OSError) as e:
                 logger.warning("Transient error describing node %s (attempt %d): %s", node.get("id"), attempt + 1, e)
@@ -401,7 +300,7 @@ class EnrichmentEngine:
         }
         try:
             await self._wait_for_backoff()
-            async with self._host._enrichment_semaphore:
+            async with self._services.semaphore:
                 parsed = await self._live_label_batch(batch, contexts, used_names)
         except Exception as e:
             self._note_rate_limit(e)
@@ -436,9 +335,9 @@ class EnrichmentEngine:
         return results, leftovers
 
     async def _live_label_batch(self, batch: list, contexts: dict, used_names: list) -> dict:
-        host = self._host
+        services = self._services
         model = self._llm.module_fast_model or self._llm.reader_model
-        temperature = host._world_builder_temperature or 0.9
+        temperature = services.temperature or 0.9
 
         # Same world for every node in the batch.
         world = contexts.get(batch[0].get("id"), {}).get("world", {})
@@ -475,7 +374,7 @@ class EnrichmentEngine:
             "location below as a part or sub-location of them):\n" + ", ".join(avoid) + "\n\n"
         ) if avoid else ""
 
-        system = host._get_prompt(
+        system = services.prompts(
             "enrich_label_batch_system",
             "You are a world-building AI. Name several map locations at once. Give each a concise, "
             "evocative name and a one-line label description. Names must be distinct from each other "
@@ -497,7 +396,7 @@ class EnrichmentEngine:
             "of a hospital, a dock of a harbor) unless a fitting parent is in that "
             "location's near list — otherwise pick a place that stands on its own."
         )
-        user_msg = host._get_prompt(
+        user_msg = services.prompts(
             "enrich_label_batch_user",
             f"""World: {world.get('name', 'Unknown')} ({world.get('genre', '')}, {world.get('tone', '')})
 World premise: {world.get('premise', '')}
@@ -527,7 +426,7 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
             temperature=temperature,
             inspector_ctx={"call_type": "world_build", "step": "enrich:label_batch"},
             step_label=f"enrich:label_batch:{len(batch)}",
-            retry_attempts=host._json_retry_attempts,
+            retry_attempts=services.json_retry_attempts,
         )
 
     # --- batch run ------------------------------------------------------------
@@ -699,7 +598,7 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
                     flush_pending += 1
                     if flush_pending >= 10:
                         flush_pending = 0
-                        self._host._flush_enrichment_cache(world_id)
+                        self._services.enrichment_store.flush_enrichment_cache(world_id)
                     await emit({"type": "node", "phase": ph, "node_id": node.get("id"),
                                 "layer_id": lid, **event_fields, **progress_snapshot()})
 
@@ -710,13 +609,13 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
 
                 def store_label(node, name, snippet):
                     node_id = node.get("id")
-                    self._host._save_node_enrichment(world_id, node_id, "name", name)
-                    self._update_cached_node(compiled, node_id, "name", name)
+                    self._services.enrichment_store.save_node_enrichment(world_id, node_id, "name", name)
+                    self._services.compiled.update_node(compiled, node_id, "name", name)
                     node["name"] = name
                     used_names.append(name)
                     if snippet:
-                        self._host._save_node_enrichment(world_id, node_id, "label_description", snippet)
-                        self._update_cached_node(compiled, node_id, "label_description", snippet)
+                        self._services.enrichment_store.save_node_enrichment(world_id, node_id, "label_description", snippet)
+                        self._services.compiled.update_node(compiled, node_id, "label_description", snippet)
                         node["label_description"] = snippet
                     summary["labeled"] += 1
 
@@ -759,14 +658,14 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
                                 continue
                             desc = postprocess_links(desc_with_links, node, all_nodes)
                             node_id = node.get("id")
-                            self._host._save_node_enrichment(world_id, node_id, "description", desc)
-                            self._update_cached_node(compiled, node_id, "description", desc)
+                            self._services.enrichment_store.save_node_enrichment(world_id, node_id, "description", desc)
+                            self._services.compiled.update_node(compiled, node_id, "description", desc)
                             node["description"] = desc
                             summary["described"] += 1
                             await record_result(node, {"description": desc})
 
                 await asyncio.gather(*(worker() for _ in range(min(concurrency, queue.qsize()))))
-                self._host._flush_enrichment_cache(world_id)
+                self._services.enrichment_store.flush_enrichment_cache(world_id)
                 flush_pending = 0
                 if world_id in self._cancel_flags:
                     summary["cancelled"] = True
@@ -794,11 +693,11 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
                                            world_id, exc_info=True)
         finally:
             if flush_pending:
-                self._host._flush_enrichment_cache(world_id)
+                self._services.enrichment_store.flush_enrichment_cache(world_id)
             self._cancel_flags.discard(world_id)
             # Keep the cheap compiled JSON cached but free the decompressed
             # rasters (tens of MB — matters on Termux).
-            self.release_terrain(world_id)
+            self._services.compiled.release_terrain(world_id)
 
         await emit({"type": "done", **summary})
         return summary
@@ -870,12 +769,12 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
                 if name is None:
                     continue
                 node_id = node.get("id")
-                self._host._save_node_enrichment(world_id, node_id, "name", name)
-                self._update_cached_node(compiled, node_id, "name", name)
+                self._services.enrichment_store.save_node_enrichment(world_id, node_id, "name", name)
+                self._services.compiled.update_node(compiled, node_id, "name", name)
                 node["name"] = name
                 if snippet:
-                    self._host._save_node_enrichment(world_id, node_id, "label_description", snippet)
-                    self._update_cached_node(compiled, node_id, "label_description", snippet)
+                    self._services.enrichment_store.save_node_enrichment(world_id, node_id, "label_description", snippet)
+                    self._services.compiled.update_node(compiled, node_id, "label_description", snippet)
                     node["label_description"] = snippet
                 if node.get("description"):
                     # The old description narrates the rejected name — rework
@@ -886,8 +785,8 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
                         node, dctx, node.get("description", ""))
                     if desc_links is not None:
                         desc = postprocess_links(desc_links, node, all_nodes)
-                        self._host._save_node_enrichment(world_id, node_id, "description", desc)
-                        self._update_cached_node(compiled, node_id, "description", desc)
+                        self._services.enrichment_store.save_node_enrichment(world_id, node_id, "description", desc)
+                        self._services.compiled.update_node(compiled, node_id, "description", desc)
                         node["description"] = desc
                 summary["relabeled"].append(
                     {"node_id": node_id, "map_id": mid, "old": old_name,
@@ -895,12 +794,12 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
                 await emit({"type": "review_fix", "map_id": mid, "node_id": node_id,
                             "old": old_name, "new": name, "problem": problem})
         if summary["relabeled"]:
-            self._host._flush_enrichment_cache(world_id)
+            self._services.enrichment_store.flush_enrichment_cache(world_id)
         return summary
 
     async def _live_review_map(self, rec: dict, compiled: dict) -> list:
         """One review call for one map. Returns [{"id", "problem"}, ...]."""
-        host = self._host
+        services = self._services
         adjacency: dict = {}
         for e in rec.get("edges", []) or []:
             a, b = e.get("from"), e.get("to")
@@ -919,13 +818,13 @@ Output ONLY valid JSON: {{"nodes": [{{"id": "...", "name": "...", "label_descrip
         world = (compiled.get("lore") or {})
         premise = world.get("premise", "") if isinstance(world, dict) else ""
 
-        system = host._get_prompt(
+        system = services.prompts(
             "enrich_review_system",
             "You are reviewing the location names on one finished map of a game world. "
             "Flag ONLY real coherence problems; an empty list is the normal, expected outcome. "
             "Output ONLY valid JSON.",
         )
-        user_msg = host._get_prompt(
+        user_msg = services.prompts(
             "enrich_review_user",
             f"""Map: {rec.get('label', rec.get('map_id', ''))} ({rec.get('level_type', 'map')})
 Map description: {rec.get('description', '')}
@@ -945,7 +844,7 @@ Do NOT flag names for style, quality or taste. Output ONLY valid JSON:
             map_level=rec.get("level_type", ""),
         )
         await self._wait_for_backoff()
-        async with self._host._enrichment_semaphore:
+        async with self._services.semaphore:
             parsed = await json_retry_completion(
                 self._llm,
                 messages=[{"role": "system", "content": system},
@@ -954,7 +853,7 @@ Do NOT flag names for style, quality or taste. Output ONLY valid JSON:
                 temperature=0.3,
                 inspector_ctx={"call_type": "world_build", "step": "enrich:review"},
                 step_label=f"enrich:review:{rec.get('map_id', '')}",
-                retry_attempts=host._json_retry_attempts,
+                retry_attempts=services.json_retry_attempts,
             )
         issues = parsed.get("issues") if isinstance(parsed, dict) else None
         return [i for i in (issues if isinstance(issues, list) else [])
@@ -982,11 +881,11 @@ Do NOT flag names for style, quality or taste. Output ONLY valid JSON:
         landmarks_str = f"- Notable landmarks: {', '.join(region_landmarks)}\n" if region_landmarks else ""
         terrain_str = _terrain_line(context.get("terrain", {}))
 
-        host = self._host
+        services = self._services
         model = self._llm.module_fast_model or self._llm.reader_model
-        temperature = host._world_builder_temperature or 0.9
+        temperature = services.temperature or 0.9
 
-        system = host._get_prompt(
+        system = services.prompts(
             "enrich_label_system",
             "You are a world-building AI. Generate a concise, evocative name and a one-line label description for a map node.",
         )
@@ -1025,7 +924,7 @@ Do NOT flag names for style, quality or taste. Output ONLY valid JSON:
         if connection_str:
             guidance.append(connection_str)
         system = system + "\n\n" + "\n".join(guidance)
-        user_msg = host._get_prompt(
+        user_msg = services.prompts(
             "enrich_label_user",
             f"""World: {world.get('name', 'Unknown')} ({world.get('genre', '')}, {world.get('tone', '')})
 World premise: {world.get('premise', '')}
@@ -1077,7 +976,7 @@ Output ONLY valid JSON: {{"name": "...", "label_description": "..."}}""",
                 temperature=temperature,
                 inspector_ctx={"call_type": "world_build", "step": "enrich:label"},
                 step_label=f"enrich:label:{node_id}",
-                retry_attempts=host._json_retry_attempts,
+                retry_attempts=services.json_retry_attempts,
             )
             return _strip_leading_the(result.get("name", "Unknown")), result.get("label_description", "")
         except Exception as e:
@@ -1100,9 +999,9 @@ Output ONLY valid JSON: {{"name": "...", "label_description": "..."}}""",
             [f"{n.get('name', '?')} ({n.get('type', '?')}, link_id: {n.get('link_id', '?')})" for n in labeled_neighbors[:5]]
         ) or "none"
 
-        host = self._host
+        services = self._services
         model = self._llm.reader_model
-        temperature = host._world_builder_temperature or 0.9
+        temperature = services.temperature or 0.9
 
         if existing_description:
             system_fallback = (
@@ -1125,11 +1024,11 @@ Output ONLY valid JSON: {{"name": "...", "label_description": "..."}}""",
                 "their link IDs like ${link_n_0001} or ${link_a1b2} (the same format used in the neighbor list above)."
             )
 
-        system = host._get_prompt("enrich_description_system", system_fallback)
+        system = services.prompts("enrich_description_system", system_fallback)
         connection_str = _connection_block(context.get("connection", {}), context.get("vocab"))
         if connection_str:
             system = system + "\n\n" + connection_str
-        user_msg = host._get_prompt(
+        user_msg = services.prompts(
             "enrich_description_user",
             f"""World: {world.get('name', 'Unknown')} ({world.get('genre', '')}, {world.get('tone', '')})
 World premise: {world.get('premise', '')}
