@@ -151,6 +151,118 @@ def test_scope_content_carries_anchors():
 
 
 # ---------------------------------------------------------------------------
+# Tolerant region references (the "Lustra System" failure)
+# ---------------------------------------------------------------------------
+
+def _lustra_steps():
+    """Mirrors the real failure mode: faction region references name authored
+    landmarks ("Fleshport") or drop the article ("Neon Docks") instead of
+    copying an area name exactly."""
+    return {
+        "natural_landmarks": {"data": {
+            "areas": [
+                {"name": "The Glimmering Core", "terrain": "orbital habitats",
+                 "description": ""},
+                {"name": "The Tattered Belt", "terrain": "drifting asteroids",
+                 "description": ""},
+                {"name": "The Neon Docks", "terrain": "freeport station",
+                 "description": ""},
+            ],
+            "landmarks": [
+                {"scope": "", "region": "The Tattered Belt", "name": "Fleshport",
+                 "type": "asteroid den", "description": "lawless"},
+                {"scope": "", "region": "The Glimmering Core",
+                 "name": "The Halo Ring", "type": "orbital", "description": "ring"},
+            ]}},
+        "society_factions": {"data": {"factions": [
+            {"scope": "", "region": "Fleshport", "name": "The Velvet Chain",
+             "type": "cartel", "description": "",
+             "settlements": ["The Flesh Markets", "Chain's Den"],
+             "significant_landmarks": ["Slave Docks"]},
+            {"scope": "", "region": "Neon Docks", "name": "CyberSleaze",
+             "type": "megacorp", "description": "",
+             "settlements": ["The CyberSleaze Spire"],
+             "significant_landmarks": []},
+            {"scope": "", "region": "Nowhere Nebula", "name": "Lost Cult",
+             "type": "cult", "description": "",
+             "settlements": ["Hidden Shrine"], "significant_landmarks": []},
+        ]}},
+    }
+
+
+def test_region_reference_naming_a_landmark_resolves_and_anchors():
+    scopes = collect_scope_content(_lustra_steps())
+    by_name = {l["name"]: l for l in scopes[""]["named_locations"]}
+    # "Fleshport" is a landmark in The Tattered Belt: the cartel's places
+    # land in that area, anchored beside the landmark itself.
+    assert by_name["The Flesh Markets"]["region"] == "The Tattered Belt"
+    assert by_name["The Flesh Markets"]["part_of"] == "Fleshport"
+    assert by_name["The Flesh Markets"]["relation"] == "adjacent"
+    # The group's landmarks still chain to its seat settlement.
+    assert by_name["Slave Docks"]["part_of"] == "The Flesh Markets"
+    assert by_name["Slave Docks"]["region"] == "The Tattered Belt"
+
+
+def test_region_reference_without_article_resolves_to_area():
+    scopes = collect_scope_content(_lustra_steps())
+    by_name = {l["name"]: l for l in scopes[""]["named_locations"]}
+    spire = by_name["The CyberSleaze Spire"]
+    assert spire["region"] == "The Neon Docks"
+    assert "part_of" not in spire
+
+
+def test_unresolvable_region_reference_blanks_out():
+    scopes = collect_scope_content(_lustra_steps())
+    by_name = {l["name"]: l for l in scopes[""]["named_locations"]}
+    # "Nowhere Nebula" matches no area and no landmark: better unplaced than
+    # scattered by a reference that matches nothing.
+    assert "region" not in by_name["Hidden Shrine"]
+    assert "part_of" not in by_name["Hidden Shrine"]
+
+
+def test_merge_joins_factions_through_landmark_and_articleless_references():
+    merged = merge_geography_steps(_lustra_steps())
+    by_region = {r["name"]: r for r in merged["regions"]}
+    belt_names = [l["name"] for l in by_region["The Tattered Belt"]["named_locations"]]
+    assert "Fleshport" in belt_names and "The Flesh Markets" in belt_names
+    assert "The Velvet Chain" in by_region["The Tattered Belt"]["factions"]
+    assert "CyberSleaze" in by_region["The Neon Docks"]["factions"]
+    # The unresolvable faction joins no region at all.
+    for region in merged["regions"]:
+        assert "Hidden Shrine" not in [l["name"] for l in region["named_locations"]]
+
+
+def test_bind_anchor_lookup_is_article_tolerant():
+    nodes, edges = _chain(6)
+    nodes[5]["name"] = "The Halo Ring"
+    locs = [{"name": "Council Dome", "category": "settlement",
+             "part_of": "Halo Ring", "relation": "adjacent"}]
+    bind_named_locations(nodes, locs, edges)
+    # n4 adjoins the ring; n0 (highest importance) must NOT get the dome.
+    assert nodes[4]["name"] == "Council Dome"
+    assert nodes[0]["name"] == ""
+
+
+def test_bind_dedup_is_article_tolerant():
+    nodes, edges = _chain(4)
+    nodes[3]["name"] = "The CyberSleaze Spire"
+    locs = [{"name": "CyberSleaze Spire", "category": "settlement"}]
+    assert bind_named_locations(nodes, locs, edges) == 0
+    assert nodes[0]["name"] == ""
+
+
+def test_bind_region_preference_is_article_tolerant():
+    nodes, edges = _chain(4)
+    for i, n in enumerate(nodes):
+        n["region"] = "The Neon Docks" if i >= 2 else "The Glimmering Core"
+    locs = [{"name": "Freeport Market", "category": "settlement",
+             "region": "Neon Docks"}]
+    bind_named_locations(nodes, locs, edges)
+    market = next(n for n in nodes if n["name"] == "Freeport Market")
+    assert market["region"] == "The Neon Docks"
+
+
+# ---------------------------------------------------------------------------
 # Expansion honors contained_locations (mock mode)
 # ---------------------------------------------------------------------------
 

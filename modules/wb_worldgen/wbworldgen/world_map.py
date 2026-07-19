@@ -13,6 +13,16 @@ except ImportError:
     HAS_SCIPY = False
 
 
+def _join_key(name) -> str:
+    """Case/whitespace/article-tolerant key for matching authored names —
+    the same normalization the compiler's join uses, so "The Halo Ring"
+    anchors a location whose part_of says "Halo Ring"."""
+    key = str(name or "").strip().lower()
+    if key.startswith("the ") and len(key) > 4:
+        key = key[4:]
+    return key
+
+
 @dataclass
 class MapNode:
     id: str
@@ -299,15 +309,15 @@ class WorldMapGenerator:
         #     back to plain suitability placement so authored content is never
         #     dropped.
         if deferred_anchored:
-            placed_by_name = {n.name.strip().lower(): n for n in nodes if n.name}
+            placed_by_name = {_join_key(n.name): n for n in nodes if n.name}
             general = self._general_field(fields)
             rows, cols = np.meshgrid(np.arange(res), np.arange(res), indexing="ij")
             for rname, loc in deferred_anchored:
-                anchor = placed_by_name.get(str(loc.get("part_of", "")).strip().lower())
+                anchor = placed_by_name.get(_join_key(loc.get("part_of", "")))
                 if anchor is not None and loc.get("relation") == "inside":
                     contained = anchor.contained_locations
-                    if loc.get("name", "").strip().lower() not in {
-                            str(c.get("name", "")).strip().lower() for c in contained}:
+                    if _join_key(loc.get("name", "")) not in {
+                            _join_key(c.get("name", "")) for c in contained}:
                         contained.append({"name": loc.get("name", ""),
                                           "description": loc.get("description", "")})
                     continue
@@ -335,7 +345,7 @@ class WorldMapGenerator:
                     type="settlement" if loc.get("category") == "settlement" else "landmark",
                     importance=8 if loc.get("category") == "settlement" else 6,
                     region=rname, layer_id=id_prefix.rstrip("_"))
-                placed_by_name[node.name.strip().lower()] = node
+                placed_by_name[_join_key(node.name)] = node
 
         # 2) Fill the remaining budget with general-suitability wilderness nodes.
         remaining = max(0, total_nodes - len(nodes))
@@ -1445,12 +1455,13 @@ def bind_named_locations(nodes: list, named_locations: list,
     expanded. Anchors resolve against already-named nodes AND locations bound
     earlier in the same call, so anchor chains work regardless of list order.
     A location whose name is already on the map is skipped (it was placed by
-    an earlier pass — e.g. region-based geometric placement)."""
+    an earlier pass — e.g. region-based geometric placement). All name
+    matching — anchors, dedup, region labels — is case- and leading-article-
+    tolerant (``_join_key``)."""
     if not named_locations:
         return 0
 
-    def _key(name) -> str:
-        return str(name or "").strip().lower()
+    _key = _join_key
 
     by_name = {_key(n.get("name")): n for n in nodes if n.get("name")}
     free = sorted((n for n in nodes if not n.get("name")),

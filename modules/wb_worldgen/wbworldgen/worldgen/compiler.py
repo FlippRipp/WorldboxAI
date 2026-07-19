@@ -9,8 +9,61 @@ from typing import Any, Optional
 
 
 def _norm_name(name) -> str:
-    """Case/whitespace-tolerant key for joining authored names."""
-    return str(name or "").strip().lower()
+    """Case/whitespace/article-tolerant key for joining authored names.
+
+    A leading "The " is dropped so cross-step references join even when one
+    step writes "The Neon Docks" and another "Neon Docks" — with independent
+    LLM calls authoring each side, that mismatch is routine."""
+    key = str(name or "").strip().lower()
+    if key.startswith("the ") and len(key) > 4:
+        key = key[4:]
+    return key
+
+
+def _region_resolver(area_names: list, landmarks: list):
+    """Build ``resolve(raw) -> (area_name, anchor_name)`` for authored
+    ``region`` references.
+
+    Steps author ``region`` as free text, so the join must be tolerant.
+    Two-level resolution:
+
+    1. The reference names one of the map's areas (case/article-tolerant) —
+       resolve to that area's canonical name.
+    2. The reference names an authored landmark ("based in Fleshport") —
+       resolve to the area THAT landmark sits in, and return the landmark's
+       canonical name as ``anchor_name`` so the caller can keep the entry's
+       places beside it (part_of/adjacent).
+
+    Anything else resolves to ("", "") — explicitly unplaced — rather than
+    keeping a reference that matches nothing and silently letting placement
+    fall back to arbitrary map nodes.
+    """
+    areas: dict[str, str] = {}
+    for name in area_names or []:
+        name = str(name or "").strip()
+        if name:
+            areas.setdefault(_norm_name(name), name)
+    by_landmark: dict[str, tuple] = {}
+    for lm in landmarks or []:
+        if not isinstance(lm, dict):
+            continue
+        lm_name = str(lm.get("name", "") or "").strip()
+        if not lm_name:
+            continue
+        lm_area = areas.get(_norm_name(lm.get("region", "")), "")
+        by_landmark.setdefault(_norm_name(lm_name), (lm_area, lm_name))
+
+    def resolve(raw) -> tuple:
+        key = _norm_name(raw)
+        if not key:
+            return "", ""
+        if key in areas:
+            return areas[key], ""
+        if key in by_landmark:
+            return by_landmark[key]
+        return "", ""
+
+    return resolve
 
 
 def merge_geography_steps(steps_data: dict) -> dict:
@@ -36,6 +89,8 @@ def merge_geography_steps(steps_data: dict) -> dict:
         ]
     all_landmarks = landmarks_data.get("landmarks", [])
     all_factions = society_data.get("factions", [])
+    resolve_region = _region_resolver(
+        [r.get("name", "") for r in region_list], all_landmarks)
 
     merged_regions = []
     for region in region_list:
@@ -54,7 +109,7 @@ def merge_geography_steps(steps_data: dict) -> dict:
             name = (name or "").strip()
             if not name:
                 return
-            key = name.lower()
+            key = _norm_name(name)
             if key in seen_names:
                 return
             seen_names.add(key)
@@ -65,17 +120,22 @@ def merge_geography_steps(steps_data: dict) -> dict:
             }
             if environment:
                 loc["environment"] = environment
+            if part_of and _norm_name(part_of) == key:
+                part_of = ""  # a place is never anchored to itself
             if part_of:
                 loc["part_of"] = part_of
                 loc["relation"] = relation if relation in ("adjacent", "inside") else "adjacent"
             named_locations.append(loc)
 
         def _in_region(entry):
-            # Tolerant join: v2 entries carry no layer_id (scope replaced it),
-            # so the layer condition only applies when both sides have one.
-            # Entries scoped to a parallel map never join main-map areas —
-            # they are placed on their own map via collect_scope_content.
-            if _norm_name(entry.get("region", "")) != _norm_name(rname):
+            # Tolerant join: region references resolve through the area list
+            # (and authored landmark names) instead of exact-matching. v2
+            # entries carry no layer_id (scope replaced it), so the layer
+            # condition only applies when both sides have one. Entries scoped
+            # to a parallel map never join main-map areas — they are placed
+            # on their own map via collect_scope_content.
+            area, _anchor = resolve_region(entry.get("region", ""))
+            if _norm_name(area) != _norm_name(rname):
                 return False
             if not rlayer and str(entry.get("scope", "") or "").strip():
                 return False
@@ -87,10 +147,17 @@ def merge_geography_steps(steps_data: dict) -> dict:
             if _in_region(lm):
                 lm_name = lm.get("name", "")
                 natural_lm_names.append(lm_name)
+                part_of = (lm.get("part_of") or "").strip()
+                relation = (lm.get("relation") or "").strip()
+                if not part_of:
+                    # A region reference that named another landmark ("on The
+                    # Slick") also anchors this one beside it.
+                    _area, anchor = resolve_region(lm.get("region", ""))
+                    if anchor:
+                        part_of, relation = anchor, "adjacent"
                 _add_location(lm_name, "landmark", lm.get("description", ""),
                               environment=lm.get("environment", ""),
-                              part_of=(lm.get("part_of") or "").strip(),
-                              relation=(lm.get("relation") or "").strip())
+                              part_of=part_of, relation=relation)
 
         region_factions = []
         faction_details = []
@@ -106,12 +173,17 @@ def merge_geography_steps(steps_data: dict) -> dict:
                     "description": faction.get("description", ""),
                     "settlements": faction.get("settlements", []),
                 })
+                # A group whose region named a landmark ("based in Fleshport")
+                # keeps its settlements beside that landmark, not merely
+                # somewhere in the same area.
+                _area, f_anchor = resolve_region(faction.get("region", ""))
                 for settlement in faction.get("settlements", []):
                     # No placeholder description: a non-empty description here
                     # would be bound onto the map node and make the node_descriptions
                     # enrichment step treat it as already-described, permanently
                     # skipping the real flavor text it's supposed to generate.
-                    _add_location(settlement, "settlement", "")
+                    _add_location(settlement, "settlement", "",
+                                  part_of=f_anchor, relation="adjacent")
                 seat = next((s.strip() for s in faction.get("settlements", [])
                              if s and s.strip()), "")
                 for slm in faction.get("significant_landmarks", []):
@@ -143,9 +215,24 @@ def collect_scope_content(steps_data: dict) -> dict:
     "named_locations": [...]}} where scope_label "" is the root/world map.
     Same dedup and no-placeholder-description rules as the legacy region
     merge (a non-empty settlement description would make node_descriptions
-    treat the node as already described)."""
+    treat the node as already described).
+
+    Root-map ``region`` references are resolved through ``_region_resolver``
+    (areas divide the main map only): tolerant area matching, landmark-name
+    references anchoring places beside that landmark, and unresolvable
+    references blanked so binding never scatters them by a name that matches
+    nothing."""
     landmarks_data = steps_data.get("natural_landmarks", {}).get("data", {})
     society_data = steps_data.get("society_factions", {}).get("data", {})
+    # The root map's region vocabulary: the Notable Features areas, plus the
+    # deprecated terrain_regions names legacy worlds still carry.
+    area_names = [a.get("name", "") for a in landmarks_data.get("areas", []) or []
+                  if isinstance(a, dict)]
+    area_names += [r.get("name", "") for r in
+                   (steps_data.get("terrain_regions", {}).get("data", {}) or {}
+                    ).get("regions", []) or [] if isinstance(r, dict)]
+    resolve_region = _region_resolver(area_names,
+                                      landmarks_data.get("landmarks", []) or [])
 
     scopes: dict[str, dict] = {}
 
@@ -160,18 +247,27 @@ def collect_scope_content(steps_data: dict) -> dict:
                       description: str = "", environment: str = "",
                       region: str = "", part_of: str = "", relation: str = ""):
         name = (name or "").strip()
-        if not name or name.lower() in scope["_seen"]:
+        if not name or _norm_name(name) in scope["_seen"]:
             return
-        scope["_seen"].add(name.lower())
+        scope["_seen"].add(_norm_name(name))
         loc = {"name": name, "category": category, "description": description or ""}
         if environment:
             loc["environment"] = environment
         if region:
             loc["region"] = region
+        if part_of and _norm_name(part_of) == _norm_name(name):
+            part_of = ""  # a place is never anchored to itself
         if part_of:
             loc["part_of"] = part_of
             loc["relation"] = relation if relation in ("adjacent", "inside") else "adjacent"
         scope["named_locations"].append(loc)
+
+    def _resolved(scope_label: str, region_raw: str) -> tuple:
+        """(region, anchor) for one entry: root-map references resolve through
+        the area list; parallel-map scopes have no areas, keep the raw text."""
+        if str(scope_label or "").strip():
+            return (region_raw or "").strip(), ""
+        return resolve_region(region_raw)
 
     for lm in landmarks_data.get("landmarks", []) or []:
         scope = _scope(lm.get("scope", ""))
@@ -181,11 +277,16 @@ def collect_scope_content(steps_data: dict) -> dict:
             "description": lm.get("description", ""),
             "environment": lm.get("environment", ""),
         })
+        region, anchor = _resolved(lm.get("scope", ""), lm.get("region") or "")
+        part_of = (lm.get("part_of") or "").strip()
+        relation = (lm.get("relation") or "").strip()
+        if anchor and not part_of:
+            # A region reference that named another landmark ("on The Slick")
+            # also anchors this one beside it.
+            part_of, relation = anchor, "adjacent"
         _add_location(scope, lm.get("name", ""), "landmark",
                       lm.get("description", ""), lm.get("environment", ""),
-                      region=(lm.get("region") or "").strip(),
-                      part_of=(lm.get("part_of") or "").strip(),
-                      relation=(lm.get("relation") or "").strip())
+                      region=region, part_of=part_of, relation=relation)
 
     for faction in society_data.get("factions", []) or []:
         scope = _scope(faction.get("scope", ""))
@@ -195,9 +296,13 @@ def collect_scope_content(steps_data: dict) -> dict:
             "description": faction.get("description", ""),
             "settlements": faction.get("settlements", []),
         })
-        region = (faction.get("region") or "").strip()
+        # A group whose region named a landmark ("based in Fleshport") keeps
+        # its settlements beside that landmark, not merely in the same area.
+        region, f_anchor = _resolved(faction.get("scope", ""),
+                                     faction.get("region") or "")
         for settlement in faction.get("settlements", []) or []:
-            _add_location(scope, settlement, "settlement", "", region=region)
+            _add_location(scope, settlement, "settlement", "", region=region,
+                          part_of=f_anchor, relation="adjacent")
         seat = next((s.strip() for s in faction.get("settlements", []) or []
                      if s and s.strip()), "")
         for slm in faction.get("significant_landmarks", []) or []:
