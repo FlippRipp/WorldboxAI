@@ -72,6 +72,12 @@ class AgentBuild:
         self.turns = 0
         self.tool_calls = 0
         self.finding_rounds: dict = {}   # finding key -> evaluation sightings
+        #: note id -> latest verifier verdict (C5): the context a
+        #: discuss_finding exchange answers to.
+        self.last_note_verdicts: dict = {}
+        #: note id -> {"rounds", "transcript"} — the per-finding dialogue
+        #: state discuss_finding budgets against (N5).
+        self.note_dialogues: dict = {}
         self.cancel_requested = False
         self.result: dict = None
         self.error: str = None
@@ -254,6 +260,12 @@ major findings show the gap).
 - Fix content findings with steered regeneration: run_pass with rework, \
 node_ids and a guidance note is your primary fix instrument. Regenerating \
 a step with a steering note is the recourse for structural problems.
+- Note findings (note:*) are the user's contract and are never \
+auto-accepted. Fix the world — or, if you believe the verifier is wrong \
+or the note genuinely conflicts with the design, contest the finding with \
+discuss_finding: the verifier withdraws on real evidence, or agrees a \
+compromise the user reviews after the build. Explicit acceptance in the \
+done claim is the last resort and is shown to the user.
 - Verify before claiming done: run evaluate, fix the problems it reports, \
 re-evaluate. The done claim triggers a final evaluation; blocking findings \
 must be fixed or explicitly accepted by key.
@@ -351,6 +363,9 @@ def _track_findings(handle: AgentBuild, eval_result: dict):
     for f in eval_result.get("findings", []):
         if f.get("severity") == "problem":
             handle.finding_rounds[f["key"]] = handle.finding_rounds.get(f["key"], 0) + 1
+    # Stash the verifier's verdicts: discuss_finding answers to them (N5).
+    for v in (eval_result.get("notes") or {}).get("verdicts") or []:
+        handle.last_note_verdicts[v["id"]] = v
 
 
 def _is_note_finding(key: str) -> bool:
@@ -412,8 +427,9 @@ async def _done_gate(handle: AgentBuild, done_claim: dict, budgets: dict):
                  "suggestion": f.get("suggestion", "")} for f in remaining],
             "message": (
                 f"{len(remaining)} blocking finding(s) stand. Fix them (steered "
-                "rework / edit_node / regenerate), or claim done again with "
-                "their keys in accept_findings plus a note."),
+                "rework / edit_node / regenerate), contest note findings with "
+                "discuss_finding, or claim done again with their keys in "
+                "accept_findings plus a note."),
         }
 
     accepted = [
@@ -453,7 +469,7 @@ async def _run_build(handle: AgentBuild):
         await _emit(handle, {"type": "progress", "event": evt}, persist=False)
 
     ctx = ToolContext(builder=builder, world_id=handle.world_id,
-                      on_event=on_progress)
+                      on_event=on_progress, build=handle)
     llm_failures = 0
     try:
         while handle.turns < budgets["max_turns"]:

@@ -30,8 +30,11 @@ from wbworldgen.worldgen import mapspace as _ms
 #: ignored — tiny overlaps would bind everything to everything.
 _MIN_CONTAINMENT = 4
 
-#: Amendment-state keys preserved through cleaning (see module docstring).
-_CARRIED_KEYS = ("id", "status", "original_text", "rationale", "no_compromise")
+#: Amendment/dialogue-state keys preserved through cleaning (see module
+#: docstring; ``verifier_context`` records a withdrawn objection so later
+#: verification runs don't re-flag capriciously, N5).
+_CARRIED_KEYS = ("id", "status", "original_text", "rationale",
+                 "no_compromise", "verifier_context")
 
 
 def clean_notes(raw) -> list:

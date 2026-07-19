@@ -91,6 +91,9 @@ def _checklist(notes: list) -> str:
         amended = (" (text amended by an agreed compromise — verify the "
                    "amended text)" if n.get("status") == "amended" else "")
         lines.append(f"- {n['id']} [{where}]{amended}: {n['text']}")
+        if n.get("verifier_context"):
+            lines.append(f"  (context from an earlier discussion: "
+                         f"{n['verifier_context']})")
     return "\n".join(lines)
 
 
@@ -237,3 +240,160 @@ async def verify_notes(services, builder, world_id: str, world_state: dict,
     # reports unverified — a blocking finding, never a silent pass (P7).
     return {"verdicts": [], "unverified": [n["id"] for n in notes],
             "skipped": False}
+
+
+# --- the discussion channel (N5) --------------------------------------------
+
+#: Verifier turns inside ONE discussion exchange (reads + the answer).
+DEFAULT_DISCUSSION_TURNS = 6
+
+#: Builder<->verifier exchanges per finding before it stands as-is,
+#: setting ``world.note_discussion_rounds``.
+DEFAULT_DISCUSSION_ROUNDS = 3
+
+
+async def discuss_turn(services, messages: list) -> dict:
+    """One discussion completion. Module-level patch point, separate from
+    ``verifier_turn`` so canned tests can drive the two loops apart."""
+    return await json_retry_completion(
+        services.llm,
+        messages=messages,
+        model=services.llm.storyteller_model,
+        temperature=0.3,
+        inspector_ctx={"call_type": "world_build", "step": "agent:discuss_note"},
+        step_label="agent:discuss_note",
+        retry_attempts=services.json_retry_attempts,
+    )
+
+
+def _discussion_system(note: dict, verdict: dict, transcript: list,
+                       allow_compromise: bool, max_turns: int) -> str:
+    outcomes = ('"upheld" | "withdrawn" | "compromise"' if allow_compromise
+                else '"upheld" | "withdrawn"')
+    compromise_rule = (
+        "- \"compromise\" ONLY when an amended note text genuinely serves "
+        "the creator's evident intent — or resolves a real conflict between "
+        "notes or with the world rules — never because the builder finds "
+        "the note hard or expensive. The amendment goes to the creator for "
+        "review after the build; they can veto it.\n"
+        if allow_compromise else
+        "- A compromise on this note was already VETOED by the creator: "
+        "amending it again is impossible. Only \"upheld\" or \"withdrawn\" "
+        "exist.\n")
+    lines = []
+    for t in transcript:
+        lines.append(f"Builder: {t['builder']}")
+        if t.get("verifier"):
+            lines.append(f"You ({t.get('outcome', 'replied')}): {t['verifier']}")
+    history = "\n".join(lines) if lines else "(none yet)"
+    return f"""You are the note verifier for an AI-built game world, in a discussion \
+with the build agent about ONE of your findings. You flagged the note below as \
+not honored; the builder is contesting or seeking clarification. You work for \
+the note's AUTHOR — the world's creator — not for the builder. Be firm but \
+honest: the point is the creator getting the world they asked for.
+
+## The note
+{note.get('id', '?')}{f" (about: {note['subject']})" if note.get('subject') else ""}: {note.get('text', '')}
+
+## Your finding
+{verdict.get('evidence') or '(no evidence recorded)'}
+
+## The discussion so far
+{history}
+
+## How to answer
+- "upheld": the finding stands — say precisely what the world must show \
+before you will pass it.
+- "withdrawn": ONLY when the builder's evidence shows the note IS honored \
+and your finding was wrong — re-read the world first to check any claim.
+{compromise_rule}
+## Read tools (to check claims before answering)
+{_render_tools()}
+
+## Response protocol
+Reply with exactly ONE JSON object and nothing else. Either read:
+{{"thought": "...", "action": {{"tool": "...", "args": {{...}}}}}}
+or answer the builder:
+{{"thought": "...", "reply": "your answer to the builder", "outcome": {outcomes}{', "amended_text": "the full amended note text"' if allow_compromise else ''}}}
+- "amended_text" is REQUIRED with outcome "compromise" and forbidden otherwise.
+- You have {max_turns} turns in this exchange — read what you need, then answer."""
+
+
+async def discuss_note(services, builder, world_id: str, note: dict,
+                       verdict: dict, transcript: list, message: str,
+                       on_event=None) -> dict:
+    """One builder->verifier exchange about one note finding. Returns
+    ``{"reply", "outcome", "amended_text"?}``; outcome is always one of
+    upheld/withdrawn/compromise (budget exhaustion upholds — the finding
+    never dissolves by silence)."""
+    allow_compromise = not note.get("no_compromise")
+    system = _discussion_system(note, verdict or {}, transcript,
+                                allow_compromise, DEFAULT_DISCUSSION_TURNS)
+    allowed = set(verifier_tool_ids())
+    ctx = ToolContext(builder=builder, world_id=world_id, on_event=on_event)
+    recent: list = []
+    failures = 0
+
+    for turn in range(1, DEFAULT_DISCUSSION_TURNS + 1):
+        user = ("The builder says:\n" + message + "\n\nCurrent state:\n"
+                + json.dumps({"turn": f"{turn}/{DEFAULT_DISCUSSION_TURNS}",
+                              "recent": recent[-_RECENT_LIMIT:]},
+                             indent=2, ensure_ascii=False)
+                + "\n\nReply with exactly one protocol JSON object.")
+        try:
+            completion = await discuss_turn(
+                services,
+                [{"role": "system", "content": system},
+                 {"role": "user", "content": user}])
+            failures = 0
+        except Exception as e:
+            failures += 1
+            logger.warning("note-discussion turn failed for %s: %s", world_id, e)
+            if failures >= MAX_LLM_FAILURES:
+                break
+            recent.append({"error": f"LLM turn failed: {e}"})
+            continue
+
+        if isinstance(completion, dict) and completion.get("reply"):
+            outcome = completion.get("outcome")
+            amended = str(completion.get("amended_text") or "").strip()
+            if outcome == "compromise" and (not allow_compromise or not amended):
+                recent.append({"protocol_error": (
+                    "compromise is not possible for this note" if not allow_compromise
+                    else "outcome 'compromise' requires a non-empty 'amended_text'")})
+                continue
+            if outcome not in ("upheld", "withdrawn", "compromise"):
+                recent.append({"protocol_error":
+                               "outcome must be upheld, withdrawn or compromise"})
+                continue
+            result = {"reply": str(completion["reply"]), "outcome": outcome}
+            if outcome == "compromise":
+                result["amended_text"] = amended
+            return result
+
+        action = completion.get("action") if isinstance(completion, dict) else None
+        if not isinstance(action, dict) or not action.get("tool"):
+            recent.append({"protocol_error":
+                           "reply with either 'action' or a 'reply' + 'outcome'"})
+            continue
+        tool_id = str(action["tool"])
+        args = action.get("args") or {}
+        if tool_id not in allowed:
+            recent.append({"action": {"tool": tool_id},
+                           "error": f"tool '{tool_id}' is not available to "
+                                    "the verifier"})
+            continue
+        if on_event is not None:
+            await on_event({"type": "verifier_action", "tool": tool_id,
+                            "args": args, "discussing": note.get("id")})
+        try:
+            result = await invoke_tool(ctx, tool_id, args)
+            recent.append({"action": {"tool": tool_id, "args": args},
+                           "result": result})
+        except ToolError as e:
+            recent.append({"action": {"tool": tool_id, "args": args},
+                           "error": str(e)})
+
+    return {"reply": ("The verifier did not reach a conclusion in this "
+                      "exchange; the finding stands."),
+            "outcome": "upheld"}

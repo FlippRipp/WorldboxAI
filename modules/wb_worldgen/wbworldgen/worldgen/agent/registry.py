@@ -36,6 +36,10 @@ class ToolContext:
     #: runs (enrichment node/phase events stream to the build observer;
     #: they never enter the persisted action log).
     on_event: Any = None
+    #: The AgentBuild handle when the invocation runs inside an agent build
+    #: — build-scoped tools (discuss_finding's per-finding dialogue state,
+    #: C5/N5) require it and reject invocations without one.
+    build: Any = None
 
 
 @dataclass(frozen=True)
