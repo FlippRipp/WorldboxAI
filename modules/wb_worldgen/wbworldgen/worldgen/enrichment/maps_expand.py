@@ -24,8 +24,12 @@ a hard error, never silently accepted.
 
 import hashlib
 import logging
+import re
 
 from wbworldgen.worldgen.generation.llm import json_retry_completion
+from wbworldgen.worldgen.generation.abstract_graph import (
+    MAX_PLANE_NODES, MAX_ROOT_NODES, ensure_crossing_nodes,
+    layout_abstract_graph, mock_abstract_parsed, normalize_abstract_graph)
 from wbworldgen.worldgen.enrichment.context import build_enrichment_context, collect_nodes_by_layer
 
 logger = logging.getLogger(__name__)
@@ -537,6 +541,311 @@ Output ONLY valid JSON:
             step_label="map:root",
             retry_attempts=host._json_retry_attempts,
         )
+
+    # --- authored abstract root (map_style "abstract") ----------------------
+
+    def _abstract_inputs(self, world_state: dict) -> tuple:
+        """(seed_prompt, lore, rules, areas, scopes, parallel_maps) for the
+        authored abstract root flow."""
+        from wbworldgen.worldgen.compiler import collect_scope_content
+        steps_data = world_state.get("steps", {})
+        landmarks_data = steps_data.get("natural_landmarks", {}).get("data", {}) or {}
+        areas = [a for a in landmarks_data.get("areas", []) or []
+                 if isinstance(a, dict) and str(a.get("name", "")).strip()]
+        scopes = collect_scope_content(steps_data)
+        hierarchy = steps_data.get("hierarchy_design", {}).get("data", {}) or {}
+        parallel = [p for p in hierarchy.get("parallel_maps") or []
+                    if isinstance(p, dict) and str(p.get("label", "")).strip()]
+        lore = steps_data.get("lore", {}).get("data", {}) or {}
+        rules = steps_data.get("world_rules", {}).get("data", {}) or {}
+        return world_state.get("seed_prompt", ""), lore, rules, areas, scopes, parallel
+
+    def mock_abstract_root(self, world_state: dict, level: dict) -> dict:
+        """Deterministic offline authored-abstract root — same assembly as the
+        live path, with the per-layer LLM call replaced by the mock author."""
+        seed_prompt, _lore, _rules, areas, scopes, parallel = \
+            self._abstract_inputs(world_state)
+        root_prefix = "root_" if parallel else ""
+        parsed_root = mock_abstract_parsed(
+            "the world", areas, scopes.get("", {}).get("named_locations", []))
+        parsed_planes = [
+            mock_abstract_parsed(pm["label"], [],
+                                 scopes.get(pm["label"], {}).get("named_locations", []),
+                                 MAX_PLANE_NODES)
+            for pm in parallel]
+        return self._assemble_abstract_root(
+            seed_prompt, areas, scopes, parallel, level,
+            parsed_root, parsed_planes, root_prefix)
+
+    async def expand_abstract_root(self, world_state: dict, user_prompt: str,
+                                   level: dict, directive: str = "",
+                                   world_kind: str = "") -> dict:
+        """Author the ROOT map for an abstract world (map_style "abstract"):
+        a solar system, a dream web — a graph of real conceptual places, not
+        a procedural scatter. One full-attention call authors the root layer
+        (reading the hierarchy guidance, the world-design map directive, the
+        authored areas and every named location); each parallel plane gets
+        its own call; crossings are paired and the deterministic layout
+        places everything. Returns map_generation step data in the same
+        shape as the procedural path (flat map, or legacy multilayer with
+        parallel planes)."""
+        if not self._llm or self._llm.mode == "mock":
+            return self.mock_abstract_root(world_state, level)
+        seed_prompt, lore, rules, areas, scopes, parallel = \
+            self._abstract_inputs(world_state)
+        root_prefix = "root_" if parallel else ""
+
+        crossing_specs = []
+        for pm in parallel:
+            try:
+                count = max(1, min(6, int(pm.get("connection_count") or 2)))
+            except (TypeError, ValueError):
+                count = 2
+            crossing_specs.append({
+                "label": pm["label"],
+                "kind": pm.get("connection_kind") or "passage",
+                "count": count,
+                "description": pm.get("description", ""),
+            })
+
+        parsed_root = await self._live_abstract_layer(
+            lore, rules, user_prompt, world_kind=world_kind,
+            label=lore.get("world_name", "") or "the world",
+            level_type=level.get("level_type", "world"),
+            guidance=level.get("guidance", ""), directive=directive,
+            areas=areas,
+            named_locations=scopes.get("", {}).get("named_locations", []),
+            crossing_specs=crossing_specs, max_nodes=MAX_ROOT_NODES,
+            plane_description="", step_label="map:abstract_root")
+        parsed_planes = []
+        for pm in parallel:
+            spec = next(s for s in crossing_specs if s["label"] == pm["label"])
+            parsed_planes.append(await self._live_abstract_layer(
+                lore, rules, user_prompt, world_kind=world_kind,
+                label=pm["label"], level_type=pm.get("level_type", "world"),
+                guidance="", directive="", areas=[],
+                named_locations=scopes.get(pm["label"], {}).get("named_locations", []),
+                crossing_specs=[{**spec, "label": "main",
+                                 "description": "the main world map"}],
+                max_nodes=MAX_PLANE_NODES,
+                plane_description=pm.get("description", ""),
+                step_label=f"map:abstract_plane:{pm['label']}"))
+
+        return self._assemble_abstract_root(
+            seed_prompt, areas, scopes, parallel, level,
+            parsed_root, parsed_planes, root_prefix)
+
+    def _assemble_abstract_root(self, seed_prompt: str, areas: list,
+                                scopes: dict, parallel: list, level: dict,
+                                parsed_root: dict, parsed_planes: list,
+                                root_prefix: str) -> dict:
+        """Normalize + lay out authored layers, pair plane crossings, and
+        shape the result exactly like the procedural path's output. A layer
+        whose authored output normalizes to nothing degrades to the mock
+        author for that layer — an abstract world never falls back to the
+        Poisson scatter."""
+        root_locs = scopes.get("", {}).get("named_locations", [])
+        root_graph = normalize_abstract_graph(
+            parsed_root, root_locs, areas, root_prefix, MAX_ROOT_NODES)
+        if not root_graph["nodes"]:
+            root_graph = normalize_abstract_graph(
+                mock_abstract_parsed("the world", areas, root_locs),
+                root_locs, areas, root_prefix, MAX_ROOT_NODES)
+
+        if not parallel:
+            result = layout_abstract_graph(root_graph, areas,
+                                           generated_from=seed_prompt)
+            for node in result["nodes"]:
+                node.pop("crossing", None)
+            return result
+
+        plane_graphs = []
+        for i, pm in enumerate(parallel):
+            lid = re.sub(r"[^a-z0-9]+", "_", str(pm["label"]).lower()).strip("_") \
+                or f"parallel_{i + 1}"
+            plane_locs = scopes.get(pm["label"], {}).get("named_locations", [])
+            parsed = parsed_planes[i] if i < len(parsed_planes) else {}
+            graph = normalize_abstract_graph(
+                parsed, plane_locs, [], f"{lid}_", MAX_PLANE_NODES)
+            if not graph["nodes"]:
+                graph = normalize_abstract_graph(
+                    mock_abstract_parsed(pm["label"], [], plane_locs,
+                                         MAX_PLANE_NODES),
+                    plane_locs, [], f"{lid}_", MAX_PLANE_NODES)
+            plane_graphs.append((lid, pm, graph))
+
+        connections = []
+        counter = 0
+        for lid, pm, graph in plane_graphs:
+            try:
+                count = max(1, min(6, int(pm.get("connection_count") or 2)))
+            except (TypeError, ValueError):
+                count = 2
+            kind = pm.get("connection_kind") or "passage"
+            root_cross = ensure_crossing_nodes(
+                root_graph, pm["label"], kind, count, root_prefix)
+            plane_cross = ensure_crossing_nodes(
+                graph, "main", kind, count, f"{lid}_")
+            for fn, tn in zip(root_cross, plane_cross):
+                lc_id = f"lc_{counter:04d}"
+                fn["interlayer_connection_id"] = lc_id
+                tn["interlayer_connection_id"] = lc_id
+                connections.append({
+                    "id": lc_id,
+                    "from_layer_id": "root", "from_node_id": fn["id"],
+                    "to_layer_id": lid, "to_node_id": tn["id"],
+                    "connection_type": kind,
+                    "name": f"{kind.replace('_', ' ').title()} #{counter + 1}",
+                    "description": pm.get("description", ""),
+                    "bidirectional": True,
+                })
+                counter += 1
+
+        layers = []
+        root_map = layout_abstract_graph(root_graph, areas,
+                                         generated_from=seed_prompt)
+        root_description = root_map.pop("description", "")
+        root_map["layer_id"] = "root"
+        layers.append({
+            "layer_id": "root", "name": "",
+            "description": root_description,
+            "layer_type": level.get("level_type") or "world",
+            "index": 0, "map": root_map,
+        })
+        for i, (lid, pm, graph) in enumerate(plane_graphs):
+            plane_map = layout_abstract_graph(graph, [], generated_from=seed_prompt)
+            plane_map.pop("description", None)
+            plane_map["layer_id"] = lid
+            layers.append({
+                "layer_id": lid, "name": pm["label"],
+                "description": pm.get("description", ""),
+                "layer_type": pm.get("level_type") or "world",
+                "index": i + 1, "map": plane_map,
+            })
+        for layer in layers:
+            for node in layer["map"]["nodes"]:
+                node.pop("crossing", None)
+
+        return {
+            "layers": layers,
+            "connections": connections,
+            "config": {
+                "total_nodes": sum(len(l["map"]["nodes"]) for l in layers),
+                "generated_from": seed_prompt,
+            },
+        }
+
+    async def _live_abstract_layer(self, lore: dict, rules: dict,
+                                   user_prompt: str, *, world_kind: str,
+                                   label: str, level_type: str, guidance: str,
+                                   directive: str, areas: list,
+                                   named_locations: list, crossing_specs: list,
+                                   max_nodes: int, plane_description: str,
+                                   step_label: str) -> dict:
+        host = self._host
+        name = lore.get("world_name") or "the world"
+
+        kind_line = f"World kind: {world_kind}\n" if world_kind else ""
+        if plane_description:
+            scale_block = (f'This map is a PARALLEL plane beside the main world map: '
+                           f'"{label}" ({level_type}) — {plane_description}\n'
+                           f'Nodes here have no "region" (leave it empty).')
+        else:
+            scale_block = (f'The root map of this world is ONE "{level_type}" map:\n'
+                           f'{guidance or label}')
+        directive_line = f"\nMap directive: {directive}" if directive else ""
+
+        if areas:
+            area_lines = "\n".join(
+                f"- {a.get('name', '')}: {a.get('terrain', '')}"
+                + (f" — {a.get('description', '')}" if a.get('description') else "")
+                for a in areas)
+            areas_block = ("\nAreas dividing this map (every node's \"region\" must be "
+                           "one of these names, copied exactly, and every area must "
+                           f"hold at least one node):\n{area_lines}\n")
+        else:
+            areas_block = ""
+
+        if named_locations:
+            loc_lines = []
+            for loc in named_locations:
+                bits = [loc.get("category", "place")]
+                if loc.get("region"):
+                    bits.append(f"area: {loc['region']}")
+                if loc.get("part_of"):
+                    bits.append(f"{loc.get('relation', 'adjacent')} {loc['part_of']}")
+                head = f"- {loc.get('name', '')} ({', '.join(bits)})"
+                desc = str(loc.get("description", "")).strip()
+                loc_lines.append(f"{head}: {desc}" if desc else head)
+            locations_block = (
+                "\nAuthored places that must appear. Make each one either a node "
+                "itself (if it IS a place at this map's scale) or an entry in a "
+                "fitting node's \"contains\" (a venue-scale place lives INSIDE "
+                "the larger place it belongs to — never as its sibling on this "
+                "map):\n" + "\n".join(loc_lines) + "\n")
+        else:
+            locations_block = ""
+
+        crossing_block = ""
+        for spec in crossing_specs:
+            crossing_block += (
+                f"\nInclude exactly {spec['count']} node(s) of kind "
+                f"\"{spec['kind']}\" — crossings to \"{spec['label']}\" "
+                f"({spec['description']}). Mark each of them with "
+                f"\"crossing\": \"{spec['label']}\".")
+
+        system = host._get_prompt(
+            "map_abstract_system",
+            "You are a world-building AI designing a map as a graph of real places. "
+            "This map is ABSTRACT: no procedural terrain, no filler — every node is "
+            "a distinct, named, meaningful place at this map's scale (in a solar "
+            "system: the star, planets, moons, stations; in a dream web: the great "
+            "dreams), and every edge is a real travel route. Ground everything in "
+            "the provided world context and authored places. Output ONLY valid JSON.",
+        )
+        user_msg = host._get_prompt(
+            "map_abstract_user",
+            f"""World: {name} ({rules.get('genre', '')}, {rules.get('tone', '')})
+{kind_line}World premise: {user_prompt}
+
+{scale_block}{directive_line}
+{areas_block}{locations_block}
+Design {max(6, max_nodes // 2)}-{max_nodes} nodes — the real structure of this map at its own
+scale. Each node: "name"; "kind" (this world's own noun for what it is: planet,
+station, moon, gate, dream...); "region" (one of the areas above, or empty);
+"importance" 1-10 (how central it is); "description" (1-2 vivid sentences);
+"adjacent" (names of nodes it has direct travel routes to — every node must be
+reachable); "contains" (names of authored places from the list above that live
+inside/on this node).{crossing_block}
+
+Output ONLY valid JSON:
+{{"description": "2-3 sentences on this map's overall shape",
+"nodes": [{{"name": "...", "kind": "...", "region": "...", "importance": 5,
+"description": "...", "adjacent": ["..."], "contains": ["..."], "crossing": ""}}]}}""",
+            world_name=name,
+            world_premise=user_prompt,
+            map_label=label,
+            level_type=level_type,
+            max_nodes=str(max_nodes),
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ]
+        try:
+            return await json_retry_completion(
+                self._llm,
+                messages=messages,
+                model=self._llm.reader_model,
+                temperature=host._world_builder_temperature or 0.9,
+                inspector_ctx={"call_type": "world_build", "step": "map:abstract"},
+                step_label=step_label,
+                retry_attempts=host._json_retry_attempts,
+            )
+        except Exception as e:
+            logger.error("Abstract map authoring failed for %s: %s — layer "
+                         "degrades to the offline author", label, e)
+            return {}
 
     # --- result shaping -----------------------------------------------------
 

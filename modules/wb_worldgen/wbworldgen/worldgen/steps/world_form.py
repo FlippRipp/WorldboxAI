@@ -79,6 +79,11 @@ def world_kind(world_state: dict) -> str:
     return str(_step_data(world_state).get("world_kind") or "").strip()
 
 
+def map_style(world_state: dict) -> str:
+    """The design's root map style ("" when absent — old worlds)."""
+    return str(_step_data(world_state).get("map_style") or "").strip()
+
+
 def map_generator_override(world_state: dict) -> str:
     """Generator id the world's own design imposes on the root map ("" when
     the template's level default should stand). A "city" map style routes

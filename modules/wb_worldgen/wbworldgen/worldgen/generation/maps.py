@@ -197,7 +197,11 @@ class MapStepGenerator:
             return result
 
         if parallel_maps:
-            layer_specs = [{"layer_id": "root", "name": "", "layer_type": "world", "index": 0}]
+            from wbworldgen.worldgen.steps.hierarchy_design import designed_levels
+            levels = designed_levels(world_state)
+            root_layer_type = (levels[0].get("level_type") if levels else "world") or "world"
+            layer_specs = [{"layer_id": "root", "name": "",
+                            "layer_type": root_layer_type, "index": 0}]
             connections_spec = []
             for i, pm in enumerate(parallel_maps):
                 lid = _re.sub(r"[^a-z0-9]+", "_", str(pm["label"]).lower()).strip("_") or f"parallel_{i + 1}"
