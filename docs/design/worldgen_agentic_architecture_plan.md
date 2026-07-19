@@ -36,7 +36,10 @@ live run) exposed four silent-contract defects — all fixed same day
 and settled the design of v2c (checkpoint/revert, the agent's undo),
 LANDED 2026-07-19 (60889d7) on Filip's go: every mutating action is
 auto-checkpointed and a build-scoped revert tool restores byte-exact.
-The catalog is now 20 tools.
+v2d (the expand_node tool) LANDED 2026-07-19 (e7d2b33) on Filip's go,
+design delegated: child maps — the wall that felled both live builds —
+are now reachable through the same expansion surface play-time uses.
+The catalog is now 21 tools.
 Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
@@ -1061,6 +1064,71 @@ carry-forward, flush/invalidate coherence, and the real loop
 (mutate→revert→byte-equal, read-only actions snapshot nothing, launch
 clears stale tags, a failed snapshot blocks the mutation).*
 
+### v2d — Child-map expansion tool (designed and landed 2026-07-19)
+
+*Prompted by Filip's question after the Ecstasy Veil diagnosis — "is
+there a good reason for there not being an expansion tool?" — and the
+honest answer was no. The gap was an artifact of how D1's v1 list was
+enumerated (steps, passes, and the wizard's write surfaces; expansion
+triggers from routes and play-time, outside the step list — exactly the
+Crucible Stars blind-spot shape), not a withholding decision: the
+rationale that withheld surgery (no existing surface, heavy invariants)
+never applied here, since ``facade.expand_node`` is the cached,
+invariant-handling, terrain-aware surface play-time expansion and the
+pregenerate pass already trust. D1's own evidence gate ("if evaluation
+shows a recurring wall") was met twice over — the child-map wall is the
+documented proximate cause of both live-build failures. Filip approved
+build without design confirmation; decisions below were made in
+implementation and recorded here.*
+
+**Decisions:**
+
+- **X1 — One primitive, no batch.** ``expand_node(node_id, level_type?,
+  force?, note?)`` wraps the facade surface 1:1 (the v2a
+  wrap-the-shared-surface pattern). Deliberately no ``run_pregenerate``
+  batch tool: the hierarchy's pregenerate plans (readable via
+  ``read_step``) are a work list the agent drives one node per action —
+  one observation, one v2c checkpoint and one budget unit per child
+  map, instead of one long opaque call.
+- **X2 — Loud expandability, with the fix in the message.** Unknown
+  node, unnamed anchor (name it: label pass / edit_node), depth
+  exhausted, no child level in the hierarchy (regenerate
+  hierarchy_design with a note), ``level_type`` not allowed below this
+  map (the allowed list is in the rejection). An existing child is NOT
+  an error: it returns as-is, flagged ``existed``, with a pointer at
+  ``force``.
+- **X3 — force is in v1, and it is steerable.** A bad child map needs
+  regeneration, and v2c makes that safe (checkpointed, revertible). The
+  ``note`` threads into the child author's prompt — via the context
+  dict, not the signature (``_live_expand`` is an established test
+  patch point; the C1 guidance-channel precedent) — because a force
+  regeneration without steering would be the Ecstasy Veil unsteerable
+  re-roll again. ``facade.expand_node`` gains ``user_note`` for every
+  caller. A force regeneration invalidates the compiled cache (its
+  in-place update only ever adds maps/connections; a replacement behind
+  its back would serve a blend).
+- **X4 — Results tell the naming truth.** Authored levels come fully
+  named/described ("no label pass is pending"); procedural children are
+  born unnamed (detail lazily, or ``run_pass`` scoped to the new
+  map_id); terrain-flagged children report that they rasterized their
+  own terrain — which is also how per-planet terrain is reached (the
+  Crucible Stars honest-terrain contract: children rasterize at
+  expansion time).
+
+*Landed 2026-07-19 (e7d2b33): ``agent/tools/expand.py`` (the 21st
+catalog entry), ``user_note`` through ``MapExpansionEngine.expand`` /
+``facade.expand_node``, the system-prompt line naming expand_node as
+the ONLY source of child maps (map_generation cannot add them — the
+exact confusion that destroyed the Ecstasy Veil root), and a
+"Child maps" how-to-work bullet. Verified by 4 new tests: create +
+read-tools round-trip (anchor stops advertising expandable), cached
+return + force regeneration, the rejection set, and the note reaching
+the child author's prompt. With v2d, the Crucible Stars systemic open
+item ("exposing the expansion/pregenerate phase as agent tools") is
+closed; per-planet terrain arrives by modeling planet-likes as
+terrain-flagged children, and the parallel-map-raster question stops
+gating anything.*
+
 ### C5 — Ideation notes, the note verifier and the review gate (designed 2026-07-19)
 
 *Designed 2026-07-19 with Filip directly after v2a, build started on his go
@@ -1295,9 +1363,11 @@ the patch rejection.
 
 **Open discussion items (deliberately not scheduled):** exposing the
 expansion/pregenerate phase as agent tools (the systemic fix — without
-it any world needing child maps or non-root terrain is out of reach);
-whether ``parallel_maps`` should carry creation-time rasters, or whether
-planet-likes belong as terrain-flagged children instead; a lint for
+it any world needing child maps or non-root terrain is out of reach) —
+*landed 2026-07-19 as v2d (e7d2b33)*; whether ``parallel_maps`` should
+carry creation-time rasters, or whether planet-likes belong as
+terrain-flagged children instead (v2d defuses this: terrain-flagged
+children work today, so it stops gating anything); a lint for
 terrain entries with no raster on disk (would have caught the
 fabrication at the done-gate); rejecting unknown ``run_step`` config
 keys (P7 at the config layer) — *landed 2026-07-19 with the Ecstasy
@@ -1363,11 +1433,13 @@ bounds. 60889d7 — v2c (see its section): with checkpoints, turn 11's
 destruction would have been one ``revert`` call instead of six turns
 and a sibling map.
 
-**Still open (unchanged from Crucible Stars):** the expansion/
-pregenerate tools — the agent still cannot CREATE the child maps it was
-hunting in both live runs; v2c makes that wall recoverable, not
-reachable — plus parallel-map rasters, the missing-raster lint, and
-record-a-blocker.
+**Still open (unchanged from Crucible Stars):** ~~the expansion/
+pregenerate tools~~ — *closed the same day by v2d (e7d2b33), on Filip's
+"is there a good reason for there not being an expansion tool?": the
+agent can now CREATE the child maps it was hunting in both live runs —
+leaving* the missing-raster lint and record-a-blocker (parallel-map
+rasters stop gating anything once planet-likes are terrain-flagged
+children).
 
 ### Superseded: the plan-artifact design (refined and replaced 2026-07-19)
 
@@ -1410,6 +1482,7 @@ file, before the 2026-07-19 Arc C rewrite).
 | 15 | C6 world explorer + classic-system removal | L | ✓ landed (2 commits, 2026-07-19) | the world is a map, not a list; one build system left |
 | 16 | Ecstasy Veil P7 fixes (config contract, note threading, excerpt honesty) | S–M | ✓ landed (5174f95, 39380ca) | steering that actually steers; no fabricated findings |
 | 17 | v2c checkpoint/revert | M | ✓ landed (60889d7) | the agent's undo — a destructive mistake is one call back |
+| 18 | v2d expand_node tool | M | ✓ landed (e7d2b33) | child maps reachable — the wall from both live runs falls |
 
 (A5 landed before B1 — the reverse of the original ordering; nothing
 depended on the order.) RuntimeHost (`backend.py` half of A1) can ride along
