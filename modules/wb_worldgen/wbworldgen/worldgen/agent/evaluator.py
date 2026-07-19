@@ -82,6 +82,15 @@ def _content_excerpts(compiled: dict) -> str:
                 lines.append(f"    description: {n['description']}")
             if n.get("additional_details"):
                 lines.append(f"    storyteller details: {n['additional_details']}")
+        if len(named) > _EXCERPT_NODES_PER_MAP:
+            # An unmarked cutoff reads as missing content: the Ecstasy Veil
+            # live run's critique flagged "20 claimed, only 12 listed" as a
+            # blocking finding off exactly this truncation.
+            lines.append(
+                f"  (excerpt truncated: the {_EXCERPT_NODES_PER_MAP} "
+                f"highest-importance of {len(named)} named locations are "
+                f"shown — the other {len(named) - _EXCERPT_NODES_PER_MAP} "
+                "exist and are simply not excerpted)")
     return "\n".join(lines)
 
 
@@ -99,7 +108,11 @@ async def generate_critique(services, rules: dict, lore: dict, lint_report: dict
         "contradictions between locations, content that ignores the world's "
         "premise, and tonal breaks the rules forbid. Do NOT flag style, "
         "prose quality, or things the rules are silent on. An empty findings "
-        "list is the normal outcome for a sound world.\n\n"
+        "list is the normal outcome for a sound world.\n"
+        "The content is an EXCERPT — per-map location lists are truncated "
+        "to the highest-importance entries (marked when so). Judge only "
+        "what is shown; never flag counts, completeness, or absences "
+        "inferred from the excerpt's own bounds.\n\n"
         "Severity: 'problem' = violates a rule or breaks coherence (blocks "
         "completion); 'nit' = worth noting, does not block.\n"
         "Output ONLY valid JSON: {\"findings\": [{\"kind\": \"short_slug\", "

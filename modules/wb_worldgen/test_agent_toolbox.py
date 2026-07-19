@@ -721,3 +721,173 @@ def test_read_map_include_prose(builder):
     assert by_id["n1"]["description"] == ""
     assert by_id["n1"]["additional_details"] == ""
     assert by_id["n1"]["label_description"] == ""
+
+
+# ---------------------------------------------------------------------------
+# run_step config/steering honesty (P7 at the config layer — the Ecstasy
+# Veil live run lost a finished root map to a silently-ignored invented
+# config, then failed to restore it because the steering note was dropped)
+# ---------------------------------------------------------------------------
+
+def _abstract_world(builder, world_id="abstract_world"):
+    """World whose designed root is authored-abstract (map_style 'abstract',
+    root level on the world_map generator)."""
+    return builder.save_world(world_id, {
+        "seed_prompt": "a veil of worlds",
+        "steps": {
+            "world_form": {"data": {"world_kind": "a veil",
+                                    "map_style": "abstract"}, "approved": True},
+            "world_rules": {"data": {"genre": "sf", "tone": "wistful"},
+                            "approved": True},
+            "lore": {"data": {"world_name": "The Veil"}, "approved": True},
+            "hierarchy_design": {"data": {"levels": [
+                {"level_type": "world", "generator_id": "world_map"}]},
+                "approved": True},
+        },
+    })
+
+
+def _procedural_world(builder, world_id="procedural_world"):
+    """World whose designed root stays procedural (terrain style)."""
+    return builder.save_world(world_id, {
+        "seed_prompt": "a plain land",
+        "steps": {
+            "world_form": {"data": {"map_style": "terrain"}, "approved": True},
+            "hierarchy_design": {"data": {"levels": [
+                {"level_type": "region", "generator_id": "world_map",
+                 "terrain": True}]}, "approved": True},
+        },
+    })
+
+
+def test_run_step_rejects_unknown_config_keys(mock_builder):
+    wid = _map_world(mock_builder)
+    ctx = _ctx(mock_builder, wid)
+    # The Ecstasy Veil failure shape: invented child-map config keys must be
+    # rejected loudly, never silently ignored while the root regenerates.
+    with pytest.raises(ToolError) as err:
+        run(invoke_tool(ctx, "run_step",
+                        {"step_id": "map_generation",
+                         "config": {"parent_node_id": "n1",
+                                    "level_type": "planet"}}))
+    msg = str(err.value)
+    assert "unknown config key 'parent_node_id'" in msg
+    assert "total_nodes" in msg  # the rejection names the accepted keys
+    with pytest.raises(ToolError, match="accepted: none"):
+        run(invoke_tool(ctx, "run_step",
+                        {"step_id": "lore", "config": {"length": "long"}}))
+
+
+def test_run_step_config_type_and_bounds(mock_builder):
+    wid = _map_world(mock_builder)
+    ctx = _ctx(mock_builder, wid)
+    with pytest.raises(ToolError, match="must be a integer"):
+        run(invoke_tool(ctx, "run_step",
+                        {"step_id": "map_generation",
+                         "config": {"total_nodes": "many"}}))
+    with pytest.raises(ToolError, match=">= 30"):
+        run(invoke_tool(ctx, "run_step",
+                        {"step_id": "map_generation",
+                         "config": {"total_nodes": 25}}))
+    with pytest.raises(ToolError, match="one of"):
+        run(invoke_tool(ctx, "run_step",
+                        {"step_id": "terrain_generation",
+                         "config": {"biome_mode": "lurid"}}))
+
+
+def test_run_step_rejects_total_nodes_on_authored_root(mock_builder):
+    wid = _abstract_world(mock_builder)
+    with pytest.raises(ToolError, match="AUTHORED"):
+        run(invoke_tool(_ctx(mock_builder, wid), "run_step",
+                        {"step_id": "map_generation",
+                         "config": {"total_nodes": 40}}))
+
+
+def test_run_step_rejects_unread_steering_notes(mock_builder):
+    wid = _procedural_world(mock_builder)
+    ctx = _ctx(mock_builder, wid)
+    with pytest.raises(ToolError, match="PROCEDURAL"):
+        run(invoke_tool(ctx, "run_step",
+                        {"step_id": "map_generation",
+                         "note": "make it an archipelago"}))
+    with pytest.raises(ToolError, match="terrain is procedural"):
+        run(invoke_tool(ctx, "run_step",
+                        {"step_id": "terrain_generation",
+                         "note": "more mountains"}))
+
+
+def test_run_step_abstract_result_reports_authored_names(mock_builder):
+    # The mock abstract author names its nodes at generation time; the tool
+    # result must say so instead of claiming a label pass is pending (the
+    # Ecstasy Veil agent ran a no-op label pass off that stale note).
+    wid = _abstract_world(mock_builder)
+    result = run(invoke_tool(_ctx(mock_builder, wid), "run_step",
+                             {"step_id": "map_generation",
+                              "note": "aim for a tight cluster"}))
+    assert result["saved"] is True
+    assert all(m["named"] == m["nodes"] for m in result["maps"])
+    assert "no label pass is pending" in result["note"]
+
+
+def test_run_step_threads_note_into_abstract_author(builder):
+    # The steering note must reach the authoring LLM call — the Ecstasy
+    # Veil restoration note never did (all three map:abstract inputs were
+    # byte-identical), which made regeneration an unsteerable re-roll.
+    from wbworldgen.worldgen.expansion import maps_expand as me
+
+    wid = _abstract_world(builder)
+    captured = []
+
+    async def fake_jrc(llm, **kw):
+        captured.append(kw["messages"])
+        return {"description": "a veil of worlds",
+                "nodes": [{"name": "Alpha", "kind": "planet", "importance": 8,
+                           "description": "First.", "adjacent": ["Beta"]},
+                          {"name": "Beta", "kind": "planet", "importance": 6,
+                           "description": "Second.", "adjacent": ["Alpha"]}]}
+
+    original = me.json_retry_completion
+    me.json_retry_completion = fake_jrc
+    try:
+        result = run(invoke_tool(_ctx(builder, wid), "run_step",
+                                 {"step_id": "map_generation",
+                                  "note": "restore Helios Prime as the center"}))
+    finally:
+        me.json_retry_completion = original
+    assert result["saved"] is True and captured
+    user_msg = captured[0][1]["content"]
+    assert "Steering note for THIS generation" in user_msg
+    assert "restore Helios Prime as the center" in user_msg
+
+
+def test_catalog_renders_step_config_contract():
+    text = render_catalog_markdown()
+    assert "config `total_nodes`" in text
+    assert "config `resolution`" in text
+    # Tool text teaches that config is validated, not silently dropped.
+    assert "Unknown keys are rejected" in text
+
+
+# ---------------------------------------------------------------------------
+# Evaluator excerpt honesty (the false "20 claimed, 12 listed" finding)
+# ---------------------------------------------------------------------------
+
+def test_evaluator_excerpt_marks_truncation():
+    from wbworldgen.worldgen.agent.evaluator import (
+        _EXCERPT_NODES_PER_MAP, _content_excerpts)
+
+    n = _EXCERPT_NODES_PER_MAP + 8
+    compiled = {"root_map_id": "root", "maps": {"root": {
+        "map_id": "root", "label": "Root", "edges": [],
+        "nodes": [{"id": f"n{i}", "name": f"Place {i}", "type": "town",
+                   "importance": i % 10, "description": "d"}
+                  for i in range(n)]}}}
+    text = _content_excerpts(compiled)
+    assert f"{n} locations, {n} named" in text
+    assert (f"the {_EXCERPT_NODES_PER_MAP} highest-importance of {n} "
+            "named locations are shown") in text
+    small = {"root_map_id": "root", "maps": {"root": {
+        "map_id": "root", "label": "R", "edges": [],
+        "nodes": [{"id": "a", "name": "A", "importance": 5,
+                   "description": "d"}]}}}
+    assert "excerpt truncated" not in _content_excerpts(small)
