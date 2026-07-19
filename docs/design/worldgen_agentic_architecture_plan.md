@@ -20,7 +20,11 @@ mode is the one way to build a new world, "for now". Outstanding: Filip's
 live test (build + conversation check). v2a (structural surgery toolset)
 DESIGNED and LANDED 2026-07-19 (51e8c0d) on Filip's go, ahead of the
 original evidence gate — see the v2a section in Arc C; the live test now
-exercises the 18-tool catalog.
+exercises the 18-tool catalog. C5 (ideation notes + note verifier +
+review gate) DESIGNED 2026-07-19 with Filip and begun on his go — scoped
+brief notes (N1–N3), a read-only note-verifier agent the builder can
+argue with (N4–N6), and an end-of-build review gate whose veto relaunches
+a fix run (N7).
 Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
@@ -986,6 +990,95 @@ three connection homes) plus the module-by-path and root suites; a
 scripted five-op live sequence (add node, add portal, split-warn remove,
 healing edge, refused endpoint removal) rendered for Filip in chat.*
 
+### C5 — Ideation notes, the note verifier and the review gate (designed 2026-07-19)
+
+*Designed 2026-07-19 with Filip directly after v2a, build started on his go
+the same day. Motivating observation (Filip's): C4's funnel records
+everything the ideation conversation converges on into two artifacts — a
+short seed prompt and 3–7 rules — and both are global, so converged detail
+either dies at the Go boundary (the transcript is discarded) or
+contaminates the whole world (a rule agreed while discussing one desert
+planet becomes part of the rubric the ocean planet is judged against).
+Also settled in that conversation: this is within-world machinery only —
+no cross-world concept library — and binding granularity is per-map.*
+
+**Decisions:**
+
+- **N1 — The brief grows notes; rules stay the rubric.** A note is an
+  established fact or decision from the ideation conversation that is
+  neither seed direction nor a rule: `{"text", "subject"}`, where a
+  missing/empty subject means world-scoped and a named subject ("the sand
+  planet Kharos") scopes it to the thing it names. The ideation model
+  maintains the notes as a third shared draft (same round-trip discipline
+  as prompt and rules: shown beside the chat, hand-editable, the client's
+  version is current truth). Rules keep their D3/D4 role unchanged — small,
+  global, the evaluation rubric; notes are facts, not rubric bullets. At Go
+  the notes get stable ids (`n1`..`nk`) and ride the brief.
+- **N2 — Subjects bind per-map, loudly.** A subject binds to the map whose
+  label/id it names, or the map containing a named node it names
+  (`join_key` normalization, exact before containment — the
+  authored-location-binding precedent). Binding is computed against the
+  compiled world whenever needed, never stored as build-time truth: maps
+  appear and rename mid-build. A subject note that binds to nothing is a
+  deterministic blocking lint finding (`note_unbound`, P7) — the fix is to
+  build the thing (hierarchy steering, surgery) — and mid-build it is
+  simply an honest "doesn't exist yet" signal.
+- **N3 — Injection follows one visibility rule: the orchestrator sees
+  everything, content calls see their scope.** The build agent's system
+  prompt renders all notes in full (grouped world/subject) — the builder
+  needs the whole contract. Generation calls get scoped context: world
+  notes join the seed seam (`seed_with_scenario`, so steps, list rerolls
+  and expansions all see them) plus a one-line index of subject notes so
+  nothing is invisible; subject notes inject in full only into their
+  bound map's content calls (enrichment context block rendered by the
+  passes, child/abstract map expansion) — hierarchy_design, which must
+  create the subjects, gets them all.
+- **N4 — The note verifier is a second, read-only agent.** The recorded
+  v2 "tool-looping evaluator" upgrade arrives scoped to notes: a bounded
+  loop (own turn budget) whose toolset is carved mechanically from the
+  registry — `mutates=False`, minus `evaluate`/`discuss_finding` — so
+  future read tools flow to it (P2). In: the note checklist with current
+  bindings. Out: per-note verdicts (honored / not honored, evidence,
+  suggestion). Not-honored verdicts become blocking findings
+  (`note:<id>`) beside lint and critique findings; the rules critique
+  call stays exactly as landed. Offline the check degrades to the
+  binding lint (the gate stays testable without tokens); the loop's turn
+  function is a module-level patch point like `agent_turn`.
+- **N5 — `discuss_finding`: the builder may argue; the verifier serves
+  the note's author.** A registered tool (the catalog is the discovery
+  surface, P1) the builder can call on a note finding: the harness routes
+  the message to the verifier, which holds a per-finding transcript, may
+  re-read the world, and answers with a structured outcome — `upheld`
+  (stands, with reason), `withdrawn` (the builder's evidence convinced
+  it; recorded so later runs don't re-flag capriciously), or `compromise`
+  (amended note text). Bounded exchanges per finding; after the budget
+  the finding stands. The verifier's stance is contractual — the note's
+  author is the user, not the builder; amendments must serve the user's
+  evident intent or resolve a genuine conflict (note vs note, note vs
+  rules), never builder convenience — agent-to-agent sycophancy is the
+  failure mode this stance exists to resist. A compromise updates the
+  brief note in place (original text kept, `status: "amended"`, rationale
+  recorded) and the build proceeds against the amended text; the whole
+  exchange streams into the action log (the observer shows the argument).
+- **N6 — Note findings are never auto-accepted.** The done-gate's
+  fix-round auto-accept does not apply to `note:` findings: every note
+  ends honored, honored-as-amended, or *explicitly* accepted with a
+  recorded reason in the done claim. Explicit accept stays available as
+  the escape hatch, so builds still terminate (the turn budget bounds
+  everything else).
+- **N7 — The review gate sits at the absolute end; a veto has teeth.**
+  User steering stays at the boundaries (P6): ideation, Go, and now one
+  review moment after the build finishes. The world completes and saves
+  regardless — not vetoing (or ignoring the offer) means done, no action
+  required. When the done result carries amendments or explicitly
+  accepted note findings, the observer renders them — original vs what
+  happened, per-item veto. A veto restores the original text as binding,
+  marks the note `no_compromise` (a vetoed note can never be amended
+  again), and relaunches the agent on the finished world as a normal
+  bounded build (the existing adopt-a-world path) whose brief flags the
+  vetoed notes as the work list — same loop, same gate, same review if
+  new compromises appear.
+
 ### Superseded: the plan-artifact design (refined and replaced 2026-07-19)
 
 The original Arc C made the plan a step: a `build_plan` artifact authored
@@ -1023,6 +1116,7 @@ file, before the 2026-07-19 Arc C rewrite).
 | 11 | C3 build observer UI | M | ✓ landed (f039a87); live test = Filip's | watching the build |
 | 12 | C4 ideation conversation | L | ✓ landed (b73c275); classic entry disabled | the front door |
 | 13 | v2a structural surgery toolset | M–L | ✓ landed (51e8c0d) | the agent's structure fix instrument |
+| 14 | C5 ideation notes + note verifier + review gate | L | designed, in progress | detail survives Go, scoped; the user gets what they asked for |
 
 (A5 landed before B1 — the reverse of the original ordering; nothing
 depended on the order.) RuntimeHost (`backend.py` half of A1) can ride along
