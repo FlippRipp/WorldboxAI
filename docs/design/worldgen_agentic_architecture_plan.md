@@ -3,10 +3,10 @@
 *Status: Arc A landed (A1–A5, 2026-07-19; RuntimeHost still pending, rides
 along with the next backend.py change). Arc B refined and DECIDED with Filip
 (2026-07-19): unit+trigger pass model, legacy per-node endpoints removed in
-B1, panel generalization as B1.5. B1 landed 2026-07-19 (d169491) — next item
-B1.5. Arc C refined into C1a/C1b; its four open
-questions are deliberately STILL OPEN — settle them with Filip before C1a
-starts. Records the structural assessment of
+B1, panel generalization as B1.5. B1 landed 2026-07-19 (d169491); B1.5
+landed 2026-07-19 (301f3c1) — next item B2. Arc C refined into C1a/C1b; its
+four open questions are deliberately STILL OPEN — settle them with Filip
+before C1a starts. Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
 agentic builder — an LLM receives a world idea and figures out what it needs
@@ -407,6 +407,17 @@ and a future `history` pass appears without frontend edits (P2 extended to
 the UI). Verify in the real browser (drive real Chrome — see project
 memory; the Preview pane is unreliable for this UI).
 
+*Landed 2026-07-19 (301f3c1). `/enrich/progress` was reworked in the same
+stroke: per-pass done/total/per-map numbers computed from the registry
+predicates, bucketed by map id first so they agree with the run's SSE
+events (the old route bucketed by legacy layer id — the panel merges both
+sources). Map passes render as run-affordance rows (review's fixes now
+stream into the results list and rename nodes on the live map — the old
+panel dropped `review_fix` events). No step↔pass mapping exists anywhere:
+default selection is simply the first pass with pending work. Verified in
+real Chrome (CDP) against a seeded world on a second dev stack
+(`WB_PORT`/`WB_BACKEND`).*
+
 ### B2. One capability catalog — size S
 
 Give the three registries a uniform `describe()` and one function that
@@ -600,8 +611,8 @@ decisions.*
 | 3 | A4 package moves | M | ✓ landed (d0ca8c3, 839376a) | readability; staged B1 |
 | 4 | A5 facade slimming | M | ✓ landed (9cf5ad4) | hygiene; staged C1 |
 | 5 | B1 pass registry (+ engine split, legacy endpoint removal) | L | ✓ landed (d169491) | new LLM passes |
-| 6 | B1.5 panel over the pass catalog | S | next | UI keeps the P2 promise |
-| 7 | B2 catalog | S | | agentic substrate |
+| 6 | B1.5 panel over the pass catalog | S | ✓ landed (301f3c1) | UI keeps the P2 promise |
+| 7 | B2 catalog | S | next | agentic substrate |
 | 8 | B3 dependencies (+ order-pin test first) | M | | plan validation |
 | 9 | C1a build-plan step + executor (server) | L | ⛔ open questions first | agentic mode v1 |
 | 10 | C1b plan editor UI | M–L | after C1a | steering the plan |
