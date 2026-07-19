@@ -1,12 +1,10 @@
 # Worldgen Architecture — Modularity & Agentic Builder Plan
 
-*Status: Arc A landed (A1–A5, 2026-07-19; RuntimeHost still pending, rides
-along with the next backend.py change). Arc B refined and DECIDED with Filip
-(2026-07-19): unit+trigger pass model, legacy per-node endpoints removed in
-B1, panel generalization as B1.5. B1 landed 2026-07-19 (d169491); B1.5
-landed 2026-07-19 (301f3c1); B2 landed 2026-07-19 (22954e9) — next item B3.
-Arc C refined into C1a/C1b; its four open questions are deliberately STILL
-OPEN — settle them with Filip before C1a starts. Records the structural assessment of
+*Status: Arcs A and B COMPLETE (A1–A5, B1, B1.5, B2, B3 — all landed
+2026-07-19; RuntimeHost still pending, rides along with the next backend.py
+change). Arc C refined into C1a/C1b; its four open questions are
+deliberately STILL OPEN — settle them with Filip before C1a starts. Next:
+that discussion. Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
 agentic builder — an LLM receives a world idea and figures out what it needs
@@ -457,6 +455,18 @@ Two guard rails from the review:
   (after `dynamic_skips`) — C1's executor calls it (P7). `resolve_order`
   itself keeps its current behavior and API.
 
+*Landed 2026-07-19 (0b0cab0): `requires`/`produces` on `Step` and
+`PassSpec` (both, not requires-only — the plan's own "describe requires
+labels" example needs pass produces to validate), declared for every
+built-in; `catalog.py::check_data_dependencies(items, steps=None)` walks
+an ordered `{"kind", "id"}` item list, order-aware, loud on unknown ids;
+the order-pin test plus an all-8-skip-combinations test proving every
+legitimate effective pipeline validates clean. Requires are hard needs
+only (landmarks does not require terrain); `map_generation` requires
+`hierarchy` per the example here — its procedural fallback serves
+old-world replay, which never enters the checker. The catalog markdown
+now annotates requires/produces for the planner.*
+
 ---
 
 ## Arc C — The agentic builder
@@ -620,7 +630,7 @@ decisions.*
 | 5 | B1 pass registry (+ engine split, legacy endpoint removal) | L | ✓ landed (d169491) | new LLM passes |
 | 6 | B1.5 panel over the pass catalog | S | ✓ landed (301f3c1) | UI keeps the P2 promise |
 | 7 | B2 catalog | S | ✓ landed (22954e9) | agentic substrate |
-| 8 | B3 dependencies (+ order-pin test first) | M | next | plan validation |
+| 8 | B3 dependencies (+ order-pin test first) | M | ✓ landed (0b0cab0) | plan validation |
 | 9 | C1a build-plan step + executor (server) | L | ⛔ open questions first | agentic mode v1 |
 | 10 | C1b plan editor UI | M–L | after C1a | steering the plan |
 | 11 | C2 reactive loop | L | exploratory | agentic mode v2 |
