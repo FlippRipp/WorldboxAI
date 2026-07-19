@@ -13,7 +13,11 @@ tools + lints) LANDED 2026-07-19 (e989488); C2 (agent harness + evaluator)
 LANDED 2026-07-19 (275d8b9); C3 (build observer UI) LANDED 2026-07-19
 (f039a87) — the recorded live run is deliberately open: Filip drives it
 through the C3 observer (a first live smoke ran 3 healthy turns before
-being stopped on request; see C2's landed note). Next item: C4 (ideation).
+being stopped on request; see C2's landed note). C4 (ideation) LANDED
+2026-07-19 (b73c275) — Arc C code-complete; with it, the CLASSIC ENTRY IS
+DISABLED (decided with Filip at C4 start; see C4's landed note) — agent
+mode is the one way to build a new world, "for now". Outstanding: Filip's
+live test (build + conversation check).
 Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
@@ -62,6 +66,12 @@ The system already contains the seed of this pattern, twice:
 The agentic builder is these two patterns generalized from "the map ladder"
 to "the whole build". None of the phases below change player-visible
 capabilities; Arc C adds a new mode without removing the current one.
+*(Amended 2026-07-19 at C4: Filip decided the classic ENTRY goes away with
+the ideation front door — one path to maintain, "for now". The classic
+machinery — server generation routes, step-review flow for pre-existing
+drafts, post-build editing — all remains; only the pre-start screen's
+Generate World/skip-review affordances were removed. P5 is untouched:
+every mode still drives the same orchestration.)*
 
 ## Design principles
 
@@ -813,6 +823,37 @@ Sequenced last so an end-to-end agent mode exists early; C3/C4 have no
 dependency on each other and can swap if the front door starts to matter
 more.
 
+*Landed 2026-07-19 (b73c275), with three decisions settled with Filip at
+C4 start. (1) **The classic entry is disabled** — superseding this
+section's "classic wizard remains available unchanged" line: Filip chose
+one path to maintain, "for now". The pre-start screen is scenario +
+prompt field + the `WorldIdeation` chat; Generate World, skip-review and
+the interview UI are gone (the step-review machinery stays for resuming
+pre-existing classic drafts; the server generation routes are untouched,
+so re-enabling is a UI change). (2) **The offer highlights, never
+gates**: Go is available from the first non-empty prompt draft
+(zero-turn go = the old direct launch, brief with empty rules) and turns
+primary when the model flips ``ready``. (3) **Interview removed
+outright** (routes ``/prompt-questions`` + ``/fold-answers``, builders,
+tests — B1's decided-removal precedent). Mechanics: one stateless
+``/ideation-turn`` route (smartest slot, interview-route error
+discipline); the completion is ``{reply, prompt, rules, ready}`` — the
+drafts round-trip through the client every turn, so hand edits (prompt
+field, per-rule ✕) are simply current truth; conversation state is
+client-held in localStorage (relaunch-safe, PWA-kill precedent). The
+brief rides ``state["brief"]`` (explicit metadata key in persistence),
+renders into every turn's harness system prompt as fixed design
+decisions, and shows in the observer. Rules feed ``world_rules`` at the
+generation seam: its ``generate(ctx)`` override composes the facade's
+new ``generate_declarative`` (factored from ``generate_step``'s tail,
+exact parity — no-brief behavior byte-identical) and enforces agreed
+rules verbatim at the head of ``custom_rules`` on every regeneration;
+``RULES_DOCTRINE`` is the one rule-style text shared by step guidance
+and the ideation prompt; ``patch_step`` loudly rejects a
+``custom_rules`` patch that drops an agreed rule (P7). The live
+conversation check is Filip's (with his C2/C3 live test; backend restart
+still pending).*
+
 ### v2 extensions (recorded, deliberately unscheduled)
 
 - Structural surgery tools (add/remove nodes, connection rewiring,
@@ -859,7 +900,7 @@ file, before the 2026-07-19 Arc C rewrite).
 | 9 | C1 toolbox registry + tools + lints | M–L | ✓ landed (e989488) | the agent's action surface |
 | 10 | C2 agent harness + evaluator | L | ✓ landed (275d8b9) | agentic mode v1 |
 | 11 | C3 build observer UI | M | ✓ landed (f039a87); live test = Filip's | watching the build |
-| 12 | C4 ideation conversation | L | next | the front door |
+| 12 | C4 ideation conversation | L | ✓ landed (b73c275); classic entry disabled | the front door |
 
 (A5 landed before B1 — the reverse of the original ordering; nothing
 depended on the order.) RuntimeHost (`backend.py` half of A1) can ride along
