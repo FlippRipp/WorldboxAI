@@ -1109,6 +1109,49 @@ files (45 tests) + module-by-path and root suites green; the live
 conversation + build check rides Filip's outstanding C2–C4 live test,
 which now exercises notes end to end.*
 
+### Live-run findings — the Crucible Stars build (2026-07-19)
+
+The first full live agent build (Filip's C2/C3 test; cancelled at turn
+28) surfaced two silent walls with one shared shape: **capabilities the
+classic flow triggers outside the step list are invisible to the agent.**
+Full diagnosis from the build artifact + LLM call log, recorded here
+because it gates several open decisions:
+
+1. **Per-planet terrain is unreachable.** The hierarchy modeled the three
+   planets as ``parallel_maps``; ``terrain_generation`` builds only the
+   root raster — its ``_layer_specs`` still read the deprecated
+   ``layer_design`` step while its catalog text promised "each surface
+   layer". Four re-runs (one with an invented ``config.layers``, silently
+   ignored) returned the same single ``main`` layer; the agent then
+   fabricated three layer entries via ``patch_step`` — accepted, because
+   terrain was not in ``_UNPATCHABLE_STEPS`` — and ``natural_landmarks``
+   authored features against geography no raster backs. P7's
+   error-feedback loop never fired because every call succeeded.
+2. **Pregenerate child maps are unreachable.** The hierarchy's three
+   ``pregenerate`` entries are built by ``pregenerate_planned_maps``,
+   invoked from routes *after* generation — no agent tool runs it. Five
+   ``map_generation`` re-runs (wiping labels twice) hunted child maps
+   that cannot appear; ``read_node`` even advertises nodes as
+   "expandable" with no tool to expand them.
+
+**Landed same day (784b65c), the narrow honest-terrain fix:**
+``terrain_generation``'s docstring + catalog description state the real
+contract (one root raster; terrain-flagged children rasterize at
+expansion time; re-running cannot add layers); ``terrain_generation``
+added to ``_UNPATCHABLE_STEPS``; tests pin ``_layer_specs`` (hierarchy
+world → root only; legacy ``layer_design`` data keeps multi-layer) and
+the patch rejection.
+
+**Open discussion items (deliberately not scheduled):** exposing the
+expansion/pregenerate phase as agent tools (the systemic fix — without
+it any world needing child maps or non-root terrain is out of reach);
+whether ``parallel_maps`` should carry creation-time rasters, or whether
+planet-likes belong as terrain-flagged children instead; a lint for
+terrain entries with no raster on disk (would have caught the
+fabrication at the done-gate); rejecting unknown ``run_step`` config
+keys (P7 at the config layer); a sanctioned record-a-blocker move so a
+walled agent surfaces the wall instead of patching around it.
+
 ### Superseded: the plan-artifact design (refined and replaced 2026-07-19)
 
 The original Arc C made the plan a step: a `build_plan` artifact authored
