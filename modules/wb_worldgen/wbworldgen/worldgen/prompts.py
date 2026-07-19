@@ -119,20 +119,23 @@ def _conversation_transcript(history: list[dict] | None) -> str:
 def build_ideation_turn_messages(history: list[dict],
                                  prompt_draft: str = "",
                                  rules_draft: list | None = None,
-                                 scenario: dict | None = None) -> list[dict]:
+                                 scenario: dict | None = None,
+                                 notes_draft: list | None = None) -> list[dict]:
     """LLM messages for one turn of the ideation conversation (C4): the
     chat-shaped front door of agent-mode world building.
 
     The model is a design partner converging with the player on what the
-    world IS. Every turn it replies conversationally AND returns the two
-    shared drafts in full — the seed prompt and the world rules (rules
-    first: they double as the build's evaluation rubric, D3/D4) — plus a
-    ``ready`` flag: its judgment that the idea feels settled and the build
-    can start (the go *offer*; the player's go-ahead stays the approval
-    moment, and the UI never gates on this flag). The drafts round-trip
-    through the client every turn, so the player's hand edits are simply
-    part of the current truth. Pure (no I/O) so it is unit-testable; the
-    route feeds the result to the LLM.
+    world IS. Every turn it replies conversationally AND returns the three
+    shared drafts in full — the seed prompt, the world rules (rules first:
+    they double as the build's evaluation rubric, D3/D4), and the design
+    notes (C5: established facts that are neither seed direction nor rules,
+    each world-scoped or scoped to one named subject) — plus a ``ready``
+    flag: its judgment that the idea feels settled and the build can start
+    (the go *offer*; the player's go-ahead stays the approval moment, and
+    the UI never gates on this flag). The drafts round-trip through the
+    client every turn, so the player's hand edits are simply part of the
+    current truth. Pure (no I/O) so it is unit-testable; the route feeds
+    the result to the LLM.
     """
     from wbworldgen.worldgen.steps.world_rules import RULES_DOCTRINE
 
@@ -146,7 +149,7 @@ def build_ideation_turn_messages(history: list[dict],
         "distillation, not invention; a player with a vague itch needs vivid "
         "options to pick between. Talk about the world only — protagonists and "
         "plot belong to the stories told in it later.\n\n"
-        "You maintain two shared draft artifacts, returned in full every turn:\n"
+        "You maintain three shared draft artifacts, returned in full every turn:\n"
         '- "prompt": the world seed prompt — a short, vivid paragraph of creative '
         "direction (premise, setting, tone, defining features) the generator "
         "expands into a full world. It is direction for a generator, never "
@@ -154,20 +157,34 @@ def build_ideation_turn_messages(history: list[dict],
         '- "rules": the world rules — the handful of statements (aim for 3-7) '
         "that define how this world works. They are the spine of the design and "
         "double as the rubric the finished world is judged against, so converge "
-        "them FIRST.\n\n"
+        "them FIRST.\n"
+        '- "notes": the design notebook — everything the conversation settles '
+        "that is neither seed direction nor a rule: lore, cultures, biology, "
+        "specific places and their quirks. Each note is "
+        '{"text": "...", "subject": "..."}. Leave "subject" empty for a fact '
+        "about the world as a whole; name ONE specific thing (\"the sand "
+        "planet Kharos\") when the note belongs to it — scoped notes steer "
+        "only their own place during the build, so one place's details never "
+        "bleed into the others. The builder is verified against every note, "
+        "so record what the player settles AS the conversation settles it — "
+        "details the short prompt cannot hold survive the handoff only as "
+        "notes. Never invent notes the player did not agree to; an empty "
+        "list is fine early on.\n\n"
         f"What makes a good world rule:\n{RULES_DOCTRINE}\n\n"
-        "The player sees both drafts beside the chat and can edit them by hand; "
+        "The player sees the drafts beside the chat and can edit them by hand; "
         "the versions you receive are the current truth — never revert their "
         "edits, only evolve the drafts with the conversation.\n\n"
         "When the idea feels settled — the prompt captures it and the rules are "
         "concrete enough to judge a world by — set \"ready\" to true and offer "
         "in your reply to start the build. If the player asks to just build it, "
-        "distill the best prompt and rules you can from what you have and set "
-        "\"ready\" to true immediately. Otherwise keep \"ready\" false.\n\n"
+        "distill the best prompt, rules and notes you can from what you have "
+        "and set \"ready\" to true immediately. Otherwise keep \"ready\" "
+        "false.\n\n"
         "Return only valid JSON:\n"
-        '{"reply": "...", "prompt": "...", "rules": ["...", "..."], "ready": false}\n'
+        '{"reply": "...", "prompt": "...", "rules": ["...", "..."], '
+        '"notes": [{"text": "...", "subject": ""}, ...], "ready": false}\n'
         '"reply" is your message to the player (plain conversational text). '
-        '"prompt" and "rules" are the complete updated drafts — full '
+        '"prompt", "rules" and "notes" are the complete updated drafts — full '
         "replacements, not diffs."
     )
     parts = []
@@ -188,6 +205,14 @@ def build_ideation_turn_messages(history: list[dict],
         "<current_rules>\n"
         + ("\n".join(f"- {r}" for r in rules) if rules else "(none agreed yet)")
         + "\n</current_rules>")
+    from wbworldgen.worldgen.notes import clean_notes
+    notes = clean_notes(notes_draft)
+    parts.append(
+        "<current_notes>\n"
+        + ("\n".join(
+            f"- [{n['subject']}] {n['text']}" if n.get("subject") else f"- {n['text']}"
+            for n in notes) if notes else "(none recorded yet)")
+        + "\n</current_notes>")
     parts.append(f"<conversation>\n{_conversation_transcript(history)}\n</conversation>")
     parts.append(
         "Continue the conversation: answer the player's latest message and "
@@ -200,23 +225,33 @@ def build_ideation_turn_messages(history: list[dict],
 
 def seed_with_scenario(world_state: dict, user_prompt: str) -> str:
     """The effective seed text for generation: the user's prompt, plus the
-    optional scenario document supplied at world creation.
+    ideation brief's notes (C5/N3 — the world-scoped facts in full and a
+    one-line index of the subject-scoped ones, whose full texts inject only
+    in their own scope), plus the optional scenario document supplied at
+    world creation.
 
     The scenario is longer-form source material (a campaign setting, an
     adventure premise, pasted background text) the world must be grounded in;
     the seed prompt is the creative direction on top of it. Composed here —
     the single seam every step generation passes through — so the LLM, mock
-    and custom-step paths all see both. Never truncated.
+    and custom-step paths all see all of it. Never truncated.
     """
+    from wbworldgen.worldgen.notes import seed_notes_block
+
+    parts = [user_prompt]
+    notes_block = seed_notes_block(world_state or {})
+    if notes_block:
+        parts.append(
+            "The world's creator agreed on these design notes during "
+            "ideation — they are established facts, not suggestions:\n"
+            + notes_block)
     scenario = str((world_state or {}).get("scenario") or "").strip()
-    if not scenario:
-        return user_prompt
-    return (
-        f"{user_prompt}\n\n"
-        "The world's creator also provided a scenario — source material this world is set in. "
-        "Ground the world in it: keep its facts, names, tone and situation consistent, and treat "
-        "the seed prompt above as direction for what to build from it.\n"
-        "--- SCENARIO ---\n"
-        f"{scenario}\n"
-        "--- END SCENARIO ---"
-    )
+    if scenario:
+        parts.append(
+            "The world's creator also provided a scenario — source material this world is set in. "
+            "Ground the world in it: keep its facts, names, tone and situation consistent, and treat "
+            "the seed prompt above as direction for what to build from it.\n"
+            "--- SCENARIO ---\n"
+            f"{scenario}\n"
+            "--- END SCENARIO ---")
+    return "\n\n".join(parts)

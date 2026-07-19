@@ -399,6 +399,9 @@ class IdeationTurnRequest(BaseModel):
     prompt: Optional[str] = None
     #: Current world-rules draft.
     rules: list[str] = []
+    #: Current design-notes draft (C5): [{"text", "subject"}], empty
+    #: subject = world-scoped.
+    notes: list[dict] = []
     #: Optional linked scenario: its content counts as already decided.
     scenario_id: Optional[str] = None
 
@@ -412,6 +415,7 @@ async def ideation_turn(request: IdeationTurnRequest):
     seed-prompt endpoints: the client holds the conversation (localStorage,
     relaunch-safe) and the drafts round-trip every turn, so hand edits
     between turns are simply the current truth."""
+    from wbworldgen.worldgen.notes import clean_notes
     from wbworldgen.worldgen.prompts import build_ideation_turn_messages
     try:
         from backend.engine.llm import LLMProviderError
@@ -424,7 +428,8 @@ async def ideation_turn(request: IdeationTurnRequest):
                             detail="Say something to the design partner first.")
     scenario = _load_scenario_or_404(request.scenario_id)
     messages = build_ideation_turn_messages(
-        request.messages, (request.prompt or "").strip(), request.rules, scenario)
+        request.messages, (request.prompt or "").strip(), request.rules, scenario,
+        notes_draft=request.notes)
     try:
         content = await engine.llm.simple_completion(
             messages,
@@ -438,6 +443,8 @@ async def ideation_turn(request: IdeationTurnRequest):
         raw_rules = data.get("rules")
         rules = ([str(r).strip() for r in raw_rules if str(r).strip()]
                  if isinstance(raw_rules, list) else None)
+        raw_notes = data.get("notes")
+        notes = clean_notes(raw_notes) if isinstance(raw_notes, list) else None
         ready = bool(data.get("ready"))
     except LLMProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
@@ -453,6 +460,7 @@ async def ideation_turn(request: IdeationTurnRequest):
         "prompt": prompt or (request.prompt or "").strip(),
         "rules": (rules if rules is not None
                   else [str(r).strip() for r in request.rules if str(r).strip()]),
+        "notes": notes if notes is not None else clean_notes(request.notes),
         "ready": ready,
     }
 
@@ -1076,6 +1084,10 @@ class AgentBuildRequest(BaseModel):
     #: Co-authored world rules from the ideation conversation (C4) — the
     #: brief's fixed design decisions, fed to the world_rules step as input.
     rules: list[str] = []
+    #: Design notes from the ideation conversation (C5): [{"text",
+    #: "subject"}] — world-scoped facts and per-subject notes the build is
+    #: verified against.
+    notes: list[dict] = []
     scenario_id: Optional[str] = None
     scenario: str = ""
 
@@ -1095,6 +1107,7 @@ async def agent_build_start(request: AgentBuildRequest):
     handle = agent_harness.start_agent_build(
         world_builder, request.seed_prompt.strip(),
         rules=request.rules,
+        notes=request.notes,
         scenario=scenario_state.get("scenario", ""),
         scenario_id=scenario_state.get("scenario_id"))
     return {"world_id": handle.world_id, "status": handle.status}

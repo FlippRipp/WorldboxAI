@@ -590,6 +590,7 @@ def test_ideation_turn_route():
         assert resp == {"reply": "How alive is the tide?",
                         "prompt": "A drowned world.",
                         "rules": ["The tide is a living god."],
+                        "notes": [],
                         "ready": False}
         assert captured["model"] == "fake/model"
         assert "Player: Drowned gods." in captured["messages"][1]["content"]
@@ -602,9 +603,12 @@ def test_ideation_turn_route():
             world_routes.IdeationTurnRequest(
                 messages=[{"role": "player", "text": "keep going"}],
                 prompt="A drowned world.",
-                rules=["The tide is a living god."])))
+                rules=["The tide is a living god."],
+                notes=[{"text": "The tide sings.", "subject": "The Reef"}])))
         assert resp2["prompt"] == "A drowned world."
         assert resp2["rules"] == ["The tide is a living god."]
+        assert resp2["notes"] == [{"text": "The tide sings.",
+                                   "subject": "The Reef"}]
         assert resp2["ready"] is True
 
         # No player message → 400, no LLM call.

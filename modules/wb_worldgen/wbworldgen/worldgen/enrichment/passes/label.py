@@ -80,6 +80,10 @@ async def generate_label(services, node: dict, context: dict, used_names=None,
             "name that does not have this problem.")
     if context.get("guidance"):
         guidance.append(f"Steering note for this run: {context['guidance']}")
+    if context.get("notes"):
+        guidance.append(
+            "Agreed design notes for this map — established facts the name "
+            "and label must fit: " + " | ".join(context["notes"]))
     named_elsewhere = [str(n) for n in (used_names or []) if n]
     if named_elsewhere:
         guidance.append(
@@ -207,6 +211,21 @@ async def generate_label_batch(services, batch: list, contexts: dict,
         "location below as a part or sub-location of them):\n" + ", ".join(avoid) + "\n\n"
     ) if avoid else ""
 
+    # Agreed design notes are per-map (C5); a batch may span maps, so render
+    # each map's notes once, keyed the way the entries reference their layer.
+    notes_lines, seen_note_maps = [], set()
+    for node in batch:
+        ctx = contexts.get(node.get("id"), {})
+        map_notes = ctx.get("notes")
+        key = ctx.get("layer", {}).get("name", "") or "this map"
+        if map_notes and key not in seen_note_maps:
+            seen_note_maps.add(key)
+            notes_lines.append(f"- {key}: " + " | ".join(map_notes))
+    notes_block = (
+        "Agreed design notes (established facts — names and labels on that "
+        "map must fit them):\n" + "\n".join(notes_lines) + "\n\n"
+    ) if notes_lines else ""
+
     system = services.prompts(
         "enrich_label_batch_system",
         "You are a world-building AI. Name several map locations at once. Give each a concise, "
@@ -236,7 +255,7 @@ async def generate_label_batch(services, batch: list, contexts: dict,
         f"""World: {world.get('name', 'Unknown')} ({world.get('genre', '')}, {world.get('tone', '')})
 World premise: {world.get('premise', '')}
 
-{avoid_block}Locations to name:
+{notes_block}{avoid_block}Locations to name:
 {nodes_block}
 
 Generate a unique, fitting name and a short one-line label_description for EVERY location above.

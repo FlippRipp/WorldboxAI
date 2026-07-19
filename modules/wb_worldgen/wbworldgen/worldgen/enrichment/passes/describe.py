@@ -76,6 +76,11 @@ async def generate_description(services, node: dict, context: dict,
         system = system + "\n\n" + connection_str
     if context.get("guidance"):
         system = system + f"\n\nSteering note for this run: {context['guidance']}"
+    if context.get("notes"):
+        system = system + (
+            "\n\nAgreed design notes for this map — established facts the "
+            "description must fit (weave them in where they touch this "
+            "place):\n" + "\n".join(f"- {n}" for n in context["notes"]))
     user_msg = services.prompts(
         "enrich_description_user",
         f"""World: {world.get('name', 'Unknown')} ({world.get('genre', '')}, {world.get('tone', '')})

@@ -535,10 +535,11 @@ def test_brief_rules_persist_and_reach_the_prompt(builder, monkeypatch):
         return handle
 
     handle = run(go())
-    assert handle.brief == {"prompt": "a drowned world", "rules": cleaned}
+    assert handle.brief == {"prompt": "a drowned world", "rules": cleaned,
+                            "notes": []}
     assert handle.snapshot()["brief"]["rules"] == cleaned
     assert builder.load_world(handle.world_id)["brief"] == {
-        "prompt": "a drowned world", "rules": cleaned}
+        "prompt": "a drowned world", "rules": cleaned, "notes": []}
     system = seen["system"]
     assert "Co-authored world rules" in system
     for rule in cleaned:

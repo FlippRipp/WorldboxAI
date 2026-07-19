@@ -368,6 +368,11 @@ def compile_world(world_state: dict, steps: Optional[dict] = None) -> dict:
         compiled["scenario"] = world_state["scenario"]
     if world_state.get("scenario_id"):
         compiled["scenario_id"] = world_state["scenario_id"]
+    if isinstance(world_state.get("brief"), dict):
+        # The ideation brief rides into the compiled world so per-map note
+        # injection (C5/N3) and the note lints can read it wherever only
+        # the compiled dict is in hand.
+        compiled["brief"] = world_state["brief"]
 
     rules_data = steps_data.get("world_rules", {}).get("data", {})
     if isinstance(rules_data, dict) and rules_data.get("module_data"):

@@ -60,9 +60,11 @@ class AgentBuild:
         self.world_id = world_id
         self.seed_prompt = seed_prompt
         self.builder = builder
-        #: The ideation brief (D4): {"prompt", "rules"} — surfaced in the
-        #: snapshot/artifact so observers can show what was agreed.
-        self.brief = brief or {"prompt": seed_prompt, "rules": []}
+        #: The ideation brief (D4/C5): {"prompt", "rules", "notes"} —
+        #: surfaced in the snapshot/artifact so observers can show what was
+        #: agreed. Note amendments (N5) update the world's copy on disk;
+        #: this attribute mirrors it for the snapshot.
+        self.brief = brief or {"prompt": seed_prompt, "rules": [], "notes": []}
         self.status = "running"   # running | done | cancelled | failed | budget_exhausted
         self.todo: list = []
         self.log: list = []       # persisted events, each carrying its index "i"
@@ -176,6 +178,7 @@ async def agent_turn(services, messages: list) -> dict:
 # --- prompt assembly --------------------------------------------------------
 
 def _system_prompt(handle: AgentBuild, world_state: dict, budgets: dict) -> str:
+    from wbworldgen.worldgen import notes as _notes
     from wbworldgen.worldgen.catalog import render_catalog_markdown
 
     brief = world_state.get("brief") if isinstance(world_state.get("brief"), dict) else {}
@@ -189,6 +192,24 @@ def _system_prompt(handle: AgentBuild, world_state: dict, budgets: dict) -> str:
             "world_rules step's fixed input (running it expands them), and "
             "every evaluation judges the world against them.\n"
             + "\n".join(f"- {r}" for r in agreed) + "\n")
+
+    try:
+        compiled_now = handle.builder.services.compiled.load(handle.world_id)
+    except Exception:  # a just-created draft may not compile yet
+        compiled_now = {}
+    notes_render = _notes.agent_notes_block(world_state, compiled_now)
+    notes_block = ""
+    if notes_render:
+        notes_block = (
+            "\n### Agreed design notes (the user's contract)\n"
+            "Established facts from ideation. World-wide notes bind the "
+            "whole world; subject notes bind the map shown (their full text "
+            "is injected into that map's generation calls automatically — "
+            "you never need to copy them into steering notes). Every note "
+            "is verified before the build can finish: note findings are "
+            "NEVER auto-accepted — fix the world, or explicitly accept the "
+            "finding with a reason the user will see.\n"
+            + notes_render + "\n")
 
     rules = ((world_state.get("steps", {}).get("world_rules") or {}).get("data")) or {}
     if rules:
@@ -216,7 +237,7 @@ fix what verification finds. Build a complete, coherent, playable world.
 
 ## The brief
 {handle.seed_prompt}
-{agreed_block}{scenario_block}
+{agreed_block}{notes_block}{scenario_block}
 ## World rules (the evaluation rubric)
 {rules_block}
 
@@ -535,7 +556,7 @@ async def _run_build(handle: AgentBuild):
 
 def start_agent_build(builder, seed_prompt: str, scenario: str = "",
                       scenario_id: str = None, world_id: str = None,
-                      rules: list = None) -> AgentBuild:
+                      rules: list = None, notes: list = None) -> AgentBuild:
     """Create (or adopt) the world draft and launch the build loop as a
     server-side task. Returns the registered handle immediately; observers
     attach via its queue or the SSE route.
@@ -543,11 +564,17 @@ def start_agent_build(builder, seed_prompt: str, scenario: str = "",
     ``rules`` are the ideation conversation's co-authored world rules (C4):
     persisted with the prompt as the world's brief artifact (D4), rendered
     into every turn's system prompt, and fed to the world_rules step as
-    fixed input. ``world_id`` normally stays None (a fresh draft with a
-    generated id); when given and the world already exists on disk, the
-    build adopts its current content instead of resetting it (tests, and
-    the v2 resume-onto-draft direction).
+    fixed input. ``notes`` are the conversation's design notes (C5): they
+    ride the brief with stable ids, inject scoped into generation, and the
+    build is verified against every one. ``world_id`` normally stays None
+    (a fresh draft with a generated id); when given and the world already
+    exists on disk, the build adopts its current content instead of
+    resetting it (tests, the veto fix run, and the v2 resume-onto-draft
+    direction) — passing neither rules nor notes keeps the brief a
+    previous launch recorded.
     """
+    from wbworldgen.worldgen import notes as _notes
+
     existing = _BUILDS.get(world_id) if world_id else None
     if existing is not None and existing.status == "running":
         raise ValueError(f"An agent build is already running for '{world_id}'")
@@ -564,12 +591,12 @@ def start_agent_build(builder, seed_prompt: str, scenario: str = "",
     if scenario:
         state["scenario"] = scenario
     # The brief (D4): the agent's standing instructions, persisted in the
-    # world itself. Adopting an existing world without passing rules keeps
-    # the brief a previous launch recorded.
+    # world itself.
     rules = [str(r).strip() for r in (rules or []) if str(r).strip()]
-    if rules or not isinstance(state.get("brief"), dict):
+    notes = _notes.assign_ids(_notes.clean_notes(notes))
+    if rules or notes or not isinstance(state.get("brief"), dict):
         state["brief"] = {"prompt": state.get("seed_prompt", seed_prompt),
-                          "rules": rules}
+                          "rules": rules, "notes": notes}
     # A starting build is by definition incomplete — without this, adopting
     # an already-saved world would record draft_complete and the draft would
     # read as finished before the agent did anything.

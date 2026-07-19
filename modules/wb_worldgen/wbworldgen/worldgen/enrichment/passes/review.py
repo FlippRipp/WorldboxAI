@@ -79,6 +79,13 @@ Do NOT flag names for style, quality or taste. Output ONLY valid JSON:
     )
     if guidance:
         user_msg += f"\n\nSteering note for this review: {guidance}"
+    from wbworldgen.worldgen.notes import notes_for_map
+    map_notes = notes_for_map(compiled, compiled, rec.get("map_id", ""))
+    if map_notes:
+        user_msg += (
+            "\n\nAgreed design notes for this map (established facts — also "
+            "flag names that contradict them):\n"
+            + "\n".join(f"- {n}" for n in map_notes))
     await services.backoff.wait()
     async with services.semaphore:
         parsed = await json_retry_completion(

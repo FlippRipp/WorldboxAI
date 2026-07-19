@@ -42,6 +42,10 @@ def _lint_findings(lint_report: dict) -> list:
             map_id = p["nodes"][0].get("map_id")
         elif node_id is None and p.get("connection_id"):
             node_id = p["connection_id"]
+        elif node_id is None and p.get("note_id"):
+            # note_unbound problems key per note id, so two unbound notes
+            # get distinct fix-round tracking.
+            node_id = p["note_id"]
         elif node_id is None and isinstance(p.get("edge"), dict):
             node_id = f"{p['edge'].get('from')}->{p['edge'].get('to')}"
         findings.append({

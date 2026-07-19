@@ -178,6 +178,13 @@ def build_enrichment_context(node: dict, all_nodes: list, compiled: dict, includ
     vocab = compiled.get("template_vocab")
     if isinstance(vocab, dict) and vocab:
         result["vocab"] = vocab
+    # Agreed design notes bound to this node's map (C5/N3): the compiled
+    # world carries the ideation brief; scoped notes reach only their own
+    # map's content calls.
+    from wbworldgen.worldgen.notes import notes_for_map
+    map_notes = notes_for_map(compiled, compiled, node.get("map_id", ""))
+    if map_notes:
+        result["notes"] = map_notes
     return result
 
 

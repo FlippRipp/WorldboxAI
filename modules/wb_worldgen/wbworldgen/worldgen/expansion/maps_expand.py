@@ -218,6 +218,11 @@ class MapExpansionEngine:
         else:
             all_nodes, _ = collect_nodes_by_layer(compiled)
             context = build_enrichment_context(node, all_nodes, compiled, include_descriptions=True)
+            # Ideation notes whose subject names this node (C5/N3): the
+            # child map about to be authored IS that subject, so its
+            # generation call gets them in full.
+            from wbworldgen.worldgen.notes import notes_matching_name
+            context["child_notes"] = notes_matching_name(compiled, node.get("name", ""))
             parsed = await self._live_expand(node, context, parent_map, levels,
                                              max_locations, template_vocab,
                                              must_include=must_list)
@@ -578,11 +583,26 @@ Output ONLY valid JSON:
                 "description": pm.get("description", ""),
             })
 
+        # Ideation notes whose subject names a layer being authored right
+        # now (C5/N3): there is no map record to bind to yet, so match the
+        # layer's label directly.
+        from wbworldgen.worldgen.notes import notes_matching_name
+
+        def _layer_notes(name: str) -> str:
+            matched = notes_matching_name(world_state, name)
+            if not matched:
+                return ""
+            return ("\nThe world's creator agreed on design notes about this "
+                    "map — established facts it must embody:\n"
+                    + "\n".join(f"- {n}" for n in matched))
+
         parsed_root = await self._live_abstract_layer(
             lore, rules, user_prompt, world_kind=world_kind,
             label=lore.get("world_name", "") or "the world",
             level_type=level.get("level_type", "world"),
-            guidance=level.get("guidance", ""), directive=directive,
+            guidance=level.get("guidance", "")
+            + _layer_notes(lore.get("world_name", "")),
+            directive=directive,
             areas=areas,
             named_locations=scopes.get("", {}).get("named_locations", []),
             crossing_specs=crossing_specs, max_nodes=MAX_ROOT_NODES,
@@ -593,7 +613,7 @@ Output ONLY valid JSON:
             parsed_planes.append(await self._live_abstract_layer(
                 lore, rules, user_prompt, world_kind=world_kind,
                 label=pm["label"], level_type=pm.get("level_type", "world"),
-                guidance="", directive="", areas=[],
+                guidance=_layer_notes(pm["label"]), directive="", areas=[],
                 named_locations=scopes.get(pm["label"], {}).get("named_locations", []),
                 crossing_specs=[{**spec, "label": "main",
                                  "description": "the main world map"}],
@@ -1126,6 +1146,11 @@ Output ONLY valid JSON:
             must_include_line = (
                 f"\nThese places are already established INSIDE {node_name} — the map MUST "
                 f"include a location for each:\n{entries}\n")
+        if context.get("child_notes"):
+            must_include_line += (
+                f"\nThe world's creator agreed on design notes about {node_name} — "
+                "established facts this map must embody:\n"
+                + "\n".join(f"- {n}" for n in context["child_notes"]) + "\n")
 
         levels_block = "\n".join(
             f"- {l.get('level_type')}: {l.get('guidance', l.get('label', ''))}"

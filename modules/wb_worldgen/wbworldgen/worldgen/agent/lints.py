@@ -161,6 +161,14 @@ def lint_world(compiled: dict, map_id: str = None, major_floor: int = None) -> d
                 "message": f"Connection {c.get('id')} references missing map/node "
                            f"endpoint(s): {bad}."})
 
+    # Unbound ideation notes (C5/N2): a subject note that matches nothing —
+    # or several maps ambiguously — is a world-level contract failure. The
+    # compiled world carries the brief; worlds without one no-op. Reported
+    # only on unscoped lints: the finding belongs to no single map.
+    if map_id is None:
+        from wbworldgen.worldgen.notes import lint_notes
+        problems.extend(lint_notes(compiled, compiled))
+
     stats = []
     for mid, rec in scoped.items():
         nodes = rec.get("nodes", [])

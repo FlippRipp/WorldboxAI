@@ -261,10 +261,27 @@ class HierarchyDesignStep(Step):
                 + (f" — the FIRST level's generator_id must be {aligned}." if aligned
                    else " — no procedural terrain; give the FIRST level the generator that "
                         "best fits its scale."))
+        # Subject-scoped ideation notes (C5/N3): the structure this step
+        # designs is what note subjects later bind to per-map, so it alone
+        # sees every subject note in full.
+        from wbworldgen.worldgen import notes as _notes
+        notes_block = ""
+        subjects = _notes.subject_notes(ctx.world_state)
+        if subjects:
+            notes_block = (
+                "\n\nThe world's creator agreed on design notes about "
+                "specific places. The world must contain every subject, "
+                "named so it is recognizable. Where a subject is a "
+                "realm-, planet- or map-scale place, design the structure "
+                "so its own map exists (a level or parallel map whose "
+                "label matches the subject); smaller subjects become named "
+                "locations on maps later — do not force those into "
+                "levels:\n"
+                + "\n".join(f"- {n['subject']}: {n['text']}" for n in subjects))
         effective = copy.copy(self)
         effective.guidance = (
             f"{effective.guidance}\n\nMap generator catalog (generator_id must be one of "
-            f"these ids):\n{catalog}{style_note}"
+            f"these ids):\n{catalog}{style_note}{notes_block}"
         )
         context = services._build_chain_context(ctx.world_state, self.id)
         data = await services._llm_gen.generate(
