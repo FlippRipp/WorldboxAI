@@ -500,3 +500,24 @@ def test_add_connection_hidden_flag(builder):
     stored = next(c for c in compiled["connections"]
                   if c["id"] == result["connection"]["id"])
     assert stored["hidden"] is True
+
+
+def test_read_views_mark_hidden_connections(builder):
+    wid = _flat_world(builder)
+    ctx = _ctx(builder, wid)
+    run(invoke_tool(ctx, "add_connection",
+                    {"from_map_id": "root", "from_node_id": "n0",
+                     "to_map_id": "root", "to_node_id": "n3",
+                     "kind": "tunnel", "name": "Old Crawl", "hidden": True}))
+    run(invoke_tool(ctx, "add_connection",
+                    {"from_map_id": "root", "from_node_id": "n1",
+                     "to_map_id": "root", "to_node_id": "n4",
+                     "kind": "bridge", "name": "High Span"}))
+    detail = run(invoke_tool(ctx, "read_map", {"map_id": "root"}))
+    tunnel = next(c for c in detail["connections"] if c["kind"] == "tunnel")
+    bridge = next(c for c in detail["connections"] if c["kind"] == "bridge")
+    assert tunnel["hidden"] is True
+    assert "hidden" not in bridge  # visible ways carry no flag
+    node = run(invoke_tool(ctx, "read_node", {"node_id": "n0"}))
+    conn = next(c for c in node["connections"] if c["kind"] == "tunnel")
+    assert conn["hidden"] is True

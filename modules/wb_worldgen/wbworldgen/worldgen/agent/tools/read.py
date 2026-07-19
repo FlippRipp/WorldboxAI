@@ -104,8 +104,12 @@ async def read_step(ctx, step_id: str) -> dict:
             "data": entry.get("data") or {}}
 
 
-async def read_map(ctx, map_id: str) -> dict:
-    """One map: compact node list, edges, regions, cross-map connections."""
+async def read_map(ctx, map_id: str, include_prose: bool = False) -> dict:
+    """One map: compact node list, edges, regions, cross-map connections.
+    ``include_prose`` adds every node's full prose fields (label_description,
+    description, additional_details) — content-level review (the note
+    verifier's map-scope checks) needs the whole map's prose in one read,
+    not one read_node call per node."""
     compiled = _compiled(ctx)
     rec = _map_or_error(compiled, map_id)
     nodes = []
@@ -116,14 +120,21 @@ async def read_map(ctx, map_id: str) -> dict:
                  "detailed": bool(n.get("additional_details"))}
         if n.get("region"):
             entry["region"] = n["region"]
+        if include_prose:
+            entry["label_description"] = n.get("label_description", "")
+            entry["description"] = n.get("description", "")
+            entry["additional_details"] = n.get("additional_details", "")
         nodes.append(entry)
-    connections = [
-        {"from_node": view["near"].get("node_id"),
-         "to_map": view["far"].get("map_id"), "to_node": view["far"].get("node_id"),
-         "kind": view["connection"].get("kind", ""),
-         "name": view["connection"].get("name", "")}
-        for view in _ms.connections_from(compiled, map_id, include_hidden=True)
-    ]
+    connections = []
+    for view in _ms.connections_from(compiled, map_id, include_hidden=True):
+        conn = {"from_node": view["near"].get("node_id"),
+                "to_map": view["far"].get("map_id"),
+                "to_node": view["far"].get("node_id"),
+                "kind": view["connection"].get("kind", ""),
+                "name": view["connection"].get("name", "")}
+        if view["connection"].get("hidden"):
+            conn["hidden"] = True
+        connections.append(conn)
     return {
         **_map_stats(rec),
         "description": rec.get("description", ""),
@@ -158,11 +169,14 @@ async def read_node(ctx, node_id: str) -> dict:
             other = by_id.get(e.get("from"))
         if other is not None:
             neighbors.append({"id": other.get("id"), "name": other.get("name", "")})
-    connections = [
-        {"to_map": view["far"].get("map_id"), "to_node": view["far"].get("node_id"),
-         "kind": view["connection"].get("kind", "")}
-        for view in _ms.connections_from(compiled, map_id, node_id, include_hidden=True)
-    ]
+    connections = []
+    for view in _ms.connections_from(compiled, map_id, node_id, include_hidden=True):
+        conn = {"to_map": view["far"].get("map_id"),
+                "to_node": view["far"].get("node_id"),
+                "kind": view["connection"].get("kind", "")}
+        if view["connection"].get("hidden"):
+            conn["hidden"] = True
+        connections.append(conn)
     return {
         "node": dict(node),
         "map_id": map_id,
@@ -218,20 +232,29 @@ register_tool(ToolSpec(
     label="Read one map",
     description=(
         "One map in full structure: every node (id, name, type, importance, "
-        "described flag), edges, regions, and its connections to other maps."
+        "described/detailed flags), edges, regions, and its connections to "
+        "other maps (secret ways carry hidden: true). include_prose=true "
+        "additionally returns every node's full prose (label_description, "
+        "description, additional_details) — use it to review a whole map's "
+        "content in one read instead of one read_node per node."
     ),
     invoke=read_map,
     params={"map_id": {"type": "string", "required": True,
-                       "description": "A map id from read_world's inventory."}},
+                       "description": "A map id from read_world's inventory."},
+            "include_prose": {"type": "boolean",
+                              "description": "Include each node's full prose "
+                                             "fields (default false keeps "
+                                             "the list compact)."}},
 ))
 
 register_tool(ToolSpec(
     id="read_node",
     label="Read one node",
     description=(
-        "Every field of one map node (description and custom slots "
-        "included), its neighbors, its cross-map connections, and whether "
-        "it can host a child map."
+        "Every field of one map node (description, additional_details and "
+        "custom slots included), its neighbors, its cross-map connections "
+        "(secret ways carry hidden: true), and whether it can host a child "
+        "map."
     ),
     invoke=read_node,
     params={"node_id": {"type": "string", "required": True,

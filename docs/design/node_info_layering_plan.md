@@ -216,6 +216,17 @@ the child map's anchor (the visible entrance is always inserted);
 ``connection_between``'s duplicate check was verified already
 hidden-aware.*
 
+*Tooling audit follow-up (same day, on Filip's go): the read tools'
+connection views (``read_map``/``read_node``) now mark secret ways with
+``hidden: true`` — the agent that authors one, and the C5 note
+verifier, can see the flag when reading the world back — and
+``read_map`` gained ``include_prose`` (every node's label_description /
+description / additional_details in one read), because the verifier's
+map-scope contract ("its locations' names and descriptions") is
+unworkable at one ``read_node`` per node inside a 16-turn budget. Both
+flow to the verifier mechanically (its toolset is the non-mutating
+registry slice, P2).*
+
 ## v2 candidates (recorded, unscheduled)
 
 - A dedicated secrets/details pass if ride-along depth proves shallow

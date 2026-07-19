@@ -702,3 +702,22 @@ def test_evaluator_excerpts_include_storyteller_details():
         "edges": []}}}
     text = _content_excerpts(compiled)
     assert "storyteller details: Secret: a tunnel below." in text
+
+
+def test_read_map_include_prose(builder):
+    wid = _map_world(builder, named=True)
+    ctx = _ctx(builder, wid)
+    run(invoke_tool(ctx, "edit_node",
+                    {"node_id": "n0", "description": "Salt wind combs the quay.",
+                     "additional_details": "Secret: a vault below."}))
+    compact = run(invoke_tool(ctx, "read_map", {"map_id": "root"}))
+    assert all("description" not in n for n in compact["node_list"])
+    prose = run(invoke_tool(ctx, "read_map",
+                            {"map_id": "root", "include_prose": True}))
+    by_id = {n["id"]: n for n in prose["node_list"]}
+    assert by_id["n0"]["description"] == "Salt wind combs the quay."
+    assert by_id["n0"]["additional_details"] == "Secret: a vault below."
+    # Undescribed nodes report empty prose explicitly, never a missing key.
+    assert by_id["n1"]["description"] == ""
+    assert by_id["n1"]["additional_details"] == ""
+    assert by_id["n1"]["label_description"] == ""
