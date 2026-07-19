@@ -79,6 +79,18 @@ def register(cls):
     return cls
 
 
+def describe_steps() -> list[dict]:
+    """Catalog slice of the registered steps (see worldgen/catalog.py): one
+    self-describing entry per step, registration order. Callers that need
+    the built-ins present must import ``wbworldgen.worldgen.steps`` first
+    (the catalog does)."""
+    return [
+        {"kind": "step", "id": cls.id, "label": cls.label,
+         "description": cls.description, "after": cls.after, "uses": cls.uses}
+        for cls in STEP_REGISTRY
+    ]
+
+
 def build_default_steps() -> list:
     """Instantiate every registered step class (importing the steps package
     triggers registration)."""

@@ -174,3 +174,16 @@ def resolve_phases(phase: str) -> list:
     if phase == "all":
         return [get_pass(pid) for pid in phase_pass_ids()]
     return [get_pass(phase)]
+
+
+def describe_passes() -> list[dict]:
+    """Catalog slice of the registered passes (see worldgen/catalog.py): one
+    self-describing entry per pass, registration order."""
+    return [
+        {"kind": "pass", "id": s.id, "label": s.label,
+         "description": s.description, "unit": s.unit,
+         "after": list(s.after),
+         "triggers": dict(s.triggers) if s.triggers else None,
+         "batchable": s.batchable}
+        for s in _PASS_REGISTRY.values()
+    ]

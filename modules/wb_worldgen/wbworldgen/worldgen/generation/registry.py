@@ -56,6 +56,13 @@ def list_generators() -> list[dict]:
             for s in GENERATOR_REGISTRY.values()]
 
 
+def describe_generators() -> list[dict]:
+    """Catalog slice of the registered generators (see worldgen/catalog.py):
+    ``list_generators`` — the structure-design LLM's selection list — tagged
+    with the catalog ``kind``."""
+    return [{"kind": "generator", **entry} for entry in list_generators()]
+
+
 def _build_world_map(spec: dict) -> dict:
     """Procedural overworld/terrain map (wraps WorldMapGenerator).
 

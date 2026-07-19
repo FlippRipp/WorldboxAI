@@ -1075,15 +1075,8 @@ async def enrich_passes(world_id: str):
     """The enrichment pass slice of the capability catalog: what passes are
     registered, so the panel renders one row per pass instead of hardcoding
     phases (a dropped-in pass module appears here without frontend edits)."""
-    from wbworldgen.worldgen.enrichment import registered_passes
-    return {
-        "world_id": world_id,
-        "passes": [
-            {"id": s.id, "label": s.label, "description": s.description,
-             "unit": s.unit, "batchable": s.batchable}
-            for s in registered_passes()
-        ],
-    }
+    from wbworldgen.worldgen.enrichment.registry import describe_passes
+    return {"world_id": world_id, "passes": describe_passes()}
 
 
 @router.get("/api/world/{world_id}/enrich/progress")
