@@ -17,14 +17,14 @@ from wbworldgen.worldgen.enrichment.context import postprocess_links
 
 
 async def edit_node(ctx, node_id: str, name: str = None, description: str = None,
-                    label_description: str = None, type: str = None,
-                    importance: int = None) -> dict:
+                    additional_details: str = None, label_description: str = None,
+                    type: str = None, importance: int = None) -> dict:
     builder = ctx.builder
-    if (name is None and description is None and label_description is None
-            and type is None and importance is None):
+    if (name is None and description is None and additional_details is None
+            and label_description is None and type is None and importance is None):
         raise ToolError(
             "edit_node: nothing to change — provide name, description, "
-            "label_description, type and/or importance.")
+            "additional_details, label_description, type and/or importance.")
 
     compiled = builder.services.compiled.load(ctx.world_id)
     node = builder.get_map_node(ctx.world_id, node_id)
@@ -64,6 +64,17 @@ async def edit_node(ctx, node_id: str, name: str = None, description: str = None
         # Resolve bare tokens to the '|Name (direction)' form the app renders.
         updates["description"] = postprocess_links(description, node, all_nodes)
 
+    if additional_details is not None:
+        index = _ms.node_index(compiled)
+        broken = [m.group(1) for m in _LINK_TOKEN.finditer(additional_details)
+                  if m.group(1) not in index]
+        if broken:
+            raise ToolError(
+                f"additional_details references nonexistent node id(s): {broken}. "
+                "Link tokens must use real node ids (${link_<node_id>}); "
+                "read_map lists them.")
+        updates["additional_details"] = postprocess_links(additional_details, node, all_nodes)
+
     if label_description is not None:
         updates["label_description"] = label_description
 
@@ -90,12 +101,14 @@ register_tool(ToolSpec(
     id="edit_node",
     label="Edit a node",
     description=(
-        "Directly set a node's name, description, label_description, type "
-        "and/or importance through the app's own enrichment write path. "
-        "Enforces world-wide name uniqueness and validates description "
-        "link tokens (${link_<node_id>}), resolving bare ones. For "
-        "wholesale content regeneration prefer run_pass with rework and "
-        "guidance."
+        "Directly set a node's name, description, additional_details "
+        "(storyteller-only depth the player never reads; mark hidden facts "
+        "with a leading 'Secret:'), label_description, type and/or "
+        "importance through the app's own enrichment write path. Enforces "
+        "world-wide name uniqueness and validates link tokens "
+        "(${link_<node_id>}) in both prose fields, resolving bare ones. "
+        "For wholesale content regeneration prefer run_pass with rework "
+        "and guidance."
     ),
     invoke=edit_node,
     mutates=True,
@@ -105,9 +118,18 @@ register_tool(ToolSpec(
         "name": {"type": "string",
                  "description": "New unique name for the node."},
         "description": {"type": "string",
-                        "description": "New flavor description; may "
-                                       "reference other nodes as "
+                        "description": "New surface description (what a "
+                                       "visitor perceives; player-visible); "
+                                       "may reference other nodes as "
                                        "${link_<node_id>}."},
+        "additional_details": {"type": "string",
+                               "description": "New storyteller-only depth "
+                                              "(history, hooks, secrets — "
+                                              "mark each with a leading "
+                                              "'Secret:'); never shown to "
+                                              "the player; may reference "
+                                              "other nodes as "
+                                              "${link_<node_id>}."},
         "label_description": {"type": "string",
                               "description": "New one-line label."},
         "type": {"type": "string",

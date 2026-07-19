@@ -129,6 +129,9 @@ def normalize_abstract_graph(parsed: dict, named_locations: list, areas: list,
             "type": _engine_type(importance),
             "region": area_by_key.get(join_key(raw.get("region", "")), ""),
         }
+        details = str(raw.get("additional_details", "") or "").strip()
+        if details:
+            node["additional_details"] = details
         if layer_id:
             node["layer_id"] = layer_id
         crossing = str(raw.get("crossing", "") or "").strip()

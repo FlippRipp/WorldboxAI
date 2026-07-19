@@ -1,14 +1,21 @@
-"""The description pass: atmospheric flavor text for named map nodes.
+"""The description pass: prose for named map nodes, in two channels.
+
+One LLM call writes both ``description`` (the surface: what a visitor
+standing there perceives — player-visible on the map UI) and
+``additional_details`` (storyteller-only depth: history, hooks,
+"Secret:"-marked facts; never rendered by player-facing UI — see
+docs/design/node_info_layering_plan.md).
 
 The LLM call lives here as a module-level function (``generate_description``)
 — the review pass imports it to rework descriptions after a relabel, and
-tests monkeypatch it to fake LLM output.
+tests monkeypatch it to fake LLM output. It returns a
+``(description, additional_details)`` tuple, mirroring ``generate_label``.
 """
 
 import asyncio
 import logging
-import re
 
+from wbworldgen.worldgen.generation.llm import json_retry_completion
 from wbworldgen.worldgen.enrichment.context import (
     build_enrichment_context,
     postprocess_links,
@@ -24,13 +31,17 @@ logger = logging.getLogger(__name__)
 
 
 async def generate_description(services, node: dict, context: dict,
-                               existing_description: str = "") -> str:
+                               existing_description: str = "",
+                               existing_details: str = "") -> tuple:
     """One description LLM call (with its own short-content/transient retry
-    loop and a label-based fallback). ``existing_description`` switches the
-    prompt into revise-and-enrich mode (rework, review repairs);
+    loop and a label-based fallback). Returns ``(description,
+    additional_details)``; the details half may be empty (the node then
+    stays pending for this pass, so a later run can fill it).
+    ``existing_description`` switches the prompt into revise-and-enrich mode
+    (rework, review repairs, details backfill on already-described nodes);
     ``context["guidance"]`` carries the run-level steering note (C1's
     guidance channel — a context key so this signature, a test patch point,
-    stays stable)."""
+    stays stable across steering changes)."""
     node_id = node.get("id", "")
     node_name = node.get("name", "Unnamed")
     node_type = node.get("type", "waypoint")
@@ -49,26 +60,41 @@ async def generate_description(services, node: dict, context: dict,
     model = services.llm.reader_model
     temperature = services.temperature or 0.9
 
+    channel_spec = (
+        "- description: 1-3 sentences of surface flavor — what a visitor standing here perceives "
+        "(sight, sound, smell). Reference neighbors using their link IDs like ${link_n_0001} or "
+        "${link_a1b2} (the same format used in the neighbor list above).\n"
+        "- additional_details: 2-4 sentences for the storyteller only — depth the surface doesn't "
+        "show: history, who holds power here, tensions, a story hook. When one fits, include a "
+        "genuinely hidden fact marked with a leading 'Secret:'."
+    )
     if existing_description:
         system_fallback = (
-            "You are a world-building AI. Revise and enrich an existing flavor description for a "
-            "map location using fresh context about its neighbors. Preserve any still-fitting "
-            "details from the original but deepen it with the new context. Reference neighboring "
-            "locations using their ${link_ID} syntax."
+            "You are a world-building AI. Revise and enrich the flavor prose of a map location "
+            "using fresh context about its neighbors. The prose has two channels: 'description' "
+            "(the surface — what a visitor perceives) and 'additional_details' (storyteller-only "
+            "depth the player never reads directly). Preserve any still-fitting details from the "
+            "existing text but deepen it with the new context. Reference neighboring locations "
+            "using their ${link_ID} syntax. Output ONLY valid JSON."
         )
         rework_block = f"\nExisting description (revise/update, don't just repeat): {existing_description}\n"
+        if existing_details:
+            rework_block += f"Existing storyteller details (keep what still fits, extend or revise): {existing_details}\n"
         instruction = (
-            "Rewrite this into an updated 1-3 sentence flavor description of this location, weaving in "
-            "the nearby locations listed above. Reference neighbors using their link IDs like "
-            "${link_n_0001} or ${link_a1b2} (the same format used in the neighbor list above)."
+            "Rewrite this location's two prose channels, weaving in the nearby locations "
+            f"listed above:\n{channel_spec}"
         )
     else:
-        system_fallback = "You are a world-building AI. Write a short, atmospheric flavor description for a map location. Reference neighboring locations using their ${link_ID} syntax."
-        rework_block = ""
-        instruction = (
-            "Write a 1-3 sentence flavor description of this location. Reference neighbors using "
-            "their link IDs like ${link_n_0001} or ${link_a1b2} (the same format used in the neighbor list above)."
+        system_fallback = (
+            "You are a world-building AI. Write flavor prose for a map location in two channels: "
+            "'description' (the surface — what a visitor standing there perceives: sight, sound, "
+            "smell) and 'additional_details' (storyteller-only depth the player never reads "
+            "directly: history, inhabitants, tensions, story hooks, and hidden facts each marked "
+            "with a leading 'Secret:'). Reference neighboring locations using their ${link_ID} "
+            "syntax. Output ONLY valid JSON."
         )
+        rework_block = ""
+        instruction = f"Write this location's two prose channels:\n{channel_spec}"
 
     system = services.prompts("enrich_description_system", system_fallback)
     connection_str = connection_block(context.get("connection", {}), context.get("vocab"))
@@ -99,7 +125,7 @@ Layer description: {layer.get('description', '')}
 Nearby locations: {neighbor_str}
 {rework_block}
 {instruction}
-Output ONLY the description text, no JSON wrapper.""",
+Output ONLY valid JSON: {{"description": "...", "additional_details": "..."}}""",
         world_name=world.get('name', 'Unknown'),
         world_genre=world.get('genre', ''),
         world_tone=world.get('tone', ''),
@@ -115,6 +141,7 @@ Output ONLY the description text, no JSON wrapper.""",
         region_terrain=region.get('terrain', ''),
         region_climate=region.get('climate', ''),
         existing_description=existing_description,
+        existing_details=existing_details,
         node_biome=context.get("terrain", {}).get("biome", ""),
         node_elevation=context.get("terrain", {}).get("elevation_band", ""),
     )
@@ -126,21 +153,17 @@ Output ONLY the description text, no JSON wrapper.""",
 
     temperature = float(temperature)
     for attempt in range(3):
+        parsed = None
         try:
-            content = await services.llm.simple_completion(
+            parsed = await json_retry_completion(
+                services.llm,
                 messages=messages,
                 model=model,
                 temperature=temperature,
                 inspector_ctx={"call_type": "world_build", "step": f"enrich:description:{'retry' if attempt else 'initial'}"},
+                step_label=f"enrich:describe:{node_id}",
+                retry_attempts=services.json_retry_attempts,
             )
-            content = content.strip()
-            content = re.sub(r'^```[a-zA-Z]*\s*', '', content)
-            content = re.sub(r'\s*```$', '', content)
-            content = content.strip()
-            if len(content) >= 10:
-                return content
-            logger.warning("Description too short for node %s (%d chars), retrying (attempt %d)", node_id, len(content), attempt + 1)
-            temperature = min(temperature + 0.1, 1.0)
         except (asyncio.TimeoutError, ConnectionError, OSError) as e:
             logger.warning("Transient error for description node %s (attempt %d): %s", node_id, attempt + 1, e)
             if attempt < 2:
@@ -148,21 +171,32 @@ Output ONLY the description text, no JSON wrapper.""",
                 temperature = min(temperature + 0.1, 1.0)
                 continue
             raise
-        except Exception:
-            raise
+        except ValueError:
+            # JSON retries exhausted — treat like short content below.
+            logger.warning("Description JSON failed for node %s (attempt %d)", node_id, attempt + 1)
+        if parsed is not None:
+            description = str(parsed.get("description", "") or "").strip()
+            details = str(parsed.get("additional_details", "") or "").strip()
+            if len(description) >= 10:
+                return description, details
+            logger.warning("Description too short for node %s (%d chars), retrying (attempt %d)", node_id, len(description), attempt + 1)
+        temperature = min(temperature + 0.1, 1.0)
 
     if label_description:
-        return label_description
-    return f"A notable {node_type} within {world.get('name', 'the world')}."
+        return label_description, ""
+    return f"A notable {node_type} within {world.get('name', 'the world')}.", ""
 
 
 async def describe_with_retries(services, node: dict, context: dict,
-                                existing_description: str = ""):
-    """Describe one node with transient-error retries. None on failure."""
+                                existing_description: str = "",
+                                existing_details: str = ""):
+    """Describe one node with transient-error retries. Returns the
+    ``(description, additional_details)`` tuple, or None on failure."""
     return await call_with_retries(
         services,
         lambda: generate_description(services, node, context,
-                                     existing_description=existing_description),
+                                     existing_description=existing_description,
+                                     existing_details=existing_details),
         what="Description generation", node_id=node.get("id"))
 
 
@@ -173,25 +207,36 @@ async def _run_node(services, node: dict, state) -> dict:
                                        include_descriptions=True)
     if state.guidance:
         context["guidance"] = state.guidance
-    existing = node.get("description", "") if state.rework else ""
-    desc_with_links = await describe_with_retries(services, node, context,
-                                                  existing_description=existing)
-    if desc_with_links is None:
+    # Revise-and-enrich whenever prose already exists — rework runs, review
+    # repairs, and details backfill on already-described nodes (old worlds)
+    # all keep the standing description instead of clobbering it.
+    result = await describe_with_retries(
+        services, node, context,
+        existing_description=node.get("description", ""),
+        existing_details=node.get("additional_details", ""))
+    if result is None:
         return None
-    return {"description": postprocess_links(desc_with_links, node, state.all_nodes)}
+    desc_with_links, details_with_links = result
+    return {
+        "description": postprocess_links(desc_with_links, node, state.all_nodes),
+        "additional_details": postprocess_links(details_with_links, node, state.all_nodes),
+    }
 
 
 SPEC = register_pass(PassSpec(
     id="describe",
     label="Describe locations",
     description=(
-        "Write a short atmospheric flavor description for every named "
-        "location, weaving in linked references to its neighbors. Requires "
-        "names, so it runs after the label pass."
+        "Write each named location's two prose channels: a short surface "
+        "description of what a visitor perceives (player-visible), and "
+        "storyteller-only additional details — depth, hooks and "
+        "'Secret:'-marked facts the player never reads directly. Weaves in "
+        "linked references to neighbors. Requires names, so it runs after "
+        "the label pass."
     ),
     unit="node",
     run=_run_node,
-    is_done=lambda n: bool(n.get("description")),
+    is_done=lambda n: bool(n.get("description")) and bool(n.get("additional_details")),
     in_domain=lambda n: bool(n.get("name")),
     after=("label",),
     requires=("maps", "labels"),

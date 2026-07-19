@@ -68,6 +68,7 @@ def _normalize_locations(raw_locations, map_id: str, max_locations: int) -> list
             "name": name,
             "type": str(raw.get("type", "room")).strip() or "room",
             "description": str(raw.get("description", "")).strip(),
+            "additional_details": str(raw.get("additional_details", "")).strip(),
             "adjacent": raw.get("adjacent") if isinstance(raw.get("adjacent"), list) else [],
             "is_entrance": is_entrance,
         })
@@ -341,6 +342,7 @@ class MapExpansionEngine:
             "name": name,
             "type": str(parsed.get("type", "place")).strip() or "place",
             "description": str(parsed.get("description", "")).strip(),
+            "additional_details": str(parsed.get("additional_details", "")).strip(),
             "label_description": "",
             "importance": min(10, max(1, 3 + len(anchors))),
         }
@@ -392,12 +394,14 @@ If one of the existing locations above already IS this place, return {{"existing
 If this place does NOT belong inside {label} at all — you could not walk there without leaving
 {label}; it is its own destination out in the wider world that merely happens to be close —
 return {{"belongs_outside": true}} and nothing else, and it will be placed outside instead.
-Otherwise author it: a unique name, a short type, a 1-2 sentence description, and "adjacent" — 1-3 existing
-location names it directly adjoins. Unless the request implies otherwise, it should adjoin the player's
-current location or somewhere right next to it.
+Otherwise author it: a unique name, a short type, a 1-2 sentence description (the surface — what a
+visitor perceives), additional_details (1-2 sentences for the storyteller only: depth, a hook, hidden
+facts marked with a leading 'Secret:'), and "adjacent" — 1-3 existing location names it directly
+adjoins. Unless the request implies otherwise, it should adjoin the player's current location or
+somewhere right next to it.
 
 Output ONLY valid JSON:
-{{"name": "...", "type": "...", "description": "...", "adjacent": ["..."]}}""",
+{{"name": "...", "type": "...", "description": "...", "additional_details": "...", "adjacent": ["..."]}}""",
             map_label=label,
             map_description=map_record.get("description", ""),
             world_name=lore.get("world_name", "Unknown"),
@@ -492,13 +496,15 @@ This world's whole playable space is ONE map at the "{level.get('level_type', 'i
 
 Design 8-{max_locations} distinct locations (rooms, halls, decks, courts...). Exactly ONE
 location must have "is_entrance": true — the main way in from the outside world. Each
-location gets a name, a short type, a 1-2 sentence description, and which other locations
-it directly adjoins (by name). Make the geography coherent: wings, floors and passages
-that read like one real place.
+location gets a name, a short type, a 1-2 sentence description (the surface — what a
+visitor perceives), additional_details (1-2 sentences for the storyteller only: depth, a
+hook, hidden facts marked with a leading 'Secret:'), and which other locations it directly
+adjoins (by name). Make the geography coherent: wings, floors and passages that read like
+one real place.
 
 Output ONLY valid JSON:
 {{"label": "...", "description": "2-3 sentences on how this place is laid out",
-"locations": [{{"name": "...", "type": "...", "description": "...", "adjacent": ["..."], "is_entrance": false}}, ...]}}""",
+"locations": [{{"name": "...", "type": "...", "description": "...", "additional_details": "...", "adjacent": ["..."], "is_entrance": false}}, ...]}}""",
             world_name=name,
             world_premise=user_prompt,
             max_locations=str(max_locations),
@@ -803,7 +809,9 @@ Output ONLY valid JSON:
 Design {max(6, max_nodes // 2)}-{max_nodes} nodes — the real structure of this map at its own
 scale. Each node: "name"; "kind" (this world's own noun for what it is: planet,
 station, moon, gate, dream...); "region" (one of the areas above, or empty);
-"importance" 1-10 (how central it is); "description" (1-2 vivid sentences);
+"importance" 1-10 (how central it is); "description" (1-2 vivid sentences — the
+surface, what a visitor perceives); "additional_details" (1-2 sentences for the
+storyteller only: depth, a hook, hidden facts marked with a leading 'Secret:');
 "adjacent" (names of nodes it has direct travel routes to — every node must be
 reachable); "contains" (names of authored places from the list above that live
 inside/on this node).
@@ -1189,8 +1197,10 @@ Choose the level_type for this new map from:
 {procedural_note}
 Design 6-{max_locations} distinct locations ({sub_noun}). Exactly ONE location must have
 "is_entrance": true — the way in from {node_name}'s surroundings (a gate, door, cave mouth,
-docking bay...). Each location gets a name, a short type, a 1-2 sentence description, and
-which other locations it directly adjoins (by name).
+docking bay...). Each location gets a name, a short type, a 1-2 sentence description (the
+surface — what a visitor perceives), additional_details (1-3 sentences for the storyteller
+only: what's really going on here, tensions, a hook; mark genuinely hidden facts with a
+leading 'Secret:'), and which other locations it directly adjoins (by name).
 You MAY also add further connections out of this map in "connections": each states its kind,
 a name, at_location (which of your locations it sits at), to_parent_location (an existing
 location name on the parent map, or empty to link back to {node_name} itself), travel
@@ -1199,7 +1209,7 @@ location name on the parent map, or empty to link back to {node_name} itself), t
 Output ONLY valid JSON:
 {{"label": "...", "level_type": "...", "description": "2-3 sentences on how this place is laid out",
 "entrance_kind": "gate|door|cave mouth|...", "entrance_name": "...", "entrance_description": "...",
-"locations": [{{"name": "...", "type": "...", "description": "...", "adjacent": ["..."], "is_entrance": false}}, ...],
+"locations": [{{"name": "...", "type": "...", "description": "...", "additional_details": "...", "adjacent": ["..."], "is_entrance": false}}, ...],
 "connections": []}}""",
             node_name=node_name,
             node_type=node_type,

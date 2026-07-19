@@ -113,5 +113,17 @@ def get_site_position(state: dict):
     return (state.get("module_data", {}).get("wb_worldgen") or {}).get("site_position")
 
 
-def node_needs_detail(node: dict) -> bool:
+def node_missing_essentials(node: dict) -> bool:
+    """No name or no surface description — the storyteller would narrate
+    from thin air. This is the only condition worth blocking an arrival on
+    (``ensure_current_node_detailed``)."""
     return not node.get("name") or not node.get("description")
+
+
+def node_needs_detail(node: dict) -> bool:
+    """Anything detailing would still add, including the storyteller-only
+    ``additional_details`` channel — the trickle/prefetch condition. Nodes
+    from before the details channel existed re-qualify here and get
+    enriched in place (revise mode keeps their prose), never blocking a
+    turn."""
+    return node_missing_essentials(node) or not node.get("additional_details")

@@ -689,3 +689,26 @@ def test_generate_start_location_prompt_is_anchor_aware(builder):
     assert "near Havenport" in user
     assert "distance from player" in user
     assert "CLOSEST" in user
+
+
+def test_found_new_node_carries_additional_details():
+    compiled = {
+        "root_map_id": "root",
+        "maps": {"root": {
+            "map_id": "root",
+            "nodes": [{"id": "n0", "name": "Harbor Town",
+                       "x": 10.0, "y": 10.0, "region": "Coast"}],
+            "edges": [],
+            "config": {"map_width": 100, "map_height": 100},
+        }},
+    }
+    authored = {
+        "near_node_id": "n0", "name": "Gull Rock", "type": "landmark",
+        "label_description": "A wave-lashed spire.",
+        "description": "White water rings the rock.",
+        "additional_details": "Secret: wreckers light false beacons here.",
+    }
+    founded = start_locs._found_new_node(compiled, authored)
+    assert founded is not None
+    assert founded["additional_details"] == "Secret: wreckers light false beacons here."
+    assert founded["new_node"]["additional_details"] == founded["additional_details"]

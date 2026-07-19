@@ -30,6 +30,10 @@ class MapNode:
     importance: int = 1
     name: str = ""
     description: str = ""
+    #: Storyteller-only depth channel: history, hooks, "Secret:"-marked
+    #: facts. Never rendered by player-facing UI (see
+    #: docs/design/node_info_layering_plan.md).
+    additional_details: str = ""
     label_description: str = ""
     type: str = "waypoint"
     layer_id: str = ""
@@ -48,6 +52,8 @@ class MapNode:
             "label_description": self.label_description,
             "type": self.type,
         }
+        if self.additional_details:
+            d["additional_details"] = self.additional_details
         if self.layer_id:
             d["layer_id"] = self.layer_id
         if self.interlayer_connection_id:

@@ -118,7 +118,7 @@ def _split_warnings(record: dict, nodes: list, edges: list,
 def add_node(services, world_id: str, map_id: str, near_node_id: str,
              name: str = None, type: str = "waypoint", importance: int = 3,
              label_description: str = "", description: str = "",
-             edges_to: list = None) -> dict:
+             additional_details: str = "", edges_to: list = None) -> dict:
     """Append a new node one route leg beside its anchor, linked to
     ``edges_to`` (default: the anchor). Unnamed nodes are legal (S4) —
     enrichment fills them. The node inherits the anchor's region."""
@@ -156,6 +156,9 @@ def add_node(services, world_id: str, map_id: str, near_node_id: str,
     if description:
         node["description"] = _validate_description(
             compiled, str(description), node)
+    if additional_details:
+        node["additional_details"] = _validate_description(
+            compiled, str(additional_details), node)
     if anchor.get("region"):
         node["region"] = anchor["region"]
 

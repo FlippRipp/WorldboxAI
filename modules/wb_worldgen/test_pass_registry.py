@@ -210,9 +210,10 @@ def test_batching_only_for_batchable_specs(builder, monkeypatch):
     wid = _map_world(builder, 5, named=True)
     calls = []
 
-    async def fake_desc(services, node, context, existing_description=""):
+    async def fake_desc(services, node, context, existing_description="",
+                        existing_details=""):
         calls.append(node["id"])
-        return f"Flavor for {node['id']}"
+        return f"Flavor for {node['id']}", f"Details for {node['id']}"
 
     monkeypatch.setattr(describe_pass, "generate_description", fake_desc)
 
@@ -235,6 +236,7 @@ def test_enrich_passes_and_progress_routes(builder):
     nodes = world["steps"]["map_generation"]["data"]["nodes"]
     nodes[0]["name"] = "Alpha"
     nodes[0]["description"] = "The first place."
+    nodes[0]["additional_details"] = "Secret: the first place hides a cellar."
     nodes[1]["name"] = "Beta"
     builder.save_world(wid, world)
 
@@ -276,8 +278,9 @@ def test_builtin_run_emits_pre_b1_event_sequence(builder, monkeypatch):
     async def fake_label(services, node, context, used_names=None, problem_note=None):
         return f"Name {node['id']}", f"snippet {node['id']}"
 
-    async def fake_desc(services, node, context, existing_description=""):
-        return f"Flavor text for {node['name']}"
+    async def fake_desc(services, node, context, existing_description="",
+                        existing_details=""):
+        return f"Flavor text for {node['name']}", f"Details for {node['id']}"
 
     monkeypatch.setattr(label_pass, "generate_label", fake_label)
     monkeypatch.setattr(describe_pass, "generate_description", fake_desc)
@@ -310,8 +313,8 @@ def test_builtin_run_emits_pre_b1_event_sequence(builder, monkeypatch):
     assert describe_phase["total_nodes"] == 4  # every node named by then
     first_desc = events[6]
     assert set(first_desc) == {"type", "phase", "node_id", "layer_id",
-                               "description", "total_labeled", "total_nodes",
-                               "per_layer"}
+                               "description", "additional_details",
+                               "total_labeled", "total_nodes", "per_layer"}
     assert first_desc["description"] == "Flavor text for Name n0"
 
     done = events[-1]

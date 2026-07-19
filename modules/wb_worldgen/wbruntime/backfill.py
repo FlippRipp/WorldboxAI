@@ -15,7 +15,13 @@ import asyncio
 import logging
 
 from . import sync as _sync
-from .worldspace import all_map_nodes, fringe_node_ids, get_travel, node_needs_detail
+from .worldspace import (
+    all_map_nodes,
+    fringe_node_ids,
+    get_travel,
+    node_missing_essentials,
+    node_needs_detail,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -106,8 +112,10 @@ async def ensure_current_node_detailed(host, state: dict):
         return
     if get_travel(state):
         return  # en route — the journey narration doesn't need the destination yet
+    # Blocking is reserved for the thin-air case (no name/description); a
+    # node merely missing additional_details fills via the idle trickle.
     node = next((n for n in all_map_nodes(world_data) if n.get("id") == node_id), None)
-    if node is None or not node_needs_detail(node) or node_id in host._backfill["failed"]:
+    if node is None or not node_missing_essentials(node) or node_id in host._backfill["failed"]:
         return
     fut = host._backfill["futures"].get(node_id)
     if fut is None:

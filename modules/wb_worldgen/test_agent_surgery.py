@@ -464,3 +464,25 @@ def test_structure_tools_are_in_the_catalog():
     entry = next(e for e in describe_tools() if e["id"] == "add_node")
     assert entry["mutates"] is True
     assert entry["params"]["map_id"]["required"] is True
+
+
+# ---------------------------------------------------------------------------
+# additional_details rides add_node (node info layering)
+# ---------------------------------------------------------------------------
+
+def test_add_node_carries_additional_details(builder):
+    wid = _flat_world(builder)
+    result = run(invoke_tool(_ctx(builder, wid), "add_node",
+                             {"map_id": "root", "near_node_id": "n0",
+                              "name": "Sunken Chapel", "type": "ruin",
+                              "description": "A drowned nave.",
+                              "additional_details": "Secret: the crypt below ${link_n0} still seals something."}))
+    node = result["node"]
+    assert node["additional_details"].startswith("Secret: the crypt below ${link_n0|")
+    data = _step_map_data(builder, wid)
+    stored = next(n for n in data["nodes"] if n["id"] == node["id"])
+    assert stored["additional_details"] == node["additional_details"]
+    with pytest.raises(ToolError, match="nonexistent node id"):
+        run(invoke_tool(_ctx(builder, wid), "add_node",
+                        {"map_id": "root", "near_node_id": "n0",
+                         "additional_details": "Secret: ${link_ghost}."}))

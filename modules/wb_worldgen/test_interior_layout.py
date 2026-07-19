@@ -75,3 +75,16 @@ def test_generator_registry_contract():
         get_generator("star_system")
     # Reserved stubs are registered but explicitly unimplemented.
     assert GENERATOR_REGISTRY["region"].build is None
+
+
+def test_layout_interior_carries_additional_details():
+    result = layout_interior("m1", [
+        {"name": "Hall", "type": "room", "description": "Big.",
+         "additional_details": "Secret: a trapdoor under the dais.",
+         "adjacent": ["Cellar"], "is_entrance": True},
+        {"name": "Cellar", "type": "room", "description": "Dark.",
+         "adjacent": ["Hall"]},
+    ])
+    by_name = {n["name"]: n for n in result["nodes"]}
+    assert by_name["Hall"]["additional_details"] == "Secret: a trapdoor under the dais."
+    assert "additional_details" not in by_name["Cellar"]

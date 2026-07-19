@@ -361,8 +361,9 @@ def test_review_relabels_flagged_node(builder, monkeypatch):
         label_calls.append((node["id"], problem_note))
         return "Riverside Atelier", "a quiet workshop"
 
-    async def fake_desc(services, node, context, existing_description=""):
-        return f"Rewritten around {node['name']}."
+    async def fake_desc(services, node, context, existing_description="",
+                        existing_details=""):
+        return f"Rewritten around {node['name']}.", f"Details for {node['name']}."
 
     monkeypatch.setattr(label_pass, "generate_label", fake_label)
     monkeypatch.setattr(describe_pass, "generate_description", fake_desc)

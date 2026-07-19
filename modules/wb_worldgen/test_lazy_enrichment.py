@@ -76,8 +76,9 @@ def _fake_enrichment(monkeypatch):
     async def fake_label(services, node, context, used_names=None, problem_note=None):
         return f"Name {node['id']}", f"snippet {node['id']}"
 
-    async def fake_desc(services, node, context, existing_description=""):
-        return f"Flavor text for {node['id']}"
+    async def fake_desc(services, node, context, existing_description="",
+                        existing_details=""):
+        return f"Flavor text for {node['id']}", f"Details for {node['id']}"
 
     monkeypatch.setattr(label_pass, "generate_label", fake_label)
     monkeypatch.setattr(describe_pass, "generate_description", fake_desc)
@@ -344,3 +345,30 @@ def test_mutation_schema_offers_unexplored_fringe_nodes():
     options = schema["player_location_node_id"]["options"]
     assert "n2 (unexplored waypoint)" in options  # fringe of n1
     assert not any(o.startswith("n3") for o in options)  # beyond the fringe
+
+
+# ---------------------------------------------------------------------------
+# additional_details: predicates + session sync (node info layering)
+# ---------------------------------------------------------------------------
+
+def test_detail_predicates_split():
+    """Arrival-blocking is reserved for missing essentials (name/description);
+    a described node missing only additional_details is trickle work."""
+    from wbruntime.worldspace import node_missing_essentials, node_needs_detail
+
+    described = {"name": "A", "description": "Prose."}
+    assert not node_missing_essentials(described)
+    assert node_needs_detail(described)  # details channel still missing
+    full = {"name": "A", "description": "Prose.", "additional_details": "Depth."}
+    assert not node_missing_essentials(full)
+    assert not node_needs_detail(full)
+    for bare in ({"name": "", "description": "d"}, {"name": "A", "description": ""}):
+        assert node_missing_essentials(bare) and node_needs_detail(bare)
+
+
+def test_merge_node_fields_carries_additional_details():
+    from wbruntime.sync import merge_node_fields
+
+    target = {"id": "n1", "name": "A", "description": "d"}
+    assert merge_node_fields(target, {"additional_details": "Secret: below."})
+    assert target["additional_details"] == "Secret: below."

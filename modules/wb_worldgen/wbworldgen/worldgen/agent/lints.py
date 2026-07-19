@@ -102,31 +102,34 @@ def lint_world(compiled: dict, map_id: str = None, major_floor: int = None) -> d
                            "no chain of connections or parent anchors leads "
                            "to it."})
 
-        # Link tokens in descriptions.
+        # Link tokens in the prose fields (surface description + the
+        # storyteller-only additional_details — same rules for both, N8 of
+        # docs/design/node_info_layering_plan.md).
         for n in nodes:
-            desc = n.get("description") or ""
-            broken, unresolved = [], []
-            for m in _LINK_TOKEN.finditer(desc):
-                target, label_part = m.group(1), m.group(2)
-                if target not in index:
-                    broken.append(target)
-                elif not label_part:
-                    unresolved.append(target)
-            if broken:
-                problems.append({
-                    "kind": "broken_link_token", "map_id": mid, "node_id": n.get("id"),
-                    "targets": broken,
-                    "message": f"Description of {n.get('id')} ({n.get('name') or 'unnamed'}) "
-                               f"references nonexistent node id(s): {broken}. Rework the "
-                               "description or fix the reference."})
-            if unresolved:
-                problems.append({
-                    "kind": "unresolved_link_token", "map_id": mid, "node_id": n.get("id"),
-                    "targets": unresolved,
-                    "message": f"Description of {n.get('id')} carries bare link token(s) "
-                               f"{unresolved} without a resolved '|Name (direction)' part; "
-                               "rewriting the description (describe rework or edit_node) "
-                               "resolves them."})
+            for prose_field in ("description", "additional_details"):
+                text = n.get(prose_field) or ""
+                broken, unresolved = [], []
+                for m in _LINK_TOKEN.finditer(text):
+                    target, label_part = m.group(1), m.group(2)
+                    if target not in index:
+                        broken.append(target)
+                    elif not label_part:
+                        unresolved.append(target)
+                if broken:
+                    problems.append({
+                        "kind": "broken_link_token", "map_id": mid, "node_id": n.get("id"),
+                        "field": prose_field, "targets": broken,
+                        "message": f"{prose_field} of {n.get('id')} ({n.get('name') or 'unnamed'}) "
+                                   f"references nonexistent node id(s): {broken}. Rework the "
+                                   "text or fix the reference."})
+                if unresolved:
+                    problems.append({
+                        "kind": "unresolved_link_token", "map_id": mid, "node_id": n.get("id"),
+                        "field": prose_field, "targets": unresolved,
+                        "message": f"{prose_field} of {n.get('id')} carries bare link token(s) "
+                                   f"{unresolved} without a resolved '|Name (direction)' part; "
+                                   "rewriting the text (describe rework or edit_node) "
+                                   "resolves them."})
 
         # Coverage against the major-location floor.
         if major_floor is not None:

@@ -155,13 +155,21 @@ async def review_map(services, rec: dict, state) -> dict:
                                             include_descriptions=True)
             if state.guidance:
                 dctx["guidance"] = state.guidance
-            desc_links = await describe.describe_with_retries(
-                services, node, dctx, existing_description=node.get("description", ""))
-            if desc_links is not None:
+            reworked = await describe.describe_with_retries(
+                services, node, dctx,
+                existing_description=node.get("description", ""),
+                existing_details=node.get("additional_details", ""))
+            if reworked is not None:
+                desc_links, details_links = reworked
                 desc = postprocess_links(desc_links, node, state.all_nodes)
                 store.save_node_enrichment(state.world_id, node_id, "description", desc)
                 services.compiled.update_node(state.compiled, node_id, "description", desc)
                 node["description"] = desc
+                details = postprocess_links(details_links, node, state.all_nodes)
+                if details:
+                    store.save_node_enrichment(state.world_id, node_id, "additional_details", details)
+                    services.compiled.update_node(state.compiled, node_id, "additional_details", details)
+                    node["additional_details"] = details
         result["relabeled"].append(
             {"node_id": node_id, "map_id": mid, "old": old_name,
              "new": name, "problem": problem})

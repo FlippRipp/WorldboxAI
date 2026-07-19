@@ -414,3 +414,10 @@ def test_worldmap_get_node_and_neighbors():
 
     assert wm.get_node("nonexistent") is None
     assert wm.get_neighbors("nonexistent") == []
+
+
+def test_map_node_additional_details_serialization():
+    node = MapNode(id="a", x=1.0, y=2.0)
+    assert "additional_details" not in node.to_dict()
+    node.additional_details = "Secret: a sealed door below."
+    assert node.to_dict()["additional_details"] == "Secret: a sealed door below."

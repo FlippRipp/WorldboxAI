@@ -811,3 +811,35 @@ def test_map_world_entries_format():
     assert any(t.startswith("Location [The Keep]: Gate (gate).") for t in texts)
     assert any(t.startswith("Connection: door 'The Gate' linking World and The Keep.") for t in texts)
     assert not any("Secret" in t for t in texts)
+
+
+# ---------------------------------------------------------------------------
+# additional_details: the storyteller-only channel (node info layering)
+# ---------------------------------------------------------------------------
+
+def test_site_bundle_carries_additional_details():
+    from wbworldgen.worldgen.expansion.sites import SiteExpansionEngine
+
+    engine = SiteExpansionEngine(services=None)
+    node = {"id": "n7", "name": "Port Vellen"}
+    parsed = {
+        "layout_summary": "Docks below, terraces above.",
+        "additional_details": "Secret: the harbormaster taxes smugglers, not cargo.",
+        "sub_locations": [
+            {"name": "The Wet Market", "type": "market",
+             "description": "Fish and shouting.",
+             "additional_details": "Secret: a fence operates from the ice house.",
+             "adjacent": []},
+            {"name": "Terrace Walk", "type": "street",
+             "description": "Quiet stairs.", "adjacent": ["The Wet Market"]},
+        ],
+    }
+    site = engine._build_site(node, parsed, 10)
+    assert site["additional_details"].startswith("Secret: the harbormaster")
+    subs = {s["name"]: s for s in site["sub_locations"]}
+    assert subs["The Wet Market"]["additional_details"].startswith("Secret: a fence")
+    assert subs["Terrace Walk"]["additional_details"] == ""
+    # The offline mock bundle exercises the channel too.
+    mock = engine._mock_site(node, 6)
+    assert mock["additional_details"]
+    assert all(s["additional_details"] for s in mock["sub_locations"])

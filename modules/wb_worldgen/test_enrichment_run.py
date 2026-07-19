@@ -68,9 +68,10 @@ def test_run_all_labels_then_describes(builder, monkeypatch):
         calls["label"].append(node["id"])
         return f"Name {node['id']}", f"snippet {node['id']}"
 
-    async def fake_desc(services, node, context, existing_description=""):
+    async def fake_desc(services, node, context, existing_description="",
+                        existing_details=""):
         calls["desc"].append(node["id"])
-        return f"Flavor text for {node['name']}"
+        return f"Flavor text for {node['name']}", f"Details for {node['id']}"
 
     monkeypatch.setattr(label_pass, "generate_label", fake_label)
     monkeypatch.setattr(describe_pass, "generate_description", fake_desc)
@@ -629,3 +630,88 @@ def test_ideation_turn_route():
         assert getattr(exc.value, "status_code", None) == 502
     finally:
         world_routes.engine = old_engine
+
+
+# ---------------------------------------------------------------------------
+# additional_details: the storyteller-only channel (node info layering)
+# ---------------------------------------------------------------------------
+
+def test_details_backfill_revises_described_nodes(builder, monkeypatch):
+    """A node with a description but no additional_details is pending for
+    describe; the run engages revise mode (existing prose fed to the call —
+    no rework flag needed) and adds the details channel without clobbering."""
+    wid = _map_world(builder, 3)
+    world = builder.load_world(wid)
+    nodes = world["steps"]["map_generation"]["data"]["nodes"]
+    for n in nodes:
+        n["name"] = f"Place {n['id']}"
+        n["description"] = f"Old prose for {n['id']}."
+    builder.save_world(wid, world)
+
+    seen = []
+
+    async def fake_desc(services, node, context, existing_description="",
+                        existing_details=""):
+        seen.append(existing_description)
+        return existing_description + " Enriched.", f"Details for {node['id']}"
+
+    monkeypatch.setattr(describe_pass, "generate_description", fake_desc)
+    summary = asyncio.run(builder.enrich_run(wid, phase="describe"))
+    assert summary["described"] == 3
+    assert sorted(seen) == [f"Old prose for n{i}." for i in range(3)]
+    nodes = builder.load_world(wid)["steps"]["map_generation"]["data"]["nodes"]
+    assert all(n["description"] == f"Old prose for {n['id']}. Enriched." for n in nodes)
+    assert all(n["additional_details"] == f"Details for {n['id']}" for n in nodes)
+    # Fully detailed nodes are done: a second run finds nothing pending.
+    calls = []
+
+    async def count_desc(services, node, context, existing_description="",
+                         existing_details=""):
+        calls.append(node["id"])
+        return "x" * 12, "y"
+
+    monkeypatch.setattr(describe_pass, "generate_description", count_desc)
+    summary = asyncio.run(builder.enrich_run(wid, phase="describe"))
+    assert summary["described"] == 0 and calls == []
+
+
+def _desc_services(replies):
+    """Minimal fake GenServices for generate_description unit tests: the
+    stubbed LLM returns each canned reply in turn (last one repeats)."""
+    calls = {"n": 0}
+
+    async def simple_completion(**kwargs):
+        i = min(calls["n"], len(replies) - 1)
+        calls["n"] += 1
+        return replies[i]
+
+    llm = types.SimpleNamespace(reader_model="reader-slot",
+                                simple_completion=simple_completion)
+    return types.SimpleNamespace(
+        llm=llm, temperature=0.5, json_retry_attempts=0,
+        prompts=lambda pid, fallback, **kw: fallback)
+
+
+def test_generate_description_parses_two_channels():
+    services = _desc_services([json.dumps({
+        "description": "Salt wind combs the quay.",
+        "additional_details": "Secret: smugglers use the cellar."})])
+    node = {"id": "n1", "name": "Quay", "type": "docks",
+            "label_description": "A salt-bitten quay."}
+    desc, details = asyncio.run(
+        describe_pass.generate_description(services, node, {}))
+    assert desc == "Salt wind combs the quay."
+    assert details == "Secret: smugglers use the cellar."
+
+
+def test_generate_description_falls_back_on_bad_json():
+    """Unparseable output exhausts the JSON retries; the label fallback
+    yields a description-only result (details stay empty, so the node
+    remains pending and a later run can fill it)."""
+    services = _desc_services(["not json at all"])
+    node = {"id": "n1", "name": "Quay", "type": "docks",
+            "label_description": "A salt-bitten quay."}
+    desc, details = asyncio.run(
+        describe_pass.generate_description(services, node, {}))
+    assert desc == "A salt-bitten quay."
+    assert details == ""

@@ -23,12 +23,14 @@ def _translated(fn, ctx, **kwargs):
 async def add_node(ctx, map_id: str, near_node_id: str, name: str = None,
                    type: str = "waypoint", importance: int = 3,
                    label_description: str = "", description: str = "",
-                   edges_to: list = None) -> dict:
+                   additional_details: str = "", edges_to: list = None) -> dict:
     return _translated(surgery.add_node, ctx, map_id=map_id,
                        near_node_id=near_node_id, name=name, type=type,
                        importance=importance,
                        label_description=label_description,
-                       description=description, edges_to=edges_to)
+                       description=description,
+                       additional_details=additional_details,
+                       edges_to=edges_to)
 
 
 async def remove_node(ctx, node_id: str) -> dict:
@@ -91,7 +93,14 @@ register_tool(ToolSpec(
         "label_description": {"type": "string",
                               "description": "Optional one-line label."},
         "description": {"type": "string",
-                        "description": "Optional flavor description."},
+                        "description": "Optional surface description (what "
+                                       "a visitor perceives; player-"
+                                       "visible)."},
+        "additional_details": {"type": "string",
+                               "description": "Optional storyteller-only "
+                                              "depth (never shown to the "
+                                              "player; mark hidden facts "
+                                              "with a leading 'Secret:')."},
         "edges_to": {"type": "list", "item_type": "string",
                      "description": "Node ids on the same map to edge to "
                                     "(default: the anchor)."},

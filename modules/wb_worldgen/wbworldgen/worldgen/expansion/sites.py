@@ -112,6 +112,7 @@ class SiteExpansionEngine:
                 "name": name,
                 "type": str(raw.get("type", "place")).strip() or "place",
                 "description": str(raw.get("description", "")).strip(),
+                "additional_details": str(raw.get("additional_details", "")).strip(),
                 "adjacent": raw.get("adjacent") if isinstance(raw.get("adjacent"), list) else [],
             })
         if not subs:
@@ -131,6 +132,7 @@ class SiteExpansionEngine:
             "parent_node_id": node_id,
             "name": node.get("name", ""),
             "layout_summary": str(parsed.get("layout_summary", "")).strip(),
+            "additional_details": str(parsed.get("additional_details", "")).strip(),
             "sub_locations": subs,
             "schema": SITE_SCHEMA_VERSION,
         }
@@ -148,12 +150,14 @@ class SiteExpansionEngine:
                 "name": f"{name} Quarter {i}",
                 "type": "district",
                 "description": f"Mock district {i} of {name}.",
+                "additional_details": f"Mock storyteller details for district {i} of {name}.",
                 "adjacent": [f"{node_id}:s{i - 1}"] if i > 1 else [],
             })
         return {
             "parent_node_id": node_id,
             "name": name,
             "layout_summary": f"Mock layout of {name}: {count} districts in a ring.",
+            "additional_details": f"Mock storyteller details for {name}.",
             "sub_locations": subs,
             "schema": SITE_SCHEMA_VERSION,
         }
@@ -207,11 +211,15 @@ Description: {node.get('description', '') or node.get('label_description', '')}
 
 Design the interior of {node_name}: its overall layout and 6-{max_sub_locations} distinct sub-locations ({sub_noun}).
 Each sub-location gets a name, a short type (e.g. district, market, tavern, docks, temple), a 1-2 sentence
-description, and which other sub-locations it directly adjoins (by name).
+description (the surface — what a visitor perceives), additional_details (1-3 sentences for the storyteller
+only: what's really going on here, tensions, a hook; mark genuinely hidden facts with a leading 'Secret:'),
+and which other sub-locations it directly adjoins (by name). The site-level additional_details may carry
+what the place as a whole hides (a concealed passage, who really runs it).
 
 Output ONLY valid JSON:
 {{"layout_summary": "2-3 sentences describing how {node_name} is laid out",
-"sub_locations": [{{"name": "...", "type": "...", "description": "...", "adjacent": ["..."]}}, ...]}}""",
+"additional_details": "storyteller-only notes for the whole site",
+"sub_locations": [{{"name": "...", "type": "...", "description": "...", "additional_details": "...", "adjacent": ["..."]}}, ...]}}""",
             world_name=world.get('name', 'Unknown'),
             world_genre=world.get('genre', ''),
             world_tone=world.get('tone', ''),

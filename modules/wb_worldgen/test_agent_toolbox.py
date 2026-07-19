@@ -521,9 +521,10 @@ def test_run_pass_guidance_reaches_describe_rework(builder, monkeypatch):
     builder._enrichment_batch_size = 1
     seen = []
 
-    async def fake_desc(services, node, context, existing_description=""):
+    async def fake_desc(services, node, context, existing_description="",
+                        existing_details=""):
         seen.append(context.get("guidance"))
-        return f"Flavor for {node['name']}"
+        return f"Flavor for {node['name']}", f"Details for {node['name']}"
 
     monkeypatch.setattr(describe_pass, "generate_description", fake_desc)
     run(invoke_tool(_ctx(builder, wid), "run_pass",
@@ -637,3 +638,34 @@ def test_toolbox_reads_a_seeded_world(mock_builder):
     first_map = overview["maps"][0]["map_id"]
     detail = run(invoke_tool(ctx, "read_map", {"map_id": first_map}))
     assert detail["node_list"]
+
+
+# ---------------------------------------------------------------------------
+# additional_details: the storyteller-only channel (node info layering)
+# ---------------------------------------------------------------------------
+
+def test_edit_node_additional_details_validates_and_resolves(builder):
+    wid = _map_world(builder, named=True)
+    ctx = _ctx(builder, wid)
+    with pytest.raises(ToolError, match="nonexistent node id"):
+        run(invoke_tool(ctx, "edit_node",
+                        {"node_id": "n0",
+                         "additional_details": "Secret: ${link_ghost} lies below."}))
+    result = run(invoke_tool(ctx, "edit_node",
+                             {"node_id": "n0",
+                              "additional_details": "Secret: a vault beneath ${link_n1}."}))
+    assert result["updated"]["additional_details"].startswith("Secret: a vault beneath ${link_n1|")
+    nodes = builder.load_world(wid)["steps"]["map_generation"]["data"]["nodes"]
+    assert nodes[0]["additional_details"].startswith("Secret: a vault beneath")
+
+
+def test_lint_link_tokens_scan_additional_details():
+    compiled = _compiled_fixture()
+    compiled["maps"]["root"]["nodes"][1]["additional_details"] = \
+        "Secret: past ${link_zzz} and ${link_c}."
+    report = lint_world(compiled)
+    broken = [p for p in report["problems"] if p["kind"] == "broken_link_token"]
+    unresolved = [p for p in report["problems"] if p["kind"] == "unresolved_link_token"]
+    assert broken and broken[0]["targets"] == ["zzz"]
+    assert broken[0]["field"] == "additional_details"
+    assert unresolved and unresolved[0]["targets"] == ["c"]

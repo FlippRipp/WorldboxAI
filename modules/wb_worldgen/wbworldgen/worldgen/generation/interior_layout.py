@@ -8,7 +8,8 @@ so the same input always lays out the same way (site migration relies on
 this).
 
 Contract: ``layout_interior(map_id, locations)`` where each location is
-``{id?, name, type, description, adjacent: [ids-or-names], is_entrance?}``.
+``{id?, name, type, description, additional_details?, adjacent:
+[ids-or-names], is_entrance?}``.
 Returns ``{nodes, edges, config}`` in the standard per-map shape. The
 entrance node is pinned toward the bottom edge so interiors read
 "door at the bottom"; ``config.instant_travel`` marks room-to-room movement
@@ -141,7 +142,7 @@ def layout_interior(map_id: str, locations: list[dict]) -> dict:
     nodes = []
     for i, loc in enumerate(locations):
         importance = min(10, max(1, 3 + degree[i] + (2 if i == entrance_idx else 0)))
-        nodes.append({
+        node = {
             "id": str(loc.get("id") or f"{map_id}:n{i}"),
             "name": loc.get("name", ""),
             "type": loc.get("type", "room"),
@@ -150,7 +151,10 @@ def layout_interior(map_id: str, locations: list[dict]) -> dict:
             "x": round(pos[i][0], 2),
             "y": round(pos[i][1], 2),
             "importance": importance,
-        })
+        }
+        if loc.get("additional_details"):
+            node["additional_details"] = loc.get("additional_details")
+        nodes.append(node)
     edges = []
     for a, b in pairs:
         dist = math.hypot(pos[a][0] - pos[b][0], pos[a][1] - pos[b][1])

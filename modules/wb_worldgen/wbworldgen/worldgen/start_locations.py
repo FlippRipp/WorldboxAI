@@ -267,6 +267,7 @@ def _found_new_node(compiled: dict, authored: dict,
     k = len(anchor_map.get("nodes") or []) + 1
     while f"{anchor_map_id}:g{k}" in taken:
         k += 1
+    additional_details = str(authored.get("additional_details", "")).strip()
     node = {
         "id": f"{anchor_map_id}:g{k}",
         "name": name,
@@ -276,6 +277,8 @@ def _found_new_node(compiled: dict, authored: dict,
         "x": x,
         "y": y,
     }
+    if additional_details:
+        node["additional_details"] = additional_details
     if anchor.get("region"):
         node["region"] = anchor["region"]
     edge = {"from": anchor["id"], "to": node["id"],
@@ -286,6 +289,7 @@ def _found_new_node(compiled: dict, authored: dict,
         "type": loc_type,
         "label_description": node["label_description"],
         "description": description,
+        "additional_details": additional_details,
         "reason": str(authored.get("reason", "")).strip(),
         "map_id": anchor_map_id,
         "new_node": node,
@@ -476,7 +480,8 @@ Available unnamed map positions:
 Found a new location matching the request at the best-fitting position. Return JSON:
 {{"node_id": "<one of the ids above, or NEW>", "near_node_id": "<only with NEW: a named place id>",
 "name": "...", "type": "settlement" or "landmark",
-"label_description": "one-line label", "description": "2-3 sentence flavor description",
+"label_description": "one-line label", "description": "2-3 sentence flavor description (the surface — what a visitor perceives)",
+"additional_details": "1-3 sentences for the storyteller only: depth, a hook, hidden facts marked with a leading 'Secret:'",
 "reason": "one sentence why this position fits",
 "scene_inside": "<ONLY when the requested scene happens at a specific spot INSIDE the new location (a room, hall, deck...): that spot in a few words — otherwise omit>"}}"""
     try:
@@ -523,6 +528,7 @@ Found a new location matching the request at the best-fitting position. Return J
         "type": loc_type,
         "label_description": str(authored.get("label_description", "")).strip(),
         "description": description,
+        "additional_details": str(authored.get("additional_details", "")).strip(),
         "reason": str(authored.get("reason", "")).strip(),
     }
     if scene_inside:
@@ -746,6 +752,8 @@ def _persist_generated_start(builder, world_id: str, authored: dict) -> dict:
             writes["label_description"] = authored["label_description"]
         if authored.get("description"):
             writes["description"] = authored["description"]
+        if authored.get("additional_details"):
+            writes["additional_details"] = authored["additional_details"]
         for field, value in writes.items():
             store.save_node_enrichment(world_id, node_id, field, value)
         store.flush_enrichment_cache(world_id)

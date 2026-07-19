@@ -27,7 +27,8 @@ def write_session_world_data(sm):
         _logger.exception("failed to persist world_data for save %s", save_id)
 
 
-NODE_SYNC_FIELDS = ("name", "label_description", "description", "type", "importance")
+NODE_SYNC_FIELDS = ("name", "label_description", "description",
+                    "additional_details", "type", "importance")
 
 
 def merge_node_fields(target: dict, source: dict) -> bool:

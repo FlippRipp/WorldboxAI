@@ -404,3 +404,20 @@ def test_worlds_predating_the_design_step_stay_procedural(builder):
         "map_generation", state, state["seed_prompt"],
         config={"total_nodes": 40}))
     assert len(data["nodes"]) == 40
+
+
+def test_normalize_abstract_graph_carries_additional_details():
+    parsed = {"description": "", "nodes": [
+        {"name": "Sun Station", "kind": "station", "importance": 7,
+         "description": "Bright rings of habitat glass.",
+         "additional_details": "Secret: the reactor shielding is failing.",
+         "adjacent": []}]}
+    graph = normalize_abstract_graph(parsed, [], [])
+    assert graph["nodes"][0]["additional_details"] == \
+        "Secret: the reactor shielding is failing."
+    # Absent details never materialize an empty key.
+    parsed = {"description": "", "nodes": [
+        {"name": "Dark Moon", "kind": "moon", "importance": 4,
+         "description": "Silent.", "adjacent": []}]}
+    graph = normalize_abstract_graph(parsed, [], [])
+    assert "additional_details" not in graph["nodes"][0]
