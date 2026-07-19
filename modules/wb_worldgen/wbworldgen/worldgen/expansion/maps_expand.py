@@ -902,7 +902,7 @@ Output ONLY valid JSON:
         connections = []
 
         def _connection(kind, name, description, child_node_id, parent_node_id,
-                        travel, requirements):
+                        travel, requirements, hidden=False):
             return {
                 "id": f"c_{hashlib.sha1(f'{map_id}/{len(connections)}/{child_node_id}'.encode()).hexdigest()[:8]}",
                 "from": {"map_id": parent_map_id, "node_id": parent_node_id},
@@ -913,7 +913,7 @@ Output ONLY valid JSON:
                 "travel": travel,
                 "bidirectional": True,
                 "requirements": requirements or "",
-                "hidden": False,
+                "hidden": bool(hidden),
                 "origin": "generated",
             }
 
@@ -941,10 +941,14 @@ Output ONLY valid JSON:
                     str(raw.get("kind", "")).strip(), str(raw.get("name", "")).strip(),
                     str(raw.get("description", "")).strip(), child_node["id"],
                     parent_node.get("id", node_id), travel,
-                    str(raw.get("requirements", "")).strip()))
+                    str(raw.get("requirements", "")).strip(),
+                    hidden=bool(raw.get("hidden"))))
 
+        # Hidden ways don't count as an anchor — the player must always have
+        # a visible way in (the entrance); secrets are extra, never the door.
         anchored = any(
-            c["from"]["node_id"] == node_id or c["to"]["node_id"] == node_id
+            (c["from"]["node_id"] == node_id or c["to"]["node_id"] == node_id)
+            and not c.get("hidden")
             for c in connections)
         if not anchored:
             if entrance_node_id is None:
@@ -1208,6 +1212,10 @@ You MAY also add further connections out of this map in "connections": each stat
 a name, at_location (which of your locations it sits at), to_parent_location (an existing
 location name on the parent map, or empty to link back to {node_name} itself), travel
 ("instant" or a number of turns for a longer crossing), and requirements (empty if open).
+A connection may also set "hidden": true — a secret way (a concealed door, a smuggler's
+tunnel) the player does not know about until the story uncovers it; when you add one, let
+the additional_details of the location it sits at hint at it (marked 'Secret:'). The
+entrance itself is never hidden.
 
 Output ONLY valid JSON:
 {{"label": "...", "level_type": "...", "description": "2-3 sentences on how this place is laid out",

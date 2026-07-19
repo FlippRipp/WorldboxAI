@@ -843,3 +843,41 @@ def test_site_bundle_carries_additional_details():
     mock = engine._mock_site(node, 6)
     assert mock["additional_details"]
     assert all(s["additional_details"] for s in mock["sub_locations"])
+
+
+def test_expand_node_authors_hidden_connection(builder):
+    """The child-map design call may mark an extra connection hidden; the
+    flag parses through, and a hidden way never counts as the anchor — the
+    visible entrance is still inserted."""
+    wid = _map_world(builder)
+    builder._llm_service.mode = "live"
+
+    async def fake_live(node, context, parent_map, levels, max_locations,
+                        template_vocab=None, must_include=None):
+        return {
+            "label": "The Undercellars",
+            "description": "Vaults below the town.",
+            "locations": [
+                {"name": "The Vault Door", "type": "gate",
+                 "description": "Iron-banded and watched.",
+                 "adjacent": ["Bone Gallery"], "is_entrance": True},
+                {"name": "Bone Gallery", "type": "gallery",
+                 "description": "Niches of old bones.",
+                 "additional_details": "Secret: a crawlway breathes sea air.",
+                 "adjacent": ["The Vault Door"]},
+            ],
+            "entrance_kind": "cellar door",
+            "connections": [
+                {"kind": "tunnel", "name": "Smuggler's Crawl",
+                 "at_location": "Bone Gallery", "to_parent_location": "",
+                 "travel": "instant", "requirements": "", "hidden": True},
+            ],
+        }
+
+    builder._maps_expand._live_expand = fake_live
+    bundle = asyncio.run(builder.expand_node(wid, "root", "c1"))
+    by_kind = {c["kind"]: c for c in bundle["connections"]}
+    assert by_kind["tunnel"]["hidden"] is True
+    assert by_kind["cellar door"]["hidden"] is False
+    gallery = next(n for n in bundle["map"]["nodes"] if n["name"] == "Bone Gallery")
+    assert gallery["additional_details"].startswith("Secret:")

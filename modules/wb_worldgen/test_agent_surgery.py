@@ -486,3 +486,17 @@ def test_add_node_carries_additional_details(builder):
         run(invoke_tool(_ctx(builder, wid), "add_node",
                         {"map_id": "root", "near_node_id": "n0",
                          "additional_details": "Secret: ${link_ghost}."}))
+
+
+def test_add_connection_hidden_flag(builder):
+    wid = _flat_world(builder)
+    result = run(invoke_tool(_ctx(builder, wid), "add_connection",
+                             {"from_map_id": "root", "from_node_id": "n0",
+                              "to_map_id": "root", "to_node_id": "n3",
+                              "kind": "tunnel", "name": "Old Crawl",
+                              "hidden": True}))
+    assert result["connection"]["hidden"] is True
+    compiled = _compiled(builder, wid)
+    stored = next(c for c in compiled["connections"]
+                  if c["id"] == result["connection"]["id"])
+    assert stored["hidden"] is True

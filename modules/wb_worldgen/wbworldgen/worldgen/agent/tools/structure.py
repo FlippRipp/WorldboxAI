@@ -51,11 +51,13 @@ async def add_connection(ctx, from_map_id: str, from_node_id: str,
                          to_map_id: str, to_node_id: str,
                          kind: str = "passage", name: str = "",
                          description: str = "",
-                         bidirectional: bool = True) -> dict:
+                         bidirectional: bool = True,
+                         hidden: bool = False) -> dict:
     return _translated(surgery.add_connection, ctx, from_map_id=from_map_id,
                        from_node_id=from_node_id, to_map_id=to_map_id,
                        to_node_id=to_node_id, kind=kind, name=name,
-                       description=description, bidirectional=bidirectional)
+                       description=description, bidirectional=bidirectional,
+                       hidden=hidden)
 
 
 async def remove_connection(ctx, connection_id: str) -> dict:
@@ -168,7 +170,10 @@ register_tool(ToolSpec(
     description=(
         "Join two nodes across maps with a travel connection (portal, "
         "passage, entrance...). Refuses when the endpoints are already "
-        "directly connected."
+        "directly connected. hidden=true makes it a SECRET way the player "
+        "must discover in play — pair it with a 'Secret:' hint in a nearby "
+        "node's additional_details, and never make a map's only way in "
+        "hidden."
     ),
     invoke=add_connection,
     mutates=True,
@@ -190,6 +195,9 @@ register_tool(ToolSpec(
                         "description": "Optional flavor description."},
         "bidirectional": {"type": "boolean",
                           "description": "Two-way travel (default true)."},
+        "hidden": {"type": "boolean",
+                   "description": "Secret way: unknown to the player until "
+                                  "the story uncovers it (default false)."},
     },
 ))
 

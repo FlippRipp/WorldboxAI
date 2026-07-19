@@ -49,7 +49,9 @@ def _custom_transition_targets(world_data: dict, state: dict) -> list[str]:
                 child = get_map(world_data, child_id) or {}
                 for n in (child.get("nodes") or [])[:1]:
                     _add(n.get("id"), f"inside {child.get('label', child_id)}")
-    for view in connections_from(world_data, current_map, include_hidden=True):
+    # Visible connections only: a hidden way's far side is not "known" —
+    # offering it here would pre-leak the secret to the reader's options.
+    for view in connections_from(world_data, current_map):
         _add(view["far"].get("node_id"), "beyond a known way")
     # Visited named places anywhere (teleport targets), nearest-listed last.
     for nid in revealed:

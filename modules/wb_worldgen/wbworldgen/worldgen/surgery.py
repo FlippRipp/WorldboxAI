@@ -299,7 +299,7 @@ def remove_edge(services, world_id: str, map_id: str,
 def add_connection(services, world_id: str, from_map_id: str, from_node_id: str,
                    to_map_id: str, to_node_id: str, kind: str = "passage",
                    name: str = "", description: str = "",
-                   bidirectional: bool = True) -> dict:
+                   bidirectional: bool = True, hidden: bool = False) -> dict:
     """Join two nodes across maps with a travel connection. Stored in the
     child-map bundle it touches, else the world_connections metadata key."""
     compiled = _compiled(services, world_id)
@@ -334,7 +334,7 @@ def add_connection(services, world_id: str, from_map_id: str, from_node_id: str,
         "travel": {"mode": "instant"},
         "bidirectional": bool(bidirectional),
         "requirements": "",
-        "hidden": False,
+        "hidden": bool(hidden),
         "origin": "surgery",
     }
 

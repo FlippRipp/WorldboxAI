@@ -689,3 +689,17 @@ def test_hidden_connection_is_not_offered_until_discovered():
     assert state["world_data"]["connections"][0]["hidden"] is False
     schema2 = asyncio.run(wbg.on_mutation_schema(state, None))
     assert any(p.startswith("c_secret") for p in schema2["player_passage"]["options"])
+
+
+def test_hidden_connection_far_node_not_a_transition_target():
+    """The far side of an undiscovered way must not be offered as an
+    improvised-transition target ('beyond a known way') — that would
+    pre-leak the secret. Discovery makes it a normal candidate."""
+    state = _two_map_state()
+    schema = asyncio.run(wbg.on_mutation_schema(state, None))
+    targets = schema.get("custom_transition_target", {}).get("options", [])
+    assert not any(t.startswith("u_1") for t in targets)
+    run_turn(state, {"discover_passage": schema["discover_passage"]["options"][0]})
+    schema2 = asyncio.run(wbg.on_mutation_schema(state, None))
+    targets2 = schema2.get("custom_transition_target", {}).get("options", [])
+    assert any(t.startswith("u_1") for t in targets2)

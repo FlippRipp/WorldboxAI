@@ -54,11 +54,16 @@ export default function GameMapOverlay({ state = {} }) {
   const [localSite, setLocalSite] = useState(null); // freshly expanded, pre-refresh
 
   // One shared normalizer handles both world_format 2 (`maps`/`connections`)
-  // and legacy (`map_layers`/`map`) payloads.
-  const { mapsById, rootMapId, connections } = useMemo(
-    () => normalizeWorldData(worldData),
-    [worldData],
-  );
+  // and legacy (`map_layers`/`map`) payloads. Hidden (undiscovered) passages
+  // never render on the player's map — discover_passage flips the flag in
+  // the session copy, so found ways appear on their own.
+  const { mapsById, rootMapId, connections } = useMemo(() => {
+    const normalized = normalizeWorldData(worldData);
+    return {
+      ...normalized,
+      connections: (normalized.connections || []).filter((c) => !c.hidden),
+    };
+  }, [worldData]);
   const hasMaps = Object.keys(mapsById).length > 0;
 
   // The player's current node + its interior (if expanded). Node ids are
