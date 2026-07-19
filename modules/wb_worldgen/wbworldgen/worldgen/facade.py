@@ -231,7 +231,8 @@ class WorldBuilder:
                     "world.site_max_sublocations", 10, 4, 16)
                 return await self._maps_expand.expand_root(
                     world_state, user_prompt, level,
-                    max_locations=max(8, max_locations), force_mock=force_mock)
+                    max_locations=max(8, max_locations), force_mock=force_mock,
+                    user_note=user_note)
             abstract_level = _design.abstract_root_level(world_state, root_gen)
             if abstract_level is not None:
                 # Abstract worlds (a solar system, a dream web) get an
@@ -242,7 +243,7 @@ class WorldBuilder:
                     world_state, user_prompt, abstract_level,
                     directive=_design.coverage_directive(world_state, "map_generation"),
                     world_kind=_design.world_kind(world_state),
-                    force_mock=force_mock)
+                    force_mock=force_mock, user_note=user_note)
             # Delaunay + road pathfinding are CPU-bound; keep the event loop free.
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(

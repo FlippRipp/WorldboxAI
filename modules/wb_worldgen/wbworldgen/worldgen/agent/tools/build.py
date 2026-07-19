@@ -16,7 +16,8 @@ regenerate the owning step or use edit_node instead)."""
 import re
 
 from wbworldgen.worldgen import mapspace as _ms
-from wbworldgen.worldgen.agent.registry import ToolError, ToolSpec, register_tool
+from wbworldgen.worldgen.agent.registry import (
+    ToolError, ToolSpec, register_tool, validate_params)
 from wbworldgen.worldgen.base import USES_ENRICHMENT
 from wbworldgen.worldgen.catalog import produced_artifacts
 from wbworldgen.worldgen.enrichment.context import build_enrichment_context
@@ -73,10 +74,51 @@ def _map_inventory(compiled: dict) -> list:
     return out
 
 
+def _validate_steering(step_id: str, world_state: dict, config: dict, note: str):
+    """Reject steering this step cannot honor for THIS world (P7 at the
+    config layer): a note nothing reads, or a config key the generation
+    path ignores, is a wall the agent must see loudly — the Ecstasy Veil
+    live run burned six turns on a silently-ignored child-map config and a
+    silently-dropped restoration note."""
+    from wbworldgen.worldgen import design as _design
+    from wbworldgen.worldgen.generation.abstract_graph import MAX_ROOT_NODES
+
+    if step_id == "map_generation":
+        root_gen = _design.root_generator_for(world_state)
+        authored = (
+            _design.authored_root_level(world_state, root_gen) is not None
+            or _design.abstract_root_level(world_state, root_gen) is not None)
+        if authored and (config or {}).get("total_nodes") is not None:
+            raise ToolError(
+                "run_step 'map_generation': this world's root map is "
+                "AUTHORED (abstract/interior style) — the author reads the "
+                "hierarchy guidance and map directive and picks its own node "
+                f"count (up to {MAX_ROOT_NODES} for abstract roots); "
+                "total_nodes only drives the procedural generator. Drop it "
+                "and steer with 'note' instead (e.g. \"aim for ~15 nodes\").")
+        if not authored and (note or "").strip():
+            raise ToolError(
+                "run_step 'map_generation': this world's root map is "
+                "PROCEDURAL — no LLM reads a steering note here, so it "
+                "would be silently ignored. Use config "
+                "{\"total_nodes\": N} for density; structure follows the "
+                "hierarchy (regenerate hierarchy_design with a note to "
+                "change it).")
+    elif step_id == "terrain_generation" and (note or "").strip():
+        raise ToolError(
+            "run_step 'terrain_generation': terrain is procedural — no LLM "
+            "reads a steering note here, so it would be silently ignored. "
+            "Config accepts resolution/biome_mode; layer structure follows "
+            "the hierarchy design.")
+
+
 async def run_step(ctx, step_id: str, config: dict = None, note: str = "") -> dict:
     """Generate (or regenerate) one pipeline step and save it approved.
     ``note`` is the steering channel — regeneration with a steering note is
-    the v1 recourse for structural problems (D1)."""
+    the v1 recourse for structural problems (D1). ``config`` is validated
+    against the step's declared ``config_schema`` (P7 at the config layer):
+    unknown keys, wrong types and out-of-range values are rejected, never
+    silently ignored."""
     builder = ctx.builder
     steps = builder.steps_by_id()
     step = steps.get(step_id)
@@ -87,10 +129,18 @@ async def run_step(ctx, step_id: str, config: dict = None, note: str = "") -> di
         raise ToolError(
             f"Step '{step_id}' is engine-driven enrichment, not a generable "
             "step — use run_pass ('label'/'describe') instead.")
+    problems = validate_params(getattr(step, "config_schema", None) or {},
+                               config or {}, noun="config key")
+    if problems:
+        raise ToolError(
+            f"run_step '{step_id}': " + "; ".join(problems)
+            + ". Each step's accepted config keys are listed in the catalog; "
+              "content steering belongs in 'note'.")
 
     world_state = builder.load_world(ctx.world_id)
     compiled = builder.services.compiled.load(ctx.world_id)
     _require_artifacts("step", step, world_state, compiled, steps)
+    _validate_steering(step_id, world_state, config, note)
 
     # Terrain (and anything else writing per-world artifacts mid-generation)
     # resolves its target directory from this pin.
@@ -102,10 +152,17 @@ async def run_step(ctx, step_id: str, config: dict = None, note: str = "") -> di
 
     if step_id == "map_generation":
         fresh = builder.services.compiled.load(ctx.world_id)
+        inventory = _map_inventory(fresh)
+        unnamed = sum(m["nodes"] - m["named"] for m in inventory)
+        if unnamed:
+            note_text = (f"{unnamed} node(s) are unnamed until the label "
+                         "pass runs; use read_map for the full structure.")
+        else:
+            note_text = ("The authored generator named and described every "
+                         "node itself — no label pass is pending; use "
+                         "read_map for the full structure.")
         return {"step_id": step_id, "saved": True,
-                "maps": _map_inventory(fresh),
-                "note": "Nodes are unnamed until the label pass runs; use "
-                        "read_map for the full structure."}
+                "maps": inventory, "note": note_text}
     return {"step_id": step_id, "saved": True, "data": data,
             "note": "Downstream steps are not re-run automatically — "
                     "regenerate them yourself if they must reflect this."}
@@ -289,7 +346,9 @@ register_tool(ToolSpec(
         "orchestration the wizard uses, and save the result approved. "
         "Preconditions are checked against the step's declared requires. "
         "Regenerating with a steering note is the v1 fix for structural "
-        "problems; downstream steps are not re-run automatically."
+        "problems; downstream steps are not re-run automatically. "
+        "Regenerating map_generation REPLACES the existing maps wholesale — "
+        "it cannot add child maps or extra layers."
     ),
     invoke=run_step,
     mutates=True,
@@ -297,11 +356,16 @@ register_tool(ToolSpec(
         "step_id": {"type": "string", "required": True,
                     "description": "A registered step id (see the catalog)."},
         "config": {"type": "object",
-                   "description": "Step config, e.g. {\"total_nodes\": 60} "
-                                  "for map_generation."},
+                   "description": "Step config, validated against the step's "
+                                  "declared config keys (listed in the "
+                                  "catalog; most steps take none). Unknown "
+                                  "keys are rejected, never ignored."},
         "note": {"type": "string",
                  "description": "Steering note threaded into the step's "
-                                "generation prompt."},
+                                "generation prompt (LLM-backed steps, "
+                                "authored map roots included). Rejected "
+                                "where nothing reads it (procedural maps, "
+                                "terrain)."},
     },
 ))
 

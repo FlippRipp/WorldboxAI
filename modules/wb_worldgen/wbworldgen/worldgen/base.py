@@ -28,6 +28,15 @@ class Step:
     description: str = ""
     after: Optional[str] = None
     schema: dict[str, Any] = {}
+    #: Declared generation-config contract: the keys ``generate`` actually
+    #: consumes (``schema`` above describes the step's OUTPUT fields — the
+    #: two are different things). Same per-key spec shape as agent tool
+    #: params ({"type", "description", "min"/"max", "enum", ...}); an empty
+    #: dict means the step takes no config. The run_step tool validates
+    #: against this loudly (P7 at the config layer — the Ecstasy Veil live
+    #: run lost a finished root map to an invented, silently-ignored
+    #: config), and the catalog renders it so the agent picks real keys.
+    config_schema: dict[str, Any] = {}
     guidance: str = ""
     uses: str = USES_LLM
     #: Declared data contract (B3): names of the world artifacts this step
@@ -50,6 +59,7 @@ class Step:
         self.description = type(self).description
         self.after = type(self).after
         self.schema = copy.deepcopy(type(self).schema)
+        self.config_schema = copy.deepcopy(type(self).config_schema)
         self.guidance = type(self).guidance
         self.uses = type(self).uses
         self.requires = tuple(type(self).requires)
@@ -98,7 +108,9 @@ def describe_steps() -> list[dict]:
     return [
         {"kind": "step", "id": cls.id, "label": cls.label,
          "description": cls.description, "after": cls.after, "uses": cls.uses,
-         "requires": list(cls.requires), "produces": list(cls.produces)}
+         "requires": list(cls.requires), "produces": list(cls.produces),
+         "config": {name: dict(spec)
+                    for name, spec in (cls.config_schema or {}).items()}}
         for cls in STEP_REGISTRY
     ]
 

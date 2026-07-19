@@ -127,47 +127,55 @@ _TYPE_CHECKS = {
 }
 
 
-def validate_args(spec: ToolSpec, args: dict) -> list:
-    """Validate an argument dict against a tool's declared parameters.
+def validate_params(params: dict, args: dict, noun: str = "argument") -> list:
+    """Validate a value dict against a declared parameter-spec dict (the
+    ``ToolSpec.params`` shape — also used for step ``config_schema``).
+    ``noun`` names the thing in messages ("argument", "config key").
     Returns human-readable problems (empty = valid); never raises."""
     if not isinstance(args, dict):
-        return [f"arguments must be a JSON object, got {type(args).__name__}"]
-    params = spec.params or {}
+        return [f"{noun}s must be a JSON object, got {type(args).__name__}"]
+    params = params or {}
     problems = []
     for name in args:
         if name not in params:
             problems.append(
-                f"unknown argument '{name}' (accepted: {', '.join(params) or 'none'})")
+                f"unknown {noun} '{name}' (accepted: {', '.join(params) or 'none'})")
     for name, p in params.items():
         if name not in args:
             if p.get("required"):
-                problems.append(f"missing required argument '{name}'")
+                problems.append(f"missing required {noun} '{name}'")
             continue
         value = args[name]
         expected = p.get("type", "string")
         check = _TYPE_CHECKS.get(expected)
         if check is not None and not check(value):
             problems.append(
-                f"argument '{name}' must be a {expected}, got "
+                f"{noun} '{name}' must be a {expected}, got "
                 f"{type(value).__name__} ({value!r})")
             continue
         if p.get("enum") is not None and value not in p["enum"]:
             problems.append(
-                f"argument '{name}' must be one of {p['enum']}, got {value!r}")
+                f"{noun} '{name}' must be one of {p['enum']}, got {value!r}")
         if expected in ("integer", "number"):
             if p.get("min") is not None and value < p["min"]:
-                problems.append(f"argument '{name}' must be >= {p['min']}, got {value!r}")
+                problems.append(f"{noun} '{name}' must be >= {p['min']}, got {value!r}")
             if p.get("max") is not None and value > p["max"]:
-                problems.append(f"argument '{name}' must be <= {p['max']}, got {value!r}")
+                problems.append(f"{noun} '{name}' must be <= {p['max']}, got {value!r}")
         if expected == "list" and p.get("item_type"):
             item_check = _TYPE_CHECKS.get(p["item_type"])
             if item_check is not None:
                 bad = [v for v in value if not item_check(v)]
                 if bad:
                     problems.append(
-                        f"argument '{name}' must be a list of {p['item_type']}s; "
+                        f"{noun} '{name}' must be a list of {p['item_type']}s; "
                         f"invalid entries: {bad!r}")
     return problems
+
+
+def validate_args(spec: ToolSpec, args: dict) -> list:
+    """Validate an argument dict against a tool's declared parameters.
+    Returns human-readable problems (empty = valid); never raises."""
+    return validate_params(spec.params or {}, args)
 
 
 async def invoke_tool(ctx: ToolContext, tool_id: str, args: dict = None) -> dict:

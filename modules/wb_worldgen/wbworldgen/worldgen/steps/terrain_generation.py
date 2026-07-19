@@ -62,6 +62,19 @@ class TerrainGenerationStep(Step):
             "summary": {"type": "text", "label": "Terrain Summary"},
         }},
     }
+    # What ``generate`` below actually reads from ctx.config — the declared
+    # contract run_step validates against (P7 at the config layer).
+    config_schema = {
+        "resolution": {
+            "type": "integer", "min": 256, "max": 2048,
+            "description": "Raster resolution per side (default 1024). "
+                           "Higher costs memory/time quadratically.",
+        },
+        "biome_mode": {
+            "type": "string", "enum": ["realistic", "fantasy"],
+            "description": "Biome palette/labeling (default 'realistic').",
+        },
+    }
 
     def context_view(self, data):
         """Downstream prompts only need the readable per-layer ``summary`` —

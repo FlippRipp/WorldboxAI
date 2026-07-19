@@ -95,21 +95,29 @@ _SECTIONS = (
 )
 
 
-def _tool_lines(entry: dict) -> list:
-    """One tool as markdown: the headline plus one indented line per
-    argument (the agent picks arguments from these)."""
-    marker = "mutates world" if entry.get("mutates") else "read-only"
-    lines = [f"- **{entry['id']}** ({entry['label']}) [{marker}]: "
-             f"{entry['description']}"]
-    for name, p in (entry.get("params") or {}).items():
+def _param_lines(params: dict, prefix: str = "") -> list:
+    """Indented markdown lines for a parameter-spec dict (tool args and step
+    config share the spec shape)."""
+    lines = []
+    for name, p in (params or {}).items():
         bits = [p.get("type", "string")]
         if p.get("required"):
             bits.append("required")
         if p.get("enum") is not None:
             bits.append(f"one of {p['enum']}")
+        if p.get("min") is not None or p.get("max") is not None:
+            bits.append(f"{p.get('min', '')}–{p.get('max', '')}")
         desc = f" — {p['description']}" if p.get("description") else ""
-        lines.append(f"  - `{name}` ({', '.join(bits)}){desc}")
+        lines.append(f"  - {prefix}`{name}` ({', '.join(bits)}){desc}")
     return lines
+
+
+def _tool_lines(entry: dict) -> list:
+    """One tool as markdown: the headline plus one indented line per
+    argument (the agent picks arguments from these)."""
+    marker = "mutates world" if entry.get("mutates") else "read-only"
+    return [f"- **{entry['id']}** ({entry['label']}) [{marker}]: "
+            f"{entry['description']}"] + _param_lines(entry.get("params"))
 
 
 def render_catalog_markdown(catalog: dict = None) -> str:
@@ -125,6 +133,11 @@ def render_catalog_markdown(catalog: dict = None) -> str:
             lines.append(
                 f"- **{entry['id']}** ({entry['label']}){notes_fn(entry)}: "
                 f"{entry['description']}")
+            if entry.get("config"):
+                # A step's declared generation-config contract — the only
+                # keys run_step accepts for it (unknown keys are rejected,
+                # never silently ignored).
+                lines.extend(_param_lines(entry["config"], prefix="config "))
         lines.append("")
     if cat.get("tools"):
         lines.append("## Agent tools")

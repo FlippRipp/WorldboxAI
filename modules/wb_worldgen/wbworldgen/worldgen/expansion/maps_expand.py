@@ -48,6 +48,18 @@ def child_map_id(parent_map_id: str, node_id: str) -> str:
     return f"m_{digest[:8]}"
 
 
+def _steering_note_block(user_note: str) -> str:
+    """The regeneration steering note as a prompt block (empty note → empty
+    block). This is the D1 steering channel for authored map generation:
+    without it, re-running the step feeds the model a byte-identical prompt
+    and the result is an uncontrollable re-roll."""
+    note = str(user_note or "").strip()
+    if not note:
+        return ""
+    return ("\nSteering note for THIS generation — it overrides the "
+            f"defaults above where they conflict:\n{note}\n")
+
+
 def _normalize_locations(raw_locations, map_id: str, max_locations: int) -> list:
     """Authored locations clamped to the layout contract: ids are assigned
     server-side (never trust LLM ids), names dedup, exactly one entrance."""
@@ -446,19 +458,24 @@ Output ONLY valid JSON:
         return self._layout_root(parsed, level, max_locations)
 
     async def expand_root(self, world_state: dict, user_prompt: str, level: dict,
-                          max_locations: int = 12, force_mock: bool = False) -> dict:
+                          max_locations: int = 12, force_mock: bool = False,
+                          user_note: str = "") -> dict:
         """Author the ROOT map for a world whose root level uses an authored
         (needs_llm_content) generator — the whole playable world is one
         interior-style place (a mansion, a generation ship, a single keep).
         One full-attention call authors the locations; the level's generator
         lays them out. Returns a map_generation step-data dict
         ({nodes, edges, config, generator_id}) — no parent, no entrance
-        connection, exactly like the procedural root path's output."""
+        connection, exactly like the procedural root path's output.
+        ``user_note`` is the regeneration steering channel (D1) rendered
+        into the authoring prompt — without it a re-run is an unsteerable
+        re-roll of the identical prompt."""
         if force_mock or not self._llm or self._llm.mode == "mock":
             return self.mock_root_map(world_state, level, max_locations)
         from wbworldgen.worldgen.compiler import build_compiled_for_map
         compiled = build_compiled_for_map(world_state)
-        parsed = await self._live_expand_root(compiled, user_prompt, level, max_locations)
+        parsed = await self._live_expand_root(compiled, user_prompt, level,
+                                              max_locations, user_note)
         return self._layout_root(parsed, level, max_locations)
 
     def _layout_root(self, parsed: dict, level: dict, max_locations: int) -> dict:
@@ -478,10 +495,12 @@ Output ONLY valid JSON:
         }
 
     async def _live_expand_root(self, compiled: dict, user_prompt: str,
-                                level: dict, max_locations: int) -> dict:
+                                level: dict, max_locations: int,
+                                user_note: str = "") -> dict:
         services = self._services
         lore = compiled.get("lore", {}) or {}
         name = lore.get("world_name") or "the world"
+        note_block = _steering_note_block(user_note)
         system = services.prompts(
             "map_root_system",
             "You are a world-building AI designing the single playable map an entire "
@@ -496,7 +515,7 @@ World premise: {user_prompt}
 
 This world's whole playable space is ONE map at the "{level.get('level_type', 'interior')}" level:
 {level.get('guidance', level.get('label', ''))}
-
+{note_block}
 Design 8-{max_locations} distinct locations (rooms, halls, decks, courts...). Exactly ONE
 location must have "is_entrance": true — the main way in from the outside world. Each
 location gets a name, a short type, a 1-2 sentence description (the surface — what a
@@ -511,6 +530,7 @@ Output ONLY valid JSON:
             world_name=name,
             world_premise=user_prompt,
             max_locations=str(max_locations),
+            user_note=user_note,
         )
         messages = [
             {"role": "system", "content": system},
@@ -563,7 +583,8 @@ Output ONLY valid JSON:
     async def expand_abstract_root(self, world_state: dict, user_prompt: str,
                                    level: dict, directive: str = "",
                                    world_kind: str = "",
-                                   force_mock: bool = False) -> dict:
+                                   force_mock: bool = False,
+                                   user_note: str = "") -> dict:
         """Author the ROOT map for an abstract world (map_style "abstract"):
         a solar system, a dream web — a graph of real conceptual places, not
         a procedural scatter. One full-attention call authors the root layer
@@ -572,7 +593,11 @@ Output ONLY valid JSON:
         its own call; crossings are paired and the deterministic layout
         places everything. Returns map_generation step data in the same
         shape as the procedural path (flat map, or legacy multilayer with
-        parallel planes)."""
+        parallel planes). ``user_note`` is the regeneration steering
+        channel (D1), rendered into every layer's authoring prompt —
+        without it a re-run is an unsteerable re-roll of the identical
+        prompt (the Ecstasy Veil live run lost a finished root to exactly
+        that)."""
         if force_mock or not self._llm or self._llm.mode == "mock":
             return self.mock_abstract_root(world_state, level)
         seed_prompt, lore, rules, areas, scopes, parallel = \
@@ -615,7 +640,8 @@ Output ONLY valid JSON:
             areas=areas,
             named_locations=scopes.get("", {}).get("named_locations", []),
             crossing_specs=crossing_specs, max_nodes=MAX_ROOT_NODES,
-            plane_description="", step_label="map:abstract_root")
+            plane_description="", step_label="map:abstract_root",
+            user_note=user_note)
         parsed_planes = []
         for pm in parallel:
             spec = next(s for s in crossing_specs if s["label"] == pm["label"])
@@ -628,7 +654,8 @@ Output ONLY valid JSON:
                                  "description": "the main world map"}],
                 max_nodes=MAX_PLANE_NODES,
                 plane_description=pm.get("description", ""),
-                step_label=f"map:abstract_plane:{pm['label']}"))
+                step_label=f"map:abstract_plane:{pm['label']}",
+                user_note=user_note))
 
         return self._assemble_abstract_root(
             seed_prompt, areas, scopes, parallel, level,
@@ -740,9 +767,10 @@ Output ONLY valid JSON:
                                    directive: str, areas: list,
                                    named_locations: list, crossing_specs: list,
                                    max_nodes: int, plane_description: str,
-                                   step_label: str) -> dict:
+                                   step_label: str, user_note: str = "") -> dict:
         services = self._services
         name = lore.get("world_name") or "the world"
+        note_block = _steering_note_block(user_note)
 
         kind_line = f"World kind: {world_kind}\n" if world_kind else ""
         if plane_description:
@@ -807,7 +835,7 @@ Output ONLY valid JSON:
             f"""World: {name} ({rules.get('genre', '')}, {rules.get('tone', '')})
 {kind_line}World premise: {user_prompt}
 
-{scale_block}{directive_line}
+{scale_block}{directive_line}{note_block}
 {areas_block}{locations_block}
 Design {max(6, max_nodes // 2)}-{max_nodes} nodes — the real structure of this map at its own
 scale. Each node: "name"; "kind" (this world's own noun for what it is: planet,
@@ -837,6 +865,7 @@ Output ONLY valid JSON:
             map_label=label,
             level_type=level_type,
             max_nodes=str(max_nodes),
+            user_note=user_note,
         )
         messages = [
             {"role": "system", "content": system},
