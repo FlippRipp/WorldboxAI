@@ -3,7 +3,8 @@
 *Status: Arc A landed (A1–A5, 2026-07-19; RuntimeHost still pending, rides
 along with the next backend.py change). Arc B refined and DECIDED with Filip
 (2026-07-19): unit+trigger pass model, legacy per-node endpoints removed in
-B1, panel generalization as B1.5. Arc C refined into C1a/C1b; its four open
+B1, panel generalization as B1.5. B1 landed 2026-07-19 (d169491) — next item
+B1.5. Arc C refined into C1a/C1b; its four open
 questions are deliberately STILL OPEN — settle them with Filip before C1a
 starts. Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
@@ -371,6 +372,29 @@ registration + unknown-id failure (P1), node-vs-map scheduling, trigger
 firing, batching only for batchable specs, and an event-stream compatibility
 assertion (a built-ins run emits the same event sequence as before B1).
 
+*Landed 2026-07-19 (d169491), with three recorded refinements against the
+sketch above. (1) The per-pass ``selector`` callable became two predicates
+— ``is_done``/``in_domain`` — because a monolithic selector contradicted
+this section's own "the engine keeps per-unit pending computation" bullet:
+with the predicates, rework/scoping/importance-floor/progress arithmetic
+lives once in the engine and was verified to reproduce the old
+``_pending_for_phase`` branch-for-branch. (2) Trigger timing preserved
+*as-coded*, not as previously summarized: review fires when the label
+phase completes, over every map that phase finished — the old code never
+reviewed mid-phase. Triggered map passes emit no phase event (as before);
+explicitly-requested map phases (``phase="review"``, a new invocation
+shape) do. (3) The ``/enrich/review`` route (not in the decided removals)
+survives with a byte-identical response, running the review pass through
+``enrich_run(phase="review")``; review skipping (fewer than two named
+nodes, failed reviewer call) returns zero-valued contributions so run
+summaries keep their pre-B1 shape. Tests now fake LLM calls by
+monkeypatching the pass-module functions (``label.generate_label`` etc.)
+instead of engine attributes. Known pre-existing quirk, deliberately
+preserved (P8): review repairs update the compiled nodes but not the
+run's ``all_nodes`` copies, so a ``phase="all"`` run can describe a
+relabeled node under its pre-review name — flagged for a separate
+behavior-fix discussion.*
+
 ### B1.5 Enrichment panel over the pass catalog — size S (frontend)
 
 `EnrichmentPanel.jsx` hardcodes exactly two phases
@@ -575,8 +599,8 @@ decisions.*
 | 2 | A3 design.py | M | ✓ landed (f4d5251) | new map types |
 | 3 | A4 package moves | M | ✓ landed (d0ca8c3, 839376a) | readability; staged B1 |
 | 4 | A5 facade slimming | M | ✓ landed (9cf5ad4) | hygiene; staged C1 |
-| 5 | B1 pass registry (+ engine split, legacy endpoint removal) | L | next | new LLM passes |
-| 6 | B1.5 panel over the pass catalog | S | after B1 | UI keeps the P2 promise |
+| 5 | B1 pass registry (+ engine split, legacy endpoint removal) | L | ✓ landed (d169491) | new LLM passes |
+| 6 | B1.5 panel over the pass catalog | S | next | UI keeps the P2 promise |
 | 7 | B2 catalog | S | | agentic substrate |
 | 8 | B3 dependencies (+ order-pin test first) | M | | plan validation |
 | 9 | C1a build-plan step + executor (server) | L | ⛔ open questions first | agentic mode v1 |
