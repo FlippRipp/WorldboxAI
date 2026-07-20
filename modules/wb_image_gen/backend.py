@@ -71,7 +71,8 @@ CIVITAI_CATEGORIES = [
     "assets", "tool",
 ]
 CIVITAI_BASE_MODELS = [
-    "SD 1.5", "SDXL 1.0", "Pony", "Illustrious", "NoobAI", "Flux.1 D", "Flux.2 D",
+    "SD 1.5", "SDXL 1.0", "Pony", "Illustrious", "NoobAI", "Anima",
+    "Flux.1 D", "Flux.2 D",
 ]
 
 HF_API_BASE = "https://huggingface.co/api"
@@ -91,6 +92,7 @@ HF_BASE_MODELS = {
     "Pony": "base_model:AstraliteHeart/pony-diffusion-v6",
     "Illustrious": "base_model:OnomaAIResearch/Illustrious-xl-early-release-v0",
     "NoobAI": "base_model:Laxhar/noobai-XL-1.1",
+    "Anima": "base_model:circlestone-labs/Anima",
     "Flux.1 D": "base_model:black-forest-labs/FLUX.1-dev",
     "Flux.2 D": "base_model:black-forest-labs/FLUX.2-dev",
 }
@@ -190,6 +192,7 @@ GLOBAL_FIELDS = (
     "player_in_images", "chat_image_conceal", "civitai_nsfw",
     "provider", "local_base_url", "local_auth_user", "local_auth_pass",
     "local_checkpoint_dir", "local_lora_dir", "local_upscaler_dir",
+    "local_text_encoder_dir", "local_vae_dir",
     "local_helper_url", "local_helper_token", "local_batch_size",
 )
 LORA_STATE_FIELDS = ("active", "strength", "llm_mode", "condition")
@@ -441,15 +444,22 @@ LATEST SCENE (illustrate this):
 # Booru-tag checkpoint families each expect their own quality tags up front:
 # score_* is Pony vocabulary; Illustrious/NoobAI/Animagine were trained on
 # masterpiece/best-quality style tags (NoobAI also knows the "newest" recency
-# tag). Keyed by BOORU_TAG_MODEL_MARKERS entries. A stored quality_tags value
+# tag); Anima (the CircleStone Labs 2B model, not SDXL) mixes both — its
+# score scale runs 1..7, so score_7 is its top grade. Keyed by
+# BOORU_TAG_MODEL_MARKERS entries. A stored quality_tags value
 # still equal to ANY of these stock defaults was never customized, so it
 # keeps tracking the active checkpoint's family (resolved in
 # _effective_config); an edited value is used verbatim.
+# Anima's card also recommends the "safe" rating tag in the positive prompt;
+# it is deliberately excluded here because the module explicitly supports
+# mature scenes — the rating belongs to the scene, not a stock prefix (the
+# prompt writer can tag safe/sensitive/nsfw/explicit itself).
 QUALITY_TAG_DEFAULTS = {
     "pony": "score_9, score_8_up, score_7_up",
     "illustrious": "masterpiece, best quality, very aesthetic, absurdres",
     "noob": "masterpiece, best quality, newest, absurdres, highres",
     "animagine": "masterpiece, best quality, very aesthetic, absurdres",
+    "anima": "masterpiece, best quality, score_7",
 }
 DEFAULT_QUALITY_TAGS = QUALITY_TAG_DEFAULTS["pony"]
 STOCK_QUALITY_TAGS = frozenset(QUALITY_TAG_DEFAULTS.values())
@@ -502,6 +512,23 @@ RENDER_DEFAULTS = {
                             "missing fingers, extra digit, fewer digits, "
                             "cropped, worst quality, low quality, "
                             "jpeg artifacts, signature, watermark, username"),
+    },
+    # Anima's card: CFG 4-5 at 30-50 steps (the distilled Turbo variant wants
+    # CFG 1 — that stays a per-profile tweak), samplers er_sde/euler_a/euler.
+    # "Euler a" is the one of those every A1111-family WebUI ships; Forge
+    # Neo's er_sde arrives through the dynamic /local/samplers list. The
+    # negative is the card's verbatim, score_1..3 being the bottom of Anima's
+    # 7-point scale and "artist name" its anti-signature tag. 4.0 rather than
+    # 4.5 from the card's 4-5 range: it is already a stock guidance value
+    # (VPRED_RENDER_OVERRIDES), so it widens STOCK_RENDER_SETTINGS by nothing
+    # — a user's pinned 4.5 stays a customized value.
+    "anima": {
+        "sampler_name": "Euler a",
+        "guidance_scale": 4.0,
+        "scheduler": DEFAULT_SCHEDULER,
+        "negative_prompt": ("worst quality, low quality, score_1, score_2, "
+                            "score_3, artist name, blurry, jpeg artifacts, "
+                            "chromatic aberration"),
     },
 }
 # v-pred finetunes (NoobAI-XL vPred and its merges, detected by _is_vpred)
@@ -658,6 +685,8 @@ def _default_config() -> dict:
         "local_checkpoint_dir": "",     # enables checkpoint installs from the browser
         "local_lora_dir": "",           # enables LoRA installs from the browser
         "local_upscaler_dir": "",       # empty derives models/ESRGAN from the checkpoint dir
+        "local_text_encoder_dir": "",   # empty derives models/text_encoder (Anima's Qwen TE)
+        "local_vae_dir": "",            # empty derives models/VAE (Anima's Qwen VAE)
         "local_helper_url": "",         # helper_server.py next to a remote WebUI
         "local_helper_token": "",       # its WB_HELPER_TOKEN; masked like keys
         "local_batch_size": LOCAL_BATCH_SIZE_DEFAULT,  # images per GPU batch (wb_prompt_batch.py)
@@ -1078,8 +1107,19 @@ def _model_ident(cfg: dict) -> str:
 
 # Substrings of Novita base_model / sd_name identifying danbooru-tag-trained
 # checkpoints. "noob" (not "noobai") also matches "Noob AI" spellings, like
-# _base_family below. Keep the mirror in ui/ImageStudio.jsx in sync.
-BOORU_TAG_MODEL_MARKERS = ("pony", "illustrious", "noob", "animagine")
+# _base_family below. "anima" must stay AFTER "animagine" (its substring) and
+# is matched on word boundaries only, so "Animagine", "animation..." and
+# AnimaPencil-style SDXL names never read as CircleStone's Anima. Keep the
+# mirror in ui/ImageStudio.jsx in sync.
+BOORU_TAG_MODEL_MARKERS = ("pony", "illustrious", "noob", "animagine", "anima")
+
+_ANIMA_WORD_RE = re.compile(r"\banima\b")
+
+
+def _marker_matches(marker: str, ident: str) -> bool:
+    if marker == "anima":
+        return bool(_ANIMA_WORD_RE.search(ident))
+    return marker in ident
 
 
 def _tag_model_marker(cfg: dict) -> str | None:
@@ -1087,7 +1127,8 @@ def _tag_model_marker(cfg: dict) -> str | None:
     natural-language models and unrecognized bases. Doubles as the key into
     QUALITY_TAG_DEFAULTS."""
     ident = _model_ident(cfg)
-    return next((m for m in BOORU_TAG_MODEL_MARKERS if m in ident), None)
+    return next((m for m in BOORU_TAG_MODEL_MARKERS
+                 if _marker_matches(m, ident)), None)
 
 
 # "vPred10", "v-pred", "v_pred", "v pred"... — the naming Civitai/HF releases
@@ -1106,8 +1147,10 @@ def _is_vpred(cfg: dict) -> bool:
 def _prompt_style(cfg: dict) -> str:
     """Resolved prompt style, "tags" (danbooru lists) or "natural" (descriptive
     text). An explicit prompt_style_mode wins; "auto" picks "tags" for
-    Pony/Illustrious/NoobAI/Animagine bases and "natural" for Flux and
-    everything else."""
+    Pony/Illustrious/NoobAI/Animagine/Anima bases and "natural" for Flux and
+    everything else. (Anima also understands natural language — forcing
+    "natural" per profile is a supported choice there, its quality tags
+    still apply.)"""
     mode = str(cfg.get("prompt_style_mode") or "auto")
     if mode in ("tags", "natural"):
         return mode
@@ -1162,12 +1205,19 @@ def _subject_mode(cfg: dict, characters: dict | None = None) -> str:
 
 def _base_family(base: str) -> str:
     """Coarse base-model family for LoRA/checkpoint compatibility. SDXL-class
-    covers everything trained on SDXL (Pony, Illustrious, NoobAI...)."""
+    covers everything trained on SDXL (Pony, Illustrious, NoobAI...); "anima"
+    is CircleStone's 2B model — an architecture of its own, so its LoRAs and
+    checkpoints only pair with each other. The xl/pony/... branch must stay
+    ahead of the anima check: names like "Anima Pencil XL" are SDXL models,
+    while Anima itself never carries an XL marker."""
     ident = str(base or "").lower()
     if "flux" in ident:
         return "flux"
-    if "xl" in ident or "pony" in ident or "illustrious" in ident or "noob" in ident:
+    if ("xl" in ident or "pony" in ident or "illustrious" in ident
+            or "noob" in ident or "animagine" in ident):
         return "sdxl"
+    if _ANIMA_WORD_RE.search(ident):
+        return "anima"
     if "1.5" in ident or "sd 1" in ident or "sd1" in ident:
         return "sd15"
     return ""
@@ -1981,6 +2031,13 @@ async def _novita_submit(cfg: dict, image_prompt: str) -> str:
     """Submit an async generation task; return the task id. FLUX.2 is a
     first-party model on its own endpoint; everything else is SD txt2img."""
     import httpx
+    if _checkpoint_family(cfg) == "anima":
+        # Novita's SD catalog cannot serve Anima's architecture; the request
+        # would only fail with an opaque "model not found".
+        raise NonRetryableError(
+            "Anima checkpoints are not hosted on Novita — switch this "
+            "profile's provider to Local and run a WebUI that supports "
+            "Anima (Forge Neo; see image_server.sh/.bat)")
     if cfg.get("model_name") == FLUX2_MODEL_NAME:
         url = f"{NOVITA_BASE}/v3/async/flux-2-dev"
         payload = _flux2_payload(cfg, image_prompt)
@@ -2171,6 +2228,11 @@ def _infer_local_base(ident: str) -> str:
         return "Flux.1 D"
     if "xl" in low:
         return "SDXL 1.0"
+    # After the xl check on purpose: "AnimaPencil XL"-style SDXL names must
+    # resolve SDXL; the official Anima files ("anima-base-v1.0",
+    # "anima-aesthetic-v1.1"...) carry no xl marker.
+    if _ANIMA_WORD_RE.search(low):
+        return "Anima"
     if re.search(r"sd ?_?1[-.]?5|v1-5|\b1\.5\b", low):
         return "SD 1.5"
     return ""
@@ -2268,6 +2330,100 @@ async def _local_scheduler_ok(cfg: dict) -> bool:
     return await _local_list_schedulers(cfg) is not None
 
 
+# Anima checkpoints bake in no text encoder or VAE: Forge-family WebUIs load
+# both as "additional modules" (the UI's VAE / Text Encoder multiselect),
+# which the API selects per request via full file paths in
+# override_settings.forge_additional_modules. /sdapi/v1/sd-modules lists the
+# installed candidates with those paths; classic A1111 has no such endpoint
+# (and cannot run Anima at all).
+ANIMA_TEXT_ENCODER_FILE = "qwen_3_06b_base.safetensors"
+ANIMA_VAE_FILE = "qwen_image_vae.safetensors"
+_local_modules_probe: dict = {}
+
+
+async def _local_list_modules(cfg: dict, force: bool = False) -> list[dict] | None:
+    """VAE / text-encoder modules from /sdapi/v1/sd-modules as {"name",
+    "filename"} dicts, or None when the WebUI has no modules API. Caching
+    mirrors _local_list_schedulers: a 404 is a real answer and caches for the
+    TTL, transport failures return None WITHOUT caching."""
+    base = _local_base(cfg)
+    cached = _local_modules_probe.get(base)
+    if not force and cached \
+            and time.monotonic() - cached["at"] < LOCAL_SCRIPTS_PROBE_TTL_S:
+        return cached["modules"]
+    try:
+        body = await _local_get(cfg, "/sdapi/v1/sd-modules")
+    except LocalNotFoundError:
+        _local_modules_probe[base] = {"modules": None, "at": time.monotonic()}
+        return None
+    except Exception:
+        return None
+    modules = []
+    for item in body if isinstance(body, list) else []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("model_name") or item.get("name") or "").strip()
+        filename = str(item.get("filename") or item.get("path") or "").strip()
+        if name or filename:
+            modules.append({"name": name, "filename": filename})
+    _local_modules_probe[base] = {"modules": modules, "at": time.monotonic()}
+    return modules
+
+
+def _match_anima_modules(modules: list[dict]) -> list[str]:
+    """Full paths of the Qwen text encoder and VAE among the WebUI's modules,
+    text encoder first; missing pieces are simply absent from the result.
+    Matched by "qwen" in the stem rather than the exact official filenames so
+    the community 4B encoder builds work too — sd-modules only ever lists
+    VAE/text-encoder files, so the net is safe to cast this wide."""
+    te_path = vae_path = ""
+    for module in modules:
+        stem = Path(str(module.get("filename") or module.get("name") or "")
+                    .replace("\\", "/")).stem.lower()
+        path = str(module.get("filename") or "")
+        if "qwen" not in stem or not path:
+            continue
+        if "vae" in stem:
+            vae_path = vae_path or path
+        else:
+            te_path = te_path or path
+    return [p for p in (te_path, vae_path) if p]
+
+
+async def _local_anima_modules(cfg: dict) -> list[str] | None:
+    """The forge_additional_modules value for an Anima render: both Qwen
+    module paths when the WebUI has them, None to leave the payload alone
+    when the user has manually selected modules in the WebUI (they may use
+    files this matcher doesn't know). Raises NonRetryableError with the
+    actionable diagnosis when Anima cannot render at all."""
+    modules = await _local_list_modules(cfg)
+    if modules is None:
+        raise NonRetryableError(
+            "This WebUI has no VAE/text-encoder module API, so it cannot "
+            "run Anima checkpoints — use SD WebUI Forge Neo "
+            "(image_server.sh/.bat installs it)")
+    paths = _match_anima_modules(modules)
+    if len(paths) == 2:
+        return paths
+    # The Qwen files aren't installed (or carry unrecognizable names). If the
+    # user picked modules in the WebUI's own UI, honor that selection instead
+    # of failing; with nothing selected the render would only die inside the
+    # WebUI with a cryptic missing-state-dict error.
+    try:
+        options = await _local_get(cfg, "/sdapi/v1/options")
+    except Exception:
+        options = None
+    selected = (options or {}).get("forge_additional_modules") \
+        if isinstance(options, dict) else None
+    if isinstance(selected, list) and selected:
+        return None
+    raise NonRetryableError(
+        f"Anima needs its text encoder ({ANIMA_TEXT_ENCODER_FILE}) and VAE "
+        f"({ANIMA_VAE_FILE}) installed next to the WebUI — install both "
+        "from the Image Studio's Setup tab (or drop them into the WebUI's "
+        "models/text_encoder and models/VAE folders)")
+
+
 # The WebUI's APIs expose no usable file hashes (/sdapi/v1/loras only has
 # kohya's sshs_model_hash, a weights hash — never the file SHA256 that
 # Civitai/HF publish) — so matching browse results and library entries to
@@ -2308,7 +2464,46 @@ LOCAL_INSTALL_KINDS = {
                  "label": "upscaler",
                  "exts": (".pth", ".pt", ".safetensors"),
                  "default_ext": ".pth"},
+    # Standalone text encoders and VAEs (models/text_encoder, models/VAE) —
+    # what Anima's Qwen files install as. Forge-family WebUIs list both
+    # through the same modules dropdown and rescan them via refresh-vae.
+    "text_encoder": {"dir_key": "local_text_encoder_dir",
+                     "cache_file": "local_te_hash_cache.json",
+                     "refresh_path": "/sdapi/v1/refresh-vae",
+                     "label": "text encoder",
+                     "exts": (".safetensors", ".ckpt"),
+                     "default_ext": ".safetensors"},
+    "vae": {"dir_key": "local_vae_dir",
+            "cache_file": "local_vae_hash_cache.json",
+            "refresh_path": "/sdapi/v1/refresh-vae",
+            "label": "VAE",
+            "exts": (".safetensors", ".ckpt", ".pt"),
+            "default_ext": ".safetensors"},
 }
+
+# One-click install catalog for Anima's support files, mirroring
+# UPSCALER_CATALOG: the exact files the official repo ships, URLs and SHA256s
+# verified against the Hugging Face API. Forge Neo lists both in its
+# VAE / Text Encoder dropdown once installed.
+ANIMA_MODULE_CATALOG = [
+    {"name": "Qwen3 0.6B text encoder",
+     "kind": "text_encoder",
+     "filename": ANIMA_TEXT_ENCODER_FILE,
+     "url": "https://huggingface.co/circlestone-labs/Anima/resolve/main/"
+            "split_files/text_encoders/qwen_3_06b_base.safetensors",
+     "sha256": "cd2a512003e2f9f3cd3c32a9c3573f820bb28c940f73c57b1ddaa983d9223eba",
+     "size": 1192135096,
+     "description": "The text encoder every Anima checkpoint prompts "
+                    "through (~1.1 GB)"},
+    {"name": "Qwen-Image VAE",
+     "kind": "vae",
+     "filename": ANIMA_VAE_FILE,
+     "url": "https://huggingface.co/circlestone-labs/Anima/resolve/main/"
+            "split_files/vae/qwen_image_vae.safetensors",
+     "sha256": "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f",
+     "size": 253806246,
+     "description": "The image decoder Anima renders through (~250 MB)"},
+]
 
 # Curated hires-fix upscalers for one-click install, so nobody has to hunt
 # these down by hand. URLs and SHA256s verified against the Hugging Face
@@ -2714,20 +2909,28 @@ async def _detect_helper(cfg: dict) -> dict | None:
     return None
 
 
+# Folder kinds whose unset config field derives the WebUI-standard sibling
+# of the checkpoint folder, so the bundled-launcher layout works with zero
+# extra setup. The names match A1111/Forge/Forge Neo's models/ layout.
+LOCAL_DERIVED_SIBLINGS = {"upscaler": "ESRGAN",
+                          "text_encoder": "text_encoder",
+                          "vae": "VAE"}
+
+
 def _local_install_dir(cfg: dict, kind: str) -> Path | None:
     """The kind's install folder when this machine can write to it directly,
     else None (unset, or a path that only exists on the WebUI's machine).
-    An unset upscaler folder derives the WebUI-standard sibling of the
-    checkpoint folder (models/Stable-diffusion -> models/ESRGAN), so the
-    bundled-launcher layout works with zero extra setup; the folder may not
+    Unset upscaler/text-encoder/VAE folders derive the WebUI-standard
+    sibling of the checkpoint folder (models/Stable-diffusion ->
+    models/ESRGAN, models/text_encoder, models/VAE); the folder may not
     exist yet on a fresh WebUI — the install creates it."""
     dest = str(cfg.get(LOCAL_INSTALL_KINDS[kind]["dir_key"]) or "").strip()
     if dest and Path(dest).is_dir():
         return Path(dest)
-    if kind == "upscaler" and not dest:
+    if kind in LOCAL_DERIVED_SIBLINGS and not dest:
         ckpt = Path(str(cfg.get("local_checkpoint_dir") or "").strip() or ".")
         if ckpt.name.lower() == "stable-diffusion" and ckpt.is_dir():
-            return ckpt.parent / "ESRGAN"
+            return ckpt.parent / LOCAL_DERIVED_SIBLINGS[kind]
     return None
 
 
@@ -2830,6 +3033,10 @@ def _spawn_remote_install_followup(cfg: dict, download: dict) -> None:
                 await _local_post(cfg, refresh_path, timeout=60.0)
             except RuntimeError as e:
                 print(f"[Image Gen] Post-install refresh failed: {e}")
+        if kind in ("text_encoder", "vae"):
+            # Same as the local pipeline: force the next Anima render to
+            # re-list sd-modules instead of a stale probe.
+            _local_modules_probe.pop(_local_base(cfg), None)
         if kind == "lora" and lora_id and stem:
             await _link_installed_lora(lora_id, stem)
 
@@ -2908,6 +3115,10 @@ async def _download_file_pipeline(dl_id: str, url: str, dest_dir: Path,
             except RuntimeError as e:
                 # The file is in place; the WebUI just hasn't rescanned yet.
                 print(f"[Image Gen] Post-install refresh failed: {e}")
+        if kind in ("text_encoder", "vae"):
+            # The next Anima render must re-list sd-modules, not trust a
+            # probe cached from before this file existed.
+            _local_modules_probe.pop(_local_base(cfg), None)
         status["status"] = "done"
     except asyncio.CancelledError:
         status["status"] = "error"
@@ -2938,7 +3149,8 @@ def _local_prompt_with_tags(cfg: dict, image_prompt: str) -> str:
 
 
 def _local_payload(cfg: dict, image_prompt: str,
-                   scheduler_ok: bool = False) -> dict:
+                   scheduler_ok: bool = False,
+                   anima_modules: list[str] | None = None) -> dict:
     # No prompt cap here: local WebUIs chunk long prompts themselves.
     payload = {
         "prompt": _local_prompt_with_tags(cfg, image_prompt),
@@ -2967,6 +3179,12 @@ def _local_payload(cfg: dict, image_prompt: str,
         },
         "override_settings_restore_afterwards": False,
     }
+    # Anima renders carry their Qwen text encoder + VAE as Forge additional
+    # modules (resolved by _local_anima_modules); the sd_vae pin would fight
+    # that selection, so it rides only for the SD families.
+    if anima_modules:
+        payload["override_settings"].pop("sd_vae", None)
+        payload["override_settings"]["forge_additional_modules"] = list(anima_modules)
     negative = str(cfg.get("negative_prompt") or "").strip()
     if negative:
         payload["negative_prompt"] = negative
@@ -3036,22 +3254,33 @@ def _local_b64_decode(image: str) -> bytes:
     return base64.b64decode(image.split(",", 1)[-1])
 
 
+async def _local_render_modules(cfg: dict) -> list[str] | None:
+    """The anima_modules payload argument for this render: resolved for Anima
+    profiles, None (field absent) for every other family."""
+    if _checkpoint_family(cfg) != "anima":
+        return None
+    return await _local_anima_modules(cfg)
+
+
 async def _local_generate(cfg: dict, image_prompt: str) -> tuple[bytes, str]:
     """One synchronous txt2img render against the local WebUI."""
     payload = _local_payload(cfg, image_prompt,
-                             scheduler_ok=await _local_scheduler_ok(cfg))
+                             scheduler_ok=await _local_scheduler_ok(cfg),
+                             anima_modules=await _local_render_modules(cfg))
     images = await _local_txt2img(cfg, payload)
     return _local_b64_decode(images[0]), "png"
 
 
 def _local_batch_payload(cfg: dict, image_prompts: list[str],
-                         scheduler_ok: bool = False) -> dict:
+                         scheduler_ok: bool = False,
+                         anima_modules: list[str] | None = None) -> dict:
     """A txt2img payload that renders every prompt in one GPU batch via the
     bundled wb_prompt_batch.py script. The script reads the JSON prompt list
     from script_args and sets batch_size itself; the top-level prompt and
     batch_size stay in their single-image shape so the request remains a
     valid (if single-image) txt2img body."""
-    payload = _local_payload(cfg, image_prompts[0], scheduler_ok=scheduler_ok)
+    payload = _local_payload(cfg, image_prompts[0], scheduler_ok=scheduler_ok,
+                             anima_modules=anima_modules)
     payload["script_name"] = LOCAL_BATCH_SCRIPT_TITLE
     payload["script_args"] = [json.dumps(
         [_local_prompt_with_tags(cfg, p) for p in image_prompts])]
@@ -3064,7 +3293,8 @@ async def _local_generate_batch(cfg: dict,
     therefore a single LoRA set -- the caller groups prompts so only cells
     with identical tag strings arrive here together."""
     payload = _local_batch_payload(cfg, image_prompts,
-                                   scheduler_ok=await _local_scheduler_ok(cfg))
+                                   scheduler_ok=await _local_scheduler_ok(cfg),
+                                   anima_modules=await _local_render_modules(cfg))
     images = await _local_txt2img(cfg, payload)
     # The script suppresses the grid, but a fork that ignores
     # do_not_save_grid prepends one; drop it by count.
@@ -3589,6 +3819,11 @@ def _hf_base_model_name(tags: list) -> str:
             return "Illustrious"
         if "noob" in base:
             return "NoobAI"
+        # Word-boundary like everywhere else, so "animagine"-based repos
+        # (matched above as sdxl via their own tag spellings or passed
+        # through raw) never read as CircleStone's Anima.
+        if "animagine" not in base and _ANIMA_WORD_RE.search(base):
+            return "Anima"
     # Unknown bases pass through raw: _base_family may still classify them
     # (e.g. a plain "...FLUX..." repo id), otherwise the entry is never
     # usable — same as an unknown Civitai base today.
@@ -4564,6 +4799,8 @@ def get_router():
         local_checkpoint_dir: str | None = None
         local_lora_dir: str | None = None
         local_upscaler_dir: str | None = None
+        local_text_encoder_dir: str | None = None
+        local_vae_dir: str | None = None
         local_helper_url: str | None = None
         local_helper_token: str | None = None
         local_batch_size: int | None = None
@@ -4744,7 +4981,9 @@ def get_router():
                 raise HTTPException(status_code=400,
                                     detail="local_helper_url must start with http:// or https://")
             incoming["local_helper_url"] = helper
-        for field in ("local_checkpoint_dir", "local_lora_dir", "local_upscaler_dir"):
+        for field in ("local_checkpoint_dir", "local_lora_dir",
+                      "local_upscaler_dir", "local_text_encoder_dir",
+                      "local_vae_dir"):
             if field in incoming:
                 # Existence is checked when an install starts, not here — the
                 # WebUI may live on another machine or not be mounted yet.
@@ -5125,6 +5364,31 @@ def get_router():
                             "be sampled as epsilon (dark, blurry output). "
                             "Re-download the official file from Civitai; "
                             "merges and re-uploads often strip the key.")
+            if _checkpoint_family(cfg) == "anima":
+                # Anima needs a modules-capable WebUI (Forge Neo) plus the
+                # Qwen text encoder + VAE installed; surface both checks
+                # here so the Setup card can say exactly what is missing
+                # before the first render fails. force=True for the same
+                # reason as the batch script above.
+                out["anima"] = True
+                modules = await _local_list_modules(cfg, force=True)
+                if modules is None:
+                    out["anima_warning"] = (
+                        "This checkpoint is an Anima model but the WebUI "
+                        "has no VAE/text-encoder module API — classic "
+                        "A1111/Forge cannot run Anima. Use SD WebUI Forge "
+                        "Neo (image_server.sh/.bat installs it; existing "
+                        "installs migrate with migrate_image_server).")
+                else:
+                    found = _match_anima_modules(modules)
+                    out["anima_modules_found"] = len(found)
+                    if len(found) < 2:
+                        out["anima_warning"] = (
+                            "Anima needs its text encoder "
+                            f"({ANIMA_TEXT_ENCODER_FILE}) and VAE "
+                            f"({ANIMA_VAE_FILE}) next to the WebUI — "
+                            "install both with one click below, or drop "
+                            "them into models/text_encoder and models/VAE.")
         if _helper_url(cfg):
             try:
                 health = await _helper_request(cfg, "GET", "/wb-helper/health",
@@ -5440,6 +5704,37 @@ def get_router():
         return {"entries": entries,
                 "can_install": root is not None or bool(_helper_url(cfg)),
                 "dir": str(root) if root is not None else None}
+
+    @router.get("/local/anima-catalog")
+    async def local_anima_catalog():
+        """Anima's Qwen text encoder + VAE with per-entry install state, the
+        upscaler catalog's twin across two folder kinds. "installed" is file
+        presence in the kind's folder (or a SHA256 hit in the install
+        helper's index); whether the WebUI has picked the files up is
+        /local/status's anima_modules_found."""
+        cfg = _load_config()
+        helper_indexes: dict | None = None
+        entries = []
+        can_install = bool(_helper_url(cfg))
+        for entry in ANIMA_MODULE_CATALOG:
+            kind = entry["kind"]
+            root = _local_install_dir(cfg, kind)
+            can_install = can_install or root is not None
+            installed = False
+            if root is not None and root.is_dir():
+                present = {p.name.lower() for p in root.rglob("*") if p.is_file()}
+                installed = entry["filename"].lower() in present
+            elif _helper_url(cfg):
+                if helper_indexes is None:
+                    try:
+                        helper_indexes = await _helper_hash_indexes(cfg)
+                    except RuntimeError as e:
+                        print(f"[Image Gen] Helper hash index failed: {e}")
+                        helper_indexes = {}
+                installed = entry["sha256"] in (helper_indexes.get(kind) or {})
+            entries.append({**entry, "installed": installed,
+                            "dir": str(root) if root is not None else None})
+        return {"entries": entries, "can_install": can_install}
 
     @router.get("/local/upscalers")
     async def local_upscalers():

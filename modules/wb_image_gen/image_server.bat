@@ -4,11 +4,18 @@ setlocal enabledelayedexpansion
 :: WorldBox AI RPG Engine - local image server setup/launch (counterpart to image_server.sh)
 ::
 :: Sets up and starts a local Stable Diffusion WebUI as the "local" provider
-:: of the wb_image_gen module: clones SD WebUI Forge (updates it on later
+:: of the wb_image_gen module: clones SD WebUI Forge Neo (updates it on later
 :: runs), then launches it with --api on http://127.0.0.1:7860 -- the address
-:: the Image Studio expects by default. The WebUI's own launcher creates its
-:: private venv and installs its requirements (torch etc.) on first run, so
-:: the first launch downloads several GB.
+:: the Image Studio expects by default. Forge Neo runs the SDXL-class
+:: families (Pony, Illustrious, NoobAI...) and the newer architectures,
+:: including Anima. The WebUI's own launcher creates its private venv and
+:: installs its requirements (torch etc.) on first run, so the first launch
+:: downloads several GB.
+::
+:: An existing install of the previous default (lllyasviel's SD WebUI Forge)
+:: keeps launching as-is -- this script never switches a clone under you.
+:: To move to Forge Neo with your checkpoints and LoRAs, run
+:: .\modules\wb_image_gen\migrate_image_server.bat once.
 ::
 :: Usage (from the repo root):
 ::   .\modules\wb_image_gen\image_server.bat [install_dir]
@@ -18,8 +25,10 @@ setlocal enabledelayedexpansion
 :: Environment overrides:
 ::   WB_WEBUI_DIR      install directory (same as the argument)
 ::   WB_WEBUI_REPO     git URL of the WebUI to install (default: SD WebUI
-::                     Forge; any A1111-compatible fork with the standard
+::                     Forge Neo; any A1111-compatible fork with the standard
 ::                     webui.bat launcher works)
+::   WB_WEBUI_BRANCH   branch to clone (default: "neo" for the default repo,
+::                     the repo's default branch otherwise)
 ::   WB_WEBUI_PORT     port to listen on (default 7860; if you change it,
 ::                     change the server address in the Image Studio too)
 ::   WB_WEBUI_LISTEN   1 (default) also accepts connections from other devices
@@ -28,9 +37,9 @@ setlocal enabledelayedexpansion
 ::                     without an NVIDIA GPU, "--skip-torch-cuda-test --use-cpu all"
 ::   WB_HELPER         1 (default) also starts the WorldBox install helper
 ::                     (helper_server.py) next to the WebUI, so the app can
-::                     one-click install checkpoints/LoRAs and read exact
-::                     installed-model badges even from another machine;
-::                     0 disables it
+::                     one-click install checkpoints/LoRAs/Anima modules and
+::                     read exact installed-model badges even from another
+::                     machine; 0 disables it
 ::   WB_HELPER_PORT    helper port (default 7861)
 ::   WB_HELPER_LISTEN  like WB_WEBUI_LISTEN, for the helper (defaults to
 ::                     WB_WEBUI_LISTEN)
@@ -44,7 +53,10 @@ cd /d "%REPO_ROOT%"
 title WorldBox Image Server
 
 if not defined WB_WEBUI_PORT set WB_WEBUI_PORT=7860
-if not defined WB_WEBUI_REPO set WB_WEBUI_REPO=https://github.com/lllyasviel/stable-diffusion-webui-forge.git
+if not defined WB_WEBUI_REPO (
+    set "WB_WEBUI_REPO=https://github.com/Haoming02/sd-webui-forge-classic.git"
+    if not defined WB_WEBUI_BRANCH set "WB_WEBUI_BRANCH=neo"
+)
 set "WEBUI_DIR=%~1"
 if not defined WEBUI_DIR if defined WB_WEBUI_DIR set "WEBUI_DIR=%WB_WEBUI_DIR%"
 if not defined WEBUI_DIR set "WEBUI_DIR=%REPO_ROOT%\image_server"
@@ -63,10 +75,22 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: ── Preflight: Python (the WebUI officially supports 3.10; 3.11 usually works) ──
+:: ── Which WebUI is (or will be) installed? ──
+:: ACTIVE_REPO drives the per-fork tweaks below: an existing clone's origin
+:: outranks WB_WEBUI_REPO, because that clone is what actually launches.
+set "ACTIVE_REPO=%WB_WEBUI_REPO%"
+if exist "%WEBUI_DIR%\.git" (
+    for /f "usebackq delims=" %%u in (`git -C "%WEBUI_DIR%" remote get-url origin 2^>nul`) do set "ACTIVE_REPO=%%u"
+)
+set IS_NEO=0
+echo %ACTIVE_REPO% | findstr /c:"forge-classic" >nul && set IS_NEO=1
+
+:: ── Preflight: Python ──
+:: Forge Neo runs on modern Python (3.13 recommended); the legacy WebUIs
+:: officially support 3.10 (3.11 usually works).
 where python >nul 2>nul
 if errorlevel 1 (
-    echo [ERROR] python not found on PATH. Install Python 3.10 from python.org
+    echo [ERROR] python not found on PATH. Install Python from python.org
     echo         and check "Add python to PATH" in its installer.
     echo.
     pause
@@ -74,13 +98,24 @@ if errorlevel 1 (
 )
 set PYV=
 for /f "tokens=2" %%v in ('python --version 2^>^&1') do set PYV=%%v
-echo !PYV! | findstr /b /c:"3.10." /c:"3.11." >nul
-if errorlevel 1 (
-    echo [WARN] Python !PYV! detected. The WebUI officially supports Python 3.10.
-    echo        If the first launch fails installing torch, install Python 3.10
-    echo        and point the WebUI at it, e.g.:
-    echo        set PYTHON=C:\Path\To\Python310\python.exe
-    echo.
+if "%IS_NEO%"=="1" (
+    echo !PYV! | findstr /b /c:"3.11." /c:"3.12." /c:"3.13." >nul
+    if errorlevel 1 (
+        echo [WARN] Python !PYV! detected -- Forge Neo recommends Python 3.13.
+        echo        If the first launch fails installing torch, install a newer
+        echo        Python and point the WebUI at it, e.g.:
+        echo        set PYTHON=C:\Path\To\Python313\python.exe
+        echo.
+    )
+) else (
+    echo !PYV! | findstr /b /c:"3.10." /c:"3.11." >nul
+    if errorlevel 1 (
+        echo [WARN] Python !PYV! detected. This WebUI officially supports Python 3.10.
+        echo        If the first launch fails installing torch, install Python 3.10
+        echo        and point the WebUI at it, e.g.:
+        echo        set PYTHON=C:\Path\To\Python310\python.exe
+        echo.
+    )
 )
 
 :: ── Preflight: GPU ──
@@ -97,13 +132,26 @@ if errorlevel 1 (
 if not exist "%WEBUI_DIR%\.git" (
     echo Installing SD WebUI into %WEBUI_DIR% ...
     echo ^(repo: %WB_WEBUI_REPO%^)
-    git clone "%WB_WEBUI_REPO%" "%WEBUI_DIR%"
+    if defined WB_WEBUI_BRANCH (
+        git clone -b "%WB_WEBUI_BRANCH%" "%WB_WEBUI_REPO%" "%WEBUI_DIR%"
+    ) else (
+        git clone "%WB_WEBUI_REPO%" "%WEBUI_DIR%"
+    )
     if errorlevel 1 (
         echo [ERROR] git clone failed.
         echo.
         pause
         exit /b 1
     )
+    echo.
+) else if /i not "%ACTIVE_REPO%"=="%WB_WEBUI_REPO%" (
+    :: Never git-pull across repos: the clone that's there keeps launching.
+    echo [NOTE] %WEBUI_DIR% is a different WebUI than the current default
+    echo        ^(installed: %ACTIVE_REPO%^).
+    echo        It will start normally, but Anima checkpoints need SD WebUI
+    echo        Forge Neo. To move this install to Forge Neo -- keeping your
+    echo        checkpoints, LoRAs and upscalers -- run:
+    echo        .\modules\wb_image_gen\migrate_image_server.bat
     echo.
 ) else (
     echo Checking for WebUI updates...
@@ -115,7 +163,7 @@ if not exist "%WEBUI_DIR%\.git" (
 )
 
 if not exist "%WEBUI_DIR%\webui.bat" (
-    echo [ERROR] %WEBUI_DIR%\webui.bat not found -- %WB_WEBUI_REPO% does not
+    echo [ERROR] %WEBUI_DIR%\webui.bat not found -- %ACTIVE_REPO% does not
     echo         look like an A1111-compatible WebUI.
     echo.
     pause
@@ -148,17 +196,19 @@ if defined WEBUI_EXTRA_ARGS set "COMMANDLINE_ARGS=%COMMANDLINE_ARGS% %WEBUI_EXTR
 :: stays reachable at the printed address.
 set SD_WEBUI_RESTARTING=1
 
-:: ── Pin packages for the WebUI's pip installs ──
-:: setuptools<81: the launcher builds openai/CLIP from an old source zip
-::   whose setup.py imports pkg_resources, removed in setuptools 81. The
+:: ── Pin packages for the LEGACY WebUIs' pip installs ──
+:: Forge Neo's requirements are modern (new torch, NumPy 2) and need no help;
+:: these pins would actively fight it, so they apply only to the older forks.
+:: setuptools<81: the legacy launcher builds openai/CLIP from an old source
+::   zip whose setup.py imports pkg_resources, removed in setuptools 81. The
 ::   build runs in pip's isolated build environment (which installs the
 ::   newest setuptools), so the pin must travel via PIP_CONSTRAINT -- the one
 ::   channel that reaches build environments.
-:: numpy<2: the WebUI's torch/scikit-image builds are compiled against
+:: numpy<2: the legacy WebUIs' torch/scikit-image builds are compiled against
 ::   NumPy 1.x; a stray install step upgrading to NumPy 2 crashes startup
 ::   with "_ARRAY_API not found" / "numpy.dtype size changed".
 :: A PIP_CONSTRAINT the user already set is left alone.
-if not defined PIP_CONSTRAINT (
+if not "%IS_NEO%"=="1" if not defined PIP_CONSTRAINT (
     > "%WEBUI_DIR%\worldbox-pip-constraints.txt" (
         echo setuptools^<81
         echo numpy^<2
@@ -166,9 +216,9 @@ if not defined PIP_CONSTRAINT (
     set "PIP_CONSTRAINT=%WEBUI_DIR%\worldbox-pip-constraints.txt"
 )
 
-:: ── Repair: a venv that already picked up NumPy 2 gets downgraded ──
+:: ── Repair: a legacy venv that already picked up NumPy 2 gets downgraded ──
 set "VENV_PY=%WEBUI_DIR%\venv\Scripts\python.exe"
-if exist "%VENV_PY%" (
+if not "%IS_NEO%"=="1" if exist "%VENV_PY%" (
     "%VENV_PY%" -c "import numpy" >nul 2>&1
     if not errorlevel 1 (
         "%VENV_PY%" -c "import numpy, sys; sys.exit(int(numpy.__version__.split('.')[0]) >= 2)" >nul 2>&1
@@ -189,12 +239,16 @@ if not defined WB_HELPER set WB_HELPER=1
 if not defined WB_HELPER_PORT set WB_HELPER_PORT=7861
 if not defined WB_HELPER_LISTEN set WB_HELPER_LISTEN=%WB_WEBUI_LISTEN%
 if not exist "%WEBUI_DIR%\models\ESRGAN" mkdir "%WEBUI_DIR%\models\ESRGAN"
+if not exist "%WEBUI_DIR%\models\text_encoder" mkdir "%WEBUI_DIR%\models\text_encoder"
+if not exist "%WEBUI_DIR%\models\VAE" mkdir "%WEBUI_DIR%\models\VAE"
 if not "%WB_HELPER%"=="0" (
     if not exist "%WEBUI_DIR%\models\Stable-diffusion" mkdir "%WEBUI_DIR%\models\Stable-diffusion"
     if not exist "%WEBUI_DIR%\models\Lora" mkdir "%WEBUI_DIR%\models\Lora"
     set "WB_HELPER_CKPT_DIR=%WEBUI_DIR%\models\Stable-diffusion"
     set "WB_HELPER_LORA_DIR=%WEBUI_DIR%\models\Lora"
     set "WB_HELPER_UPSCALER_DIR=%WEBUI_DIR%\models\ESRGAN"
+    set "WB_HELPER_TE_DIR=%WEBUI_DIR%\models\text_encoder"
+    set "WB_HELPER_VAE_DIR=%WEBUI_DIR%\models\VAE"
     start "WorldBox Install Helper" /b python "%REPO_ROOT%\modules\wb_image_gen\helper_server.py"
 )
 
@@ -217,7 +271,10 @@ if not "%WB_WEBUI_LISTEN%"=="0" (
 echo ====   Checkpoint folder: %WEBUI_DIR%\models\Stable-diffusion
 echo ====   LoRA folder:       %WEBUI_DIR%\models\Lora
 echo ====   Upscaler folder:   %WEBUI_DIR%\models\ESRGAN
-echo ====     (optional -- derived from the checkpoint folder if empty)
+echo ====   Text enc. folder:  %WEBUI_DIR%\models\text_encoder
+echo ====   VAE folder:        %WEBUI_DIR%\models\VAE
+echo ====     (all three optional -- derived from the checkpoint folder
+echo ====     if empty; text encoder + VAE hold Anima's Qwen modules)
 if not "%WB_HELPER%"=="0" (
     echo ====   Install helper:    http://127.0.0.1:%WB_HELPER_PORT%
     echo ====   When WorldBox runs on ANOTHER machine, leave the folder      ====

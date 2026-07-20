@@ -57,8 +57,9 @@ are supported, switched with the provider toggle on the Setup tab:
 - **Novita AI (cloud)** — paste a [novita.ai](https://novita.ai) API key and
   pick one of the thousands of hosted checkpoints. No GPU needed.
 - **Local Stable Diffusion** — point the Studio at any A1111-compatible WebUI
-  (AUTOMATIC1111, SD WebUI Forge, reForge, SD.Next) started with the `--api`
-  flag (default address `http://127.0.0.1:7860`). Generation is free and
+  (AUTOMATIC1111, SD WebUI Forge, Forge Neo, reForge, SD.Next) started with
+  the `--api` flag (default address `http://127.0.0.1:7860`). Generation is
+  free and
   private; the model dropdown lists your installed checkpoints. Optionally set
   the WebUI's `models/Stable-diffusion` and `models/Lora` folders in the
   Studio to enable one-click installs from the built-in browsers: the Setup
@@ -81,16 +82,28 @@ the repo root:
 ./modules/wb_image_gen/image_server.sh         # Linux/macOS
 ```
 
-It clones [SD WebUI Forge](https://github.com/lllyasviel/stable-diffusion-webui-forge)
+It clones [SD WebUI Forge Neo](https://github.com/Haoming02/sd-webui-forge-classic/tree/neo)
 into `image_server/` (updating it on later runs), lets the WebUI install its
 own dependencies on first launch (several GB, one time), and starts it with
 `--api` on `http://127.0.0.1:7860` — exactly what the Image Studio expects.
+Forge Neo runs the SDXL-class families and the newer architectures,
+including Anima (see below); it prefers a modern Python (3.13 recommended).
 The script prints the server address plus the checkpoint/LoRA folder paths to
 paste into the Studio's Setup tab. An install directory can be passed as the
-first argument, and `WB_WEBUI_REPO` / `WB_WEBUI_PORT` / `WEBUI_EXTRA_ARGS`
-environment variables select a different A1111-compatible fork, port, or
-extra launch flags (e.g. `--api-auth user:pass`, or
+first argument, and `WB_WEBUI_REPO` / `WB_WEBUI_BRANCH` / `WB_WEBUI_PORT` /
+`WEBUI_EXTRA_ARGS` environment variables select a different A1111-compatible
+fork, branch, port, or extra launch flags (e.g. `--api-auth user:pass`, or
 `--skip-torch-cuda-test --use-cpu all` on machines without an NVIDIA GPU).
+An existing install of the previous default (lllyasviel's SD WebUI Forge)
+keeps launching unchanged — the script never switches a clone under you. To
+move it to Forge Neo **keeping your checkpoints, LoRAs and upscalers** (no
+re-downloads — the model files are renamed across, the old install stays
+behind as a backup), run once:
+
+```powershell
+.\modules\wb_image_gen\migrate_image_server.bat   # Windows
+./modules/wb_image_gen/migrate_image_server.sh    # Linux/macOS
+```
 The server starts without opening a browser tab (the WebUI's own interface
 stays reachable at the printed address) and accepts connections from other
 devices on the same network — the script prints the LAN URL; set
@@ -107,14 +120,27 @@ caps how many images share one batch — lower it if renders fail with CUDA
 out-of-memory. Without the script everything still works, just serially.
 
 All the booru-tag checkpoint families the module recognizes (Pony,
-Illustrious, NoobAI, Animagine) work on the default Forge install, which the
-Studio pairs with tag-style prompts, the family's own quality tags, AND the
-family's recommended render settings automatically: sampler, guidance scale,
-scheduler, and negative prompt follow the model card of the selected
-checkpoint's family (e.g. NoobAI renders with Euler a at CFG 5 and its own
-negative vocabulary instead of the generic DPM++ 2M Karras at CFG 7) as long
-as they are left at stock values — edit any of them in the Studio to pin your
-own.
+Illustrious, NoobAI, Animagine, Anima) work on the default Forge Neo
+install, which the Studio pairs with tag-style prompts, the family's own
+quality tags, AND the family's recommended render settings automatically:
+sampler, guidance scale, scheduler, and negative prompt follow the model
+card of the selected checkpoint's family (e.g. NoobAI renders with Euler a
+at CFG 5 and its own negative vocabulary instead of the generic DPM++ 2M
+Karras at CFG 7) as long as they are left at stock values — edit any of them
+in the Studio to pin your own.
+
+**Anima** (CircleStone Labs' 2B anime model — not an SDXL variant) is fully
+supported on the local provider: Civitai/Hugging Face browsing filters by
+its base model, Anima LoRAs pair only with Anima checkpoints, and its
+model-card prompting profile (masterpiece/best-quality plus its 1–7
+`score_*` scale, CFG 4 at Euler a) applies automatically. Two extra files
+are required once — the Qwen3 0.6B text encoder and the Qwen-Image VAE —
+which the Studio installs with one click into the WebUI's
+`models/text_encoder` and `models/VAE` folders when an Anima checkpoint is
+selected (the connection test diagnoses what's missing). Anima needs Forge
+Neo: classic A1111/Forge cannot load it, and Novita does not host it — the
+distilled Turbo variant additionally wants CFG 1 at 8–12 steps, set by hand
+in the profile.
 
 **v-pred checkpoints** (NoobAI-XL vPred and its merges — "vpred" in the
 filename) deserve extra care:
@@ -131,7 +157,8 @@ filename) deserve extra care:
   above ~4 oversaturates because CFG-rescale is not reachable through the
   WebUI API) when the settings are at stock values.
 - Classic AUTOMATIC1111 cannot sample SDXL v-pred at all — keep the default
-  `WB_WEBUI_REPO` (Forge) if you plan to use these checkpoints.
+  `WB_WEBUI_REPO` (Forge Neo, like the previous Forge default) if you plan
+  to use these checkpoints.
 
 For finer detail than ~30 base steps can deliver, enable **Hires fix** in the
 Studio's generation settings (local provider only): the image renders at the

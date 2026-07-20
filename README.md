@@ -119,8 +119,10 @@ refresh pip/npm dependencies when an update was pulled.
 Story illustrations render through either the Novita AI cloud API or a local
 A1111/Forge-compatible Stable Diffusion WebUI (started with `--api`), switched
 in the Image Studio main-menu screen. `modules/wb_image_gen/image_server.bat`
-/ `image_server.sh` set up and start the local server (clone SD WebUI Forge,
-install its dependencies, launch with the right flags) in one command. See
+/ `image_server.sh` set up and start the local server (clone SD WebUI Forge
+Neo — which also runs Anima — install its dependencies, launch with the right
+flags) in one command; `migrate_image_server.bat`/`.sh` moves an existing
+Forge install to Forge Neo keeping all models. See
 [docs/SETUP.md](docs/SETUP.md#image-generation-optional).
 
 ## Documentation

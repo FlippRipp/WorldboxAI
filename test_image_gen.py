@@ -1661,6 +1661,14 @@ def test_base_family_buckets(tmp_path):
     assert backend._base_family("SD 1.5") == "sd15"
     assert backend._base_family("Flux.1 D") == "flux"
     assert backend._base_family("Flux.2 D") == "flux"
+    assert backend._base_family("Anima") == "anima"
+    assert backend._base_family("anima-aesthetic-v1.1.safetensors") == "anima"
+    # The substring traps around "anima": Animagine and XL-marked names are
+    # SDXL, and "anima" inside a longer word never matches.
+    assert backend._base_family("Animagine XL") == "sdxl"
+    assert backend._base_family("Animagine") == "sdxl"
+    assert backend._base_family("Anima Pencil XL") == "sdxl"
+    assert backend._base_family("animation style") == ""
     assert backend._base_family("") == ""
     # The built-in FLUX.2 model has no base metadata but must resolve to flux.
     cfg = _lora_cfg(backend, model_name=backend.FLUX2_MODEL_NAME, model_base="")
@@ -6775,7 +6783,8 @@ def test_public_config_reports_install_capability_and_masks_token(tmp_path):
     assert resp["has_helper"] is True
     # Helper configured -> every kind installable even with no local folders.
     assert resp["local_install"] == {"checkpoint": True, "lora": True,
-                                     "upscaler": True}
+                                     "upscaler": True, "text_encoder": True,
+                                     "vae": True}
 
     # Masked round-trip keeps the stored token; clearing the URL drops the
     # capability unless a folder on this machine exists.
@@ -6784,13 +6793,15 @@ def test_public_config_reports_install_capability_and_masks_token(tmp_path):
         "local_helper_url": ""}).json()
     assert backend._load_config()["local_helper_token"] == "secret-tok"
     assert resp["local_install"] == {"checkpoint": False, "lora": False,
-                                     "upscaler": False}
+                                     "upscaler": False, "text_encoder": False,
+                                     "vae": False}
 
     lora_dir = tmp_path / "Lora"
     lora_dir.mkdir()
     resp = client.put("/config", json={"local_lora_dir": str(lora_dir)}).json()
     assert resp["local_install"] == {"checkpoint": False, "lora": True,
-                                     "upscaler": False}
+                                     "upscaler": False, "text_encoder": False,
+                                     "vae": False}
 
 
 # ---------------------------------------------------------------------------
@@ -6986,7 +6997,8 @@ def test_remote_install_end_to_end_through_real_helper(tmp_path):
     try:
         with _client(backend) as client:
             assert client.get("/config").json()["local_install"] == {
-                "checkpoint": True, "lora": True, "upscaler": True}
+                "checkpoint": True, "lora": True, "upscaler": True,
+                "text_encoder": True, "vae": True}
             body = client.post("/local/downloads", json={
                 "kind": "checkpoint", "url": file_url, "sha256": sha,
                 "label": "Juggernaut XL", "item_id": "901",
@@ -7036,3 +7048,252 @@ def test_remote_install_end_to_end_through_real_helper(tmp_path):
     finally:
         file_srv.shutdown()
         helper_srv.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Anima (CircleStone Labs 2B — its own architecture, local/Forge Neo only)
+# ---------------------------------------------------------------------------
+
+def test_anima_prompt_profile(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = backend._load_config()
+    cfg["model_base"] = "Anima"
+    cfg["model_name"] = "anima-aesthetic-v1.1.safetensors"
+    backend._save_config(cfg)
+    cfg = backend._load_config()
+
+    assert backend._tag_model_marker(cfg) == "anima"
+    assert backend._prompt_style(cfg) == "tags"
+    assert cfg["quality_tags"] == backend.QUALITY_TAG_DEFAULTS["anima"]
+    assert "score_7" in cfg["quality_tags"]
+    # The card's "safe" rating tag is deliberately not part of the stock
+    # prefix — content rating follows the scene, not the family default.
+    assert "safe" not in [t.strip() for t in cfg["quality_tags"].split(",")]
+
+    anima = backend.RENDER_DEFAULTS["anima"]
+    assert cfg["sampler_name"] == anima["sampler_name"]
+    assert cfg["guidance_scale"] == anima["guidance_scale"]
+    assert cfg["negative_prompt"] == anima["negative_prompt"]
+    assert "score_1" in cfg["negative_prompt"]
+
+    # Animagine keeps its own marker despite sharing the "anima" prefix, and
+    # an "animation..." name never reads as Anima at all.
+    cfg["model_base"] = "Animagine XL"
+    cfg["model_name"] = "animagineXL31.safetensors"
+    backend._save_config(cfg)
+    assert backend._tag_model_marker(backend._load_config()) == "animagine"
+    cfg = backend._load_config()
+    cfg["model_base"] = "SDXL 1.0"
+    cfg["model_name"] = "animationStyleXL.safetensors"
+    backend._save_config(cfg)
+    assert backend._tag_model_marker(backend._load_config()) is None
+
+
+def test_anima_local_base_inference(tmp_path):
+    backend = _load_backend(tmp_path)
+    assert backend._infer_local_base("anima-base-v1.0.safetensors") == "Anima"
+    assert backend._infer_local_base("anima-turbo-v1.0.safetensors") == "Anima"
+    # XL-marked and Animagine names keep their SDXL-class bases.
+    assert backend._infer_local_base("AnimaPencil-XL-v5.safetensors") == "SDXL 1.0"
+    assert backend._infer_local_base("animagineXL31.safetensors") == "Animagine XL"
+
+
+def test_anima_lora_compat_local(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = {**backend._default_config(), "provider": "local",
+           "model_base": "Anima", "model_name": "anima-base-v1.0.safetensors",
+           "lora_library": [
+               {"id": "1", "active": True, "base_model": "Anima",
+                "strength": 0.8,
+                "local": {"name": "anima_style", "source": "hash"}},
+               {"id": "2", "active": True, "base_model": "Illustrious",
+                "strength": 0.7,
+                "local": {"name": "ink_style", "source": "hash"}},
+           ]}
+    assert backend._checkpoint_family(cfg) == "anima"
+    # Only the Anima LoRA rides; the SDXL-class one is incompatible.
+    assert backend._local_prompt_lora_tags(cfg) == "<lora:anima_style:0.8>"
+    assert backend._applied_lora_names(cfg) == ["1"]
+
+
+def test_novita_rejects_anima_profiles(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = {**backend._default_config(), "api_key": "k",
+           "model_base": "Anima", "model_name": "anima-base-v1.0.safetensors"}
+    with pytest.raises(backend.NonRetryableError, match="not hosted on Novita"):
+        asyncio.run(backend._novita_submit(cfg, "1girl, forest"))
+
+
+def test_match_anima_modules(tmp_path):
+    backend = _load_backend(tmp_path)
+    modules = [
+        {"name": "sdxl_vae", "filename": "/m/VAE/sdxl_vae.safetensors"},
+        {"name": "qwen_image_vae",
+         "filename": "/m/VAE/qwen_image_vae.safetensors"},
+        {"name": "qwen_3_06b_base",
+         "filename": "/m/text_encoder/qwen_3_06b_base.safetensors"},
+    ]
+    # Text encoder first, VAE second; non-Qwen modules are ignored.
+    assert backend._match_anima_modules(modules) == [
+        "/m/text_encoder/qwen_3_06b_base.safetensors",
+        "/m/VAE/qwen_image_vae.safetensors"]
+    # The community 4B encoder builds match too; a missing VAE just yields
+    # a shorter list (the caller decides what that means).
+    assert backend._match_anima_modules([
+        {"name": "qwen_35_4b_fp8",
+         "filename": "/m/text_encoder/qwen_35_4b_fp8.safetensors"},
+    ]) == ["/m/text_encoder/qwen_35_4b_fp8.safetensors"]
+    assert backend._match_anima_modules([]) == []
+
+
+def test_local_anima_modules_resolution_and_payload(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = {**backend._default_config(), "provider": "local",
+           "model_base": "Anima", "model_name": "anima-base-v1.0.safetensors"}
+    holder = {"modules": [], "modules_exc": None,
+              "options": {"forge_additional_modules": []}}
+
+    async def fake_get(cfg, path, timeout=backend.LOCAL_API_TIMEOUT_S):
+        if path == "/sdapi/v1/sd-modules":
+            if holder["modules_exc"] is not None:
+                raise holder["modules_exc"]
+            return holder["modules"]
+        if path == "/sdapi/v1/options":
+            return holder["options"]
+        raise AssertionError(f"unexpected GET {path}")
+
+    backend._local_get = fake_get
+
+    # Both Qwen files known to the WebUI -> their full paths ride in
+    # override_settings.forge_additional_modules and the sd_vae pin drops.
+    holder["modules"] = [
+        {"model_name": "qwen_3_06b_base",
+         "filename": "/m/text_encoder/qwen_3_06b_base.safetensors"},
+        {"model_name": "qwen_image_vae",
+         "filename": "/m/VAE/qwen_image_vae.safetensors"}]
+    mods = asyncio.run(backend._local_anima_modules(cfg))
+    assert mods == ["/m/text_encoder/qwen_3_06b_base.safetensors",
+                    "/m/VAE/qwen_image_vae.safetensors"]
+    payload = backend._local_payload(cfg, "1girl", anima_modules=mods)
+    assert payload["override_settings"]["forge_additional_modules"] == mods
+    assert "sd_vae" not in payload["override_settings"]
+    assert payload["override_settings"]["sd_model_checkpoint"] \
+        == "anima-base-v1.0.safetensors"
+
+    # Non-Anima payloads keep the sd_vae pin exactly as before.
+    plain = backend._local_payload(cfg, "1girl")
+    assert plain["override_settings"]["sd_vae"] == "Automatic"
+    assert "forge_additional_modules" not in plain["override_settings"]
+
+    # _local_render_modules only resolves for Anima profiles.
+    pony_cfg = {**cfg, "model_base": "Pony", "model_name": "p.safetensors"}
+    assert asyncio.run(backend._local_render_modules(pony_cfg)) is None
+
+    # No modules API at all -> this WebUI cannot run Anima (classic A1111).
+    backend._local_modules_probe.clear()
+    holder["modules_exc"] = backend.LocalNotFoundError("no sd-modules")
+    with pytest.raises(backend.NonRetryableError, match="Forge"):
+        asyncio.run(backend._local_anima_modules(cfg))
+
+    # Qwen files missing but the user picked modules in the WebUI's own UI
+    # -> leave the payload alone instead of failing.
+    backend._local_modules_probe.clear()
+    holder["modules_exc"] = None
+    holder["modules"] = [{"model_name": "sdxl_vae",
+                          "filename": "/m/VAE/sdxl_vae.safetensors"}]
+    holder["options"] = {"forge_additional_modules": ["/m/custom_te.safetensors"]}
+    assert asyncio.run(backend._local_anima_modules(cfg)) is None
+
+    # Nothing installed and nothing selected -> the actionable install hint.
+    backend._local_modules_probe.clear()
+    holder["options"] = {"forge_additional_modules": []}
+    with pytest.raises(backend.NonRetryableError, match="text encoder"):
+        asyncio.run(backend._local_anima_modules(cfg))
+
+
+def test_anima_catalog_endpoint(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    # No folders and no helper: both files listed, nothing installable.
+    body = client.get("/local/anima-catalog").json()
+    assert [e["kind"] for e in body["entries"]] == ["text_encoder", "vae"]
+    assert body["can_install"] is False
+    assert all(e["installed"] is False for e in body["entries"])
+    assert all(e["sha256"] and e["url"].startswith("https://huggingface.co/")
+               for e in body["entries"])
+
+    # The folders derive from the checkpoint dir (models/text_encoder,
+    # models/VAE); a file already present flips its badge.
+    models = tmp_path / "models"
+    ckpt = models / "Stable-diffusion"
+    ckpt.mkdir(parents=True)
+    te_dir = models / "text_encoder"
+    te_dir.mkdir()
+    (te_dir / backend.ANIMA_TEXT_ENCODER_FILE).write_bytes(b"x")
+    _enable_local(backend, local_checkpoint_dir=str(ckpt))
+    body = client.get("/local/anima-catalog").json()
+    assert body["can_install"] is True
+    by_kind = {e["kind"]: e for e in body["entries"]}
+    assert by_kind["text_encoder"]["installed"] is True
+    assert by_kind["vae"]["installed"] is False
+
+
+def test_local_status_anima_diagnostics(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable_local(backend, model_base="Anima",
+                  model_name="anima-base-v1.0.safetensors")
+    holder = {"modules": backend.LocalNotFoundError("no sd-modules")}
+
+    async def fake_get(cfg, path, timeout=backend.LOCAL_API_TIMEOUT_S):
+        if path == "/sdapi/v1/options":
+            return {}
+        if path == "/sdapi/v1/sd-models":
+            return []
+        if path == "/sdapi/v1/scripts":
+            return {"txt2img": []}
+        if path == "/sdapi/v1/sd-modules":
+            if isinstance(holder["modules"], Exception):
+                raise holder["modules"]
+            return holder["modules"]
+        raise AssertionError(f"unexpected GET {path}")
+
+    backend._local_get = fake_get
+    client = _client(backend)
+
+    # No modules API: the WebUI cannot run Anima and the warning says so.
+    body = client.get("/local/status").json()
+    assert body["ok"] is True
+    assert body["anima"] is True
+    assert "Forge" in body["anima_warning"]
+
+    # Only one Qwen file: the warning switches to the install hint.
+    holder["modules"] = [{"model_name": "qwen_image_vae",
+                          "filename": "/m/VAE/qwen_image_vae.safetensors"}]
+    body = client.get("/local/status").json()
+    assert body["anima_modules_found"] == 1
+    assert backend.ANIMA_TEXT_ENCODER_FILE in body["anima_warning"]
+
+    # Both files: all green, no warning.
+    holder["modules"] = [
+        {"model_name": "qwen_3_06b_base",
+         "filename": "/m/text_encoder/qwen_3_06b_base.safetensors"},
+        {"model_name": "qwen_image_vae",
+         "filename": "/m/VAE/qwen_image_vae.safetensors"}]
+    body = client.get("/local/status").json()
+    assert body["anima_modules_found"] == 2
+    assert "anima_warning" not in body
+
+    # Non-Anima profiles never report the block at all.
+    cfg = backend._load_config()
+    cfg["model_base"] = "Pony"
+    cfg["model_name"] = "ponyDiffusionV6.safetensors"
+    backend._save_config(cfg)
+    body = client.get("/local/status").json()
+    assert "anima" not in body
+
+
+def test_helper_hash_indexes_cover_te_and_vae(tmp_path):
+    helper = _load_helper(tmp_path)
+    assert set(helper._hash_indexes()) \
+        >= {"checkpoint", "lora", "upscaler", "text_encoder", "vae"}

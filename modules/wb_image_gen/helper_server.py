@@ -25,12 +25,16 @@ into the Image Studio -- every request must then carry it as a bearer token.
 Usage:
   python3 helper_server.py --checkpoint-dir <models/Stable-diffusion> \
                            --lora-dir <models/Lora> [--upscaler-dir <models/ESRGAN>] \
+                           [--text-encoder-dir <models/text_encoder>] \
+                           [--vae-dir <models/VAE>] \
                            [--port 7861] [--token T]
 
 Environment overrides (flags win): WB_HELPER_CKPT_DIR, WB_HELPER_LORA_DIR,
-WB_HELPER_UPSCALER_DIR (derived from the checkpoint dir when unset),
-WB_HELPER_PORT (default 7861), WB_HELPER_LISTEN (0 binds to 127.0.0.1 only),
-WB_HELPER_TOKEN, WB_HELPER_CACHE (hash-cache file path).
+WB_HELPER_UPSCALER_DIR, WB_HELPER_TE_DIR, WB_HELPER_VAE_DIR (the last three
+derived from the checkpoint dir when unset — text encoder and VAE folders
+hold Anima's Qwen modules on Forge Neo), WB_HELPER_PORT (default 7861),
+WB_HELPER_LISTEN (0 binds to 127.0.0.1 only), WB_HELPER_TOKEN,
+WB_HELPER_CACHE (hash-cache file path).
 """
 import argparse
 import hashlib
@@ -46,15 +50,17 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-HELPER_VERSION = 2
+HELPER_VERSION = 3
 DEFAULT_PORT = 7861
 DOWNLOAD_CHUNK = 1 << 20
 DOWNLOADS_KEEP_FINISHED = 20
 MAX_BODY_BYTES = 1 << 16
 INSTALL_EXTS = (".safetensors", ".ckpt")
-# Hires-fix upscalers are .pth/.pt ESRGAN files; the kind gets its own
-# whitelist (same rules as the app's local installs).
-KIND_INSTALL_EXTS = {"upscaler": (".pth", ".pt", ".safetensors")}
+# Hires-fix upscalers are .pth/.pt ESRGAN files; VAEs may be legacy .pt.
+# Each such kind gets its own whitelist (same rules as the app's local
+# installs); everything else uses INSTALL_EXTS.
+KIND_INSTALL_EXTS = {"upscaler": (".pth", ".pt", ".safetensors"),
+                     "vae": (".safetensors", ".ckpt", ".pt")}
 KIND_DEFAULT_EXT = {"upscaler": ".pth"}
 SCAN_EXTS = (".safetensors", ".ckpt", ".pt", ".pth")
 _CONTENT_DISPOSITION_RE = re.compile(r'filename\*?="?([^";]+)"?')
@@ -174,8 +180,9 @@ def _register_file(path: Path, kind: str) -> None:
 
 def _hash_indexes() -> dict:
     """{"checkpoint": {sha256 -> file stem}, "lora": {...}, "upscaler":
-    {...}} from the cache."""
-    out: dict = {"checkpoint": {}, "lora": {}, "upscaler": {}}
+    {...}, "text_encoder": {...}, "vae": {...}} from the cache."""
+    out: dict = {"checkpoint": {}, "lora": {}, "upscaler": {},
+                 "text_encoder": {}, "vae": {}}
     with _hash_lock:
         entries = list(_hash_cache["files"].items())
     for file_path, meta in entries:
@@ -444,6 +451,10 @@ def main() -> int:
                         default=os.environ.get("WB_HELPER_LORA_DIR", ""))
     parser.add_argument("--upscaler-dir",
                         default=os.environ.get("WB_HELPER_UPSCALER_DIR", ""))
+    parser.add_argument("--text-encoder-dir",
+                        default=os.environ.get("WB_HELPER_TE_DIR", ""))
+    parser.add_argument("--vae-dir",
+                        default=os.environ.get("WB_HELPER_VAE_DIR", ""))
     parser.add_argument("--port", type=int,
                         default=int(os.environ.get("WB_HELPER_PORT", DEFAULT_PORT)))
     parser.add_argument("--listen",
@@ -455,18 +466,24 @@ def main() -> int:
     args = parser.parse_args()
 
     for kind, raw in (("checkpoint", args.checkpoint_dir), ("lora", args.lora_dir),
-                      ("upscaler", args.upscaler_dir)):
+                      ("upscaler", args.upscaler_dir),
+                      ("text_encoder", args.text_encoder_dir),
+                      ("vae", args.vae_dir)):
         folder = Path(os.path.expanduser(raw)).resolve() if str(raw).strip() else None
         KIND_DIRS[kind] = folder
         if folder is not None and not folder.is_dir():
             log(f"warning: {kind} folder does not exist yet: {folder}")
-    # An unset upscaler folder derives the WebUI-standard sibling of the
-    # checkpoint folder (models/Stable-diffusion -> models/ESRGAN), same as
-    # the app does for its own local installs.
+    # Unset upscaler / text-encoder / VAE folders derive the WebUI-standard
+    # siblings of the checkpoint folder (models/Stable-diffusion ->
+    # models/ESRGAN, models/text_encoder, models/VAE), same as the app does
+    # for its own local installs.
     ckpt = KIND_DIRS.get("checkpoint")
-    if KIND_DIRS.get("upscaler") is None and ckpt is not None \
-            and ckpt.name.lower() == "stable-diffusion":
-        KIND_DIRS["upscaler"] = ckpt.parent / "ESRGAN"
+    if ckpt is not None and ckpt.name.lower() == "stable-diffusion":
+        for kind, sibling in (("upscaler", "ESRGAN"),
+                              ("text_encoder", "text_encoder"),
+                              ("vae", "VAE")):
+            if KIND_DIRS.get(kind) is None:
+                KIND_DIRS[kind] = ckpt.parent / sibling
     if all(v is None for v in KIND_DIRS.values()):
         log("error: pass --checkpoint-dir and/or --lora-dir")
         return 1

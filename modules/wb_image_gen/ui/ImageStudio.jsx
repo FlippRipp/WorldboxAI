@@ -576,6 +576,12 @@ function LocalConnectionCard({ config, draft, set }) {
                 : 'v-pred checkpoint — the WebUI auto-detects v-prediction from the file itself (set the checkpoint folder to let the Studio verify the file)')}
           </p>
         )}
+        {status && status.anima && (
+          <p className={`text-xs mt-1 ${status.anima_warning ? 'text-yellow-400' : 'text-green-400'}`}>
+            {status.anima_warning
+              || 'Anima checkpoint ✓ — the WebUI reports the Qwen text encoder and VAE'}
+          </p>
+        )}
         {status && status.helper && (
           <p className={`text-xs mt-1 ${status.helper.ok ? 'text-green-400' : 'text-red-400'}`}>
             {status.helper.ok
@@ -601,8 +607,9 @@ function LocalConnectionCard({ config, draft, set }) {
           <p className="text-xs text-yellow-600 mt-1">Unsaved connection changes — press Save Changes before testing.</p>
         )}
         <p className="text-xs text-gray-600 mt-1">
-          Any AUTOMATIC1111-compatible WebUI (A1111, Forge, reForge, SD.Next) started with the{' '}
-          <span className="font-mono text-gray-500">--api</span> flag.{' '}
+          Any AUTOMATIC1111-compatible WebUI (A1111, Forge, Forge Neo, reForge, SD.Next) started with
+          the <span className="font-mono text-gray-500">--api</span> flag — Anima checkpoints need
+          Forge Neo (the bundled launcher's default).{' '}
           <button onClick={() => setShowGuide((s) => !s)} className="text-purple-400 hover:underline">
             {showGuide ? 'Hide quick start' : 'How do I set it up?'}
           </button>
@@ -610,16 +617,18 @@ function LocalConnectionCard({ config, draft, set }) {
         {showGuide && (
           <ol className="mt-2 space-y-1.5 text-xs text-gray-400 list-decimal list-inside bg-gray-950/60 border border-gray-800 rounded-lg p-3">
             <li>
-              Install a WebUI —{' '}
+              Install a WebUI — the bundled{' '}
+              <span className="font-mono">modules/wb_image_gen/image_server</span> launcher sets up{' '}
+              <a href="https://github.com/Haoming02/sd-webui-forge-classic/tree/neo" target="_blank" rel="noreferrer" className="text-purple-400 hover:underline">
+                Forge Neo
+              </a>{' '}
+              (runs SDXL-class models, Flux and Anima) with the right flags automatically; classic{' '}
               <a href="https://github.com/AUTOMATIC1111/stable-diffusion-webui" target="_blank" rel="noreferrer" className="text-purple-400 hover:underline">
                 AUTOMATIC1111
               </a>{' '}
-              or{' '}
-              <a href="https://github.com/lllyasviel/stable-diffusion-webui-forge" target="_blank" rel="noreferrer" className="text-purple-400 hover:underline">
-                Forge
-              </a>{' '}
-              (faster, also runs Flux) — and drop at least one checkpoint into{' '}
-              <span className="font-mono">models/Stable-diffusion</span>.
+              works too (no Anima). Drop at least one checkpoint into{' '}
+              <span className="font-mono">models/Stable-diffusion</span>, or install one from the
+              browser below.
             </li>
             <li>
               Add <span className="font-mono text-gray-300">--api</span> to its launch flags
@@ -725,6 +734,35 @@ function LocalConnectionCard({ config, draft, set }) {
           automatically, so most setups never need it.
         </p>
       </div>
+      <div className="grid sm:grid-cols-2 gap-3">
+        <div>
+          <label className={labelCls}>Text encoder folder (optional)</label>
+          <input
+            type="text"
+            value={draft.local_text_encoder_dir ?? ''}
+            onChange={(e) => set('local_text_encoder_dir', e.target.value)}
+            placeholder="e.g. C:\\sd-webui-forge-neo\\models\\text_encoder"
+            className={inputCls}
+            autoComplete="off"
+          />
+        </div>
+        <div>
+          <label className={labelCls}>VAE folder (optional)</label>
+          <input
+            type="text"
+            value={draft.local_vae_dir ?? ''}
+            onChange={(e) => set('local_vae_dir', e.target.value)}
+            placeholder="e.g. C:\\sd-webui-forge-neo\\models\\VAE"
+            className={inputCls}
+            autoComplete="off"
+          />
+        </div>
+      </div>
+      <p className="text-xs text-gray-600 -mt-1">
+        The WebUI's <span className="font-mono">models/text_encoder</span> and{' '}
+        <span className="font-mono">models/VAE</span> folders, where Anima's Qwen modules install.
+        Left empty both are derived from the checkpoint folder automatically.
+      </p>
       <div className="grid sm:grid-cols-2 gap-3">
         <div>
           <label className={labelCls}>Install helper (for a WebUI on another machine)</label>
@@ -858,16 +896,26 @@ function ProfileBar({ config, dirty, onApply, onError }) {
   );
 }
 
-// Mirror of the backend's _base_family heuristic.
+// Mirror of the backend's _base_family heuristic. "anima" (CircleStone's 2B
+// model, its own architecture) matches on word boundaries only and after the
+// xl check, so "Animagine", "animation..." and AnimaPencil-style SDXL names
+// never read as Anima.
 function baseFamily(base) {
   const ident = String(base || '').toLowerCase();
   if (ident.includes('flux')) return 'flux';
-  if (ident.includes('xl') || ident.includes('pony') || ident.includes('illustrious') || ident.includes('noob')) return 'sdxl';
+  if (ident.includes('xl') || ident.includes('pony') || ident.includes('illustrious')
+      || ident.includes('noob') || ident.includes('animagine')) return 'sdxl';
+  if (/\banima\b/.test(ident)) return 'anima';
   if (ident.includes('1.5') || ident.includes('sd 1') || ident.includes('sd1')) return 'sd15';
   return '';
 }
 
-const FAMILY_LABELS = { flux: 'FLUX.2', sdxl: 'SDXL-class', sd15: 'SD 1.5' };
+const FAMILY_LABELS = { flux: 'FLUX.2', sdxl: 'SDXL-class', sd15: 'SD 1.5', anima: 'Anima' };
+
+// Mirror of the backend's BOORU_TAG_MODEL_MARKERS + _marker_matches:
+// "animagine" before "anima", and "anima" matched on word boundaries only.
+const BOORU_TAG_MODEL_MARKERS = ['pony', 'illustrious', 'noob', 'animagine', 'anima'];
+const markerMatches = (m, ident) => (m === 'anima' ? /\banima\b/.test(ident) : ident.includes(m));
 
 function fmtCount(n) {
   n = Number(n) || 0;
@@ -2791,14 +2839,14 @@ export default function ImageStudio({ onBack }) {
   // an explicit prompt_style_mode wins, "auto" falls back to the
   // BOORU_TAG_MODEL_MARKERS heuristic.
   const modelIdent = `${draft.model_base || ''} ${draft.model_name || ''}`.toLowerCase();
-  const autoPromptStyle = ['pony', 'illustrious', 'noob', 'animagine'].some((m) => modelIdent.includes(m))
+  const autoPromptStyle = BOORU_TAG_MODEL_MARKERS.some((m) => markerMatches(m, modelIdent))
     ? 'tags' : 'natural';
   const promptStyleMode = draft.prompt_style_mode || 'auto';
   const promptStyle = promptStyleMode === 'auto' ? autoPromptStyle : promptStyleMode;
   // Mirror of the backend's _tag_model_marker: the tag-trained family the
   // checkpoint matches, keying quality_tag_defaults. Null for natural models.
   const qualityMarker =
-    ['pony', 'illustrious', 'noob', 'animagine'].find((m) => modelIdent.includes(m)) || null;
+    BOORU_TAG_MODEL_MARKERS.find((m) => markerMatches(m, modelIdent)) || null;
   const qualityDefault =
     (config?.quality_tag_defaults || {})[qualityMarker || 'pony'] || 'score_9, score_8_up, score_7_up';
   // Mirror of the backend's _is_vpred: v-prediction finetunes layer
@@ -2915,6 +2963,56 @@ export default function ImageStudio({ onBack }) {
     }
   };
 
+  // Anima's Qwen text encoder + VAE: the upscaler catalog's twin (two fixed
+  // files, per-entry install state and progress), shown for Anima profiles.
+  const [animaCatalog, setAnimaCatalog] = useState(null);
+  const [animaDownloads, setAnimaDownloads] = useState([]);
+  const [animaInstallError, setAnimaInstallError] = useState('');
+  const refreshAnimaCatalog = useCallback(() => {
+    fetch(`${API_BASE}/local/anima-catalog`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => { if (data) setAnimaCatalog(data); })
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (isLocal && checkpointFamily === 'anima') refreshAnimaCatalog();
+  }, [isLocal, checkpointFamily, refreshAnimaCatalog]);
+  const refreshAnimaDownloads = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/local/downloads`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setAnimaDownloads((data.downloads || []).filter(
+        (d) => d.kind === 'text_encoder' || d.kind === 'vae'));
+    } catch { /* transient poll failure */ }
+  }, []);
+  useEffect(() => {
+    if (!animaDownloads.some((d) => d.status === 'downloading')) return undefined;
+    const timer = setInterval(refreshAnimaDownloads, 1000);
+    return () => clearInterval(timer);
+  }, [animaDownloads, refreshAnimaDownloads]);
+  const animaDoneCount = animaDownloads.filter((d) => d.status === 'done').length;
+  useEffect(() => {
+    if (animaDoneCount > 0) refreshAnimaCatalog();
+  }, [animaDoneCount, refreshAnimaCatalog]);
+  const installAnimaModule = async (entry) => {
+    setAnimaInstallError('');
+    try {
+      const res = await fetch(`${API_BASE}/local/downloads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: entry.kind, url: entry.url,
+                               sha256: entry.sha256 || '',
+                               filename: entry.filename, label: entry.name }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      await refreshAnimaDownloads();
+    } catch (e) {
+      setAnimaInstallError(String(e.message || e));
+    }
+  };
+
   const save = async () => {
     setSaving(true);
     setSaveError('');
@@ -2962,6 +3060,8 @@ export default function ImageStudio({ onBack }) {
         local_checkpoint_dir: draft.local_checkpoint_dir ?? '',
         local_lora_dir: draft.local_lora_dir ?? '',
         local_upscaler_dir: draft.local_upscaler_dir ?? '',
+        local_text_encoder_dir: draft.local_text_encoder_dir ?? '',
+        local_vae_dir: draft.local_vae_dir ?? '',
         local_helper_url: draft.local_helper_url ?? '',
         local_helper_token: draft.local_helper_token ?? '',
         local_batch_size: Math.max(1, Number(draft.local_batch_size) || 4),
@@ -3263,6 +3363,12 @@ export default function ImageStudio({ onBack }) {
             local={isLocal}
             onSelect={(m) => setDraft((d) => ({ ...d, model_name: m.sd_name, model_base: m.base_model || '' }))}
           />
+          {!isLocal && checkpointFamily === 'anima' && (
+            <p className="text-xs text-yellow-400">
+              Anima checkpoints are not hosted on Novita — switch this profile's provider to Local
+              (SD WebUI Forge Neo, which the bundled launcher installs) to render them.
+            </p>
+          )}
           {isLocal && draft.model_name && (
             <div>
               <label className={labelCls}>Base model</label>
@@ -3284,6 +3390,60 @@ export default function ImageStudio({ onBack }) {
                 wrong — it drives the automatic prompt style (booru tags vs natural language) and which
                 LoRAs are considered compatible.
               </p>
+            </div>
+          )}
+          {isLocal && checkpointFamily === 'anima' && animaCatalog && (
+            <div className="bg-gray-950/60 border border-gray-800 rounded-lg px-3 py-2 space-y-1.5">
+              <div className="text-xs uppercase tracking-wider text-gray-500">
+                Anima support files — one-click install
+              </div>
+              <p className="text-xs text-gray-600">
+                Anima checkpoints render through a separate Qwen text encoder and VAE (needs SD WebUI
+                Forge Neo — the bundled launcher's default). Install both once; every Anima checkpoint
+                shares them.
+              </p>
+              {!animaCatalog.can_install && (
+                <p className="text-xs text-gray-600">
+                  Set your WebUI's checkpoint folder in the Setup tab — or the install helper URL for a
+                  WebUI on another machine — to enable installs. Files land in the WebUI's
+                  models/text_encoder and models/VAE.
+                </p>
+              )}
+              {(animaCatalog.entries || []).map((entry) => {
+                const dl = animaDownloads.find(
+                  (d) => d.label === entry.name
+                    || (d.filename && d.filename === entry.filename));
+                const installing = dl?.status === 'downloading';
+                const installed = entry.installed || dl?.status === 'done';
+                return (
+                  <div key={entry.filename} className="flex items-center justify-between gap-3 text-xs">
+                    <div className="min-w-0">
+                      <span className="text-gray-300 font-mono">{entry.name}</span>
+                      <span className="text-gray-600"> — {entry.description}</span>
+                    </div>
+                    {installed ? (
+                      <span className="text-green-400 whitespace-nowrap">Installed ✓</span>
+                    ) : installing ? (
+                      <span className="text-gray-400 whitespace-nowrap">
+                        {dl.total_bytes
+                          ? `${Math.min(100, Math.round((dl.received_bytes / dl.total_bytes) * 100))}%`
+                          : 'downloading…'}
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => installAnimaModule(entry)}
+                        disabled={!animaCatalog.can_install}
+                        className="text-purple-400 hover:text-purple-300 disabled:opacity-40 whitespace-nowrap"
+                      >
+                        Install
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+              {animaInstallError && (
+                <p className="text-xs text-red-400">{animaInstallError}</p>
+              )}
             </div>
           )}
           {isLocal && (
@@ -3631,6 +3791,12 @@ export default function ImageStudio({ onBack }) {
                     {' '}v-pred checkpoint detected: guidance stays at{' '}
                     {renderDefaults.guidance_scale} (higher oversaturates — CFG-rescale
                     isn't reachable through the WebUI API) with the {renderDefaults.scheduler} schedule.
+                  </>
+                )}
+                {qualityMarker === 'anima' && (
+                  <>
+                    {' '}Anima's card suggests 30–50 steps; the distilled Turbo variant
+                    instead wants guidance 1 at 8–12 steps — set those by hand when using it.
                   </>
                 )}
               </span>
