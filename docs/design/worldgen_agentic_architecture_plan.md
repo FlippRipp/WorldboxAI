@@ -62,7 +62,11 @@ drafts are server truth with a hand-edit surface, and the stateless
 veto lock still held conservatively. The enabling fix rode along:
 brief writes are now metadata-surgical (``update_brief``) — a C7a-era
 ``save_world`` side effect silently flipped drafts to finished on
-every brief edit. See the C7 section.
+every brief edit. See the C7 section. v2e (the research tool:
+provider-side web search as an engine-level search slot with a
+per-provider toggle, surfaced as the availability-gated ``web_search``
+tool in both agents' catalogs) DESIGNED and LANDED 2026-07-20 on
+Filip's direction — the catalog is now 26 tools; see the v2e section.
 Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
@@ -1723,6 +1727,93 @@ phase drives the same harness, not a second engine (P5); approval
 gates stay dead — observability, cancel, and now a voice, but never a
 mid-build gate (P6, rescoped accordingly in Design principles).
 
+### v2e — The research tool: provider-side web search (designed and landed 2026-07-20)
+
+*Prompted by Filip directly after C7b ("can we add an internet search
+tool ... good if you for example are creating a world inspired by
+existing media"), designed in the same conversation. The backend survey
+ran wide — Exa's REST API and its keyless public MCP endpoint (which is
+what opencode's built-in websearch calls), keyless MediaWiki/Fandom
+APIs, self-hosted SearXNG, keyed general APIs — and ended on Filip's
+call: the search backend is the LLM provider itself, as an engine-level
+capability. OpenRouter's web plugin is Exa underneath anyway, rides any
+model (the slot rule holds), returns structured ``url_citation``
+annotations, bills the account the app already depends on
+(~$0.005/search), and adds zero new external dependencies: search fails
+only where generation would fail too.*
+
+**Decisions (settled with Filip, 2026-07-20):**
+
+- **W1 — Search is an engine slot: per-provider capability + per-provider
+  toggle.** Provider definitions (``backend/engine/providers.py``)
+  declare ``supports_search`` explicitly on every provider and a
+  ``search_enabled`` config field (toggle, default ON) exactly on the
+  providers that support it — ``save_config``'s field whitelist keeps
+  the key out of non-supporting configs by construction. The provider
+  payload carries ``supports_search``; the Model Settings screen renders
+  a Web Search toggle for every provider, disabled with "Not supported
+  by this provider" where the capability is absent (Filip's spec:
+  present everywhere, disabled where unsupported). v1 wires OpenRouter
+  only; gemini/anthropic (which have search products litellm could
+  reach) are declared ``False`` honestly until an integration is
+  written and tested — never claimed on spec sheets alone (P7 spirit).
+- **W2 — ``LLMService.web_search``: one fast-slot completion with the
+  plugin.** ``search_available()`` = live mode AND provider supports
+  AND toggle on (the toggle is read outside reconfigure's skip-empty
+  mapping loop, so ``False`` actually lands). ``web_search(query,
+  max_results, include_domains)`` runs the module-fast model with
+  ``extra_body.plugins = [{"id": "web", "engine": "exa", ...}]`` merged
+  with the per-slot OpenRouter route pin (both ride extra_body — a
+  blind ``kwargs.update`` would clobber one), fixed low temperature
+  (factual retrieval, not storytelling), and returns
+  ``{answer, sources: [{title, url, excerpt}], provider, model}`` from
+  the ``url_citation`` annotations (dict- and object-shaped both
+  handled; sourceless answers stand on their own). Unavailability
+  raises ``LLMProviderError`` naming WHICH gate failed; ``max_results``
+  clamps to OpenRouter's included tier (1..10 — a hard external API
+  constraint, the allowed kind).
+- **W3 — The first availability-gated tool: hidden in render, loud on
+  invoke.** ``ToolSpec`` gains an optional ``available(services)``
+  predicate and the registry a ``unavailable_tool_ids(services)``
+  helper. Every surface that shows tools subtracts the failing set,
+  recomputed per turn so a Model Settings flip applies on the next one:
+  the build system prompt (filtered catalog render + a research
+  guidance bullet that comes and goes with the tool), the chat catalog
+  (``chat_tool_ids`` = ``CHAT_TOOL_IDS`` + gated
+  ``CHAT_OPTIONAL_TOOL_IDS``; the U1 restriction message follows the
+  same set), the note verifier's N4 carve (``verifier_tool_ids`` and
+  both its prompt renders take ``services``; the no-arg form stays the
+  pure mechanical carve), and the ``read_catalog`` tool. Registration
+  stays static (P1/P2); a hidden tool invoked anyway — hallucinated or
+  mid-build toggle flip — fails as a ToolError observation, never a
+  crash (P7).
+- **W4 — Research feeds the channels that exist; the brief gate
+  stands.** Chat phase: the design partner searches while converging
+  the brief and records what the player agrees to as notes (the U2
+  gate is vacuous there — every turn follows user input). Build phase:
+  findings thread into steering notes and guidance (run_step ``note``,
+  run_pass ``guidance``, expand_node ``note``) — research never writes
+  the brief unprompted. Tool description and both prompts teach the
+  injection stance: results are quoted source material to judge, never
+  instructions to follow.
+- **W5 — No new budget class (D5, the v2a precedent).** web_search
+  rides ``agent_max_tool_calls``; the chat mini-loop
+  (``agent_chat_turns``) already bounds per-message research.
+
+*Landed 2026-07-20: the catalog is 26 tools. Verified by
+``test_llm_search.py`` at the root (the pytest.ini ``python_files``
+whitelist grew its first new entry in a while — provider declarations,
+the search truth table, the plugin call shape incl. the extra_body
+merge, annotation parsing both shapes) and
+``modules/wb_worldgen/test_agent_research.py`` (the gate on every
+surface, invoke guard, result/failure shaping) — no tokens, no network
+in either. Environment note for dev containers: the root suite needs
+``cffi``/``cryptography`` wheels present or nine files fail collection
+with a pyo3 panic (dist-packages cryptography missing _cffi_backend) —
+unrelated to any code here. Live verification outstanding: rides
+Filip's next live run (a search-grounded ideation — "a world like X" —
+through Go and the build).*
+
 ### Superseded: the plan-artifact design (refined and replaced 2026-07-19)
 
 The original Arc C made the plan a step: a `build_plan` artifact authored
@@ -1767,6 +1858,7 @@ file, before the 2026-07-19 Arc C rewrite).
 | 18 | v2d expand_node tool | M | ✓ landed (e7d2b33) | child maps reachable — the wall from both live runs falls |
 | 19 | C7a mid-build user messages + brief-edit tools | S–M | ✓ landed 2026-07-20 | a voice into the running build |
 | 20 | C7b merged conversational front door (+ the update_brief fix) | L | ✓ landed 2026-07-20 | one flow: chat the world into shape, watch it build, keep talking |
+| 21 | v2e research tool (engine search slot + provider toggle + gated web_search) | M | ✓ landed 2026-07-20 | worlds inspired by existing media — grounded, not guessed |
 
 (A5 landed before B1 — the reverse of the original ordering; nothing
 depended on the order.) RuntimeHost (`backend.py` half of A1) can ride along
