@@ -39,13 +39,19 @@ auto-checkpointed and a build-scoped revert tool restores byte-exact.
 v2d (the expand_node tool) LANDED 2026-07-19 (e7d2b33) on Filip's go,
 design delegated: child maps — the wall that felled both live builds —
 are now reachable through the same expansion surface play-time uses.
-The catalog is now 21 tools. C7 (one conversation: user
+C7 (one conversation: user
 messages into the running build + ideation merged as the chat phase of
 one agent session) DESIGNED 2026-07-20 with Filip — decisions U1–U6
 settled (two agents, one session; brief edits as description-gated
 tools; no authority machinery on user input; transcript on demand via a
 read tool), two forks open, staged C7a (mid-build channel) then C7b
-(merged front door); nothing landed yet — see the C7 section.
+(merged front door). C7a LANDED 2026-07-20: the user can speak into the
+running build (queue → turn-boundary observations, never-dropped unread
+recording), the agent answers via ``say`` chat bubbles, user words
+become contract through update_prompt/update_rules/update_notes (the
+no_compromise veto lock held conservatively while fork 1 is open), and
+read_conversation serves the transcript on demand — the catalog is now
+25 tools; C7b is the outstanding slice — see the C7 section.
 Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
@@ -1575,6 +1581,52 @@ unchanged: the ready offer highlights and never gates, and zero-turn Go
   build's budget — revisit only if live runs show it hurting).
   Independent of C7b, immediately useful (both live builds wanted
   exactly this), and the live evidence de-risks the merge.
+
+  *Landed 2026-07-20, with recorded refinements. (1) The channel is as
+  designed: ``AgentBuild.post_message`` queues (ids ``m1``…), the drain
+  at the top of each turn appends verbatim ``{"user_message": ...}``
+  entries to ``recent`` and emits persisted ``user_message`` events
+  (id + the turn that reads them); messages still queued when the build
+  ends drain in the terminal path flagged ``unread`` — recorded, never
+  silently dropped — and the status snapshot carries
+  ``queued_messages`` so a reattaching observer shows pending bubbles.
+  (2) ``say`` is accepted on both completion shapes and rides the turn
+  event only when non-empty. (3) The brief tools are ``mutates=True`` —
+  which is what excludes them from the verifier's N4 carve; the v2c
+  auto-checkpoint before them is harmless since restore carries the
+  current brief forward (R3). ``update_prompt`` writes ``brief.prompt``
+  AND ``seed_prompt`` together (the generation seams read seed_prompt —
+  a brief-only edit would be cosmetic), and the build system prompt now
+  renders the brief prompt from the per-turn world_state re-read (D4),
+  so the edit takes effect next turn. ``update_rules`` replaces
+  wholesale, reports an added/removed diff, and points at re-running
+  world_rules when it is already authored (the critique rubric is the
+  authored step, not the agreed list). ``update_notes`` is id-matched
+  wholesale: id-only keeps, id+fields edits, no-id adds, omission
+  removes (reported loudly in the result); a user-directed edit clears
+  ``status``/``original_text``/``rationale``/``verifier_context`` (U5 —
+  a hand edit, not a compromise, nothing left for N7 to review), and
+  fresh ids never reuse an id removed in the same call (verdicts and
+  finding keys ride note ids). (4) Fork 1 stays open, held
+  conservatively: ``update_notes`` refuses to edit or remove
+  ``no_compromise`` notes — U3 means the tool cannot verify a user is
+  speaking, so allowing it would reopen exactly the agent-side
+  lawyering N7 locks out; lifting the refusal is a one-line change once
+  Filip decides. (5) ``read_conversation`` reads the live handle's log
+  and falls back to the persisted artifact — the fallback is what hands
+  it to the note verifier through N4's mechanical carve (verifier
+  ToolContexts carry no build handle). (6) Observer: input box while
+  running, queued bubbles reconciled by message id at render time
+  (replay-race-proof), user/say chat bubbles inline in the action log,
+  the unread annotation on builds that ended mid-conversation, and a
+  brief-display refetch after each successful brief-edit action so the
+  contract on screen stays current. Verified by 14 new tests
+  (``test_agent_conversation.py``; module suite 581, root 688) and a
+  real-Chromium drive of the whole loop against the real app with only
+  ``agent_turn`` scripted: queued state → drain → say + update_rules
+  with the header refresh → a second message left queued → unread at
+  terminal → artifact-replay reattach.*
+
 - **C7b — the merged front door (L).** The two-mode loop (chat phase
   awaits the message queue; Go flips to self-driving — the control-flow
   rewrite of ``_run_build``); session-from-first-message with a lazily
@@ -1643,7 +1695,7 @@ file, before the 2026-07-19 Arc C rewrite).
 | 16 | Ecstasy Veil P7 fixes (config contract, note threading, excerpt honesty) | S–M | ✓ landed (5174f95, 39380ca) | steering that actually steers; no fabricated findings |
 | 17 | v2c checkpoint/revert | M | ✓ landed (60889d7) | the agent's undo — a destructive mistake is one call back |
 | 18 | v2d expand_node tool | M | ✓ landed (e7d2b33) | child maps reachable — the wall from both live runs falls |
-| 19 | C7a mid-build user messages + brief-edit tools | S–M | designed 2026-07-20 | a voice into the running build |
+| 19 | C7a mid-build user messages + brief-edit tools | S–M | ✓ landed 2026-07-20 | a voice into the running build |
 | 20 | C7b merged conversational front door | L | designed 2026-07-20 | one flow: chat the world into shape, watch it build, keep talking |
 
 (A5 landed before B1 — the reverse of the original ordering; nothing

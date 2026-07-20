@@ -745,6 +745,37 @@ async def agent_build_cancel(world_id: str):
             "cancelling": agent_harness.cancel_build(world_id)}
 
 
+class AgentMessageRequest(BaseModel):
+    #: What the user says to the running build's agent — delivered verbatim
+    #: at the next turn boundary (C7a/U3).
+    text: str = ""
+
+
+@router.post("/api/world/{world_id}/agent/message")
+async def agent_build_message(world_id: str, request: AgentMessageRequest):
+    """Speak into a running build (C7a): the message queues on the build
+    handle and reaches the agent as a plain observation at the next turn
+    boundary — mid-action it waits until the current tool call returns.
+    Returns the queued message's id (echoed by the ``user_message`` event
+    when it lands) and its queue position. Only a RUNNING build listens:
+    no build is 404, a finished one is 409."""
+    from wbworldgen.worldgen.agent import harness as agent_harness
+    text = (request.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    handle = agent_harness.get_build(world_id)
+    if handle is None:
+        raise HTTPException(status_code=404,
+                            detail=f"No agent build for world '{world_id}'.")
+    if handle.status != "running":
+        raise HTTPException(
+            status_code=409,
+            detail=(f"The build for '{world_id}' is {handle.status} — "
+                    "messages reach only a running build."))
+    queued = handle.post_message(text)
+    return {"world_id": world_id, "queued": True, **queued}
+
+
 @router.get("/api/world/{world_id}/enrich/passes")
 async def enrich_passes(world_id: str):
     """The enrichment pass slice of the capability catalog: what passes are

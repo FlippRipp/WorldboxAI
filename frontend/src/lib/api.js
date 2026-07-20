@@ -189,6 +189,10 @@ export const api = {
   agentVeto:              (worldId, noteIds) => request(`/api/world/${worldId}/agent/veto`, { method: 'POST', body: JSON.stringify({ note_ids: noteIds }) }),
   agentBuildStatus:       (worldId) => request(`/api/world/${worldId}/agent/status`),
   agentBuildCancel:       (worldId) => request(`/api/world/${worldId}/agent/cancel`, { method: 'POST' }),
+  // Speak into a running build (C7a): the text reaches the agent verbatim
+  // at the next turn boundary. Returns {id, position}; the id is echoed by
+  // the user_message event once the agent picks the message up.
+  agentMessage:           (worldId, text) => request(`/api/world/${worldId}/agent/message`, { method: 'POST', body: JSON.stringify({ text }) }),
   // Agent build event stream: replays the persisted action log from `after`
   // (persisted events carry their index `i`), then streams live — including
   // transient enrichment progress events (no `i`). Every event is handed to

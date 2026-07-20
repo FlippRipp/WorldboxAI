@@ -6,7 +6,11 @@ import { api } from 'api';
 // expandable observations, evaluator findings, transient enrichment
 // progress, cancel, and reattach — the SSE stream replays the persisted
 // log from the last seen index and reconnects after drops, so a relaunched
-// client recovers the full picture from the running backend.
+// client recovers the full picture from the running backend. Since C7a the
+// log is also a conversation: an input box posts messages the agent reads
+// at the next turn boundary (queued until then — mid-enrichment a reply
+// can be minutes away), and user messages / the agent's `say` replies
+// render as chat bubbles inline with the actions they steered.
 
 const STATUS_LABEL = {
   running: 'building…',
@@ -53,6 +57,21 @@ function summarizeResult(result) {
   if (Array.isArray(result.findings)) {
     return result.clean ? 'evaluation clean' : `${result.blocking ?? 0} blocking finding(s)`;
   }
+  if (Array.isArray(result.rules) && Array.isArray(result.added)) {
+    const bits = [`${result.rules.length} rule(s)`];
+    if (result.added.length) bits.push(`+${result.added.length}`);
+    if (result.removed?.length) bits.push(`−${result.removed.length}`);
+    return `rules updated: ${bits.join(' · ')}`;
+  }
+  if (Array.isArray(result.notes) && Array.isArray(result.edited)) {
+    const bits = [];
+    if (result.added?.length) bits.push(`added ${result.added.join(', ')}`);
+    if (result.edited.length) bits.push(`edited ${result.edited.join(', ')}`);
+    if (result.removed?.length) bits.push(`removed ${result.removed.map((r) => r.id).join(', ')}`);
+    return `notes updated: ${bits.join(' · ') || 'no changes'}`;
+  }
+  if (typeof result.prompt === 'string' && typeof result.previous === 'string') return 'prompt updated';
+  if (Array.isArray(result.exchanges)) return `${result.exchanges.length} exchange(s) read`;
   if (Array.isArray(result.maps)) {
     return result.maps.map((m) => `${m.label || m.map_id}: ${m.nodes} nodes, ${m.named} named`).join(' · ');
   }
@@ -152,13 +171,45 @@ function NotesReviewPanel({ review, onVeto, vetoing }) {
   );
 }
 
+// A chat bubble in the action log (C7a): the user's message (right, sky)
+// or the agent's `say` reply (left, emerald). `queued`/`unread` annotate
+// the two off-nominal states of a user message.
+function ChatBubble({ who, text, queued, unread }) {
+  const user = who === 'user';
+  return (
+    <div className={`flex pt-1 ${user ? 'justify-end' : 'justify-start'}`}>
+      <div
+        className={`max-w-[85%] rounded-lg px-3 py-1.5 border ${
+          user
+            ? `rounded-br-sm ${queued ? 'bg-sky-950/30 border-sky-900/50 border-dashed' : 'bg-sky-900/40 border-sky-800/70'}`
+            : 'rounded-bl-sm bg-emerald-950/40 border-emerald-900/70'
+        }`}
+      >
+        <p className={`text-sm whitespace-pre-wrap break-words ${
+          user ? (queued ? 'text-sky-200/70' : 'text-sky-100') : 'text-emerald-100'
+        }`}>{text}</p>
+        {queued && (
+          <p className="text-[11px] text-gray-500 mt-0.5">queued — the agent reads it after the current action</p>
+        )}
+        {unread && (
+          <p className="text-[11px] text-amber-400/80 mt-0.5">the build ended before the agent read this</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function LogRow({ evt }) {
   const [open, setOpen] = useState(false);
+  if (evt.type === 'user_message') {
+    return <ChatBubble who="user" text={evt.text} unread={evt.unread} />;
+  }
   if (evt.type === 'turn') {
     return (
       <div className="pt-3 first:pt-0">
         <div className="text-[11px] uppercase tracking-wider text-gray-600">Turn {evt.turn}</div>
         {evt.thought && <div className="text-xs text-gray-500 italic">{evt.thought}</div>}
+        {evt.say && <ChatBubble who="agent" text={evt.say} />}
       </div>
     );
   }
@@ -232,18 +283,32 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
   const [gone, setGone] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [vetoing, setVetoing] = useState(false);
+  // Messages sent but not yet drained by the agent (C7a). Their bubbles
+  // render as "queued" until the matching user_message event lands; the
+  // status snapshot re-seeds them on reattach.
+  const [pending, setPending] = useState([]);
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
   // Bumped when a veto relaunches the build: both effects re-run and the
   // observer follows the fix run from its first event.
   const [streamEpoch, setStreamEpoch] = useState(0);
   const lastIRef = useRef(-1);
   const logRef = useRef(null);
+  const briefEditsRef = useRef(0);
 
   // One snapshot up front: the prompt/counters paint before the replay
   // lands, and a 404 marks the stale reference for dismissal.
   useEffect(() => {
     let alive = true;
     api.agentBuildStatus(worldId)
-      .then((st) => { if (alive) setMeta(st); })
+      .then((st) => {
+        if (!alive) return;
+        setMeta(st);
+        // Reattach: messages queued server-side before this mount keep
+        // their bubbles (merge — a message sent during the fetch stays).
+        const queued = st.queued_messages || [];
+        setPending((p) => [...queued.filter((m) => !p.some((x) => x.id === m.id)), ...p]);
+      })
       .catch((e) => { if (alive && e.status === 404) setGone(true); });
     return () => { alive = false; };
   }, [worldId, streamEpoch]);
@@ -286,11 +351,34 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
     return () => { alive = false; clearTimeout(timer); ctrl?.abort(); };
   }, [worldId, streamEpoch]);
 
+  // The header shows the brief from the status snapshot; a successful
+  // brief-edit tool call (U2 — the agent carrying the user's words into
+  // the contract) refetches it so the displayed contract stays current.
+  useEffect(() => {
+    const edits = events.filter((e) => (
+      e.type === 'action'
+      && ['update_prompt', 'update_rules', 'update_notes'].includes(e.tool)
+      && events.some((o) => o.type === 'observation' && o.ok && o.i === e.i + 1)
+    )).length;
+    if (edits > briefEditsRef.current) {
+      briefEditsRef.current = edits;
+      api.agentBuildStatus(worldId).then(setMeta).catch(() => {});
+    }
+  }, [events, worldId]);
+
+  // Queued bubbles: everything sent whose user_message event hasn't landed
+  // yet. Derived at render time, so replay/live races can't double-show a
+  // message — once the event is in the log, the log's bubble is the truth.
+  const landedIds = new Set(
+    events.filter((e) => e.type === 'user_message').map((e) => e.id),
+  );
+  const queuedMessages = pending.filter((m) => !landedIds.has(m.id));
+
   // Keep the log pinned to the newest entry.
   useEffect(() => {
     const el = logRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [events.length]);
+  }, [events.length, queuedMessages.length]);
 
   const status = terminal ? terminal.status : (gone ? 'gone' : 'running');
   const running = status === 'running' && !gone;
@@ -308,6 +396,24 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
     try { await api.agentBuildCancel(worldId); } catch { /* build may already be over */ }
   };
 
+  // Speak into the build (C7a): the text queues server-side and reaches
+  // the agent at the next turn boundary — mid-action, a reply can be
+  // minutes away, which is what the queued bubble state says.
+  const send = async () => {
+    const text = draft.trim();
+    if (!text || sending) return;
+    setSending(true);
+    try {
+      const res = await api.agentMessage(worldId, text);
+      setPending((p) => [...p, { id: res.id, text }]);
+      setDraft('');
+    } catch (e) {
+      alert('Message failed: ' + e.message);
+    } finally {
+      setSending(false);
+    }
+  };
+
   // The veto (N7): relaunch with the rejected notes binding, then follow
   // the fix run from scratch — same world id, a fresh build and stream.
   const veto = async (noteIds) => {
@@ -320,6 +426,7 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
       setProgress(null);
       setMeta(null);
       setCancelling(false);
+      setPending([]);
       setStreamEpoch((n) => n + 1);
     } catch (e) {
       alert('Veto failed: ' + e.message);
@@ -502,12 +609,38 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
           <div>
             <div className="text-[11px] uppercase tracking-wider text-gray-600 mb-1">Action log</div>
             <div ref={logRef} className="bg-gray-900/50 border border-gray-800 rounded-lg p-3 max-h-96 overflow-y-auto book-scroll space-y-1.5">
-              {events.length === 0 && (
+              {events.length === 0 && queuedMessages.length === 0 && (
                 <p className="text-xs text-gray-600">{gone ? 'No log.' : 'Waiting for the first turn…'}</p>
               )}
               {events.map((evt) => <LogRow key={evt.i} evt={evt} />)}
+              {queuedMessages.map((m) => (
+                <ChatBubble key={m.id} who="user" text={m.text} queued />
+              ))}
             </div>
           </div>
+
+          {running && (
+            <form
+              onSubmit={(e) => { e.preventDefault(); send(); }}
+              className="flex gap-2"
+            >
+              <input
+                type="text"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                placeholder="Say something to the agent — it reads at the next turn…"
+                disabled={sending}
+                className="flex-1 bg-gray-900/70 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-sky-700 transition-colors"
+              />
+              <button
+                type="submit"
+                disabled={sending || !draft.trim()}
+                className="px-3 py-2 rounded-lg border border-sky-800 text-sky-300 hover:bg-sky-950/40 disabled:opacity-50 disabled:cursor-not-allowed text-sm transition-colors"
+              >
+                {sending ? 'Sending…' : 'Send'}
+              </button>
+            </form>
+          )}
 
         </div>
       </div>

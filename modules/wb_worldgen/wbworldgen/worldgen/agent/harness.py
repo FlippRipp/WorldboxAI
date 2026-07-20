@@ -20,11 +20,15 @@ calls, max fix rounds per finding (a blocking finding still standing after
 that many evaluation rounds is auto-accepted and recorded). Every mutating
 tool call is preceded by a world checkpoint keyed by its action index
 (v2c) — the revert tool's restore targets; the store is per-build, cleared
-at launch and on every terminal state. The user is
-out of the loop during the build (P6): steering happened at the go-gate,
-observability is the persisted todo/action-log artifact
-(``agent_build.json`` in the world directory) streamed live over SSE, and
-cancel is always available. Clients reattach to a running build through
+at launch and on every terminal state. The user does not approve steps
+(P6, as rescoped by C7): steering happened at the go-gate, observability
+is the persisted todo/action-log artifact (``agent_build.json`` in the
+world directory) streamed live over SSE, and cancel is always available —
+but the user keeps a *voice*: messages posted to the build queue on the
+handle and drain at the next turn boundary as plain observations (C7a/U3,
+no engineered authority), the agent may answer through the completion's
+optional ``say`` (U6), and user words become contract through the
+brief-edit tools (U2). Clients reattach to a running build through
 the in-process build registry; the artifact serves finished builds after
 a restart (backend-restart *resume* is a recorded v2 item).
 """
@@ -81,6 +85,11 @@ class AgentBuild:
         #: note id -> {"rounds", "transcript"} — the per-finding dialogue
         #: state discuss_finding budgets against (N5).
         self.note_dialogues: dict = {}
+        #: The mid-build message channel (C7a): user messages queue here
+        #: and drain at the next turn boundary into ``recent`` and the
+        #: persisted log — plain observations, no engineered authority (U3).
+        self.pending_messages: list = []
+        self.message_seq = 1
         self.cancel_requested = False
         self.result: dict = None
         self.error: str = None
@@ -88,6 +97,17 @@ class AgentBuild:
         self.finished_at: str = None
         self.subscribers: list = []      # asyncio.Queue per attached observer
         self.task: asyncio.Task = None
+
+    def post_message(self, text: str) -> dict:
+        """Queue one user message for the next turn boundary (C7a). The
+        drain emits the persisted ``user_message`` event and hands the text
+        to the agent as a plain observation; until then the message rides
+        the snapshot's ``queued_messages`` so a reattaching observer still
+        shows it."""
+        mid = f"m{self.message_seq}"
+        self.message_seq += 1
+        self.pending_messages.append({"id": mid, "text": text})
+        return {"id": mid, "position": len(self.pending_messages)}
 
     def snapshot(self) -> dict:
         return {
@@ -99,6 +119,7 @@ class AgentBuild:
             "error": self.error, "result": self.result,
             "log_len": len(self.log),
             "last_event": self.log[-1] if self.log else None,
+            "queued_messages": [dict(m) for m in self.pending_messages],
         }
 
     def subscribe(self) -> asyncio.Queue:
@@ -177,6 +198,26 @@ async def _emit(handle: AgentBuild, evt: dict, persist: bool = True):
         _persist_artifact(handle)
     for q in list(handle.subscribers):
         q.put_nowait(evt)
+
+
+async def _drain_messages(handle: AgentBuild, unread: bool = False):
+    """Move queued user messages into the persisted log and — at a turn
+    boundary — into ``recent`` as plain ``{"user_message": ...}``
+    observations the coming turn reads (C7a/U3: the text lands verbatim,
+    with no engineered authority; the model's instruction-following is the
+    mechanism). ``unread=True`` is the terminal path: the build ended with
+    messages still queued, so they are recorded — never silently dropped —
+    but flagged as never having reached the agent."""
+    while handle.pending_messages:
+        msg = handle.pending_messages.pop(0)
+        evt = {"type": "user_message", "id": msg["id"], "text": msg["text"]}
+        if unread:
+            evt["unread"] = True
+        else:
+            evt["turn"] = handle.turns
+            handle.recent.append({"turn": handle.turns,
+                                  "user_message": msg["text"]})
+        await _emit(handle, evt)
 
 
 def _clear_checkpoints(builder, world_id: str):
@@ -285,13 +326,18 @@ def _system_prompt(handle: AgentBuild, world_state: dict, budgets: dict) -> str:
         f"\n## Source material the world is grounded in\n{scenario}\n"
         if scenario else "")
     ordered = [p["id"] for p in handle.builder.get_pipeline()]
+    # The brief is re-read from disk every turn (D4) — an update_prompt
+    # carried in from a user message takes effect on the very next turn.
+    prompt_text = str(brief.get("prompt") or "").strip() or handle.seed_prompt
 
-    return f"""You are the build agent for a game world. You work alone: the user \
-approved the brief and left — you decide, act, verify your own output, and \
-fix what verification finds. Build a complete, coherent, playable world.
+    return f"""You are the build agent for a game world. You drive the build: the \
+user approved the brief and handed you the work — you decide, act, verify \
+your own output, and fix what verification finds. The user can watch and may \
+speak while you build; their messages are observations to fold in, never a \
+gate to wait for. Build a complete, coherent, playable world.
 
 ## The brief
-{handle.seed_prompt}
+{prompt_text}
 {agreed_block}{notes_block}{scenario_block}
 ## World rules (the evaluation rubric)
 {rules_block}
@@ -325,6 +371,15 @@ or the note genuinely conflicts with the design, contest the finding with \
 discuss_finding: the verifier withdraws on real evidence, or agrees a \
 compromise the user reviews after the build. Explicit acceptance in the \
 done claim is the last resort and is shown to the user.
+- The user may speak mid-build: their words arrive verbatim as \
+{{"user_message": ...}} observations at the turn boundary. Respond in that \
+turn — answer briefly via "say", and fold any standing instruction into \
+your todo so it survives the conversation scrolling off. When their words \
+change what the world should BE, record the change in the brief \
+(update_prompt / update_rules / update_notes) so generation and \
+verification follow it; the brief-edit tools exist ONLY to carry direct \
+user input — never rewrite the brief unprompted. Exchanges that scrolled \
+out of recent are readable with read_conversation.
 - Verify before claiming done: run evaluate, fix the problems it reports, \
 re-evaluate. The done claim triggers a final evaluation; blocking findings \
 must be fixed or explicitly accepted by key.
@@ -341,6 +396,9 @@ or, when the world is genuinely finished and verified, declare done:
 - "todo" replaces your previous list; omit the field to keep it unchanged.
 - One action per turn; its result arrives as an observation next turn.
 - "accept_findings"/"note" only when accepting remaining findings.
+- Either shape may add "say": "..." — a short reply the user sees as chat. \
+Use it when answering a user_message; it accompanies your action, never \
+replaces it.
 
 ## Tools and capabilities
 {render_catalog_markdown()}"""
@@ -582,6 +640,9 @@ async def _run_build(handle: AgentBuild):
                 handle.status = "cancelled"
                 break
             handle.turns += 1
+            # The turn boundary is where user messages land (C7a): queued
+            # texts become this turn's freshest observations.
+            await _drain_messages(handle)
             world_state = builder.load_world(handle.world_id)
             messages = [
                 {"role": "system",
@@ -606,10 +667,16 @@ async def _run_build(handle: AgentBuild):
             todo, action, done_claim, problems = _validate_completion(completion)
             if todo is not None:
                 handle.todo = todo
+            # ``say`` is the user-facing reply channel (C7a/U6) — free text
+            # like ``thought``, carried on the turn event so the observer
+            # renders it as chat; the empty default keeps events lean.
+            say = (str(completion.get("say") or "").strip()
+                   if isinstance(completion, dict) else "")
             await _emit(handle, {"type": "turn", "turn": handle.turns,
                                  "thought": str((completion or {}).get("thought", ""))
                                  if isinstance(completion, dict) else "",
-                                 "todo": list(handle.todo)})
+                                 "todo": list(handle.todo),
+                                 **({"say": say} if say else {})})
             if problems:
                 observation = {"protocol_error": "; ".join(problems)}
                 handle.recent.append({"turn": handle.turns, **observation})
@@ -695,6 +762,9 @@ async def _run_build(handle: AgentBuild):
         handle.error = str(e)
     finally:
         handle.finished_at = datetime.utcnow().isoformat() + "Z"
+        # Messages still queued when the build ends are recorded unread —
+        # the log stays the honest record of everything the user said.
+        await _drain_messages(handle, unread=True)
         # Every terminal state closes the revert window (v2c): checkpoints
         # are build-scoped scaffolding, not world content.
         _clear_checkpoints(builder, handle.world_id)
