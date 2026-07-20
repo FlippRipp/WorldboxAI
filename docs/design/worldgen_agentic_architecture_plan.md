@@ -51,7 +51,18 @@ recording), the agent answers via ``say`` chat bubbles, user words
 become contract through update_prompt/update_rules/update_notes (the
 no_compromise veto lock held conservatively while fork 1 is open), and
 read_conversation serves the transcript on demand — the catalog is now
-25 tools; C7b is the outstanding slice — see the C7 section.
+25 tools. C7b LANDED 2026-07-20 — Arc C's front door is one two-phase
+agent session: the first message lazily creates a draft world and opens
+a message-paced chat phase (a second agent on a restricted brief
+catalog), Go flips the same session/artifact/stream into the build,
+the chat phase is resumable from its artifact across restarts, the
+drafts are server truth with a hand-edit surface, and the stateless
+``/ideation-turn`` machinery is deleted. Fork 2 is resolved
+(lazy-create + explicit discard, no sweeps); fork 1 stays open, the
+veto lock still held conservatively. The enabling fix rode along:
+brief writes are now metadata-surgical (``update_brief``) — a C7a-era
+``save_world`` side effect silently flipped drafts to finished on
+every brief edit. See the C7 section.
 Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
@@ -1562,7 +1573,13 @@ unchanged: the ready offer highlights and never gates, and zero-turn Go
    abandoning costs nothing (client-held). Lazy-create at the first
    chat message (or at Go, whichever comes first) is the default; the
    cleanup story (hide-from-list, sweep, or explicit discard) is an
-   implementation decision to make when C7b starts.
+   implementation decision to make when C7b starts. *(Resolved at C7b
+   build time: lazy-create at the first message, and the cleanup story
+   is EXPLICIT DISCARD — ideation drafts are visible in the world list
+   as "In design" cards with Continue/Delete, and the session screen
+   carries a confirm-gated "Discard draft". No hiding and no sweep: an
+   abandoned ideation is a resumable conversation by construction (the
+   artifact carries the transcript), and a sweep would delete it.)*
 
 **Staging — two slices, the first lands alone:**
 
@@ -1645,6 +1662,59 @@ unchanged: the ready offer highlights and never gates, and zero-turn Go
   ``/ideation-turn`` route, ``build_ideation_turn_messages``, and
   WorldIdeation's localStorage transcript machinery.
 
+  *Landed 2026-07-20, with recorded refinements. (1) An enabling fix
+  came first: every brief-edit surface (the C7a tools, the N5
+  compromise/withdrawal path, the N7 veto) wrote the brief through
+  ``save_world``, whose ``in_progress=False`` side effect silently
+  flipped a draft to finished on every brief edit — fatal for chat
+  worlds, whose only mutations are brief edits. ``update_brief`` is
+  the metadata-surgical writer (brief/seed_prompt/agent_phase only;
+  draft status, ``draft_complete`` and ``created_at`` survive), and
+  everything brief-shaped now rides it. (2) One session task,
+  ``_run_session``: chat phase → Go flip → the untouched build loop,
+  with ONE terminal path (unread drain, checkpoint sweep, done event —
+  now phase-stamped). U1's two agents are two module-level patch seams:
+  ``chat_turn`` beside ``agent_turn``. Chat completions are U6's
+  ``{say, action?, ready?}``; each user message opens a mini-loop
+  budgeted by ``world.agent_chat_turns`` (default 6, loud on
+  exhaustion), the restriction to the four chat tools is enforced
+  harness-side (the registry is unchanged — the build tools exist,
+  they are just not this agent's), and chat LLM failures surface as
+  observations without killing the session (a conversation survives a
+  failed reply; only the build escalates to abort). Chat actions are
+  never checkpointed (v2c stays build-scoped; R3 excludes the brief
+  anyway) and Go clears the checkpoint store — "cleared at launch"
+  means the build phase's start. (3) Go outranks queued messages: they
+  ride into the build and drain at its first turn boundary (C7a
+  machinery). Go validates a non-empty prompt loudly; zero-turn Go
+  survives as the direct ``agent/build`` route. (4) Resumability: a
+  chat task torn down while running (backend shutdown) writes NO
+  terminal event — the artifact stays a live snapshot, queued messages
+  included — and ``resume_chat_session`` rebuilds the handle from it
+  (transcript, message counter, stranded messages re-queued), invoked
+  by the message, Go and brief-edit routes alike; a cancelled
+  conversation revives the same way. ``metadata.agent_phase``
+  ("chat"/"build") labels the world list ("In design" cards,
+  "World in design" title fallback for the still-unnamed). (5) The
+  chat prompt shows the full conversation every completion (P9) via
+  ``exchanges_from_log``, shared with read_conversation — whose scope
+  is now honestly "the session's whole conversation", ideation
+  included, for both the build agent and the note verifier.
+  (6) Frontend: AgentBuildObserver is the one continuous screen
+  (phase-aware header, chat bubbles without turn chrome, "the build
+  started" divider, editable draft panels PUTting to ``agent/brief``,
+  ready-highlighted Go, confirm-gated Discard, the input box in both
+  phases — sending into a dead chat session revives it and the
+  observer reattaches past the stale terminal event); WorldIdeation.jsx
+  and its localStorage machinery are gone, and the create form clears
+  its prompt on session start (the draft owns it — a leftover would
+  silently seed the next draft). Verified by 17 new tests
+  (``test_agent_chat.py``; module suite 597, root 688) and a
+  real-Chromium drive of the whole loop with only the two turn seams
+  scripted: first message → session, tool-edited drafts, mid-chat
+  relaunch replay, ✕ hand edit, Go, mid-build message → say, cancel,
+  "In design" list card, continue-from-list, discard.*
+
 **What C7 deliberately does not change:** the brief remains the
 contract and the only ambient carrier across Go (C5's machinery and
 stances are untouched); generation calls never see the transcript
@@ -1696,7 +1766,7 @@ file, before the 2026-07-19 Arc C rewrite).
 | 17 | v2c checkpoint/revert | M | ✓ landed (60889d7) | the agent's undo — a destructive mistake is one call back |
 | 18 | v2d expand_node tool | M | ✓ landed (e7d2b33) | child maps reachable — the wall from both live runs falls |
 | 19 | C7a mid-build user messages + brief-edit tools | S–M | ✓ landed 2026-07-20 | a voice into the running build |
-| 20 | C7b merged conversational front door | L | designed 2026-07-20 | one flow: chat the world into shape, watch it build, keep talking |
+| 20 | C7b merged conversational front door (+ the update_brief fix) | L | ✓ landed 2026-07-20 | one flow: chat the world into shape, watch it build, keep talking |
 
 (A5 landed before B1 — the reverse of the original ordering; nothing
 depended on the order.) RuntimeHost (`backend.py` half of A1) can ride along
