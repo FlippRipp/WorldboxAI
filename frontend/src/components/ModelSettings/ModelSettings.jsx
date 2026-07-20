@@ -40,7 +40,7 @@ function FieldInput({ fieldKey, fdef, value, onChange, disabled }) {
         <button
           onClick={() => onChange(fieldKey, !value)}
           disabled={disabled}
-          className={`w-10 h-5 rounded-full transition-colors ${value ? 'bg-purple-500' : 'bg-gray-600'}`}
+          className={`w-10 h-5 rounded-full transition-colors ${value ? 'bg-purple-500' : 'bg-gray-600'} ${disabled ? 'opacity-40 cursor-not-allowed' : ''}`}
         >
           <div className={`w-4 h-4 bg-white rounded-full transition-transform ${value ? 'translate-x-5' : 'translate-x-0.5'}`} />
         </button>
@@ -467,6 +467,29 @@ export default function ModelSettings({ onBack, embedded = false }) {
                 })}
               </div>
             )}
+
+            {/* Web Search — every provider shows the toggle; providers
+                without a search integration show it disabled. */}
+            <div className="p-4 bg-gray-800/60 rounded-lg space-y-3">
+              <h3 className="text-sm font-semibold text-gray-300">Web Search</h3>
+              {pdef.supports_search ? (
+                <FieldInput
+                  fieldKey="search_enabled"
+                  fdef={fields.search_enabled}
+                  value={config.search_enabled ?? fields.search_enabled?.default ?? true}
+                  onChange={handleFieldChange}
+                  disabled={false}
+                />
+              ) : (
+                <FieldInput
+                  fieldKey="search_enabled"
+                  fdef={{ type: 'toggle', label: 'Agent Web Search', description: 'Not supported by this provider.' }}
+                  value={false}
+                  onChange={() => {}}
+                  disabled={true}
+                />
+              )}
+            </div>
 
             {/* LLM Options */}
             <div className="p-4 bg-gray-800/60 rounded-lg space-y-4">

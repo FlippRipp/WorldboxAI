@@ -5,6 +5,7 @@ import hashlib
 import asyncio
 from typing import Any
 from litellm import acompletion, aembedding
+from backend.engine.providers import PROVIDERS
 from backend.engine.schemas import MemorySummary, MemoryImportance
 from backend.engine.llm_inspector import LLMInspector
 
@@ -98,6 +99,13 @@ class LLMService:
         #: pin via the request-body ``provider`` routing param. Empty for
         #: non-OpenRouter providers.
         self._or_provider_routes: dict[str, str] = {}
+        #: The engine's search slot: which provider is active, whether its
+        #: definition wires web search (PROVIDERS supports_search), and the
+        #: provider config's search toggle. All set by reconfigure; until a
+        #: provider is configured search stays unavailable.
+        self._provider_id = ""
+        self._search_supported = False
+        self._search_enabled = False
         self._temperature = None
         self._top_p = None
         self._max_output_tokens = None
@@ -159,6 +167,19 @@ class LLMService:
             if not config.get("module_fast_model"):
                 self.module_fast_model = self.storyteller_model
 
+        # The search slot follows the provider: capability from the provider
+        # definition, permission from the config toggle. The toggle default
+        # is ON — a supporting provider searches unless explicitly disabled;
+        # False must win over the skip-empty mapping loop above, so it is
+        # handled here, not in `mapping`.
+        self._provider_id = provider_id
+        self._search_supported = bool(
+            PROVIDERS.get(provider_id, {}).get("supports_search", False))
+        enabled = config.get("search_enabled", True)
+        if isinstance(enabled, str):
+            enabled = enabled.strip().lower() not in ("", "0", "false", "no", "off")
+        self._search_enabled = bool(enabled)
+
         # Build per-slot OpenRouter provider routing. A per-slot provider wins;
         # otherwise the singular "Default Provider" applies. Keyed by the same
         # effective model string later passed to acompletion/aembedding.
@@ -218,6 +239,127 @@ class LLMService:
         if not self._model_supports_reasoning(model):
             return {}
         return {"reasoning_effort": effort}
+
+    def search_available(self) -> bool:
+        """Whether the engine's search slot can serve a web search right now:
+        live mode, an active provider whose definition wires search
+        (``PROVIDERS[...]["supports_search"]``), and the provider config's
+        search toggle on. Agent surfaces gate tool *visibility* on this."""
+        return (self.mode != "mock"
+                and self._search_supported
+                and self._search_enabled)
+
+    @staticmethod
+    def _citation_sources(message) -> list:
+        """``url_citation`` annotations -> ``[{"title", "url", "excerpt"}]``.
+        Annotations arrive as dicts or typed objects depending on litellm's
+        path; entries without a URL are skipped rather than failing the
+        search — the answer text stands on its own."""
+        sources = []
+        for ann in (getattr(message, "annotations", None) or []):
+            if isinstance(ann, dict):
+                cite = ann.get("url_citation") or {}
+            else:
+                cite = getattr(ann, "url_citation", None) or {}
+                if not isinstance(cite, dict):
+                    cite = {k: getattr(cite, k, "") or ""
+                            for k in ("title", "url", "content")}
+            url = str(cite.get("url") or "").strip()
+            if not url:
+                continue
+            sources.append({
+                "title": str(cite.get("title") or "").strip() or url,
+                "url": url,
+                "excerpt": str(cite.get("content") or "").strip(),
+            })
+        return sources
+
+    async def web_search(self, query: str, max_results: int = 5,
+                         include_domains: list = None,
+                         inspector_ctx: dict = None) -> dict:
+        """One web search through the engine's search slot: a fast-slot
+        completion with the active provider's search integration enabled —
+        OpenRouter's web plugin (Exa engine) — returning the model's sourced
+        answer plus its cited sources. Raises ``LLMProviderError`` when the
+        slot is unavailable (unsupported provider, toggle off, mock mode);
+        the message names which."""
+        query = str(query or "").strip()
+        if not query:
+            raise ValueError("web_search: query must be a non-empty string")
+        if not self.search_available():
+            if self.mode == "mock":
+                reason = "LLM mode is 'mock' (offline)"
+            elif not self._search_supported:
+                reason = (f"provider '{self._provider_id or 'none'}' has no "
+                          "web search integration")
+            else:
+                reason = "web search is toggled off in Model Settings"
+            raise LLMProviderError(f"Web search unavailable: {reason}")
+
+        model = self.module_fast_model
+        # OpenRouter's base search price includes up to 10 results; more is
+        # billed per result — a hard external API constraint, clamped here.
+        max_results = max(1, min(int(max_results or 5), 10))
+        plugin = {"id": "web", "engine": "exa", "max_results": max_results}
+        domains = [str(d).strip() for d in (include_domains or [])
+                   if str(d).strip()]
+        if domains:
+            plugin["include_domains"] = domains
+        extra_body = {"plugins": [plugin]}
+        route = self._provider_route_kwargs(model)
+        if route:
+            extra_body.update(route["extra_body"])
+
+        messages = [
+            {"role": "system", "content": (
+                "You are a research assistant with live web search. Answer "
+                "the query from the search results: factual, specific and "
+                "compact (a few short paragraphs or a tight list). Prefer "
+                "names, dates and concrete details over generalities; when "
+                "the results conflict or do not answer the query, say so "
+                "plainly. Never invent facts the results do not support.")},
+            {"role": "user", "content": query},
+        ]
+        _llm_log_req("web_search", model, messages,
+                     f"plugins: web/exa | max_results: {max_results}"
+                     + (f" | domains: {domains}" if domains else ""))
+
+        ctx = inspector_ctx or {}
+        cid = None
+        if self.inspector:
+            cid = await self.inspector.start_call(
+                call_type=ctx.get("call_type", "search"),
+                model=model,
+                step=ctx.get("step", "web_search"),
+                module_source=ctx.get("module_source", ""),
+                input_data=messages,
+            )
+        try:
+            # Factual retrieval, not creative writing — fixed low temperature
+            # instead of the configured storytelling one.
+            response = await acompletion(model=model, messages=messages,
+                                         temperature=0.3,
+                                         extra_body=extra_body)
+            message = response.choices[0].message
+            content = (message.content or "").strip()
+            sources = self._citation_sources(message)
+            usage = response.usage.to_dict() if hasattr(response, "usage") else {}
+            _llm_log_res("web_search", content, usage,
+                         response.choices[0].finish_reason)
+            if self.inspector and cid:
+                await self.inspector.end_call(cid, messages, content,
+                                              usage.get("prompt_tokens", 0),
+                                              usage.get("completion_tokens", 0))
+            return {"answer": content, "sources": sources,
+                    "provider": self._provider_id, "model": model}
+        except asyncio.CancelledError:
+            if self.inspector and cid:
+                await self.inspector.end_call(cid, messages, cancelled=True)
+            raise
+        except Exception as e:
+            if self.inspector and cid:
+                await self.inspector.end_call(cid, messages, "", error=str(e))
+            raise
 
     async def simple_completion(self, messages: list[dict[str, str]], model: str = None, max_tokens: int = None, temperature: float = None, top_p: float = None, response_format: Any = None, inspector_ctx: dict = None, return_reasoning: bool = False, return_usage: bool = False):
         # NOTE: `max_tokens` should NOT be used for content generation. It cuts off LLM output

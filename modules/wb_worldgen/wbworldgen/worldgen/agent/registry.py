@@ -59,6 +59,12 @@ class ToolSpec:
     passed as keywords, so optional parameters take their Python defaults.
     ``mutates`` marks tools that change the world (the catalog shows it; the
     C2 harness logs and budgets writes differently from reads).
+    ``available`` (optional) is a predicate over ``GenServices`` for tools
+    that depend on runtime wiring (v2e: web_search needs a search-capable
+    provider with its toggle on) — agent surfaces subtract failing tools
+    from every catalog render via ``unavailable_tool_ids``, while the tool
+    itself still rejects invocations loudly, so a hidden tool called anyway
+    fails as an observation, not a crash (P7).
     """
 
     id: str
@@ -67,6 +73,7 @@ class ToolSpec:
     invoke: Callable = None
     params: dict = field(default_factory=dict)
     mutates: bool = False
+    available: Callable = None
 
     def __post_init__(self):
         if not self.id or not callable(self.invoke):
@@ -109,6 +116,15 @@ def registered_tools() -> list:
     """Every registered spec, registration order."""
     _ensure_builtins()
     return list(_TOOL_REGISTRY.values())
+
+
+def unavailable_tool_ids(services) -> set:
+    """Ids of tools whose ``available`` predicate rejects the current
+    service wiring. The harness (build and chat prompts) and the note
+    verifier subtract these from the tool lists they render."""
+    _ensure_builtins()
+    return {s.id for s in _TOOL_REGISTRY.values()
+            if s.available is not None and not s.available(services)}
 
 
 def _ensure_builtins():

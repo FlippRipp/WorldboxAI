@@ -12,3 +12,4 @@ from wbworldgen.worldgen.agent.tools import expand  # noqa: F401
 from wbworldgen.worldgen.agent.tools import verify  # noqa: F401
 from wbworldgen.worldgen.agent.tools import revert  # noqa: F401
 from wbworldgen.worldgen.agent.tools import conversation  # noqa: F401
+from wbworldgen.worldgen.agent.tools import research  # noqa: F401

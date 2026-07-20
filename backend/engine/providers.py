@@ -3,6 +3,9 @@ PROVIDERS = {
         "label": "Google Gemini",
         "litellm_prefix": "gemini",
         "model_fetch_method": "gemini",
+        # Gemini has search grounding, but our litellm path doesn't wire it
+        # yet — flip this only together with an LLMService integration.
+        "supports_search": False,
         "fields": {
             "api_key": {
                 "type": "secret",
@@ -92,12 +95,21 @@ PROVIDERS = {
         "label": "OpenRouter",
         "litellm_prefix": "openrouter",
         "model_fetch_method": "openrouter",
+        # The engine's search slot is served by OpenRouter's web plugin
+        # (request-level, works with any model — the slot rule holds).
+        "supports_search": True,
         "fields": {
             "api_key": {
                 "type": "secret",
                 "label": "API Key",
                 "env_var": "OPENROUTER_API_KEY",
                 "required": True,
+            },
+            "search_enabled": {
+                "type": "toggle",
+                "label": "Agent Web Search",
+                "default": True,
+                "description": "Allow AI agents to search the web through OpenRouter's web plugin (Exa engine, ~$0.005 per search billed to your OpenRouter credit).",
             },
             "openrouter_provider": {
                 "type": "select",
@@ -219,6 +231,9 @@ PROVIDERS = {
         "label": "OpenAI",
         "litellm_prefix": "openai",
         "model_fetch_method": "openai",
+        # OpenAI ties web search to specific search-preview models / the
+        # Responses API — not wireable model-agnostically, so no search slot.
+        "supports_search": False,
         "fields": {
             "api_key": {
                 "type": "secret",
@@ -309,6 +324,8 @@ PROVIDERS = {
         "litellm_prefix": "deepseek",
         "model_fetch_method": "deepseek",
         "base_url": "https://api.deepseek.com",
+        # DeepSeek's API offers no web search.
+        "supports_search": False,
         "fields": {
             "api_key": {
                 "type": "secret",
@@ -398,6 +415,9 @@ PROVIDERS = {
         "label": "Anthropic Claude",
         "litellm_prefix": "anthropic",
         "model_fetch_method": "anthropic",
+        # Anthropic has a server-side web_search tool, but our litellm path
+        # doesn't wire it yet — flip only with an LLMService integration.
+        "supports_search": False,
         "fields": {
             "api_key": {
                 "type": "secret",

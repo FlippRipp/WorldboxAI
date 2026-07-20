@@ -29,6 +29,7 @@ from wbworldgen.worldgen.agent.registry import (
     ToolError,
     invoke_tool,
     registered_tools,
+    unavailable_tool_ids,
 )
 from wbworldgen.worldgen.generation.llm import json_retry_completion
 
@@ -50,17 +51,22 @@ _EXCLUDED_TOOLS = frozenset({"evaluate", "discuss_finding"})
 _RECENT_LIMIT = 6
 
 
-def verifier_tool_ids() -> list:
+def verifier_tool_ids(services=None) -> list:
     """The verifier's toolset: mechanically the non-mutating slice of the
-    registry, minus the exclusions."""
+    registry, minus the exclusions. With ``services`` given,
+    availability-gated tools that fail their predicate are excluded too —
+    the verifier reads through the same wiring the builder does (v2e)."""
+    hidden = unavailable_tool_ids(services) if services is not None else set()
     return [s.id for s in registered_tools()
-            if not s.mutates and s.id not in _EXCLUDED_TOOLS]
+            if not s.mutates and s.id not in _EXCLUDED_TOOLS
+            and s.id not in hidden]
 
 
-def _render_tools() -> str:
+def _render_tools(services=None) -> str:
+    ids = set(verifier_tool_ids(services))
     lines = []
     for s in registered_tools():
-        if s.mutates or s.id in _EXCLUDED_TOOLS:
+        if s.id not in ids:
             continue
         params = ", ".join(
             f"{name}{'*' if p.get('required') else ''}"
@@ -97,7 +103,7 @@ def _checklist(notes: list) -> str:
     return "\n".join(lines)
 
 
-def _system_prompt(notes: list, max_turns: int) -> str:
+def _system_prompt(notes: list, max_turns: int, services=None) -> str:
     return f"""You are the note verifier for an AI-built game world. The world's \
 creator agreed on the notes below during ideation; a build agent has since \
 built the world; you now check, note by note, whether the built world actually \
@@ -117,7 +123,7 @@ waste the builder's budget.
 {_checklist(notes)}
 
 ## Read tools
-{_render_tools()}
+{_render_tools(services)}
 
 ## Response protocol
 Reply with exactly ONE JSON object and nothing else. Either read:
@@ -181,8 +187,8 @@ async def verify_notes(services, builder, world_id: str, world_state: dict,
 
     max_turns = services.resolve_int_setting(
         "world.note_verifier_max_turns", DEFAULT_MAX_TURNS, 5, 40)
-    system = _system_prompt(notes, max_turns)
-    allowed = set(verifier_tool_ids())
+    system = _system_prompt(notes, max_turns, services)
+    allowed = set(verifier_tool_ids(services))
     ctx = ToolContext(builder=builder, world_id=world_id, on_event=on_event)
     recent: list = []
     failures = 0
@@ -267,7 +273,8 @@ async def discuss_turn(services, messages: list) -> dict:
 
 
 def _discussion_system(note: dict, verdict: dict, transcript: list,
-                       allow_compromise: bool, max_turns: int) -> str:
+                       allow_compromise: bool, max_turns: int,
+                       services=None) -> str:
     outcomes = ('"upheld" | "withdrawn" | "compromise"' if allow_compromise
                 else '"upheld" | "withdrawn"')
     compromise_rule = (
@@ -308,7 +315,7 @@ before you will pass it.
 and your finding was wrong — re-read the world first to check any claim.
 {compromise_rule}
 ## Read tools (to check claims before answering)
-{_render_tools()}
+{_render_tools(services)}
 
 ## Response protocol
 Reply with exactly ONE JSON object and nothing else. Either read:
@@ -328,8 +335,9 @@ async def discuss_note(services, builder, world_id: str, note: dict,
     never dissolves by silence)."""
     allow_compromise = not note.get("no_compromise")
     system = _discussion_system(note, verdict or {}, transcript,
-                                allow_compromise, DEFAULT_DISCUSSION_TURNS)
-    allowed = set(verifier_tool_ids())
+                                allow_compromise, DEFAULT_DISCUSSION_TURNS,
+                                services)
+    allowed = set(verifier_tool_ids(services))
     ctx = ToolContext(builder=builder, world_id=world_id, on_event=on_event)
     recent: list = []
     failures = 0

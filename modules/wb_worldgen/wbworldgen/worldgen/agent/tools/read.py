@@ -197,9 +197,19 @@ async def read_lint(ctx, map_id: str = None) -> dict:
 
 
 async def read_catalog(ctx) -> dict:
-    """The full capability catalog (steps, generators, passes, tools)."""
-    from wbworldgen.worldgen.catalog import render_catalog_markdown
-    return {"markdown": render_catalog_markdown()}
+    """The full capability catalog (steps, generators, passes, tools) —
+    minus availability-gated tools that cannot run in this service wiring
+    (they are not part of this build's action surface)."""
+    from wbworldgen.worldgen.agent.registry import unavailable_tool_ids
+    from wbworldgen.worldgen.catalog import (capability_catalog,
+                                             render_catalog_markdown)
+
+    catalog = capability_catalog()
+    hidden = unavailable_tool_ids(ctx.builder.services)
+    if hidden:
+        catalog["tools"] = [t for t in catalog["tools"]
+                            if t["id"] not in hidden]
+    return {"markdown": render_catalog_markdown(catalog)}
 
 
 register_tool(ToolSpec(

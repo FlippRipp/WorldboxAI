@@ -43,6 +43,7 @@ class ProviderManager:
                 "models": models,
                 "fields": pdef["fields"],
                 "presets": pdef.get("presets", []),
+                "supports_search": pdef.get("supports_search", False),
             })
         return providers
 
