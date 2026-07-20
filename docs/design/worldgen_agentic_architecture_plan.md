@@ -39,7 +39,13 @@ auto-checkpointed and a build-scoped revert tool restores byte-exact.
 v2d (the expand_node tool) LANDED 2026-07-19 (e7d2b33) on Filip's go,
 design delegated: child maps — the wall that felled both live builds —
 are now reachable through the same expansion surface play-time uses.
-The catalog is now 21 tools.
+The catalog is now 21 tools. C7 (one conversation: user
+messages into the running build + ideation merged as the chat phase of
+one agent session) DESIGNED 2026-07-20 with Filip — decisions U1–U6
+settled (two agents, one session; brief edits as description-gated
+tools; no authority machinery on user input; transcript on demand via a
+read tool), two forks open, staged C7a (mid-build channel) then C7b
+(merged front door); nothing landed yet — see the C7 section.
 Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
@@ -139,7 +145,12 @@ deviate. Cite them by number in reviews.
   rules), the explicit go-ahead, and unrestricted post-build editing;
   during the build the user is deliberately out of the loop — steering is
   replaced by *observability* (persisted todo/action-log artifacts
-  streamed live, cancel always available), not approval gates. In both
+  streamed live, cancel always available), not approval gates. *(Rescoped
+  again 2026-07-20 with C7: the user gains a conversational channel into
+  the running build — messages land as plain observations at turn
+  boundaries, and the brief-edit tools let user words amend the contract.
+  An advisory voice, not approval: no gates return; the agent still
+  decides and acts.)* In both
   modes, AI decisions are persisted artifacts the UI can show — never
   conversation state inside one long LLM call.
 - **P7 — Loud validation, never silent repair.** A plan or request that
@@ -609,7 +620,9 @@ Building a world has two phases with one explicit gate between them:
    list, calls tools, verifies its own output against the rules, fixes
    what verification finds, and repeats until the done-gate passes. The
    user watches — the todo list and action log stream live — and can
-   cancel; they do not approve steps.
+   cancel; they do not approve steps. *(C7, designed 2026-07-20, softens
+   the out-of-the-loop stance: the user may speak into the running build
+   — see the C7 section.)*
 
 The three properties the original framing protected, re-resolved:
 
@@ -1441,6 +1454,153 @@ leaving* the missing-raster lint and record-a-blocker (parallel-map
 rasters stop gating anything once planet-likes are terrain-flagged
 children).
 
+### C7 — One conversation: user messages in the build, ideation as the chat phase (designed 2026-07-20)
+
+*Designed 2026-07-20 with Filip, from his proposal to merge the C4
+pre-chat and the build into one flow ("you get into the agent view and
+have a chat with the agent about what the world should be"),
+reality-checked against the code in conversation. Both live builds
+supplied the motivating pain: Filip could SEE the agent walled in the
+observer and had no move but cancel. Nothing here is built yet; the
+decisions below are settled, two forks are explicitly open.*
+
+**The shape.** World creation becomes one continuous agent session with
+two phases and the existing gate between them. The session opens in a
+**chat phase**: a message-paced conversation about what the world should
+be, in which the model maintains the brief (prompt, rules, notes)
+through a restricted tool catalog. The Go button stays: pressing it
+flips the same session into the **build phase** — the current
+self-driving loop, full catalog, budgets, done-gate — and the
+conversation channel stays open: the user may type at any time, and the
+message lands at the next turn boundary. C4's decisions carry over
+unchanged: the ready offer highlights and never gates, and zero-turn Go
+(type a prompt, press build) survives.
+
+**Decisions (settled with Filip, 2026-07-20):**
+
+- **U1 — One session, two agents.** One harness session, artifact,
+  event stream, message channel and UI surface across both phases — but
+  two separate agents with different system prompts (design partner vs
+  builder). "The same AI" is UX truth, not prompt truth: forcing one
+  prompt to do both jobs risks a builder that chats instead of acting
+  and a partner that reaches for build tools. What unifies is state and
+  transport, not persona.
+- **U2 — Brief edits are tools, in both phases; the gate is the
+  description, not machinery.** update_prompt / update_rules /
+  update_notes (granularity an implementation choice; 1:1 with the
+  three drafts is the default) are registered tools available to BOTH
+  agents, and their descriptions state the rule: use only in response
+  to direct user input, never unprompted. In the chat phase the
+  constraint is vacuous (every turn follows user input); it exists to
+  bind the build agent. This is what makes a mid-build "actually, make
+  the ocean frozen" coherent with C5: the agent edits the note through
+  the tool, and the verifier — which computes bindings and verdicts
+  fresh from the brief — judges the world against the CURRENT contract.
+  No amendment machinery, no authority levels.
+- **U3 — User messages carry no engineered authority.** A mid-build
+  message is injected verbatim at the next turn boundary as a plain
+  observation (`User said: "..."`) — the cancel-flag semantics applied
+  to input. No binding/advisory distinction in code, no harness
+  enforcement of what the agent does with it: the model is trained to
+  follow instructions, and that is the mechanism (Filip's call). The
+  designed fallback if live runs show the builder editing the brief
+  unprompted: a cheap harness gate (brief-edit tools valid only within
+  a few turns of a user message) — recorded, not built.
+- **U4 — The transcript persists; the builder reads it on demand, never
+  ambiently.** The chat phase is the first stretch of the session log,
+  so "keeping the transcript" is a prompt-policy question, not a copy.
+  It does NOT enter the build agent's turn prompt: a transcript
+  contains rejected ideas beside kept ones (a second source of truth
+  against the brief), ambient availability softens the pressure that
+  makes ideation record notes (the verifier enforces notes, not chat),
+  and the no-truncation rule (P9) would make a long chat tax every one
+  of ~40 build turns. Instead a read-only registered tool
+  (read_conversation) over the session's own log serves the moments
+  that need it — the merged UI presents one continuous conversation, so
+  "like we discussed…" WILL be typed — and doubles as recovery for
+  mid-build instructions that scrolled off the RECENT_LIMIT window. The
+  note verifier inherits the tool through N4's mechanical carve,
+  anchored by its contractual stance. The ideation prompt keeps
+  teaching that only prompt/rules/notes survive Go ambiently; the tool
+  is a safety net, not the carrier.
+- **U5 — A user-directed note edit is a hand edit, not a compromise.**
+  No ``status: "amended"``: the N7 review panel exists for changes the
+  AGENT negotiated, and must not present the user's own mid-build
+  instruction back to them as something to veto. The audit trail is the
+  action log (the message and the tool call it triggered) — hand-edit
+  equivalence, the tool as the user's hand moved by their words.
+- **U6 — Protocol: ``say`` joins the completion; one action per turn
+  stays.** ``say`` is the user-facing reply channel, distinct from
+  ``thought`` (internal; the observer shows it as the log's italic
+  line). Chat-phase completions are ``{say, action?, ready?}`` —
+  ``ready`` keeps its C4 meaning as the go offer; build-phase
+  completions gain an optional ``say`` for answering a mid-build
+  message (rendered as a chat bubble). Drafts do NOT ride the
+  completion (Filip decided tools — superseding the
+  drafts-ride-the-completion alternative the todo precedent suggested):
+  a typical ideation turn is one completion; reply plus two draft edits
+  is three. Each user message opens a small turn-budgeted mini-loop (a
+  structural setting, loud on exhaustion, P9); D2's one-action-per-turn
+  is untouched.
+
+**Open forks (explicitly Filip's, before or during build):**
+
+1. **May a user message edit a ``no_compromise`` note?** The veto
+   stance (N7) says a vetoed note can never be amended again — but that
+   guard exists against agent-to-agent lawyering, and here the note's
+   AUTHOR is speaking. Lean: yes — the veto binds the agents, not the
+   user. Undecided.
+2. **Session start and draft litter (C7b).** The session needs a world
+   id from its first event (the artifact lives in the world dir), so
+   abandoned ideations start leaving embryonic drafts behind — today
+   abandoning costs nothing (client-held). Lazy-create at the first
+   chat message (or at Go, whichever comes first) is the default; the
+   cleanup story (hide-from-list, sweep, or explicit discard) is an
+   implementation decision to make when C7b starts.
+
+**Staging — two slices, the first lands alone:**
+
+- **C7a — the mid-build channel (S–M).** A message queue on the
+  AgentBuild handle, drained at the turn boundary into ``recent`` and
+  the persisted log (new ``user_message`` event); ``POST
+  .../agent/message``; the observer gains an input box and a "queued —
+  the agent reads it after the current action" state (mid-enrichment, a
+  reply is minutes away); optional ``say`` in the build protocol,
+  rendered as a chat bubble; the U2 brief-edit tools and U4's
+  read_conversation (over the mid-build exchanges — the chat phase
+  joins it in C7b); system-prompt guidance (respond to messages, fold
+  standing instructions into the todo, the brief stays the contract);
+  the P6 rescope above. Messages spend nothing themselves; the turns
+  reacting to them count as any other (a chatty user visibly burns the
+  build's budget — revisit only if live runs show it hurting).
+  Independent of C7b, immediately useful (both live builds wanted
+  exactly this), and the live evidence de-risks the merge.
+- **C7b — the merged front door (L).** The two-mode loop (chat phase
+  awaits the message queue; Go flips to self-driving — the control-flow
+  rewrite of ``_run_build``); session-from-first-message with a lazily
+  created draft world; the restricted chat catalog (brief tools +
+  read_conversation) and the design-partner system prompt (today's
+  ``build_ideation_turn_messages``, reshaped to the U6 protocol); notes
+  get their stable ids at Go exactly as N1 specifies; the transcript
+  persisted in the artifact makes the chat phase
+  resumable-by-construction after a backend restart (recreate the
+  session from the artifact on the next message — the build phase's
+  restart resume stays a recorded v2 item); hand edits of the drafts
+  (prompt field, per-rule/per-note ✕) become a small server surface,
+  since the drafts are server truth now; one continuous screen (chat +
+  editable draft panels + Go, growing todo/log/findings after Go, the
+  input box persisting throughout). Net deletions: the stateless
+  ``/ideation-turn`` route, ``build_ideation_turn_messages``, and
+  WorldIdeation's localStorage transcript machinery.
+
+**What C7 deliberately does not change:** the brief remains the
+contract and the only ambient carrier across Go (C5's machinery and
+stances are untouched); generation calls never see the transcript
+(N3's visibility rule); budgets stay harness-enforced (D5); the chat
+phase drives the same harness, not a second engine (P5); approval
+gates stay dead — observability, cancel, and now a voice, but never a
+mid-build gate (P6, rescoped accordingly in Design principles).
+
 ### Superseded: the plan-artifact design (refined and replaced 2026-07-19)
 
 The original Arc C made the plan a step: a `build_plan` artifact authored
@@ -1483,6 +1643,8 @@ file, before the 2026-07-19 Arc C rewrite).
 | 16 | Ecstasy Veil P7 fixes (config contract, note threading, excerpt honesty) | S–M | ✓ landed (5174f95, 39380ca) | steering that actually steers; no fabricated findings |
 | 17 | v2c checkpoint/revert | M | ✓ landed (60889d7) | the agent's undo — a destructive mistake is one call back |
 | 18 | v2d expand_node tool | M | ✓ landed (e7d2b33) | child maps reachable — the wall from both live runs falls |
+| 19 | C7a mid-build user messages + brief-edit tools | S–M | designed 2026-07-20 | a voice into the running build |
+| 20 | C7b merged conversational front door | L | designed 2026-07-20 | one flow: chat the world into shape, watch it build, keep talking |
 
 (A5 landed before B1 — the reverse of the original ordering; nothing
 depended on the order.) RuntimeHost (`backend.py` half of A1) can ride along
