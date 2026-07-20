@@ -96,6 +96,9 @@ class WorldPersistence:
                 "current_step": meta.get("current_step") if in_progress else None,
                 # Scenario linked at creation; story creation pairs them back up.
                 "scenario_id": meta.get("scenario_id"),
+                # "chat" while the C7b design conversation runs, "build"
+                # once Go flips the session — the list's card labels.
+                "agent_phase": meta.get("agent_phase"),
             })
         worlds.sort(key=lambda w: w.get("created_at", ""), reverse=True)
         return worlds
@@ -156,6 +159,11 @@ class WorldPersistence:
             # One-shot generations must resume as one-shot: /api/world/continue
             # keys off this after a backend restart mid-run.
             metadata["skip_review"] = True
+        if world_state.get("agent_phase"):
+            # Which phase the world's agent session is in ("chat" during the
+            # C7b design conversation, "build" after Go) — the world list
+            # labels in-progress drafts with it.
+            metadata["agent_phase"] = world_state["agent_phase"]
         if in_progress:
             metadata["in_progress"] = True
             metadata["current_step"] = world_state.get("current_step")
@@ -195,6 +203,8 @@ class WorldPersistence:
         }
         if metadata.get("skip_review"):
             world_state["skip_review"] = True
+        if metadata.get("agent_phase"):
+            world_state["agent_phase"] = metadata["agent_phase"]
         if metadata.get("scenario"):
             world_state["scenario"] = metadata["scenario"]
         if metadata.get("scenario_id"):
@@ -214,6 +224,29 @@ class WorldPersistence:
         if child_maps:
             world_state["child_maps"] = child_maps
         return world_state
+
+    def update_brief(self, world_id: str, brief: dict = None,
+                     seed_prompt: str = None, agent_phase: str = None):
+        """Surgically update the brief-family metadata keys, preserving every
+        other metadata field (``in_progress``, ``draft_complete``,
+        ``created_at``, ...). The brief-edit surfaces — the C7 brief tools,
+        the chat-phase hand-edit route, the note verifier's compromise
+        channel — write through this instead of a full ``save_world``, whose
+        ``in_progress=False`` side effect would silently flip a draft to
+        finished on every brief edit. Only arguments given are written."""
+        meta_path = self._dir / safe_world_id(world_id) / "metadata.json"
+        if not meta_path.is_file():
+            raise FileNotFoundError(f"World '{world_id}' not found.")
+        with open(meta_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+        if brief is not None:
+            metadata["brief"] = brief
+        if seed_prompt is not None:
+            metadata["seed_prompt"] = seed_prompt
+        if agent_phase is not None:
+            metadata["agent_phase"] = agent_phase
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2, default=str)
 
     def save_step(self, world_id: str, step_id: str, step_data: dict):
         world_dir = self._dir / world_id

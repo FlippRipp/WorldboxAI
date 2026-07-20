@@ -16,12 +16,13 @@ is an explicitly open fork of the C7 design — until Filip decides it, the
 veto lock binds this tool too.
 
 ``read_conversation`` (U4) serves the transcript on demand, never ambiently:
-the mid-build exchanges — user messages and the agent's ``say`` replies —
-from the build's own persisted log. It reads the live handle when invoked
-inside a build and falls back to the ``agent_build.json`` artifact, so the
-note verifier inherits it through N4's mechanical carve (its ToolContext
-carries no build handle) and it doubles as recovery for instructions that
-scrolled off the harness's recent window.
+every user message and every ``say`` reply from the session's persisted log
+— since C7b that is one continuous record from the first ideation exchange
+through the running build. It reads the live handle when invoked inside a
+build and falls back to the ``agent_build.json`` artifact, so the note
+verifier inherits it through N4's mechanical carve (its ToolContext carries
+no build handle) and it doubles as recovery for instructions that scrolled
+off the harness's recent window.
 """
 
 from wbworldgen.worldgen import notes as _notes
@@ -53,11 +54,15 @@ def _load_brief(ctx):
     return world_state, brief
 
 
-def _persist(ctx, world_state):
-    """Save the edited brief and keep the live handle's mirror current
-    (the discuss_finding precedent; save_world invalidates the compiled
-    cache, so note bindings recompute against the new text)."""
-    ctx.builder.save_world(ctx.world_id, world_state)
+def _persist(ctx, world_state, seed_prompt: str = None):
+    """Save the edited brief and keep the live handle's mirror current.
+    Metadata-surgical (``update_brief``): a full ``save_world`` would flip
+    an in-progress draft to finished as a side effect — fatal in the C7b
+    chat phase, whose worlds are drafts mutated only through brief edits.
+    ``update_brief`` invalidates the compiled cache, so note bindings
+    recompute against the new text."""
+    ctx.builder.update_brief(ctx.world_id, brief=world_state["brief"],
+                             seed_prompt=seed_prompt)
     if ctx.build is not None:
         ctx.build.brief = world_state["brief"]
 
@@ -73,7 +78,7 @@ async def update_prompt(ctx, prompt: str) -> dict:
     # (run_step chain context, expansion, compiled generated_from) read
     # state["seed_prompt"], so both move together or the edit is cosmetic.
     world_state["seed_prompt"] = prompt
-    _persist(ctx, world_state)
+    _persist(ctx, world_state, seed_prompt=prompt)
     if ctx.build is not None:
         ctx.build.seed_prompt = prompt
     return {"prompt": prompt, "previous": previous,
@@ -213,11 +218,12 @@ async def update_notes(ctx, notes: list) -> dict:
 
 
 async def read_conversation(ctx) -> dict:
+    from wbworldgen.worldgen.agent import harness as _harness
+
     log = None
     if ctx.build is not None:
         log = ctx.build.log
     else:
-        from wbworldgen.worldgen.agent import harness as _harness
         artifact = _harness.load_build_artifact(ctx.builder, ctx.world_id)
         if artifact is not None:
             log = artifact.get("log") or []
@@ -225,15 +231,7 @@ async def read_conversation(ctx) -> dict:
         raise ToolError(
             "No build conversation exists for this world — no agent build "
             "has recorded one.")
-    exchanges = []
-    for evt in log:
-        if evt.get("type") == "user_message":
-            exchanges.append({"who": "user", "turn": evt.get("turn"),
-                              "text": str(evt.get("text") or ""),
-                              **({"unread": True} if evt.get("unread") else {})})
-        elif evt.get("type") == "turn" and str(evt.get("say") or "").strip():
-            exchanges.append({"who": "agent", "turn": evt.get("turn"),
-                              "text": str(evt["say"]).strip()})
+    exchanges = _harness.exchanges_from_log(log)
     return {"exchanges": exchanges, "count": len(exchanges)}
 
 
@@ -297,11 +295,11 @@ register_tool(ToolSpec(
     id="read_conversation",
     label="Read the build's conversation",
     description=(
-        "The build's user exchanges so far, oldest first: every "
-        "user_message verbatim and every 'say' reply, with the turn each "
-        "landed on. Use it when a message refers to earlier exchanges "
-        "(\"like I said before...\") or when older instructions have "
-        "scrolled out of your recent observations."
+        "The session's whole conversation so far, oldest first: every user "
+        "message verbatim and every 'say' reply — the design conversation "
+        "before the build included. Use it when a message refers to "
+        "earlier exchanges (\"like we discussed...\") or when older "
+        "instructions have scrolled out of your recent observations."
     ),
     invoke=read_conversation,
 ))

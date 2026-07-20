@@ -84,7 +84,12 @@ export default function WorldListScreen({ onOpenWorld, onRecoverWorld, onBack })
                 key={world.id}
                 className="bg-gray-800/60 border border-gray-700 rounded-xl p-5 hover:border-purple-500/50 transition-colors"
               >
-                <h3 className="text-lg font-semibold text-gray-100 mb-1 truncate">{world.name}</h3>
+                <h3 className="text-lg font-semibold text-gray-100 mb-1 truncate">
+                  {/* Ideation drafts have no lore yet, so their "name" is a
+                      generated id — label them by what they are instead. */}
+                  {world.agent_phase === 'chat' && world.name === world.id
+                    ? 'World in design' : world.name}
+                </h3>
                 <p className="text-xs text-gray-500 mb-3 line-clamp-2">{world.seed_prompt || 'No prompt'}</p>
                 <div className="flex items-center gap-3 text-xs text-gray-500 mb-4">
                   <span>{world.step_count} steps</span>
@@ -97,26 +102,37 @@ export default function WorldListScreen({ onOpenWorld, onRecoverWorld, onBack })
                   {world.in_progress && (
                     <>
                       <span>·</span>
-                      <span className="text-amber-400 font-medium">In Progress</span>
+                      {world.agent_phase === 'chat' ? (
+                        // A C7b ideation draft: a design conversation that
+                        // hasn't gone to build — resumable any time.
+                        <span className="text-sky-400 font-medium">In design</span>
+                      ) : (
+                        <span className="text-amber-400 font-medium">In Progress</span>
+                      )}
                     </>
                   )}
                 </div>
                 <div className="flex gap-2">
                   {world.in_progress && (
                     // Recovery lands on the agent flow: reattach to the
-                    // recorded build's observer, or adopt the draft into a
-                    // fresh build that finishes it.
+                    // session's screen (conversation or build), or adopt a
+                    // pre-agent-era draft into a fresh build.
                     <button
                       onClick={async () => {
                         setRecoveringId(world.id);
                         try { await onRecoverWorld?.(world); } finally { setRecoveringId(null); }
                       }}
                       disabled={recoveringId !== null}
-                      className="flex-1 px-3 py-1.5 bg-amber-700 hover:bg-amber-600 disabled:opacity-50 rounded text-sm font-medium transition-colors"
+                      className={`flex-1 px-3 py-1.5 disabled:opacity-50 rounded text-sm font-medium transition-colors ${
+                        world.agent_phase === 'chat'
+                          ? 'bg-sky-800 hover:bg-sky-700'
+                          : 'bg-amber-700 hover:bg-amber-600'
+                      }`}
                     >
                       {recoveringId === world.id
                         ? 'Starting…'
-                        : world.has_agent_build ? 'View build' : 'Finish with AI'}
+                        : world.agent_phase === 'chat' ? 'Continue designing'
+                          : world.has_agent_build ? 'View build' : 'Finish with AI'}
                     </button>
                   )}
                   <button

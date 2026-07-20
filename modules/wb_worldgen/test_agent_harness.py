@@ -235,6 +235,7 @@ def test_turn_budget_exhaustion_leaves_a_draft(builder, monkeypatch):
     assert handle.status == "budget_exhausted"
     assert handle.turns == 5
     assert handle.log[-1] == {"type": "done", "status": "budget_exhausted",
+                              "phase": "build",
                               "turns": 5, "tool_calls": 5, "error": None,
                               "result": None, "i": handle.log[-1]["i"]}
     # The world stays an in-progress draft for the user to pick up.

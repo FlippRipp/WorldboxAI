@@ -172,11 +172,17 @@ export const api = {
   // LLM-as-author: write/rewrite the World Prompt from the player's notes
   // (instruction), the current draft, and an optional linked scenario.
   rewriteWorldPrompt:     ({ instruction = '', currentText = null, scenarioId = null }) => request('/api/world/rewrite-prompt', { method: 'POST', body: JSON.stringify({ instruction, current_text: currentText, scenario_id: scenarioId }) }),
-  // Ideation conversation (C4): one stateless turn — the model answers the
-  // player and returns the updated seed-prompt + world-rules drafts, plus
-  // `ready` (its judgment that the idea is settled — the go offer). The
-  // client holds the conversation and the drafts round-trip every turn.
-  ideationTurn:           ({ messages = [], prompt = null, rules = [], notes = [], scenarioId = null }) => request('/api/world/ideation-turn', { method: 'POST', body: JSON.stringify({ messages, prompt, rules, notes, scenario_id: scenarioId }) }),
+  // The design conversation (C7b): the first message lazily creates a draft
+  // world and opens the agent session in its chat phase — replies, draft
+  // edits and (after Go) the build all stream over the same agent events
+  // surface. Further messages go through agentMessage on the world id.
+  agentChatStart:         ({ text, prompt = '', scenarioId = null }) => request('/api/world/agent/chat', { method: 'POST', body: JSON.stringify({ text, prompt, ...(scenarioId ? { scenario_id: scenarioId } : {}) }) }),
+  // Go (C7b): flip the world's chat-phase session into the self-driving
+  // build — same session, artifact and stream; a phase event marks the flip.
+  agentGo:                (worldId) => request(`/api/world/${worldId}/agent/go`, { method: 'POST' }),
+  // Hand edits of the shared drafts (C7b: the drafts are server truth).
+  // Only the fields given are written; each replaces its draft wholesale.
+  agentBrief:             (worldId, { prompt, rules, notes } = {}) => request(`/api/world/${worldId}/agent/brief`, { method: 'PUT', body: JSON.stringify({ ...(prompt !== undefined ? { prompt } : {}), ...(rules !== undefined ? { rules } : {}), ...(notes !== undefined ? { notes } : {}) }) }),
   // Agent builds (C2): a server-side agent plans, builds and verifies the
   // whole world on its own, from the ideation brief (seed prompt + the
   // co-authored world rules). Launch returns the new world id immediately;

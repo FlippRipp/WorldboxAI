@@ -120,6 +120,27 @@ def _tool_lines(entry: dict) -> list:
             f"{entry['description']}"] + _param_lines(entry.get("params"))
 
 
+def render_tools_markdown(tool_ids: list = None) -> str:
+    """Markdown render of the agent-tool slice alone, optionally restricted
+    to ``tool_ids`` in the order given (C7b: the chat phase's toolbox text
+    is the brief tools + read_conversation, never the build catalog).
+    Unknown ids fail loudly (P1)."""
+    from wbworldgen.worldgen.agent.registry import describe_tools
+
+    entries = {e["id"]: e for e in describe_tools()}
+    if tool_ids is None:
+        chosen = list(entries.values())
+    else:
+        unknown = [t for t in tool_ids if t not in entries]
+        if unknown:
+            raise ValueError(f"Unknown agent tool(s): {', '.join(unknown)}")
+        chosen = [entries[t] for t in tool_ids]
+    lines = []
+    for entry in chosen:
+        lines.extend(_tool_lines(entry))
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def render_catalog_markdown(catalog: dict = None) -> str:
     """The catalog as a markdown document — what the build agent (or a
     human) reads to choose capabilities and actions."""

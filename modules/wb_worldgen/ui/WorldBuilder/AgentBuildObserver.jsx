@@ -1,19 +1,23 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from 'api';
 
-// The build observer (C3): the watching surface for a server-side agent
-// build. Live todo list, current action, the streamed action log with
-// expandable observations, evaluator findings, transient enrichment
-// progress, cancel, and reattach — the SSE stream replays the persisted
-// log from the last seen index and reconnects after drops, so a relaunched
-// client recovers the full picture from the running backend. Since C7a the
-// log is also a conversation: an input box posts messages the agent reads
-// at the next turn boundary (queued until then — mid-enrichment a reply
-// can be minutes away), and user messages / the agent's `say` replies
-// render as chat bubbles inline with the actions they steered.
+// The agent session surface — since C7b, the one continuous screen world
+// creation lives on. A session opens in the CHAT PHASE: the conversation
+// fills the log, the shared drafts (prompt, rules, notes) render as
+// editable panels beside it (hand edits PUT to the server — the drafts are
+// server truth), and the Go button flips the same session into the BUILD
+// PHASE: the C3 observer — live todo list, current action, streamed action
+// log with expandable observations, evaluator findings, transient
+// enrichment progress, cancel — with the input box persisting throughout
+// (C7a: mid-build messages land at the next turn boundary; queued until
+// then — mid-enrichment a reply can be minutes away). The SSE stream
+// replays the persisted log from the last seen index and reconnects after
+// drops; a dead chat session revives server-side on the next message, so
+// even a backend restart only pauses the conversation.
 
 const STATUS_LABEL = {
   running: 'building…',
+  designing: 'designing…',   // the running chat phase (C7b)
   done: 'finished',
   cancelled: 'cancelled',
   failed: 'failed',
@@ -22,6 +26,7 @@ const STATUS_LABEL = {
 
 const STATUS_STYLE = {
   running: 'bg-emerald-900/40 text-emerald-300 border-emerald-800',
+  designing: 'bg-sky-900/40 text-sky-300 border-sky-800',
   done: 'bg-emerald-900/40 text-emerald-300 border-emerald-800',
   cancelled: 'bg-gray-800 text-gray-400 border-gray-700',
   failed: 'bg-red-950/40 text-red-300 border-red-900',
@@ -204,7 +209,21 @@ function LogRow({ evt }) {
   if (evt.type === 'user_message') {
     return <ChatBubble who="user" text={evt.text} unread={evt.unread} />;
   }
+  if (evt.type === 'phase') {
+    // The Go moment (C7b): the session flipped from chat to build.
+    return (
+      <div className="flex items-center gap-2 py-2 text-[11px] uppercase tracking-wider text-emerald-500/80">
+        <span className="flex-1 border-t border-emerald-900/60" />
+        the build started
+        <span className="flex-1 border-t border-emerald-900/60" />
+      </div>
+    );
+  }
   if (evt.type === 'turn') {
+    if (evt.phase === 'chat') {
+      // A design-conversation reply: just the bubble — no turn chrome.
+      return evt.say ? <ChatBubble who="agent" text={evt.say} /> : null;
+    }
     return (
       <div className="pt-3 first:pt-0">
         <div className="text-[11px] uppercase tracking-wider text-gray-600">Turn {evt.turn}</div>
@@ -275,6 +294,116 @@ function LogRow({ evt }) {
   return null;
 }
 
+// The shared drafts as editable panels (C7b, chat phase only): the drafts
+// are server truth, so the prompt field PUTs on blur and each rule/note ✕
+// PUTs the filtered list. After Go the panels go read-only — mid-build the
+// user's channel is the conversation (the agent carries their words into
+// the brief through the brief tools).
+function ChatDraftPanels({ worldId, brief, disabled, onSaved }) {
+  const [promptDraft, setPromptDraft] = useState(brief?.prompt || '');
+  const dirtyRef = useRef(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  // Server updates (the agent's update_prompt, a reattach) flow into the
+  // field unless the user is mid-edit — their keystrokes win.
+  useEffect(() => {
+    if (!dirtyRef.current) setPromptDraft(brief?.prompt || '');
+  }, [brief?.prompt]);
+
+  const put = async (fields) => {
+    setSaving(true);
+    setError('');
+    try {
+      const res = await api.agentBrief(worldId, fields);
+      onSaved?.(res.brief);
+      return true;
+    } catch (e) {
+      setError(e.message || 'Saving the draft failed.');
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const savePrompt = async () => {
+    if (!dirtyRef.current) return;
+    if ((promptDraft || '') === (brief?.prompt || '')) { dirtyRef.current = false; return; }
+    if (await put({ prompt: promptDraft })) dirtyRef.current = false;
+  };
+  const removeRule = (i) => put({ rules: (brief?.rules || []).filter((_, j) => j !== i) });
+  const removeNote = (i) => put({ notes: (brief?.notes || []).filter((_, j) => j !== i) });
+
+  const rules = brief?.rules || [];
+  const notes = brief?.notes || [];
+  return (
+    <div className="space-y-3">
+      <div>
+        <label className="block text-xs font-medium text-gray-400 mb-1">
+          World prompt <span className="text-gray-600">— the seed the generator expands; the AI keeps it updated as you talk</span>
+        </label>
+        <textarea
+          value={promptDraft}
+          onChange={(e) => { dirtyRef.current = true; setPromptDraft(e.target.value); }}
+          onBlur={savePrompt}
+          rows={3}
+          disabled={disabled || saving}
+          placeholder="No seed prompt yet — describe the world in the chat, or type one here."
+          className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-emerald-600 focus:outline-none resize-y"
+        />
+      </div>
+      {rules.length > 0 && (
+        <div className="rounded-lg border border-gray-700 bg-gray-900/50 p-3 space-y-1.5">
+          <p className="text-xs font-medium text-gray-400">
+            World rules <span className="text-gray-600">— the build is judged against these</span>
+          </p>
+          {rules.map((r, i) => (
+            <div key={i} className="flex items-start gap-2">
+              <span className="text-sm text-gray-300 flex-1">• {r}</span>
+              <button
+                type="button"
+                onClick={() => removeRule(i)}
+                disabled={disabled || saving}
+                title="Drop this rule"
+                className="shrink-0 text-gray-600 hover:text-red-400 disabled:opacity-50 text-xs transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {notes.length > 0 && (
+        <div className="rounded-lg border border-gray-700 bg-gray-900/50 p-3 space-y-1.5">
+          <p className="text-xs font-medium text-gray-400">
+            Design notes <span className="text-gray-600">— established facts the build must honor; notes about a specific place steer only that place</span>
+          </p>
+          {notes.map((n, i) => (
+            <div key={n.id || i} className="flex items-start gap-2">
+              <span className="text-sm text-gray-300 flex-1">
+                {n.subject && (
+                  <span className="text-emerald-400/80 text-xs mr-1.5 border border-emerald-900 rounded px-1 py-0.5">{n.subject}</span>
+                )}
+                {n.text}
+              </span>
+              <button
+                type="button"
+                onClick={() => removeNote(i)}
+                disabled={disabled || saving}
+                title="Drop this note"
+                className="shrink-0 text-gray-600 hover:text-red-400 disabled:opacity-50 text-xs transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {error && <p className="text-xs text-red-400">{error}</p>}
+    </div>
+  );
+}
+
 export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, onExplore, onBack }) {
   const [meta, setMeta] = useState(null);        // status snapshot (seed prompt etc.)
   const [events, setEvents] = useState([]);      // persisted, i-ordered
@@ -289,8 +418,11 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
   const [pending, setPending] = useState([]);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
-  // Bumped when a veto relaunches the build: both effects re-run and the
-  // observer follows the fix run from its first event.
+  const [going, setGoing] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
+  // Bumped when a veto relaunches the build (or a message revives a dead
+  // chat session): both effects re-run and the observer follows the new
+  // stream from where it left off.
   const [streamEpoch, setStreamEpoch] = useState(0);
   const lastIRef = useRef(-1);
   const logRef = useRef(null);
@@ -334,6 +466,13 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
               setEvents((prev) => (
                 prev.length && prev[prev.length - 1].i >= evt.i ? prev : [...prev, evt]
               ));
+              // A resumed chat session (C7b) continues past an old terminal
+              // event — anything newer than it means the session lives.
+              if (evt.type !== 'done') {
+                setTerminal((t) => (
+                  t && typeof t.i === 'number' && evt.i > t.i ? null : t
+                ));
+              }
             }
             if (evt.type === 'observation') setProgress(null);
             if (evt.type === 'done') setTerminal(evt);
@@ -351,14 +490,16 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
     return () => { alive = false; clearTimeout(timer); ctrl?.abort(); };
   }, [worldId, streamEpoch]);
 
-  // The header shows the brief from the status snapshot; a successful
+  // The displayed brief comes from the status snapshot; a successful
   // brief-edit tool call (U2 — the agent carrying the user's words into
-  // the contract) refetches it so the displayed contract stays current.
+  // the contract) or the Go flip (note ids are assigned there, N1)
+  // refetches it so the contract on screen stays current.
   useEffect(() => {
     const edits = events.filter((e) => (
-      e.type === 'action'
-      && ['update_prompt', 'update_rules', 'update_notes'].includes(e.tool)
-      && events.some((o) => o.type === 'observation' && o.ok && o.i === e.i + 1)
+      (e.type === 'action'
+        && ['update_prompt', 'update_rules', 'update_notes'].includes(e.tool)
+        && events.some((o) => o.type === 'observation' && o.ok && o.i === e.i + 1))
+      || e.type === 'phase'
     )).length;
     if (edits > briefEditsRef.current) {
       briefEditsRef.current = edits;
@@ -382,23 +523,40 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
 
   const status = terminal ? terminal.status : (gone ? 'gone' : 'running');
   const running = status === 'running' && !gone;
-  const turnEvents = events.filter((e) => e.type === 'turn');
+  // The session's phase (C7b): the last phase event wins (the Go flip is
+  // an event), else the snapshot's word; old build artifacts have neither.
+  const lastPhaseEvt = [...events].reverse().find((e) => e.type === 'phase');
+  const phase = lastPhaseEvt?.phase || terminal?.phase || meta?.phase || 'build';
+  const inChat = phase === 'chat' && !gone;
+  // The chat agent's standing go offer — highlights Go, never gates it.
+  const lastOfferEvt = [...events].reverse().find(
+    (e) => e.type === 'turn' && e.phase === 'chat' && typeof e.ready === 'boolean',
+  );
+  const ready = lastOfferEvt ? lastOfferEvt.ready : !!meta?.ready;
+  const turnEvents = events.filter((e) => e.type === 'turn' && e.phase !== 'chat');
+  const chatTurns = Math.max(
+    events.filter((e) => e.type === 'turn' && e.phase === 'chat').length,
+    meta?.chat_turns ?? 0,
+  );
   const todo = turnEvents.length ? turnEvents[turnEvents.length - 1].todo : (meta?.todo || []);
   const turns = terminal?.turns ?? (turnEvents.length ? turnEvents[turnEvents.length - 1].turn : meta?.turns ?? 0);
-  const toolCalls = terminal?.tool_calls ?? events.filter((e) => e.type === 'action').length;
+  const toolCalls = terminal?.tool_calls ?? events.filter((e) => e.type === 'action' && e.phase !== 'chat').length;
   const lastAction = [...events].reverse().find((e) => e.type === 'action');
   const actionPending = running && lastAction
     && !events.some((e) => e.type === 'observation' && e.i > lastAction.i);
   const result = terminal?.result || meta?.result;
+  const brief = meta?.brief;
 
   const cancel = async () => {
     setCancelling(true);
     try { await api.agentBuildCancel(worldId); } catch { /* build may already be over */ }
   };
 
-  // Speak into the build (C7a): the text queues server-side and reaches
-  // the agent at the next turn boundary — mid-action, a reply can be
-  // minutes away, which is what the queued bubble state says.
+  // Speak into the session: in the chat phase this IS the conversation; in
+  // the build the text queues server-side and reaches the agent at the
+  // next turn boundary (C7a) — mid-action, a reply can be minutes away,
+  // which is what the queued bubble state says. A dead chat session is
+  // revived server-side by the message (C7b) — reattach the stream then.
   const send = async () => {
     const text = draft.trim();
     if (!text || sending) return;
@@ -407,10 +565,44 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
       const res = await api.agentMessage(worldId, text);
       setPending((p) => [...p, { id: res.id, text }]);
       setDraft('');
+      if (terminal) {
+        setTerminal(null);
+        setStreamEpoch((n) => n + 1);
+      }
     } catch (e) {
       alert('Message failed: ' + e.message);
     } finally {
       setSending(false);
+    }
+  };
+
+  // Go (C7b): flip this session into the self-driving build. The phase
+  // event does the UI work; the button just asks.
+  const go = async () => {
+    if (going) return;
+    setGoing(true);
+    try {
+      await api.agentGo(worldId);
+    } catch (e) {
+      alert('Failed to start the build: ' + e.message);
+    } finally {
+      setGoing(false);
+    }
+  };
+
+  // Discarding an ideation draft deletes the world it lazily created —
+  // the explicit-discard cleanup story (C7 fork 2); nothing sweeps drafts
+  // behind the user's back.
+  const discard = async () => {
+    if (discarding) return;
+    if (!window.confirm('Discard this draft world and its conversation? This cannot be undone.')) return;
+    setDiscarding(true);
+    try {
+      await api.deleteWorld(worldId);
+      onDismiss?.();
+    } catch (e) {
+      alert('Failed to discard the draft: ' + e.message);
+      setDiscarding(false);
     }
   };
 
@@ -446,7 +638,8 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
-            {running ? 'Back — the build keeps running' : 'Back'}
+            {inChat ? 'Back — the conversation stays saved'
+              : running ? 'Back — the build keeps running' : 'Back'}
           </button>
         )}
         <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-6 space-y-4">
@@ -454,21 +647,33 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <h2 className="text-2xl font-bold text-gray-100 flex items-center gap-3">
-                {running && (
+                {running && !inChat && (
                   <span className="inline-block w-5 h-5 border-2 border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin" />
                 )}
-                Agent build
-                <span className={`text-xs font-medium px-2 py-0.5 rounded-full border ${STATUS_STYLE[status] || 'bg-gray-800 text-gray-400 border-gray-700'}`}>
-                  {gone ? 'not found' : (STATUS_LABEL[status] || status)}
+                {inChat ? 'Design the world' : 'Agent build'}
+                <span className={`text-xs font-medium px-2 py-0.5 rounded-full border ${STATUS_STYLE[inChat && running ? 'designing' : status] || 'bg-gray-800 text-gray-400 border-gray-700'}`}>
+                  {gone ? 'not found'
+                    : (STATUS_LABEL[inChat && running ? 'designing' : status] || status)}
                 </span>
               </h2>
               <p className="text-gray-500 text-xs mt-1">
                 World <span className="text-gray-400">{worldId}</span>
-                {' · '}turn {turns}{' · '}{toolCalls} tool calls
+                {inChat
+                  ? <>{' · '}{chatTurns} repl{chatTurns === 1 ? 'y' : 'ies'}</>
+                  : <>{' · '}turn {turns}{' · '}{toolCalls} tool calls</>}
               </p>
             </div>
             <div className="flex gap-2 shrink-0">
-              {running && !gone && (
+              {inChat && (
+                <button
+                  onClick={discard}
+                  disabled={discarding}
+                  className="px-3 py-1.5 rounded-lg border border-gray-700 text-gray-400 hover:bg-red-950/40 hover:text-red-300 hover:border-red-900 disabled:opacity-50 text-sm transition-colors"
+                >
+                  {discarding ? 'Discarding…' : 'Discard draft'}
+                </button>
+              )}
+              {running && !gone && !inChat && (
                 <button
                   onClick={cancel}
                   disabled={cancelling}
@@ -504,27 +709,27 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
             </div>
           </div>
 
-          {meta?.seed_prompt && (
+          {!inChat && meta?.seed_prompt && (
             <p className="text-sm text-gray-400 border-l-2 border-gray-700 pl-3">{meta.seed_prompt}</p>
           )}
 
-          {meta?.brief?.rules?.length > 0 && (
+          {!inChat && brief?.rules?.length > 0 && (
             <div className="text-xs border-l-2 border-emerald-900 pl-3 space-y-0.5">
               <p className="text-gray-400 font-medium">
                 Co-authored rules <span className="text-gray-600">— the build is judged against these</span>
               </p>
-              {meta.brief.rules.map((r, i) => (
+              {brief.rules.map((r, i) => (
                 <p key={i} className="text-gray-500">• {r}</p>
               ))}
             </div>
           )}
 
-          {meta?.brief?.notes?.length > 0 && (
+          {!inChat && brief?.notes?.length > 0 && (
             <div className="text-xs border-l-2 border-emerald-900 pl-3 space-y-0.5">
               <p className="text-gray-400 font-medium">
                 Design notes <span className="text-gray-600">— verified before the build can finish</span>
               </p>
-              {meta.brief.notes.map((n, i) => (
+              {brief.notes.map((n, i) => (
                 <p key={i} className="text-gray-500">
                   •{' '}
                   {n.subject && <span className="text-emerald-500/80">[{n.subject}]</span>}
@@ -607,10 +812,14 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
           )}
 
           <div>
-            <div className="text-[11px] uppercase tracking-wider text-gray-600 mb-1">Action log</div>
+            <div className="text-[11px] uppercase tracking-wider text-gray-600 mb-1">
+              {inChat ? 'Conversation' : 'Action log'}
+            </div>
             <div ref={logRef} className="bg-gray-900/50 border border-gray-800 rounded-lg p-3 max-h-96 overflow-y-auto book-scroll space-y-1.5">
               {events.length === 0 && queuedMessages.length === 0 && (
-                <p className="text-xs text-gray-600">{gone ? 'No log.' : 'Waiting for the first turn…'}</p>
+                <p className="text-xs text-gray-600">
+                  {gone ? 'No log.' : inChat ? 'Waiting for the reply…' : 'Waiting for the first turn…'}
+                </p>
               )}
               {events.map((evt) => <LogRow key={evt.i} evt={evt} />)}
               {queuedMessages.map((m) => (
@@ -619,7 +828,7 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
             </div>
           </div>
 
-          {running && (
+          {(running || inChat) && !gone && (
             <form
               onSubmit={(e) => { e.preventDefault(); send(); }}
               className="flex gap-2"
@@ -628,7 +837,9 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
                 type="text"
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                placeholder="Say something to the agent — it reads at the next turn…"
+                placeholder={inChat
+                  ? 'Talk the world into shape — the AI keeps the drafts below updated…'
+                  : 'Say something to the agent — it reads at the next turn…'}
                 disabled={sending}
                 className="flex-1 bg-gray-900/70 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-sky-700 transition-colors"
               />
@@ -640,6 +851,44 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
                 {sending ? 'Sending…' : 'Send'}
               </button>
             </form>
+          )}
+
+          {inChat && (
+            <>
+              <ChatDraftPanels
+                worldId={worldId}
+                brief={brief}
+                disabled={discarding || going}
+                onSaved={(newBrief) => setMeta((m) => ({ ...(m || {}), brief: newBrief, seed_prompt: newBrief?.prompt ?? m?.seed_prompt }))}
+              />
+              {ready && (
+                <p className="text-xs text-emerald-300">
+                  The AI thinks this is ready to build — your call.
+                </p>
+              )}
+              <div>
+                <button
+                  type="button"
+                  onClick={go}
+                  disabled={going || discarding || !(brief?.prompt || '').trim()}
+                  className={`w-full py-3 rounded-lg font-medium text-lg transition-colors flex items-center justify-center gap-2 ${
+                    ready
+                      ? 'bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white'
+                      : 'border border-emerald-800 text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed'
+                  }`}
+                >
+                  {going && (
+                    <span className="inline-block w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  )}
+                  {going ? 'Starting the build…' : 'Build this world'}
+                </button>
+                <p className="text-xs text-gray-500 mt-2">
+                  An agent plans, builds and verifies the whole world on its own — keep
+                  talking to it while it works. It runs server-side, so closing the app
+                  doesn't stop it.
+                </p>
+              </div>
+            </>
           )}
 
         </div>

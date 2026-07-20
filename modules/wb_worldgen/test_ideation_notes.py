@@ -1,6 +1,6 @@
 """Tests for C5 ideation notes: the notes module (cleaning, id assignment,
-per-map subject binding, rendering), the ideation-turn protocol carrying the
-third draft, the seed-seam and enrichment-context injection, the unbound-note
+per-map subject binding, rendering), the chat phase's notes discipline
+(C7b), the seed-seam and enrichment-context injection, the unbound-note
 lint, and the brief handoff into an agent build.
 
 Run by explicit path (the root pytest.ini python_files whitelist does not
@@ -17,10 +17,7 @@ from wbworldgen.worldgen import notes as notes_mod
 from wbworldgen.worldgen.agent.lints import lint_world
 from wbworldgen.worldgen.compiler import compile_world
 from wbworldgen.worldgen.enrichment.context import build_enrichment_context
-from wbworldgen.worldgen.prompts import (
-    build_ideation_turn_messages,
-    seed_with_scenario,
-)
+from wbworldgen.worldgen.prompts import seed_with_scenario
 
 
 @pytest.fixture
@@ -267,25 +264,23 @@ def test_lint_flags_unbound_note_only_unscoped():
                    for p in lint_world(_compiled())["problems"])
 
 
-# --- ideation protocol -------------------------------------------------------
+# --- ideation protocol (C7b: the chat phase) ---------------------------------
 
-def test_ideation_messages_carry_notes_draft_and_protocol():
-    msgs = build_ideation_turn_messages(
-        [{"role": "player", "text": "hi"}],
-        prompt_draft="a world",
-        rules_draft=["rule one"],
-        notes_draft=[
-            {"text": "Water is currency.", "subject": ""},
-            {"text": "Three moons.", "subject": "Kharos"},
-        ])
-    system, user = msgs[0]["content"], msgs[1]["content"]
-    assert '"notes"' in system and '"subject"' in system
-    assert "<current_notes>" in user
-    assert "- Water is currency." in user
-    assert "- [Kharos] Three moons." in user
-    # Empty draft renders the placeholder.
-    empty = build_ideation_turn_messages([{"role": "player", "text": "hi"}])
-    assert "(none recorded yet)" in empty[1]["content"]
+def test_chat_prompt_carries_notes_discipline_and_drafts():
+    from wbworldgen.worldgen.agent import harness
+
+    system = harness._chat_system_prompt({})
+    # The notes discipline: subject scoping, record-as-settled, no invention.
+    assert "update_notes" in system and '"subject"' in system
+    assert "Never invent notes" in system
+    user = harness._chat_user_payload(
+        harness.AgentBuild("w", "s", builder=None, phase="chat"),
+        {"brief": {"prompt": "a world", "rules": ["rule one"],
+                   "notes": [{"text": "Water is currency.", "subject": ""},
+                             {"text": "Three moons.", "subject": "Kharos"}]}},
+        observations=[])
+    assert '"Water is currency."' in user
+    assert '"Kharos"' in user
 
 
 # --- the Go handoff ----------------------------------------------------------

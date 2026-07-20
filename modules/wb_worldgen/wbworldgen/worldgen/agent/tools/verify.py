@@ -96,14 +96,15 @@ async def discuss_finding(ctx, key: str, message: str) -> dict:
         # Persist the amendment: the amended text becomes the binding note
         # (injection and verification follow it from the next compiled
         # load); the original is kept for the user's end-of-build review
-        # and restored on veto (N7). save_world invalidates the compiled
-        # cache.
+        # and restored on veto (N7). update_brief is metadata-surgical (a
+        # save_world here would flip the draft to finished) and invalidates
+        # the compiled cache.
         if "original_text" not in note:
             note["original_text"] = note["text"]
         note["text"] = result["amended_text"]
         note["status"] = "amended"
         note["rationale"] = result["reply"]
-        builder.save_world(ctx.world_id, world_state)
+        builder.update_brief(ctx.world_id, brief=world_state["brief"])
         build.brief = world_state["brief"]
         build.last_note_verdicts.pop(nid, None)
     elif outcome == "withdrawn":
@@ -112,7 +113,7 @@ async def discuss_finding(ctx, key: str, message: str) -> dict:
         note["verifier_context"] = (
             "A previous objection was withdrawn after builder evidence: "
             + result["reply"])
-        builder.save_world(ctx.world_id, world_state)
+        builder.update_brief(ctx.world_id, brief=world_state["brief"])
         build.brief = world_state["brief"]
         build.last_note_verdicts.pop(nid, None)
 

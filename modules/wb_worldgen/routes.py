@@ -150,80 +150,6 @@ async def rewrite_world_prompt(request: RewriteWorldPromptRequest):
     return {"text": text}
 
 
-class IdeationTurnRequest(BaseModel):
-    #: Conversation so far, oldest first, the player's newest message last.
-    #: Each item: {"role": "player"|"assistant", "text": str}.
-    messages: list[dict] = []
-    #: Current seed-prompt draft (the shared field — may be hand-edited).
-    prompt: Optional[str] = None
-    #: Current world-rules draft.
-    rules: list[str] = []
-    #: Current design-notes draft (C5): [{"text", "subject"}], empty
-    #: subject = world-scoped.
-    notes: list[dict] = []
-    #: Optional linked scenario: its content counts as already decided.
-    scenario_id: Optional[str] = None
-
-
-@router.post("/api/world/ideation-turn")
-async def ideation_turn(request: IdeationTurnRequest):
-    """One turn of the ideation conversation (C4): the model answers the
-    player and returns the updated seed-prompt + world-rules drafts, plus
-    ``ready`` — its judgment that the idea feels settled (the go offer; the
-    player's go-ahead stays the approval moment). Stateless like the other
-    seed-prompt endpoints: the client holds the conversation (localStorage,
-    relaunch-safe) and the drafts round-trip every turn, so hand edits
-    between turns are simply the current truth."""
-    from wbworldgen.worldgen.notes import clean_notes
-    from wbworldgen.worldgen.prompts import build_ideation_turn_messages
-    try:
-        from backend.engine.llm import LLMProviderError
-    except ImportError:  # isolated module-test context: core pkg not on path
-        LLMProviderError = RuntimeError
-
-    if not any(str(m.get("text") or "").strip()
-               for m in request.messages if m.get("role") != "assistant"):
-        raise HTTPException(status_code=400,
-                            detail="Say something to the design partner first.")
-    scenario = _load_scenario_or_404(request.scenario_id)
-    messages = build_ideation_turn_messages(
-        request.messages, (request.prompt or "").strip(), request.rules, scenario,
-        notes_draft=request.notes)
-    try:
-        content = await engine.llm.simple_completion(
-            messages,
-            model=engine.llm.storyteller_model,
-            response_format={"type": "json_object"},
-            inspector_ctx={"call_type": "world_ideation", "step": "world_build:ideation"},
-        )
-        data = json.loads(content)
-        reply = str(data.get("reply") or "").strip()
-        prompt = str(data.get("prompt") or "").strip()
-        raw_rules = data.get("rules")
-        rules = ([str(r).strip() for r in raw_rules if str(r).strip()]
-                 if isinstance(raw_rules, list) else None)
-        raw_notes = data.get("notes")
-        notes = clean_notes(raw_notes) if isinstance(raw_notes, list) else None
-        ready = bool(data.get("ready"))
-    except LLMProviderError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-    except (ValueError, TypeError, AttributeError) as exc:
-        raise HTTPException(status_code=502,
-                            detail=f"Ideation turn returned unusable output: {exc}")
-    if not reply:
-        raise HTTPException(status_code=502, detail="Ideation turn returned no reply.")
-    # A model that omits a draft leaves it unchanged — the client always
-    # overwrites its local drafts with this response.
-    return {
-        "reply": reply,
-        "prompt": prompt or (request.prompt or "").strip(),
-        "rules": (rules if rules is not None
-                  else [str(r).strip() for r in request.rules if str(r).strip()]),
-        "notes": notes if notes is not None else clean_notes(request.notes),
-        "ready": ready,
-    }
-
-
 # === Debug / seed endpoints ===
 
 class SeedRequest(BaseModel):
@@ -637,6 +563,121 @@ async def agent_build_start(request: AgentBuildRequest):
     return {"world_id": handle.world_id, "status": handle.status}
 
 
+# === Agent sessions (C7b: the merged conversational front door) ===
+
+class AgentChatRequest(BaseModel):
+    #: The user's first message — the event that lazily creates the draft
+    #: world and its session (C7 fork 2's settled default).
+    text: str = ""
+    #: Whatever seed-prompt draft was typed before the first message;
+    #: becomes the brief's starting prompt (may be empty — converging it is
+    #: the conversation's job).
+    prompt: str = ""
+    scenario_id: Optional[str] = None
+    scenario: str = ""
+
+
+@router.post("/api/world/agent/chat")
+async def agent_chat_start(request: AgentChatRequest):
+    """Open the design conversation (C7b): lazily create a draft world (the
+    session's artifact lives in the world dir, so the first message needs
+    one) and start the two-phase session in its chat phase. Replies and
+    draft edits stream over the same agent status/events surface the build
+    uses; Go later flips this same session into the build — no new world,
+    stream or transcript. An abandoned conversation stays an ordinary
+    in-progress draft: resumable by messaging its world, deletable like any
+    world."""
+    from wbworldgen.worldgen.agent import harness as agent_harness
+    if not (request.text or "").strip():
+        raise HTTPException(status_code=400, detail="text is required")
+    scenario_state: dict = {}
+    _apply_scenario(scenario_state, request.scenario_id, request.scenario)
+    try:
+        handle = agent_harness.start_chat_session(
+            world_builder, request.text,
+            prompt=request.prompt or "",
+            scenario=scenario_state.get("scenario", ""),
+            scenario_id=scenario_state.get("scenario_id"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"world_id": handle.world_id, "status": handle.status,
+            "phase": handle.phase}
+
+
+@router.post("/api/world/{world_id}/agent/go")
+async def agent_session_go(world_id: str):
+    """Go (C7b): flip the world's chat-phase session into the self-driving
+    build. Works on the live session or one resumed from its artifact (a
+    backend restart never loses the conversation). Refused while the brief
+    has no prompt (400 — type one or converge it in chat first) and when
+    the session is already building (409)."""
+    from wbworldgen.worldgen.agent import harness as agent_harness
+    try:
+        state = world_builder.load_world(world_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Unknown world: {world_id}")
+    brief = state.get("brief") if isinstance(state.get("brief"), dict) else {}
+    if not str(brief.get("prompt") or state.get("seed_prompt") or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail=("The world needs a prompt before it can be built — type "
+                    "one or shape it in the conversation first."))
+    try:
+        handle = agent_harness.resume_chat_session(world_builder, world_id)
+    except ValueError as exc:
+        status = 404 if "No agent session" in str(exc) else 409
+        raise HTTPException(status_code=status, detail=str(exc))
+    handle.request_go()
+    return {"world_id": world_id, "status": handle.status, "phase": "build"}
+
+
+class AgentBriefRequest(BaseModel):
+    #: Hand edits of the shared drafts (C7b: the drafts are server truth —
+    #: the panels beside the chat edit them directly). Only fields given
+    #: are written; each replaces its draft wholesale.
+    prompt: Optional[str] = None
+    rules: Optional[list[str]] = None
+    notes: Optional[list[dict]] = None
+
+
+@router.put("/api/world/{world_id}/agent/brief")
+async def agent_brief_edit(world_id: str, request: AgentBriefRequest):
+    """The user's own hand on the drafts (C7b): the prompt field and the
+    per-rule/per-note ✕ beside the chat. Chat phase only — after Go the
+    user's channel is the conversation, and the agent carries their words
+    into the brief through the U2 tools (the panels go read-only). A dead
+    chat session is resumed first, so hand edits survive restarts too."""
+    from wbworldgen.worldgen import notes as notes_mod
+    from wbworldgen.worldgen.agent import harness as agent_harness
+    try:
+        state = world_builder.load_world(world_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Unknown world: {world_id}")
+    try:
+        handle = agent_harness.resume_chat_session(world_builder, world_id)
+    except ValueError as exc:
+        status = 404 if "No agent session" in str(exc) else 409
+        raise HTTPException(status_code=status, detail=str(exc))
+    brief = state.get("brief") if isinstance(state.get("brief"), dict) else {}
+    brief.setdefault("prompt", state.get("seed_prompt", ""))
+    brief.setdefault("rules", [])
+    brief.setdefault("notes", [])
+    seed = None
+    if request.prompt is not None:
+        brief["prompt"] = request.prompt.strip()
+        seed = brief["prompt"]
+    if request.rules is not None:
+        brief["rules"] = [str(r).strip() for r in request.rules
+                          if str(r).strip()]
+    if request.notes is not None:
+        brief["notes"] = notes_mod.clean_notes(request.notes)
+    world_builder.update_brief(world_id, brief=brief, seed_prompt=seed)
+    handle.brief = brief
+    if seed is not None:
+        handle.seed_prompt = seed
+    return {"world_id": world_id, "brief": brief}
+
+
 class AgentVetoRequest(BaseModel):
     #: Ids of the brief notes whose compromise/acceptance the user rejects.
     note_ids: list[str] = []
@@ -753,17 +794,27 @@ class AgentMessageRequest(BaseModel):
 
 @router.post("/api/world/{world_id}/agent/message")
 async def agent_build_message(world_id: str, request: AgentMessageRequest):
-    """Speak into a running build (C7a): the message queues on the build
-    handle and reaches the agent as a plain observation at the next turn
-    boundary — mid-action it waits until the current tool call returns.
-    Returns the queued message's id (echoed by the ``user_message`` event
-    when it lands) and its queue position. Only a RUNNING build listens:
-    no build is 404, a finished one is 409."""
+    """Speak into the world's agent session. In the chat phase this IS the
+    conversation; mid-build the message queues on the handle and reaches
+    the agent as a plain observation at the next turn boundary (C7a) —
+    mid-action it waits until the current tool call returns. A dead
+    chat-phase session (backend restart, cancelled conversation) is resumed
+    from its artifact first (C7b) — a design conversation is never over
+    while its world exists. Returns the queued message's id (echoed by the
+    ``user_message`` event when it lands) and its queue position. No
+    session is 404; a finished build is 409."""
     from wbworldgen.worldgen.agent import harness as agent_harness
     text = (request.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
     handle = agent_harness.get_build(world_id)
+    if handle is None or handle.status != "running":
+        # Chat sessions are resumable by construction; builds are not (the
+        # build phase's restart resume stays a recorded v2 item).
+        try:
+            handle = agent_harness.resume_chat_session(world_builder, world_id)
+        except ValueError:
+            pass
     if handle is None:
         raise HTTPException(status_code=404,
                             detail=f"No agent build for world '{world_id}'.")

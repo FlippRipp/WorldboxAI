@@ -378,6 +378,17 @@ class WorldBuilder:
         self._compiled.invalidate(saved_id)
         return saved_id
 
+    def update_brief(self, world_id: str, brief: dict = None,
+                     seed_prompt: str = None, agent_phase: str = None):
+        """Metadata-surgical brief write (C7): updates only the keys given,
+        preserving the world's draft/finished status — the write path for
+        every brief-edit surface. Invalidates the compiled cache so note
+        bindings recompute against the new text."""
+        self._persistence.update_brief(world_id, brief=brief,
+                                       seed_prompt=seed_prompt,
+                                       agent_phase=agent_phase)
+        self._compiled.invalidate(world_id)
+
     def load_world(self, world_id: str) -> dict:
         return self._persistence.load_world(world_id)
 

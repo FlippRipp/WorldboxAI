@@ -392,41 +392,49 @@ def test_build_world_prompt_messages():
     assert "seed prompt from the scenario" in msgs3[1]["content"]
 
 
-def test_build_ideation_turn_messages():
-    from wbworldgen.worldgen.prompts import build_ideation_turn_messages
-    msgs = build_ideation_turn_messages(
-        [{"role": "player", "text": "Something with drowned gods."},
-         {"role": "assistant", "text": "Sunken temples, then — who drowned them?"},
-         {"role": "player", "text": "The tide itself. It's alive."}],
-        prompt_draft="A drowned world.",
-        rules_draft=["The tide is a living god.", "  "],
-        scenario={"name": "The Sunken Court"},
-    )
-    assert msgs[0]["role"] == "system"
-    system = msgs[0]["content"]
-    # Rules-first, with the doctrine shared with the world_rules step, the
-    # two-draft contract, and the ready/offer protocol.
+def test_chat_phase_prompt_shape():
+    # C7b: the design-partner prompt (the reshaped C4 ideation prompt) —
+    # rules-first with the doctrine shared with the world_rules step, the
+    # tool-maintained drafts, the ready/offer protocol, the restricted
+    # toolbox, and the scenario grounding when one is linked.
+    from wbworldgen.worldgen.agent import harness
+
+    system = harness._chat_system_prompt(
+        {"scenario": "Scenario: The Sunken Court"})
     assert "FIRST" in system
     assert "world rule is a practical statement" in system
     assert '"ready"' in system and "offer" in system
-    assert "replacements, not diffs" in system
-    # World-scoped, like the interview it replaces.
     assert "protagonists" in system
-    user = msgs[1]["content"]
-    assert "The Sunken Court" in user and "already decided" in user
-    assert "A drowned world." in user
-    assert "- The tide is a living god." in user
-    # Transcript rendered in order, blank rules dropped.
-    assert "Player: Something with drowned gods." in user
-    assert "You: Sunken temples, then — who drowned them?" in user
-    assert user.index("Something with drowned gods.") < user.index("The tide itself.")
+    for tool in harness.CHAT_TOOL_IDS:
+        assert f"**{tool}**" in system
+    assert "run_step" not in system  # the build catalog stays locked
+    assert "The Sunken Court" in system and "already decided" in system
+    assert "The Sunken Court" not in harness._chat_system_prompt({})
 
-    # From scratch: empty drafts render as such; no scenario block.
-    msgs2 = build_ideation_turn_messages([{"role": "player", "text": "Surprise me."}])
-    user2 = msgs2[1]["content"]
-    assert "(empty — no seed prompt yet)" in user2
-    assert "(none agreed yet)" in user2
-    assert "<scenario>" not in user2
+    # The per-turn payload: drafts as server truth plus the running
+    # conversation (oldest first, never truncated) and the standing offer.
+    handle = harness.AgentBuild("w", "seed", builder=None, phase="chat")
+    handle.log = [
+        {"type": "user_message", "id": "m1",
+         "text": "Something with drowned gods.", "i": 0},
+        {"type": "turn", "phase": "chat", "chat_turn": 1, "ready": False,
+         "say": "Sunken temples, then — who drowned them?", "i": 1},
+        {"type": "user_message", "id": "m2",
+         "text": "The tide itself. It's alive.", "i": 2},
+    ]
+    user = harness._chat_user_payload(handle, {
+        "brief": {"prompt": "A drowned world.",
+                  "rules": ["The tide is a living god."],
+                  "notes": [{"id": "n1", "text": "Three moons.",
+                             "subject": "Kharos"}]},
+    }, observations=[{"protocol_error": "x"}])
+    assert '"A drowned world."' in user
+    assert "The tide is a living god." in user
+    assert '"subject": "Kharos"' in user
+    assert "Something with drowned gods." in user
+    assert "Sunken temples, then" in user
+    assert user.index("Something with drowned gods.") < user.index("The tide itself.")
+    assert '"protocol_error"' in user
 
 
 def test_world_rules_generate_honors_brief_mock_path(builder):

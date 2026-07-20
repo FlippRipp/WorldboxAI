@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from 'api';
 import AgentBuildObserver from './AgentBuildObserver';
-import WorldIdeation, { clearSavedIdeation } from './WorldIdeation';
 
 function AutoTextarea({ value, onChange, disabled, minRows = 3, placeholder }) {
   const ref = useRef(null);
@@ -158,16 +157,19 @@ export function pinAgentBuild(worldId) {
 }
 
 /**
- * WorldCreateScreen — the one front door to building a world: shape the
- * idea in the ideation conversation, then hand the brief to the server-side
- * agent and watch it build through the observer.
+ * WorldCreateScreen — the front door to building a world (C7b): the first
+ * message to the design partner opens a draft world and its agent session;
+ * from there the one continuous screen (chat + drafts + Go + build) is the
+ * AgentBuildObserver. The prompt field and "Build this world" remain the
+ * zero-turn path — a direct launch with no conversation.
  */
 export default function WorldCreateScreen({ onBack, onOpenWorlds, onExploreWorld }) {
   const [loading, setLoading] = useState(false);
   const [seedPrompt, setSeedPrompt] = useState(() => readSavedForm().seedPrompt || '');
+  const [chatDraft, setChatDraft] = useState('');
   const [scenarios, setScenarios] = useState([]);
   const [scenarioId, setScenarioId] = useState(() => readSavedForm().scenarioId || null);
-  // A running (or finished, not yet dismissed) agent build owned by this
+  // A running (or finished, not yet dismissed) agent session owned by this
   // client. Mirrored to localStorage so a relaunched client reattaches.
   const [agentWorldId, setAgentWorldId] = useState(() => readSavedForm().agentWorldId || null);
 
@@ -181,25 +183,48 @@ export default function WorldCreateScreen({ onBack, onOpenWorlds, onExploreWorld
       .catch(() => {});
   }, []);
 
-  // Mirror the form so a relaunch before the build starts loses nothing.
+  // Mirror the form so a relaunch before the session starts loses nothing.
   useEffect(() => {
     try {
       localStorage.setItem(FORM_KEY, JSON.stringify({ seedPrompt, scenarioId, agentWorldId }));
     } catch { /* storage unavailable */ }
   }, [seedPrompt, scenarioId, agentWorldId]);
 
-  // The go-ahead (C4/C5): hand the ideation brief — prompt + co-authored
-  // rules + design notes — to the server-side agent. The conversation has
-  // done its job once the build owns the brief, so its saved state clears.
-  const handleAgentStart = async (rules = [], notes = []) => {
+  // The zero-turn go (C4, kept by C7b): hand the typed prompt straight to
+  // the build agent — no conversation, a brief with empty rules and notes.
+  const handleAgentStart = async () => {
     if (!seedPrompt.trim()) return;
     setLoading(true);
     try {
-      const result = await api.agentBuild(seedPrompt.trim(), scenarioId, rules, notes);
-      clearSavedIdeation();
+      const result = await api.agentBuild(seedPrompt.trim(), scenarioId);
       setAgentWorldId(result.world_id);
     } catch (e) {
       alert('Failed to start the agent build: ' + e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // The conversational front door (C7b): the first message lazily creates
+  // the draft world and opens the session's chat phase — everything after
+  // this happens on the session screen, where the drafts are server truth.
+  const handleChatStart = async () => {
+    const text = chatDraft.trim();
+    if (!text || loading) return;
+    setLoading(true);
+    try {
+      const result = await api.agentChatStart({
+        text,
+        prompt: seedPrompt.trim(),
+        scenarioId: scenarioId || null,
+      });
+      setChatDraft('');
+      // The draft world owns the prompt from here (server truth) — a
+      // leftover in the form would silently seed the NEXT draft too.
+      setSeedPrompt('');
+      setAgentWorldId(result.world_id);
+    } catch (e) {
+      alert('Failed to start the conversation: ' + e.message);
     } finally {
       setLoading(false);
     }
@@ -292,13 +317,59 @@ export default function WorldCreateScreen({ onBack, onOpenWorlds, onExploreWorld
             scenarioId={scenarioId}
           />
 
-          <WorldIdeation
-            promptText={seedPrompt}
-            onPromptChange={setSeedPrompt}
-            scenarioId={scenarioId}
-            onGo={handleAgentStart}
-            starting={loading}
-          />
+          <div className="rounded-lg border border-emerald-900/60 bg-emerald-950/10 p-3 space-y-3">
+            <div>
+              <p className="text-sm font-medium text-gray-200">Design it with the AI</p>
+              <p className="text-xs text-gray-500">
+                Start a conversation — the AI shapes the prompt, world rules and design
+                notes with you, and you press build when it feels right. Your first
+                message opens a draft world you can leave and come back to any time.
+              </p>
+            </div>
+            <div className="flex gap-2 items-end">
+              <textarea
+                value={chatDraft}
+                onChange={(e) => setChatDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleChatStart();
+                  }
+                }}
+                rows={2}
+                disabled={loading}
+                placeholder="What kind of world are you dreaming of?"
+                className="flex-1 bg-gray-900/80 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-emerald-600 resize-none"
+              />
+              <button
+                type="button"
+                onClick={handleChatStart}
+                disabled={!chatDraft.trim() || loading}
+                className="shrink-0 px-3 py-2 rounded-lg text-sm bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed text-white transition-colors"
+              >
+                {loading ? 'Starting…' : 'Start designing'}
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <button
+              type="button"
+              onClick={handleAgentStart}
+              disabled={!seedPrompt.trim() || loading}
+              className="w-full py-3 rounded-lg font-medium text-lg border border-emerald-800 text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+            >
+              {loading && (
+                <span className="inline-block w-5 h-5 border-2 border-emerald-300/30 border-t-emerald-300 rounded-full animate-spin" />
+              )}
+              {loading ? 'Starting…' : 'Build this world'}
+            </button>
+            <p className="text-xs text-gray-500 mt-2">
+              The direct route: hand the prompt above straight to the agent with no
+              conversation. It plans, builds and verifies the whole world server-side —
+              you can watch, keep talking to it, or come back later.
+            </p>
+          </div>
         </div>
       </div>
     </div>
