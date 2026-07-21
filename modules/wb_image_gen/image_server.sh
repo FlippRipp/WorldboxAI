@@ -84,33 +84,61 @@ case "$ACTIVE_REPO" in
 esac
 
 # ── Preflight: Python ──
-# Forge Neo runs on modern Python (3.13 recommended); the legacy WebUIs
-# officially support 3.10 (3.11 usually works).
+# Forge Neo needs modern Python (3.11+, 3.13 recommended): its pinned
+# requirements (numpy 2.3+, new torch) publish no 3.10 wheels, so an
+# unsupported interpreter is a hard stop here rather than a multi-GB
+# install that dies at numpy. The legacy WebUIs officially support 3.10
+# (3.11 usually works) and keep their soft warning.
 if [ "$IS_NEO" = "1" ]; then
     PY_CANDIDATES="python3.13 python3.12 python3.11 python3"
-    PY_SUPPORTED="3.11|3.12|3.13"
-    PY_HINT="Forge Neo recommends Python 3.13"
 else
     PY_CANDIDATES="python3.10 python3.11 python3"
-    PY_SUPPORTED="3.10|3.11"
-    PY_HINT="this WebUI officially supports Python 3.10"
 fi
 PY_CMD=""
+PY_FOUND=""
+PY_FOUND_VER=""
 for cand in $PY_CANDIDATES; do
-    if command -v "$cand" >/dev/null 2>&1; then
-        PY_CMD="$cand"
-        break
+    command -v "$cand" >/dev/null 2>&1 || continue
+    ver=$("$cand" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null) || continue
+    [ -n "$ver" ] || continue
+    if [ -z "$PY_FOUND" ]; then
+        PY_FOUND="$cand"
+        PY_FOUND_VER="$ver"
     fi
+    if [ "$IS_NEO" = "1" ]; then
+        case "$ver" in
+            3.*) [ "${ver#3.}" -ge 11 ] 2>/dev/null && PY_CMD="$cand" ;;
+        esac
+    else
+        case "$ver" in
+            3.10|3.11) PY_CMD="$cand" ;;
+        esac
+    fi
+    [ -n "$PY_CMD" ] && break
 done
-if [ -z "$PY_CMD" ]; then
-    echo "[ERROR] python3 not found on PATH. Install Python first ($PY_HINT)."
+if [ -z "$PY_CMD" ] && [ "$IS_NEO" = "1" ]; then
+    echo "[ERROR] Forge Neo needs Python 3.11 or newer (3.13 recommended);"
+    if [ -n "$PY_FOUND" ]; then
+        echo "        found only $PY_FOUND (Python $PY_FOUND_VER) on PATH."
+    else
+        echo "        no python3 was found on PATH."
+    fi
+    echo "        Install it and re-run this script, e.g. on Debian/Ubuntu:"
+    echo "          sudo apt install python3.13 python3.13-venv"
+    echo "        (see python.org/downloads for other platforms). To keep the"
+    echo "        legacy WebUI on Python 3.10 instead, set WB_WEBUI_REPO to"
+    echo "        its git URL."
     exit 1
 fi
-PY_VER=$("$PY_CMD" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)
-if ! echo "$PY_VER" | grep -Eq "^($PY_SUPPORTED)$"; then
-    echo "[WARN] Using $PY_CMD (Python ${PY_VER:-unknown}) -- $PY_HINT."
-    echo "       If the first launch fails installing torch, install a"
-    echo "       supported Python and re-run this script."
+if [ -z "$PY_CMD" ]; then
+    if [ -z "$PY_FOUND" ]; then
+        echo "[ERROR] python3 not found on PATH. Install Python 3.10 first."
+        exit 1
+    fi
+    PY_CMD="$PY_FOUND"
+    echo "[WARN] Using $PY_CMD (Python $PY_FOUND_VER) -- this WebUI officially"
+    echo "       supports Python 3.10. If the first launch fails installing"
+    echo "       torch, install a supported Python and re-run this script."
     echo
 fi
 if ! "$PY_CMD" -c "import venv" >/dev/null 2>&1; then
@@ -126,6 +154,24 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
     echo "       WEBUI_EXTRA_ARGS=\"--skip-torch-cuda-test --use-cpu all\" $0"
     echo "       For AMD GPUs see the WebUI's ROCm install docs."
     echo
+fi
+
+# ── Preflight: an existing venv built by an unsupported Python ──
+# webui.sh reuses $WEBUI_DIR/venv as-is, so a venv created back when this
+# install ran on Python 3.10 keeps failing (no numpy 2.3+ wheels for it) no
+# matter which interpreter launches the WebUI now. Refuse early with the fix.
+VENV_CFG="$WEBUI_DIR/venv/pyvenv.cfg"
+if [ "$IS_NEO" = "1" ] && [ -f "$VENV_CFG" ]; then
+    VENV_VER=$(sed -n 's/^version[^=]*= *\([0-9]*\.[0-9]*\).*/\1/p' "$VENV_CFG" | head -n 1)
+    if [ "${VENV_VER%%.*}" = "3" ] && [ "${VENV_VER#3.}" -lt 11 ] 2>/dev/null; then
+        echo "[ERROR] $WEBUI_DIR/venv was created with Python $VENV_VER, which"
+        echo "        Forge Neo's dependencies do not support -- and the WebUI"
+        echo "        reuses this venv on every launch, so installs keep failing."
+        echo "        Delete it and re-run this script; the WebUI rebuilds it"
+        echo "        with $PY_CMD automatically:"
+        echo "          rm -rf \"$WEBUI_DIR/venv\""
+        exit 1
+    fi
 fi
 
 # ── Clone or update the WebUI ──

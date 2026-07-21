@@ -86,28 +86,68 @@ set IS_NEO=0
 echo %ACTIVE_REPO% | findstr /c:"forge-classic" >nul && set IS_NEO=1
 
 :: ── Preflight: Python ──
-:: Forge Neo runs on modern Python (3.13 recommended); the legacy WebUIs
-:: officially support 3.10 (3.11 usually works).
+:: Forge Neo needs modern Python (3.11+, 3.13 recommended): its pinned
+:: requirements (numpy 2.3+, new torch) publish no 3.10 wheels, so an
+:: unsupported interpreter is a hard stop here rather than a multi-GB
+:: install that dies at numpy. When "python" on PATH is too old, the py
+:: launcher is asked for 3.13/3.12/3.11 and the winner is handed to the
+:: WebUI via its PYTHON variable. The legacy WebUIs officially support
+:: 3.10 and keep their soft warning. A PYTHON the user already set is
+:: honored as-is.
+set "PY_ON_PATH="
 where python >nul 2>nul
-if errorlevel 1 (
-    echo [ERROR] python not found on PATH. Install Python from python.org
-    echo         and check "Add python to PATH" in its installer.
-    echo.
-    pause
-    exit /b 1
-)
+if not errorlevel 1 set "PY_ON_PATH=1"
 set PYV=
-for /f "tokens=2" %%v in ('python --version 2^>^&1') do set PYV=%%v
+if defined PY_ON_PATH for /f "tokens=2" %%v in ('python --version 2^>^&1') do set PYV=%%v
+if defined PYTHON (
+    echo Using PYTHON=!PYTHON! as set in the environment.
+    echo.
+    goto :python_done
+)
 if "%IS_NEO%"=="1" (
-    echo !PYV! | findstr /b /c:"3.11." /c:"3.12." /c:"3.13." >nul
-    if errorlevel 1 (
-        echo [WARN] Python !PYV! detected -- Forge Neo recommends Python 3.13.
-        echo        If the first launch fails installing torch, install a newer
-        echo        Python and point the WebUI at it, e.g.:
-        echo        set PYTHON=C:\Path\To\Python313\python.exe
+    set "PY_OK="
+    if defined PY_ON_PATH (
+        echo !PYV! | findstr /b /c:"3.11." /c:"3.12." /c:"3.13." /c:"3.14." >nul
+        if not errorlevel 1 set "PY_OK=1"
+    )
+    if not defined PY_OK (
+        for %%r in (3.13 3.12 3.11) do (
+            if not defined PY_OK (
+                for /f "usebackq delims=" %%p in (`py -%%r -c "import sys; print(sys.executable)" 2^>nul`) do (
+                    set "PYTHON=%%p"
+                    set "PY_OK=1"
+                )
+            )
+        )
+        if defined PY_OK (
+            echo Using !PYTHON!
+            if defined PY_ON_PATH echo ^(via the py launcher -- "python" on PATH is !PYV!, too old for Forge Neo^)
+            echo.
+        )
+    )
+    if not defined PY_OK (
+        echo [ERROR] Forge Neo needs Python 3.11 or newer ^(3.13 recommended^);
+        if defined PY_ON_PATH (
+            echo         "python" on PATH is !PYV! and the py launcher found no
+            echo         newer install either.
+        ) else (
+            echo         no python was found on PATH.
+        )
+        echo         Install it from python.org ^(or: winget install Python.3.13^)
+        echo         and re-run this script. To keep the legacy WebUI on Python
+        echo         3.10 instead, set WB_WEBUI_REPO to its git URL.
         echo.
+        pause
+        exit /b 1
     )
 ) else (
+    if not defined PY_ON_PATH (
+        echo [ERROR] python not found on PATH. Install Python from python.org
+        echo         and check "Add python to PATH" in its installer.
+        echo.
+        pause
+        exit /b 1
+    )
     echo !PYV! | findstr /b /c:"3.10." /c:"3.11." >nul
     if errorlevel 1 (
         echo [WARN] Python !PYV! detected. This WebUI officially supports Python 3.10.
@@ -117,6 +157,11 @@ if "%IS_NEO%"=="1" (
         echo.
     )
 )
+:python_done
+:: What the install helper (and anything else this script runs itself)
+:: should use: the PYTHON handed to the WebUI, or "python" from PATH.
+set "WB_PY=python"
+if defined PYTHON set "WB_PY=%PYTHON%"
 
 :: ── Preflight: GPU ──
 where nvidia-smi >nul 2>nul
@@ -126,6 +171,28 @@ if errorlevel 1 (
     echo        set WEBUI_EXTRA_ARGS=--skip-torch-cuda-test --use-cpu all
     echo        For AMD GPUs see the WebUI's DirectML/ZLUDA install docs.
     echo.
+)
+
+:: ── Preflight: an existing venv built by an unsupported Python ──
+:: webui.bat reuses %WEBUI_DIR%\venv as-is, so a venv created back when this
+:: install ran on Python 3.10 keeps failing (no numpy 2.3+ wheels for it) no
+:: matter which interpreter launches the WebUI now. Refuse early with the fix.
+if "%IS_NEO%"=="1" if exist "%WEBUI_DIR%\venv\pyvenv.cfg" (
+    set "VENVV="
+    for /f "usebackq tokens=2 delims== " %%v in (`findstr /b /c:"version" "%WEBUI_DIR%\venv\pyvenv.cfg"`) do if not defined VENVV set "VENVV=%%v"
+    for /f "tokens=1,2 delims=." %%a in ("!VENVV!") do (
+        if "%%a"=="3" if %%b lss 11 (
+            echo [ERROR] %WEBUI_DIR%\venv was created with Python !VENVV!, which
+            echo         Forge Neo's dependencies do not support -- and the WebUI
+            echo         reuses this venv on every launch, so installs keep failing.
+            echo         Delete it and re-run this script; the WebUI rebuilds it
+            echo         automatically:
+            echo           rmdir /s /q "%WEBUI_DIR%\venv"
+            echo.
+            pause
+            exit /b 1
+        )
+    )
 )
 
 :: ── Clone or update the WebUI ──
@@ -249,7 +316,7 @@ if not "%WB_HELPER%"=="0" (
     set "WB_HELPER_UPSCALER_DIR=%WEBUI_DIR%\models\ESRGAN"
     set "WB_HELPER_TE_DIR=%WEBUI_DIR%\models\text_encoder"
     set "WB_HELPER_VAE_DIR=%WEBUI_DIR%\models\VAE"
-    start "WorldBox Install Helper" /b python "%REPO_ROOT%\modules\wb_image_gen\helper_server.py"
+    start "WorldBox Install Helper" /b "!WB_PY!" "%REPO_ROOT%\modules\wb_image_gen\helper_server.py"
 )
 
 :: ── First-run hints + the values the Image Studio needs ──

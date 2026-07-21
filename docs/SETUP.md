@@ -87,7 +87,11 @@ into `image_server/` (updating it on later runs), lets the WebUI install its
 own dependencies on first launch (several GB, one time), and starts it with
 `--api` on `http://127.0.0.1:7860` — exactly what the Image Studio expects.
 Forge Neo runs the SDXL-class families and the newer architectures,
-including Anima (see below); it prefers a modern Python (3.13 recommended).
+including Anima (see below); it needs Python 3.11+ (3.13 recommended — its
+dependencies publish no 3.10 wheels), so the script refuses to install with
+an older interpreter, finds a newer one via the `py` launcher on Windows
+automatically, and detects a venv left behind by an unsupported Python
+(delete `image_server/venv` and re-run when it says so).
 The script prints the server address plus the checkpoint/LoRA folder paths to
 paste into the Studio's Setup tab. An install directory can be passed as the
 first argument, and `WB_WEBUI_REPO` / `WB_WEBUI_BRANCH` / `WB_WEBUI_PORT` /
