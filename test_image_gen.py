@@ -1174,6 +1174,11 @@ def test_prompt_style_detection(tmp_path):
     assert backend._prompt_style(cfg("Illustrious XL")) == "tags"
     assert backend._prompt_style(cfg("NoobAI XL")) == "tags"
     assert backend._prompt_style(cfg("Animagine XL 3.1")) == "tags"
+    # Anima auto-resolves to the hybrid style (tags + sentences); AnimaPencil
+    # is an SDXL model and must keep resolving natural despite the substring.
+    assert backend._prompt_style(cfg("Anima")) == "hybrid"
+    assert backend._prompt_style(cfg("", "anima-base-v1.0.safetensors")) == "hybrid"
+    assert backend._prompt_style(cfg("SDXL 1.0", "AnimaPencil-XL-v5.safetensors")) == "natural"
     # sd_name fallback for configs saved before model_base existed
     assert backend._prompt_style(cfg("", "ponyDiffusionV6XL.safetensors")) == "tags"
     assert backend._prompt_style(cfg("", "noobaiXLNAIXL_epsilon.safetensors")) == "tags"
@@ -1186,8 +1191,12 @@ def test_prompt_style_detection(tmp_path):
     # "auto" and junk values fall back to it.
     assert backend._prompt_style({**cfg("Pony"), "prompt_style_mode": "natural"}) == "natural"
     assert backend._prompt_style({**cfg("FLUX.1"), "prompt_style_mode": "tags"}) == "tags"
+    assert backend._prompt_style({**cfg("FLUX.1"), "prompt_style_mode": "hybrid"}) == "hybrid"
+    assert backend._prompt_style({**cfg("Anima"), "prompt_style_mode": "tags"}) == "tags"
     assert backend._prompt_style({**cfg("Pony"), "prompt_style_mode": "auto"}) == "tags"
+    assert backend._prompt_style({**cfg("Anima"), "prompt_style_mode": "auto"}) == "hybrid"
     assert backend._prompt_style({**cfg("Pony"), "prompt_style_mode": "bogus"}) == "tags"
+    assert backend._prompt_style({**cfg("Anima"), "prompt_style_mode": "bogus"}) == "hybrid"
 
 
 def test_prompt_style_mode_config_roundtrip(tmp_path):
@@ -7286,7 +7295,7 @@ def test_anima_prompt_profile(tmp_path):
     cfg = backend._load_config()
 
     assert backend._tag_model_marker(cfg) == "anima"
-    assert backend._prompt_style(cfg) == "tags"
+    assert backend._prompt_style(cfg) == "hybrid"
     assert cfg["quality_tags"] == backend.QUALITY_TAG_DEFAULTS["anima"]
     assert "score_7" in cfg["quality_tags"]
     # The card's "safe" rating tag is deliberately not part of the stock
@@ -7310,6 +7319,87 @@ def test_anima_prompt_profile(tmp_path):
     cfg["model_name"] = "animationStyleXL.safetensors"
     backend._save_config(cfg)
     assert backend._tag_model_marker(backend._load_config()) is None
+
+
+def test_anima_hybrid_prompt_writing(tmp_path):
+    backend = _load_backend(tmp_path)
+
+    def anima_cfg(**overrides):
+        return {**backend._default_config(), "model_base": "Anima",
+                "model_name": "anima-base-v1.0.safetensors", **overrides}
+
+    # The hybrid template drives the writer, and the family quality tags are
+    # prepended ahead of the reply exactly like the tag families.
+    captured = {}
+    reply = "safe, 1girl, silver hair, blue eyes. She stands in the rain, upper body."
+    sdk = _make_sdk(reply=reply, captured=captured)
+    prompt = asyncio.run(backend._write_image_prompt(anima_cfg(), "scene", "", sdk))
+    assert "ONE hybrid prompt" in captured["prompts"][0]
+    assert "BOORU-STYLE TAGS" not in captured["prompts"][0]
+    assert prompt == f"{backend.QUALITY_TAG_DEFAULTS['anima']}, {reply}"
+
+    # Subject modes ride the hybrid rule variants, and the BREAK option is
+    # ignored (CLIP-chunking syntax means nothing to Anima's text encoder).
+    captured = {}
+    sdk = _make_sdk(reply=reply, captured=captured)
+    asyncio.run(backend._write_image_prompt(
+        anima_cfg(booru_subject_mode="single"), "scene", "", sdk))
+    assert backend.HYBRID_SINGLE_SUBJECT_RULE in captured["prompts"][0]
+    assert backend.BOORU_SINGLE_SUBJECT_RULE not in captured["prompts"][0]
+
+    captured = {}
+    sdk = _make_sdk(reply=reply, captured=captured)
+    asyncio.run(backend._write_image_prompt(
+        anima_cfg(booru_subject_mode="multi", booru_break_separator=True),
+        "scene", "", sdk))
+    assert backend.HYBRID_MULTI_SUBJECT_RULE in captured["prompts"][0]
+    assert backend.BOORU_MULTI_SUBJECT_RULE not in captured["prompts"][0]
+    assert "BREAK" not in captured["prompts"][0]
+
+    # The rare-tag usage filter never touches a hybrid prompt: "hard" mode
+    # would shred the sentences into unknown comma fragments.
+    sdk = _make_sdk(reply=reply, captured={})
+    prompt = asyncio.run(backend._write_image_prompt(
+        anima_cfg(tag_usage_filter="hard", tag_usage_min_count=10_000_000),
+        "scene", "", sdk))
+    assert prompt.endswith(reply)
+
+    # Hybrid counts as a tag style everywhere else: canonical character tags
+    # stay enabled and the subject mode resolves instead of going blank.
+    cfg = anima_cfg()
+    assert backend._uses_booru_tags(cfg)
+    assert backend._subject_mode(cfg) == "single"
+    block = backend._character_block(
+        cfg, {"player": {"name": "Ash", "descriptor": "tall, scarred",
+                         "tags": "1boy, black hair"}, "npcs": []})
+    assert "appearance tags (canonical, use verbatim)" in block
+
+
+def test_anima_hybrid_config_roundtrip(tmp_path):
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+
+    body = client.get("/config").json()
+    assert body["default_prompt_template_anima"] \
+        == backend.DEFAULT_PROMPT_TEMPLATE_ANIMA
+    assert body["prompt_template_anima"] == backend.DEFAULT_PROMPT_TEMPLATE_ANIMA
+    assert "hybrid" in body["prompt_style_modes"]
+
+    resp = client.put("/config", json={
+        "prompt_style_mode": "hybrid",
+        "prompt_template_anima": "my anima template {narration} {history}"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["prompt_style"] == "hybrid"
+    cfg = backend._load_config()
+    assert cfg["prompt_style_mode"] == "hybrid"
+    assert cfg["prompt_template_anima"] == "my anima template {narration} {history}"
+
+    # The customized template is what the writer renders.
+    captured = {}
+    sdk = _make_sdk(reply="safe, 1girl. She waves.", captured=captured)
+    asyncio.run(backend._write_image_prompt(cfg, "the scene", "the past", sdk))
+    assert captured["prompts"][0].startswith("my anima template the scene the past")
 
 
 def test_anima_local_base_inference(tmp_path):

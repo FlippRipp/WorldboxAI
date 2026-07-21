@@ -2993,16 +2993,19 @@ export default function ImageStudio({ onBack }) {
 
   // Mirror of the backend's _prompt_style resolution, live against the draft:
   // an explicit prompt_style_mode wins, "auto" falls back to the
-  // BOORU_TAG_MODEL_MARKERS heuristic.
+  // BOORU_TAG_MODEL_MARKERS heuristic (anima → hybrid, other markers → tags).
   const modelIdent = `${draft.model_base || ''} ${draft.model_name || ''}`.toLowerCase();
-  const autoPromptStyle = BOORU_TAG_MODEL_MARKERS.some((m) => markerMatches(m, modelIdent))
-    ? 'tags' : 'natural';
-  const promptStyleMode = draft.prompt_style_mode || 'auto';
-  const promptStyle = promptStyleMode === 'auto' ? autoPromptStyle : promptStyleMode;
   // Mirror of the backend's _tag_model_marker: the tag-trained family the
   // checkpoint matches, keying quality_tag_defaults. Null for natural models.
   const qualityMarker =
     BOORU_TAG_MODEL_MARKERS.find((m) => markerMatches(m, modelIdent)) || null;
+  const autoPromptStyle =
+    qualityMarker === 'anima' ? 'hybrid' : qualityMarker ? 'tags' : 'natural';
+  const promptStyleMode = draft.prompt_style_mode || 'auto';
+  const promptStyle = promptStyleMode === 'auto' ? autoPromptStyle : promptStyleMode;
+  const PROMPT_STYLE_LABELS = {
+    tags: 'booru tags', natural: 'descriptive text', hybrid: 'hybrid (tags + sentences)',
+  };
   const qualityDefault =
     (config?.quality_tag_defaults || {})[qualityMarker || 'pony'] || 'score_9, score_8_up, score_7_up';
   // Mirror of the backend's _is_vpred: v-prediction finetunes layer
@@ -3196,6 +3199,7 @@ export default function ImageStudio({ onBack }) {
         beat_planner: draft.beat_planner || 'fast',
         prompt_template: draft.prompt_template,
         prompt_template_tags: draft.prompt_template_tags,
+        prompt_template_anima: draft.prompt_template_anima,
         quality_tags: draft.quality_tags,
         booru_subject_mode: draft.booru_subject_mode || 'auto',
         booru_break_separator: draft.booru_break_separator === true,
@@ -3986,22 +3990,26 @@ export default function ImageStudio({ onBack }) {
               className={inputCls}
             >
               <option value="auto">
-                Auto — detect from the model{draft.model_name ? ` (currently ${autoPromptStyle === 'tags' ? 'booru tags' : 'descriptive text'})` : ''}
+                Auto — detect from the model{draft.model_name ? ` (currently ${PROMPT_STYLE_LABELS[autoPromptStyle]})` : ''}
               </option>
               <option value="tags">Booru tags</option>
               <option value="natural">Descriptive text</option>
+              <option value="hybrid">Hybrid — tags + sentences (Anima)</option>
             </select>
             <p className="text-xs text-gray-600 mt-1">
-              How prompts are phrased: comma-separated booru tags (tag-trained models) or
-              descriptive sentences. Auto detects from the base model — Pony/Illustrious/NoobAI/Animagine → tags,
-              Flux and everything else → descriptive text.
+              How prompts are phrased: comma-separated booru tags (tag-trained models),
+              descriptive sentences, or a hybrid of both — a tag block for who is in frame
+              and what they look like, then sentences for the action (what Anima&apos;s card
+              recommends). Auto detects from the base model — Pony/Illustrious/NoobAI/Animagine → tags,
+              Anima → hybrid, Flux and everything else → descriptive text.
             </p>
           </div>
           {draft.model_name && (
             <div className="text-xs text-gray-500 bg-gray-950/60 border border-gray-800 rounded-lg px-3 py-2">
               Selected model uses the{' '}
               <span className="text-purple-300 font-medium">
-                {promptStyle === 'tags' ? 'booru tag' : 'natural language'}
+                {promptStyle === 'tags' ? 'booru tag'
+                  : promptStyle === 'hybrid' ? 'Anima hybrid' : 'natural language'}
               </span>{' '}
               template{qualityMarker ? ', with its family’s quality tags prepended' : ''}.
               {promptStyleMode === 'auto'
@@ -4087,8 +4095,27 @@ export default function ImageStudio({ onBack }) {
               rows={3}
               className={`${inputCls} font-mono text-xs leading-relaxed`}
             />
+          </div>
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className={`text-xs uppercase tracking-wider ${promptStyle === 'hybrid' ? 'text-purple-400' : 'text-gray-500'}`}>
+                Hybrid template (Anima — tags + sentences){promptStyle === 'hybrid' ? ' — active' : ''}
+              </label>
+              <button
+                onClick={() => set('prompt_template_anima', config.default_prompt_template_anima)}
+                className="text-xs text-gray-500 hover:text-gray-300"
+              >
+                Reset to default
+              </button>
+            </div>
+            <AutoGrowTextarea
+              value={draft.prompt_template_anima || ''}
+              onChange={(e) => set('prompt_template_anima', e.target.value)}
+              rows={3}
+              className={`${inputCls} font-mono text-xs leading-relaxed`}
+            />
             <p className="text-xs text-gray-600 mt-1">
-              Placeholders in both templates: <code className="text-purple-400">{'{narration}'}</code> = latest scene,{' '}
+              Placeholders in all templates: <code className="text-purple-400">{'{narration}'}</code> = latest scene,{' '}
               <code className="text-purple-400">{'{history}'}</code> = earlier scenes.
             </p>
           </div>
@@ -4112,7 +4139,7 @@ export default function ImageStudio({ onBack }) {
               keeps their own look. Works best on Illustrious and NoobAI, less reliably
               on Pony. Natural-language models are unaffected.
             </p>
-            {(draft.booru_subject_mode || 'auto') !== 'single' && (
+            {promptStyle !== 'hybrid' && (draft.booru_subject_mode || 'auto') !== 'single' && (
               <>
                 <Toggle
                   checked={draft.booru_break_separator === true}
@@ -4122,7 +4149,8 @@ export default function ImageStudio({ onBack }) {
                 <p className="text-xs text-gray-600">
                   A1111-style prompt chunking that further isolates each character's
                   tags. Only useful if the generation pipeline honors the BREAK
-                  keyword — leave off if unsure.
+                  keyword — leave off if unsure. Hybrid (Anima) prompts never use
+                  BREAK, so the toggle hides there.
                 </p>
               </>
             )}
@@ -4158,7 +4186,8 @@ export default function ImageStudio({ onBack }) {
               the dictionaries know but that fall below the threshold; Hard also removes
               tags neither site has heard of (usually hallucinated). LoRA trigger words,
               score_ tags, and BREAK always survive. Natural-language models are
-              unaffected.
+              unaffected, and hybrid (Anima) prompts keep their sentences untouched —
+              there the filter only prunes cached character tags.
             </p>
           </div>
           <div>

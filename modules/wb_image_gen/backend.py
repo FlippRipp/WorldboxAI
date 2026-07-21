@@ -196,7 +196,7 @@ PROFILE_FIELDS = (
     "hires_denoise", "negative_prompt", "style_suffix",
     "quality_tags", "booru_subject_mode", "booru_break_separator",
     "tag_usage_filter", "tag_usage_min_count", "prompt_template",
-    "prompt_template_tags", "prompt_style_mode",
+    "prompt_template_tags", "prompt_template_anima", "prompt_style_mode",
 )
 GLOBAL_FIELDS = (
     "enabled", "api_key", "civitai_api_key", "hf_api_key", "interval",
@@ -229,9 +229,11 @@ CHAT_IMAGE_CONCEAL_MODES = ("off", "blur", "blackout")
 BOORU_SUBJECT_MODES = ("single", "multi", "auto")
 
 # How the prompt writer phrases prompts: danbooru tag lists ("tags"),
-# descriptive natural language ("natural"), or "auto" — detect from the
-# checkpoint's base model / name (BOORU_TAG_MODEL_MARKERS).
-PROMPT_STYLE_MODES = ("auto", "tags", "natural")
+# descriptive natural language ("natural"), a mixed tag-block-plus-sentences
+# format ("hybrid" — what Anima's card recommends), or "auto" — detect from
+# the checkpoint's base model / name (BOORU_TAG_MODEL_MARKERS; the anima
+# marker resolves to hybrid, every other marker to tags).
+PROMPT_STYLE_MODES = ("auto", "tags", "natural", "hybrid")
 
 # Tag usage filter: drop LLM-produced tags that are too rare on the booru
 # sites to mean anything to a tag-trained checkpoint. "soft" drops only tags
@@ -422,6 +424,35 @@ EARLIER CONTEXT (for continuity only):
 LATEST SCENE (illustrate this):
 {narration}"""
 
+# Anima (CircleStone Labs) was trained on tags, natural-language captions,
+# AND combinations, and its card recommends mixing them: tags for who is in
+# frame and what they look like, sentences for the action and composition
+# (its Qwen text encoder reads prose far better than SDXL-class CLIP).
+# Community consensus matches: hybrid prompts beat pure tag lists on
+# comprehension while keeping the anime aesthetics, and the model is
+# sensitive to tag walls -- concise beats exhaustive. The quality prefix
+# (masterpiece, best quality, score_7) is prepended by _quality_tags, so the
+# template only asks for the rating tag onward.
+DEFAULT_PROMPT_TEMPLATE_ANIMA = """You write prompts for the Anima AI image generator. Anima reads BOTH booru tags AND natural language, and responds best to a MIX: tags pin down who is in frame and what they look like, sentences carry what is happening. Turn the scene below into ONE hybrid prompt depicting a single striking moment from the latest scene.
+
+Structure, in this order:
+- Open with exactly one rating tag matched to the scene: safe, sensitive, nsfw, or explicit.
+- Then subject-count tags (1girl, 1boy, 2girls, 1other, no humans...).
+- Then each subject's appearance as comma-separated booru tags (hair, eyes, skin, clothing, species, distinctive features). Lowercase, spaces instead of underscores; danbooru vocabulary for human and anime-style subjects, e621 for anthro, feral, or creature subjects.
+- Then 2-4 plain-English sentences describing the moment: the action and interaction (who does what to whom), pose, expression, setting, lighting, and mood. Standard English capitalization. Refer to subjects by appearance ("the silver-haired knight"), never by story names the image model cannot know.
+- State the camera framing exactly once, as a tag or in a sentence: close-up, portrait, upper body, cowboy shot, full body, or wide shot. Default to the tightest framing that still shows the action; use full body or wide shot only when the whole figure or the scale of the scene is the point.
+
+Rules:
+- Tags carry appearance; sentences carry action and composition. Never restate the same fact in both.
+- Concise and concrete: no tag walls, no repetition, no story summary, no inner thoughts -- describe what things LOOK like.
+- Output ONLY the prompt text, no quotes, no preamble.
+
+EARLIER CONTEXT (for continuity only):
+{history}
+
+LATEST SCENE (illustrate this):
+{narration}"""
+
 # Earlier defaults of the tags template. A stored config still carrying one of
 # these verbatim was never customized, so it upgrades to the current default
 # on load; edited templates are left alone.
@@ -581,6 +612,18 @@ BOORU_MULTI_SUBJECT_RULE = """MULTI-SUBJECT STRUCTURE (MANDATORY): when the mome
 BOORU_BREAK_RULE = ("- Put the single uppercase word BREAK between consecutive character tag "
                     "groups (its own item in the list, no commas attached to it).")
 
+# Hybrid (Anima) prompts keep the tag block's subject-count discipline, but
+# interaction and placement move into the sentences, where Anima's language
+# understanding actually resolves who-does-what-to-whom. No BREAK variant:
+# BREAK is CLIP-chunking syntax and means nothing to Anima's Qwen encoder.
+HYBRID_SINGLE_SUBJECT_RULE = """SINGLE SUBJECT RULE (MANDATORY): depict exactly ONE character. Pick the most relevant subject of the latest scene -- the character the moment centers on (acting, speaking, or being acted upon). Tag only them in the tag block: solo, one subject-count tag (1girl, 1boy, 1other -- or e621 style for anthro/feral subjects: anthro or feral plus male/female), then their appearance tags; keep the sentences on that one character's action too. Never tag or describe a second character; at most, imply others through the setting (a shadow, a doorway, an empty chair). A scene with no characters at all may be pure scenery (no humans)."""
+
+HYBRID_MULTI_SUBJECT_RULE = """MULTI-SUBJECT STRUCTURE (MANDATORY): when the moment involves more than one character, keep them distinct:
+- Start the tag block with ONE correct subject-count tag combo: 2girls, 1boy 1girl, 2boys, 3girls, 2girls 1boy... (for anthro/feral characters use e621 style instead: duo or group plus anthro/feral and male/female). Count only the characters actually depicted, 3 at most -- if more are present, depict the 2-3 the moment centers on and fold the rest into the setting (crowd, blurry background figures).
+- Give EACH depicted character ONE CONTIGUOUS appearance-tag group, most central character first, led by the traits that most set them apart from the others in the image (hair, eyes, species features); NEVER interleave one character's traits with another's.
+- Use the sentences to bind them together: state plainly who does what to whom, their relative placement, and how they face or touch each other, referring to each character by their distinguishing appearance.
+- A scene that truly centers on one character may still be solo (solo, 1girl/1boy and that character's tags); a scene with none may be pure scenery (no humans)."""
+
 # Precomputed per-character appearance tags for tag-trained checkpoints. Each
 # known character's sheet is distilled ONCE into canonical booru tags by a
 # background LLM pass and cached (keyed by save + character, invalidated by a
@@ -706,6 +749,7 @@ def _default_config() -> dict:
         "beat_planner": "fast",         # one of BEAT_PLANNER_MODES
         "prompt_template": DEFAULT_PROMPT_TEMPLATE,
         "prompt_template_tags": DEFAULT_PROMPT_TEMPLATE_TAGS,
+        "prompt_template_anima": DEFAULT_PROMPT_TEMPLATE_ANIMA,
         "quality_tags": DEFAULT_QUALITY_TAGS,
         "booru_subject_mode": "auto",   # tag models: one of BOORU_SUBJECT_MODES
         "prompt_style_mode": "auto",    # one of PROMPT_STYLE_MODES
@@ -1225,16 +1269,27 @@ def _is_vpred(cfg: dict) -> bool:
 
 
 def _prompt_style(cfg: dict) -> str:
-    """Resolved prompt style, "tags" (danbooru lists) or "natural" (descriptive
-    text). An explicit prompt_style_mode wins; "auto" picks "tags" for
-    Pony/Illustrious/NoobAI/Animagine/Anima bases and "natural" for Flux and
-    everything else. (Anima also understands natural language — forcing
-    "natural" per profile is a supported choice there, its quality tags
-    still apply.)"""
+    """Resolved prompt style: "tags" (danbooru lists), "natural" (descriptive
+    text), or "hybrid" (a tag block plus sentences — the format Anima's card
+    recommends). An explicit prompt_style_mode wins; "auto" picks "hybrid"
+    for Anima, "tags" for Pony/Illustrious/NoobAI/Animagine, and "natural"
+    for Flux and everything else. (Anima was trained on all three formats —
+    forcing "tags" or "natural" per profile is a supported choice there, its
+    quality tags still apply.)"""
     mode = str(cfg.get("prompt_style_mode") or "auto")
-    if mode in ("tags", "natural"):
+    if mode in ("tags", "natural", "hybrid"):
         return mode
-    return "tags" if _tag_model_marker(cfg) else "natural"
+    marker = _tag_model_marker(cfg)
+    if marker == "anima":
+        return "hybrid"
+    return "tags" if marker else "natural"
+
+
+def _uses_booru_tags(cfg: dict) -> bool:
+    """Whether the resolved style puts booru tags in the prompt ("tags" and
+    "hybrid" both do). Gates quality tags, subject modes, and canonical
+    character appearance tags."""
+    return _prompt_style(cfg) in ("tags", "hybrid")
 
 
 def _quality_tags(cfg: dict) -> str:
@@ -1254,7 +1309,7 @@ def _quality_tags(cfg: dict) -> str:
         return ""
     if marker:
         return value
-    return value if _prompt_style(cfg) == "tags" else ""
+    return value if _uses_booru_tags(cfg) else ""
 
 
 def _subject_mode(cfg: dict, characters: dict | None = None) -> str:
@@ -1263,7 +1318,7 @@ def _subject_mode(cfg: dict, characters: dict | None = None) -> str:
     the scene roster puts in frame (the player counts unless POV hides them);
     untracked narration-only characters are invisible to it, so with no roster
     data it falls back to "single"."""
-    if _prompt_style(cfg) != "tags":
+    if not _uses_booru_tags(cfg):
         return ""
     mode = str(cfg.get("booru_subject_mode") or "single")
     if mode not in BOORU_SUBJECT_MODES:
@@ -1776,7 +1831,7 @@ def _character_block(cfg: dict, characters: dict | None,
     if subject_mode is None:
         subject_mode = _subject_mode(cfg, characters)
     pov = str(cfg.get("player_in_images") or "show") == "pov"
-    tags = _prompt_style(cfg) == "tags"
+    tags = _uses_booru_tags(cfg)
 
     def _line(sheet: dict, label_suffix: str = "") -> str:
         # A sheet with precomputed appearance tags serves them ready-made;
@@ -1895,16 +1950,23 @@ async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
     style = _prompt_style(cfg)
     if style == "tags":
         template = cfg.get("prompt_template_tags") or DEFAULT_PROMPT_TEMPLATE_TAGS
+    elif style == "hybrid":
+        template = cfg.get("prompt_template_anima") or DEFAULT_PROMPT_TEMPLATE_ANIMA
     else:
         template = cfg.get("prompt_template") or DEFAULT_PROMPT_TEMPLATE
     prompt = _render_template(template, narration, history)
     subject_mode = _subject_mode(cfg, characters)
     if subject_mode == "single":
-        prompt += "\n\n" + BOORU_SINGLE_SUBJECT_RULE
+        prompt += "\n\n" + (HYBRID_SINGLE_SUBJECT_RULE if style == "hybrid"
+                            else BOORU_SINGLE_SUBJECT_RULE)
     elif subject_mode == "multi":
-        rule = BOORU_MULTI_SUBJECT_RULE
-        if cfg.get("booru_break_separator"):
-            rule += "\n" + BOORU_BREAK_RULE
+        if style == "hybrid":
+            # No BREAK option: CLIP-chunking syntax, inert on Anima's Qwen TE.
+            rule = HYBRID_MULTI_SUBJECT_RULE
+        else:
+            rule = BOORU_MULTI_SUBJECT_RULE
+            if cfg.get("booru_break_separator"):
+                rule += "\n" + BOORU_BREAK_RULE
         prompt += "\n\n" + rule
     triggers, llm_triggers = _active_trigger_words(cfg)
     if triggers:
@@ -1942,6 +2004,10 @@ async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
     if _looks_like_llm_refusal(image_prompt):
         raise RuntimeError(f"prompt writer refused: {image_prompt[:120]}")
     if style == "tags":
+        # Tags only, never hybrid: the filter splits on commas, so on a
+        # hybrid prompt "hard" mode would shred the sentences into unknown
+        # comma fragments and drop them. Cached character tags still filter
+        # for hybrid profiles (_clean_character_tags runs on pure tag lists).
         image_prompt = _filter_tags_by_usage(image_prompt, cfg,
                                              whitelist=triggers + llm_triggers)
 
@@ -4516,7 +4582,7 @@ def _spawn_tag_backfill(save_id: str, characters: dict | None, sdk) -> None:
     cfg = _load_config()
     if _missing_setup(cfg):
         return
-    if _prompt_style(cfg) != "tags" or not cfg.get("character_reference_enabled", True):
+    if not _uses_booru_tags(cfg) or not cfg.get("character_reference_enabled", True):
         return
     if _get_tag_lock().locked():
         return
@@ -5048,6 +5114,7 @@ def get_router():
         beat_planner: str | None = None
         prompt_template: str | None = None
         prompt_template_tags: str | None = None
+        prompt_template_anima: str | None = None
         quality_tags: str | None = None
         pony_quality_tags: str | None = None       # deprecated alias for quality_tags
         booru_subject_mode: str | None = None
@@ -5185,6 +5252,7 @@ def get_router():
         out["samplers"] = SAMPLERS
         out["default_prompt_template"] = DEFAULT_PROMPT_TEMPLATE
         out["default_prompt_template_tags"] = DEFAULT_PROMPT_TEMPLATE_TAGS
+        out["default_prompt_template_anima"] = DEFAULT_PROMPT_TEMPLATE_ANIMA
         out["quality_tag_defaults"] = QUALITY_TAG_DEFAULTS
         out["render_defaults"] = RENDER_DEFAULTS
         out["vpred_render_overrides"] = VPRED_RENDER_OVERRIDES
@@ -5500,7 +5568,7 @@ def get_router():
                 descriptor = _character_descriptor(ch.race, ch.gender, ch.appearance)
                 tags[ch.key] = _public_tag_entry(entry, descriptor)
         return {
-            "tags_enabled": _prompt_style(cfg) == "tags"
+            "tags_enabled": _uses_booru_tags(cfg)
                             and bool(cfg.get("character_reference_enabled", True)),
             "tags": tags,
         }
