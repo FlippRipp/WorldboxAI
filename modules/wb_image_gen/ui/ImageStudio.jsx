@@ -1173,6 +1173,7 @@ function LoraRow({ entry, checkpointFamily, provider, canInstall, download, onIn
   const [triggers, setTriggers] = useState((entry.trained_words || []).join(', '));
   const [showLink, setShowLink] = useState(false);
   const [linkFilter, setLinkFilter] = useState('');
+  const [expanded, setExpanded] = useState(false);
   const isLocal = provider === 'local';
 
   useEffect(() => { setStrength(entry.strength ?? 0.7); }, [entry.strength]);
@@ -1254,49 +1255,79 @@ function LoraRow({ entry, checkpointFamily, provider, canInstall, download, onIn
 
   return (
     <div className={`bg-gray-950/60 border border-gray-800 rounded-lg p-3 space-y-2 ${!compatible ? 'opacity-60' : ''}`}>
-      <div className="flex items-center gap-3">
+      <div
+        className="flex items-center gap-2 cursor-pointer select-none"
+        onClick={() => setExpanded((x) => !x)}
+        title={expanded ? 'Collapse' : 'Expand'}
+      >
+        <svg
+          className={`w-3 h-3 shrink-0 text-gray-600 transition-transform ${expanded ? 'rotate-90' : ''}`}
+          fill="none" stroke="currentColor" viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+        </svg>
         {entry.thumb_url ? (
-          <a href={pageUrl} target="_blank" rel="noreferrer" className="shrink-0" title={`Open on ${sourceName}`}>
-            <img src={entry.thumb_url} alt="" loading="lazy" className="w-10 h-10 rounded object-cover bg-gray-800" />
-          </a>
+          expanded ? (
+            <a
+              href={pageUrl} target="_blank" rel="noreferrer" className="shrink-0"
+              title={`Open on ${sourceName}`} onClick={(e) => e.stopPropagation()}
+            >
+              <img src={entry.thumb_url} alt="" loading="lazy" className="w-10 h-10 rounded object-cover bg-gray-800" />
+            </a>
+          ) : (
+            <img src={entry.thumb_url} alt="" loading="lazy" className="w-6 h-6 rounded object-cover bg-gray-800 shrink-0" />
+          )
         ) : (
-          <div className="w-10 h-10 rounded bg-gray-800 shrink-0" />
+          <div className={`${expanded ? 'w-10 h-10' : 'w-6 h-6'} rounded bg-gray-800 shrink-0`} />
         )}
         <div className="min-w-0 flex-1">
-          <a
-            href={pageUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="text-sm text-gray-200 hover:text-purple-300 truncate block"
-            title={`${entry.name} — ${entry.version_name}`}
-          >
-            {entry.name}
-          </a>
-          <div className="text-[10px] text-gray-500 truncate">
-            {entry.creator && <span>by {entry.creator} · </span>}
-            {entry.base_model}
-            {entry.trained_words?.length > 0 && (
-              <span className="text-gray-600"> · triggers: {entry.trained_words.slice(0, 3).join(', ')}</span>
-            )}
-          </div>
+          {expanded ? (
+            <>
+              <a
+                href={pageUrl}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="text-sm text-gray-200 hover:text-purple-300 truncate block"
+                title={`${entry.name} — ${entry.version_name}`}
+              >
+                {entry.name}
+              </a>
+              <div className="text-[10px] text-gray-500 truncate">
+                {entry.creator && <span>by {entry.creator} · </span>}
+                {entry.base_model}
+                {entry.trained_words?.length > 0 && (
+                  <span className="text-gray-600"> · triggers: {entry.trained_words.slice(0, 3).join(', ')}</span>
+                )}
+              </div>
+              <span className={`inline-block mt-1 max-w-full truncate px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wider border ${availability.cls}`}>
+                {availability.label}
+              </span>
+            </>
+          ) : (
+            <span className="text-sm text-gray-200 truncate block" title={`${entry.name} — ${entry.version_name}`}>
+              {entry.name}
+            </span>
+          )}
         </div>
-        <span className={`px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wider border shrink-0 ${availability.cls}`}>
-          {availability.label}
+        <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+          <Toggle
+            checked={!!entry.active}
+            onChange={(v) => onPatch(entry.id, { active: v })}
+            label=""
+          />
         </span>
-        <Toggle
-          checked={!!entry.active}
-          onChange={(v) => onPatch(entry.id, { active: v })}
-          label=""
-        />
-        <button
-          onClick={() => onDelete(entry.id)}
-          className="text-gray-600 hover:text-red-400 transition-colors shrink-0"
-          title="Remove from library"
-        >
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-          </svg>
-        </button>
+        {expanded && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(entry.id); }}
+            className="text-gray-600 hover:text-red-400 transition-colors shrink-0"
+            title="Remove from library"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+          </button>
+        )}
       </div>
 
       {dimmed && (
@@ -1306,7 +1337,7 @@ function LoraRow({ entry, checkpointFamily, provider, canInstall, download, onIn
         </p>
       )}
 
-      {entry.active && fam !== 'flux' && (
+      {expanded && entry.active && fam !== 'flux' && (
         <div className="flex items-center gap-3">
           <label
             className="text-[10px] uppercase tracking-wider text-gray-500 shrink-0"
@@ -1352,7 +1383,7 @@ function LoraRow({ entry, checkpointFamily, provider, canInstall, download, onIn
         </div>
       )}
 
-      {entry.active && (
+      {expanded && entry.active && (
         <div className="flex items-start gap-2">
           <label
             className={`text-[10px] uppercase tracking-wider shrink-0 pt-2.5 ${llmMode !== 'off' ? 'text-purple-400' : 'text-gray-500'}`}
@@ -1383,7 +1414,7 @@ function LoraRow({ entry, checkpointFamily, provider, canInstall, download, onIn
         </div>
       )}
 
-      {entry.active && (
+      {expanded && entry.active && (
         <div className="flex items-start gap-2">
           <label
             className="text-[10px] uppercase tracking-wider shrink-0 pt-2.5 text-gray-500"
@@ -1406,7 +1437,7 @@ function LoraRow({ entry, checkpointFamily, provider, canInstall, download, onIn
 
       {isLocal && download && <InstallProgress download={download} onCancel={onCancelInstall} />}
 
-      {isLocal && !availability.ok && (!download || download.status === 'error') && (
+      {expanded && isLocal && !availability.ok && (!download || download.status === 'error') && (
         <div className="space-y-1.5">
           <div className="flex items-center gap-3 text-[11px]">
             {entry.download_url && !entry.gated && (
@@ -1476,7 +1507,7 @@ function LoraRow({ entry, checkpointFamily, provider, canInstall, download, onIn
         </div>
       )}
 
-      {!isLocal && !availability.ok && fam !== 'flux' && (
+      {expanded && !isLocal && !availability.ok && fam !== 'flux' && (
         <div className="space-y-1.5">
           <div className="flex items-center gap-3 text-[11px]">
             <button
