@@ -1519,13 +1519,18 @@ def test_models_endpoint_proxies_and_requires_key(tmp_path):
             "models": [
                 {"sd_name": "goodModel_v1.safetensors", "sd_name_in_api": "goodModel_v1.safetensors",
                  "name": "Good Model", "status": 1, "is_sdxl": True,
-                 "base_model": "SDXL 1.0", "cover_url": "https://img.example/c.jpg"},
+                 "base_model": "SDXL 1.0", "cover_url": "https://img.example/c.jpg",
+                 "hash_sha256": "AbCdEf1234"},
                 {"sd_name": "brokenModel.safetensors", "name": "Broken", "status": 0},
             ],
             "pagination": {"next_cursor": "abc123"},
         }
 
+    async def never_fetch(cfg, prefix):
+        raise AssertionError("search pages must not look hashes up on Civitai")
+
     backend._novita_list_models = fake_list
+    backend._civitai_version_by_hash = never_fetch
     body = client.get("/models?query=real&limit=10").json()
     assert captured == {"query": "real", "cursor": "", "limit": 10}
     assert body["next_cursor"] == "abc123"
@@ -1533,6 +1538,10 @@ def test_models_endpoint_proxies_and_requires_key(tmp_path):
     model = body["models"][0]
     assert model["sd_name"] == "goodModel_v1.safetensors"
     assert model["is_sdxl"] is True
+    # Novita's truncated SHA256 travels (normalized) so the card can link to
+    # its Civitai page; nothing is in the by-hash cache, so no direct URL yet.
+    assert model["hash"] == "abcdef1234"
+    assert model["civitai_url"] == ""
 
     async def bad_key(cfg, query, cursor, limit):
         raise RuntimeError("Novita rejected the model search: invalid API key")
@@ -1541,6 +1550,43 @@ def test_models_endpoint_proxies_and_requires_key(tmp_path):
     resp = client.get("/models")
     assert resp.status_code == 502
     assert "invalid API key" in resp.json()["detail"]
+
+
+def test_models_novita_links_resolve_from_hash_cache(tmp_path):
+    """Search pages read the by-hash cache only: known hashes get a direct
+    civitai_url (and a cover for entries Novita ships none for), unknown ones
+    stay link-less rather than triggering per-result lookups."""
+    backend = _load_backend(tmp_path)
+    client = _client(backend)
+    _enable(backend)
+    backend._atomic_write_json(
+        backend._data_dir() / backend.CIVITAI_CKPT_META_FILE,
+        {"entries": {"aaaa000000": {"model_id": 4384,
+                                    "thumb_url": "https://img.civitai/t.jpg",
+                                    "name": "DreamShaper",
+                                    "checked_at": backend._now()}}})
+
+    async def fake_list(cfg, query, cursor, limit):
+        return {
+            "models": [
+                {"sd_name": "known.safetensors", "name": "Known", "status": 1,
+                 "hash_sha256": "AAAA000000", "cover_url": None},
+                {"sd_name": "unknown.safetensors", "name": "Unknown", "status": 1,
+                 "hash_sha256": "BBBB000000", "cover_url": "https://img.example/n.jpg"},
+            ],
+            "pagination": {},
+        }
+
+    async def never_fetch(cfg, prefix):
+        raise AssertionError("search pages must not look hashes up on Civitai")
+
+    backend._novita_list_models = fake_list
+    backend._civitai_version_by_hash = never_fetch
+    known, unknown = client.get("/models?query=x").json()["models"]
+    assert known["civitai_url"] == "https://civitai.com/models/4384"
+    assert known["cover_url"] == "https://img.civitai/t.jpg"  # filled from cache
+    assert unknown["civitai_url"] == ""
+    assert unknown["cover_url"] == "https://img.example/n.jpg"  # untouched
 
 
 # Novita names its Civitai mirrors after the no-space file name, so spaced
@@ -5306,7 +5352,18 @@ def test_models_endpoint_lists_local_checkpoints(tmp_path):
         assert path == "/sdapi/v1/sd-models"
         return SD_MODELS_FIXTURE
 
+    lookups = []
+
+    async def fake_by_hash(cfg, prefix):
+        lookups.append(prefix)
+        if prefix == "879db523c3":
+            return {"model_id": 4384,
+                    "thumb_url": "https://img.civitai/ds8.jpg",
+                    "name": "DreamShaper"}
+        return None   # Civitai answers 404: a real miss, cached
+
     backend._local_get = fake_get
+    backend._civitai_version_by_hash = fake_by_hash
     client = _client(backend)
 
     body = client.get("/models").json()
@@ -5317,6 +5374,22 @@ def test_models_endpoint_lists_local_checkpoints(tmp_path):
     pony = body["models"][1]
     assert pony["base_model"] == "Pony" and pony["is_sdxl"] is True
     assert body["next_cursor"] == ""
+
+    # Title [shorthash]es are AutoV2 prefixes: matched files get their Civitai
+    # page and preview, misses stay bare, unhashed titles are never looked up.
+    dream, pony, noob = body["models"]
+    assert dream["hash"] == "879db523c3"
+    assert dream["civitai_url"] == "https://civitai.com/models/4384"
+    assert dream["cover_url"] == "https://img.civitai/ds8.jpg"
+    assert pony["hash"] == "67ab2fd8ec"
+    assert pony["civitai_url"] == "" and pony["cover_url"] is None
+    assert noob["hash"] == "" and noob["civitai_url"] == ""
+    assert sorted(lookups) == ["67ab2fd8ec", "879db523c3"]
+
+    # Both answers were cached (the hit forever, the miss for its TTL), so a
+    # second request does not ask Civitai again.
+    client.get("/models")
+    assert sorted(lookups) == ["67ab2fd8ec", "879db523c3"]
 
     # Case-insensitive substring filter over title and model_name.
     body = client.get("/models", params={"query": "PONY"}).json()
@@ -5330,6 +5403,110 @@ def test_models_endpoint_lists_local_checkpoints(tmp_path):
     resp = client.get("/models")
     assert resp.status_code == 502
     assert "WebUI" in resp.json()["detail"]
+
+
+def test_models_local_hash_falls_back_to_scan_cache(tmp_path):
+    """A title the WebUI has not hashed yet still gets its Civitai match when
+    the checkpoint folder's scan cache knows the file's SHA256 by name."""
+    backend = _load_backend(tmp_path)
+    _enable_local(backend)
+    sha = "aabbccddee" + "0" * 54
+    backend._atomic_write_json(
+        backend._data_dir() / backend.LOCAL_INSTALL_KINDS["checkpoint"]["cache_file"],
+        {"files": {"C:/sd/models/Stable-diffusion/noobaiXLNAIXL_vPred10.safetensors":
+                   {"size": 7, "mtime": 7, "sha256": sha}},
+         "scanned_at": backend._now()})
+
+    async def fake_get(cfg, path, timeout=None):
+        return [{"title": "noobaiXLNAIXL_vPred10.safetensors",
+                 "model_name": "noobaiXLNAIXL_vPred10"}]
+
+    async def fake_by_hash(cfg, prefix):
+        assert prefix == "aabbccddee"
+        return {"model_id": 833294, "thumb_url": "https://img.civitai/noob.jpg",
+                "name": "NoobAI-XL"}
+
+    backend._local_get = fake_get
+    backend._civitai_version_by_hash = fake_by_hash
+    client = _client(backend)
+
+    (noob,) = client.get("/models").json()["models"]
+    assert noob["hash"] == "aabbccddee"
+    assert noob["civitai_url"] == "https://civitai.com/models/833294"
+    assert noob["cover_url"] == "https://img.civitai/noob.jpg"
+
+
+def test_civitai_page_redirects_by_hash(tmp_path):
+    """Model cards link images through /civitai/page: one cached by-hash
+    lookup, then a redirect to the model's civitai.red page."""
+    backend = _load_backend(tmp_path)
+    _enable_local(backend)
+    client = _client(backend)
+    lookups = []
+
+    async def fake_by_hash(cfg, prefix):
+        lookups.append(prefix)
+        return ({"model_id": 4384, "thumb_url": "", "name": "DreamShaper"}
+                if prefix == "879db523c3" else None)
+
+    backend._civitai_version_by_hash = fake_by_hash
+
+    resp = client.get("/civitai/page", params={"hash": "879DB523C3"},
+                      follow_redirects=False)
+    assert resp.status_code in (302, 307)
+    assert resp.headers["location"] == "https://civitai.red/models/4384"
+
+    # Served from the cache the second time.
+    client.get("/civitai/page", params={"hash": "879db523c3"},
+               follow_redirects=False)
+    assert lookups == ["879db523c3"]
+
+    # A real Civitai miss names the model in the error; junk hashes 404 too.
+    resp = client.get("/civitai/page",
+                      params={"hash": "ffff000000", "name": "Mystery Mix"})
+    assert resp.status_code == 404
+    assert "Mystery Mix" in resp.json()["detail"]
+    assert client.get("/civitai/page", params={"hash": "nope"}).status_code == 404
+
+    # Transport trouble is not a miss: 502, and nothing is cached for it.
+    async def unreachable(cfg, prefix):
+        raise RuntimeError("Could not reach Civitai: boom")
+
+    backend._civitai_version_by_hash = unreachable
+    resp = client.get("/civitai/page", params={"hash": "eeee111111"})
+    assert resp.status_code == 502
+    assert "eeee111111" not in backend._read_ckpt_meta_cache()
+
+
+def test_civitai_hash_meta_miss_ttl(tmp_path):
+    """Cached misses are re-asked only after their TTL; hits never are."""
+    from datetime import datetime, timedelta, timezone
+    backend = _load_backend(tmp_path)
+    cfg = _enable_local(backend)
+    old = (datetime.now(timezone.utc)
+           - timedelta(seconds=backend.CIVITAI_HASH_MISS_TTL_S + 60)).isoformat()
+    backend._atomic_write_json(
+        backend._data_dir() / backend.CIVITAI_CKPT_META_FILE,
+        {"entries": {
+            "aaaa000000": {"model_id": None, "thumb_url": "", "name": "",
+                           "checked_at": old},                      # expired miss
+            "bbbb000000": {"model_id": None, "thumb_url": "", "name": "",
+                           "checked_at": backend._now()},           # fresh miss
+            "cccc000000": {"model_id": 7, "thumb_url": "", "name": "C",
+                           "checked_at": old},                      # hit: no expiry
+        }})
+    lookups = []
+
+    async def fake_by_hash(cfg_, prefix):
+        lookups.append(prefix)
+        return None
+
+    backend._civitai_version_by_hash = fake_by_hash
+    meta = asyncio.run(backend._civitai_hash_meta(
+        cfg, ["aaaa000000", "bbbb000000", "cccc000000"]))
+    assert lookups == ["aaaa000000"]
+    assert meta["cccc000000"]["model_id"] == 7
+    assert meta["bbbb000000"]["model_id"] is None
 
 
 def test_local_status_and_samplers_endpoints(tmp_path):

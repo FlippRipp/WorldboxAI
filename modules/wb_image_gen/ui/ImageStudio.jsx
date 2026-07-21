@@ -278,14 +278,18 @@ function Lightbox({ items, index, onNavigate, onClose, errorRecord }) {
   );
 }
 
-// Searchable dropdown over Novita's checkpoint catalog (thousands of models).
-// Searches server-side via the module's /models proxy; cursor-paginated. The
-// proxy may answer a spaced query with a catalog-style respelling (Novita
+// Model picker: the active checkpoint in a slot, with a browsable grid of
+// preview cards under it — the same view for the local WebUI and Novita.
+// Results come from the module's /models proxy (server-side search over the
+// installed list or Novita's thousands of Civitai mirrors, cursor-paginated).
+// The proxy may answer a spaced query with a catalog-style respelling (Novita
 // names Civitai mirrors after the no-space file name) — pagination must reuse
-// that effective_query, not what the user typed.
+// that effective_query, not what the user typed. A card's image links to the
+// model's Civitai (.red) page like the LoRA browsers do; clicking anywhere
+// else on the card selects it, and the active card wears a green border and
+// checkmark.
 // onSelect receives the whole model object (sd_name + base_model metadata).
 function ModelPicker({ value, valueBase, hasKey, local, onSelect }) {
-  const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [models, setModels] = useState([]);
   const [nextCursor, setNextCursor] = useState('');
@@ -295,7 +299,8 @@ function ModelPicker({ value, valueBase, hasKey, local, onSelect }) {
   const [refreshing, setRefreshing] = useState(false);
   const debounceRef = useRef(null);
   const seqRef = useRef(0);
-  const boxRef = useRef(null);
+  const gridRef = useRef(null);
+  const autoLoadCursorRef = useRef('');
   const enabled = local || hasKey;   // the local WebUI needs no API key
 
   const search = useCallback(async (q, cursor = '') => {
@@ -322,129 +327,152 @@ function ModelPicker({ value, valueBase, hasKey, local, onSelect }) {
     }
   }, []);
 
-  // Debounced search while the dropdown is open.
+  // Debounced search. Also the initial load, and the reload after a provider
+  // flip (the saved provider decides what /models answers).
   useEffect(() => {
-    if (!open) return undefined;
+    if (!enabled) return undefined;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => search(query), 350);
     return () => clearTimeout(debounceRef.current);
-  }, [open, query, search]);
+  }, [enabled, local, query, search]);
 
-  // Close on outside click.
-  useEffect(() => {
-    if (!open) return undefined;
-    const onDown = (e) => {
-      if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false);
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [open]);
+  // Infinite scroll: fetch the next page as the bottom approaches. A page
+  // that fails keeps its cursor in autoLoadCursorRef, so scrolling won't
+  // hammer the API — the Load more button below stays as the manual retry.
+  const onGridScroll = () => {
+    const el = gridRef.current;
+    if (
+      el && !loading && nextCursor && autoLoadCursorRef.current !== nextCursor &&
+      el.scrollTop + el.clientHeight >= el.scrollHeight - 200
+    ) {
+      autoLoadCursorRef.current = nextCursor;
+      search(effQuery || query, nextCursor);
+    }
+  };
+
+  // The WebUI appends " [shorthash]" to a title once it has hashed the file,
+  // so a model selected before that would stop matching its own entry.
+  const isActive = (m) => m.sd_name === value ||
+    (local && !!value && stripCkptTitleHash(m.sd_name) === stripCkptTitleHash(value));
 
   return (
-    <div ref={boxRef} className="relative">
+    <div>
       <label className={labelCls}>Model</label>
-      {value && !open && (
-        <div className="flex items-center justify-between gap-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2">
+      {value && (
+        <div className="flex items-center justify-between gap-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 mb-2">
           <span className="text-sm text-gray-200 font-mono truncate" title={value}>{value}</span>
-          <div className="flex items-center gap-2 shrink-0">
-            {valueBase && (
-              <span className="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wider bg-gray-800 border border-gray-700 text-gray-400">
-                {valueBase}
-              </span>
-            )}
-            <button
-              onClick={() => setOpen(true)}
-              disabled={!enabled}
-              className="text-xs text-purple-400 hover:text-purple-300 disabled:opacity-40"
-            >
-              Change
-            </button>
-          </div>
+          {valueBase && (
+            <span className="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wider bg-gray-800 border border-gray-700 text-gray-400 shrink-0">
+              {valueBase}
+            </span>
+          )}
         </div>
       )}
-      {(!value || open) && (
-        <input
-          type="text"
-          value={query}
-          autoFocus={open}
-          disabled={!enabled}
-          onChange={(e) => setQuery(e.target.value)}
-          onFocus={() => setOpen(true)}
-          onKeyDown={(e) => { if (e.key === 'Escape') setOpen(false); }}
-          placeholder={local
-            ? 'Search your installed checkpoints…'
-            : hasKey ? 'Search thousands of models — e.g. realistic, anime, fantasy…' : 'Save an API key first'}
-          className={inputCls}
-        />
-      )}
-      {!enabled && !value && (
+      <input
+        type="text"
+        value={query}
+        disabled={!enabled}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder={local
+          ? 'Filter your installed checkpoints…'
+          : hasKey ? 'Search thousands of models — e.g. realistic, anime, fantasy…' : 'Save an API key first'}
+        className={inputCls}
+      />
+      {!enabled && (
         <p className="text-xs text-yellow-500 mt-1">Save an API key to browse models.</p>
       )}
-
-      {open && (
-        <div className="absolute z-30 mt-1 w-full max-h-80 overflow-y-auto bg-gray-900 border border-gray-700 rounded-lg shadow-2xl">
-          {error && <div className="px-3 py-2 text-xs text-red-400">{error}</div>}
-          {!error && models.length === 0 && !loading && (
-            <div className="px-3 py-2 text-xs text-gray-500 italic">
+      {enabled && (
+        <div className="mt-2 space-y-2">
+          {error && <p className="text-xs text-red-400">{error}</p>}
+          {!error && models.length > 0 && effQuery && effQuery !== query.trim() && (
+            <p className="text-[10px] text-gray-500">
+              Matched catalog spelling <span className="font-mono text-gray-400">{effQuery}</span>
+            </p>
+          )}
+          <div
+            ref={gridRef}
+            onScroll={onGridScroll}
+            className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-96 overflow-y-auto pr-1"
+          >
+            {models.map((m) => {
+              const active = isActive(m);
+              const pageUrl = modelPageLink(m);
+              const cover = m.cover_url ? (
+                <img src={m.cover_url} alt="" loading="lazy" className="w-full h-28 object-cover bg-gray-800" />
+              ) : (
+                <div className="w-full h-28 bg-gray-800" />
+              );
+              return (
+                <div
+                  key={m.sd_name}
+                  className={`relative bg-gray-950/60 border rounded-lg overflow-hidden ${
+                    active ? 'border-green-500 ring-1 ring-green-500/50' : 'border-gray-800 hover:border-gray-600'
+                  }`}
+                >
+                  {active && (
+                    <span
+                      className="absolute top-1.5 right-1.5 z-10 w-5 h-5 rounded-full bg-green-500 text-gray-950 text-xs font-bold flex items-center justify-center shadow"
+                      title="The active model"
+                    >
+                      ✓
+                    </span>
+                  )}
+                  {pageUrl ? (
+                    <a href={pageUrl} target="_blank" rel="noreferrer" title="Open the model's Civitai page">
+                      {cover}
+                    </a>
+                  ) : cover}
+                  <button
+                    onClick={() => onSelect(m)}
+                    className="w-full p-2 text-left space-y-0.5 hover:bg-gray-900/70 transition-colors"
+                    title={active ? 'The active model' : `Use ${m.name || m.sd_name}`}
+                  >
+                    <div className="text-xs text-gray-200 truncate leading-snug">{m.name || m.sd_name}</div>
+                    <div className="text-[10px] text-gray-500 font-mono truncate">{m.sd_name}</div>
+                    {(m.is_sdxl || m.base_model) && (
+                      <span className="inline-block px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider bg-gray-800 border border-gray-700 text-gray-400">
+                        {m.is_sdxl ? 'SDXL' : m.base_model}
+                      </span>
+                    )}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          {!loading && models.length === 0 && !error && (
+            <p className="text-xs text-gray-600 italic">
               {local
                 ? 'No checkpoints found — is the WebUI running with --api?'
                 : 'No models found.'}
-            </div>
+            </p>
           )}
-          {local && !loading && (
-            <button
-              onClick={async () => {
-                setRefreshing(true);
-                try {
-                  await fetch(`${API_BASE}/local/refresh`, { method: 'POST' });
-                } catch (e) { /* the re-search below surfaces errors */ }
-                setRefreshing(false);
-                search(query);
-              }}
-              disabled={refreshing}
-              className="w-full px-3 py-1.5 text-left text-[11px] text-purple-400 hover:text-purple-300 hover:bg-gray-800 border-b border-gray-800 disabled:opacity-40"
-            >
-              {refreshing ? 'Rescanning model folders…' : '↻ Rescan the WebUI’s model folders'}
-            </button>
-          )}
-          {!error && models.length > 0 && effQuery && effQuery !== query.trim() && (
-            <div className="px-3 py-1.5 text-[10px] text-gray-500 border-b border-gray-800">
-              Matched catalog spelling <span className="font-mono text-gray-400">{effQuery}</span>
-            </div>
-          )}
-          {models.map((m) => (
-            <button
-              key={m.sd_name}
-              onClick={() => { onSelect(m); setOpen(false); setQuery(''); }}
-              className={`w-full flex items-center gap-3 px-3 py-2 text-left hover:bg-gray-800 transition-colors ${
-                m.sd_name === value ? 'bg-purple-900/30' : ''
-              }`}
-            >
-              {m.cover_url ? (
-                <img src={m.cover_url} alt="" loading="lazy" className="w-9 h-9 rounded object-cover shrink-0 bg-gray-800" />
-              ) : (
-                <div className="w-9 h-9 rounded bg-gray-800 shrink-0" />
-              )}
-              <div className="min-w-0 flex-1">
-                <div className="text-sm text-gray-200 truncate">{m.name || m.sd_name}</div>
-                <div className="text-[10px] text-gray-500 font-mono truncate">{m.sd_name}</div>
-              </div>
-              {(m.is_sdxl || m.base_model) && (
-                <span className="px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wider bg-gray-800 border border-gray-700 text-gray-400 shrink-0">
-                  {m.is_sdxl ? 'SDXL' : m.base_model}
-                </span>
-              )}
-            </button>
-          ))}
-          {loading && <div className="px-3 py-2 text-xs text-gray-500 animate-pulse">Searching…</div>}
-          {!loading && nextCursor && (
-            <button
-              onClick={() => search(effQuery || query, nextCursor)}
-              className="w-full px-3 py-2 text-xs text-purple-400 hover:text-purple-300 hover:bg-gray-800 transition-colors"
-            >
-              Load more…
-            </button>
-          )}
+          {loading && <p className="text-xs text-gray-500 animate-pulse">Searching…</p>}
+          <div className="flex items-center gap-4">
+            {!loading && nextCursor && (
+              <button
+                onClick={() => search(effQuery || query, nextCursor)}
+                className="text-xs text-purple-400 hover:text-purple-300"
+              >
+                Load more…
+              </button>
+            )}
+            {local && (
+              <button
+                onClick={async () => {
+                  setRefreshing(true);
+                  try {
+                    await fetch(`${API_BASE}/local/refresh`, { method: 'POST' });
+                  } catch (e) { /* the re-search below surfaces errors */ }
+                  setRefreshing(false);
+                  search(query);
+                }}
+                disabled={refreshing}
+                className="text-[11px] text-purple-400 hover:text-purple-300 disabled:opacity-40"
+              >
+                {refreshing ? 'Rescanning model folders…' : '↻ Rescan the WebUI’s model folders'}
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -927,12 +955,31 @@ function fmtCount(n) {
 // Source page link for a browse item or saved entry. Civitai models are always
 // routed to the .red domain (same /models/{id} path), regardless of NSFW
 // status, so links never bounce off civitai.com's content gating.
-function loraLink(item) {
+function sourcePageLink(item) {
   const url = item.page_url || item.civitai_url || '';
   if (url.startsWith('https://civitai.com/')) {
     return url.replace('https://civitai.com/', 'https://civitai.red/');
   }
   return url;
+}
+
+// Civitai page for a model-picker card. Entries whose file hash is already
+// resolved carry civitai_url; otherwise the module's /civitai/page endpoint
+// looks the hash up server-side and redirects, so search results never wait
+// on per-card lookups. No hash at all — first-party FLUX.2, console uploads,
+// local files the WebUI hasn't hashed — means no link.
+function modelPageLink(m) {
+  if (m.civitai_url) return sourcePageLink(m);
+  if (m.hash) {
+    const params = new URLSearchParams({ hash: m.hash, name: m.name || m.sd_name || '' });
+    return `${API_BASE}/civitai/page?${params}`;
+  }
+  return '';
+}
+
+// A WebUI checkpoint title with its trailing " [shorthash]" stripped.
+function stripCkptTitleHash(name) {
+  return String(name || '').replace(/\s*\[[0-9a-f]{6,12}\]\s*$/i, '');
 }
 
 // Availability of a saved LoRA. Local mode: it must be linked to a file
@@ -1250,7 +1297,7 @@ function LoraRow({ entry, checkpointFamily, provider, canInstall, download, onIn
   const availability = loraAvailability(entry, isLocal);
   const compatible = fam && checkpointFamily && fam === checkpointFamily;
   const dimmed = entry.active && !compatible;
-  const pageUrl = loraLink(entry);
+  const pageUrl = sourcePageLink(entry);
   const sourceName = entry.source === 'hf' ? 'Hugging Face' : 'Civitai';
 
   return (
@@ -2175,7 +2222,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
             className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-96 overflow-y-auto pr-1"
           >
             {visibleItems.map((item) => {
-              const pageUrl = loraLink(item);
+              const pageUrl = sourcePageLink(item);
               const badge = browseAvailability(item, isLocal);
               const itemDownload = downloads.find(
                 (d) => d.lora_id === item.id && d.status === 'downloading');
@@ -2487,7 +2534,7 @@ function CheckpointBrowser({ config, draft, set, setDraft }) {
       const low = String(stem || '').toLowerCase();
       const hit = (data.models || []).find((m) => low && m.sd_name.toLowerCase().includes(low));
       if (!hit) {
-        throw new Error('The WebUI has not picked the file up yet — press "Rescan" in the Model dropdown, then try again');
+        throw new Error('The WebUI has not picked the file up yet — press "Rescan" under the Model grid, then try again');
       }
       setDraft((d) => ({ ...d, model_name: hit.sd_name, model_base: civitaiBase || hit.base_model || '' }));
     } catch (e) {
@@ -2685,7 +2732,7 @@ function CheckpointBrowser({ config, draft, set, setDraft }) {
             className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-96 overflow-y-auto pr-1"
           >
             {visibleItems.map((item) => {
-              const pageUrl = loraLink(item);
+              const pageUrl = sourcePageLink(item);
               const badge = ckptAvailability(item);
               const itemDownload = downloads.find(
                 (d) => d.item_id === item.id && d.status === 'downloading');

@@ -115,6 +115,19 @@ NOVITA_HASH_PREFIX_LEN = 10
 NOVITA_LORA_INDEX_TTL_S = 6 * 3600
 NOVITA_LORA_INDEX_MAX_PAGES = 100
 
+# Checkpoint -> Civitai page/preview matching for the model picker. Novita's
+# truncated hash_sha256 and an A1111 title [shorthash] are both the first 10
+# hex chars of the file SHA256 -- exactly Civitai's AutoV2 hash, which
+# /model-versions/by-hash resolves to the model's page and preview images.
+# Answers cache on disk: hits forever (model pages don't move), misses for a
+# TTL (the file may get published on Civitai later). Transport failures cache
+# nothing but pause further lookups briefly, so an unreachable Civitai cannot
+# stall every /models search.
+CIVITAI_CKPT_META_FILE = "civitai_ckpt_meta.json"
+CIVITAI_HASH_MISS_TTL_S = 7 * 24 * 3600
+CIVITAI_HASH_CONCURRENCY = 8
+CIVITAI_HASH_BACKOFF_S = 120
+
 SAMPLERS = [
     "DPM++ 2M Karras",
     "DPM++ SDE Karras",
@@ -2259,10 +2272,24 @@ def _infer_local_base(ident: str) -> str:
     return ""
 
 
+def _webui_model_hash(m: dict) -> str:
+    """AutoV2 prefix for one /sdapi/v1/sd-models entry: its sha256/hash field
+    or the title's [shorthash] — all SHA256 prefixes in A1111 forks, computed
+    lazily by the WebUI so any of the three may be missing."""
+    bracket = _CKPT_TITLE_HASH_RE.search(str(m.get("title") or ""))
+    for h in (m.get("sha256"), m.get("hash"),
+              bracket.group(0).strip(" []") if bracket else ""):
+        prefix = _hash_prefix10(h)
+        if prefix:
+            return prefix
+    return ""
+
+
 async def _local_list_checkpoints(cfg: dict) -> list[dict]:
-    """Installed checkpoints in the dropdown-entry shape /models returns.
+    """Installed checkpoints in the model-picker entry shape /models returns.
     `title` (filename plus the WebUI's short hash once computed) is what
-    override_settings.sd_model_checkpoint accepts."""
+    override_settings.sd_model_checkpoint accepts. The WebUI has no covers or
+    pages; /models fills cover_url/civitai_url from Civitai by file hash."""
     body = await _local_get(cfg, "/sdapi/v1/sd-models")
     models = []
     for m in body if isinstance(body, list) else []:
@@ -2278,6 +2305,8 @@ async def _local_list_checkpoints(cfg: dict) -> list[dict]:
             "is_sdxl": _base_family(base) == "sdxl",
             "base_model": base,
             "cover_url": None,
+            "hash": _webui_model_hash(m),
+            "civitai_url": "",
         })
     return models
 
@@ -2601,6 +2630,18 @@ def _local_hash_index(cache: dict | None) -> dict[str, str] | None:
         sha = str((meta or {}).get("sha256") or "").lower()
         if sha:
             index[sha] = Path(file_path).stem
+    return index
+
+
+def _stem_hash_index(cache: dict | None) -> dict[str, str]:
+    """The reverse of _local_hash_index — file stem (casefolded) -> AutoV2
+    prefix — for model-picker entries whose WebUI title carries no hash yet:
+    the scan cache knows the file's SHA256 by name."""
+    index: dict[str, str] = {}
+    for file_path, meta in (cache or {}).get("files", {}).items():
+        prefix = _hash_prefix10((meta or {}).get("sha256"))
+        if prefix:
+            index.setdefault(Path(file_path).stem.casefold(), prefix)
     return index
 
 
@@ -3377,8 +3418,10 @@ async def _novita_list_models(cfg: dict, query: str, cursor: str, limit: int,
 
 
 def _public_checkpoints(body: dict) -> list[dict]:
-    """Reduce a /v3/model response to the dropdown-entry shape, dropping
-    models that are not deployable (status != 1) or have no usable sd_name."""
+    """Reduce a /v3/model response to the model-picker entry shape, dropping
+    models that are not deployable (status != 1) or have no usable sd_name.
+    `hash` (Novita's truncated SHA256 = Civitai's AutoV2) is what links a
+    card to its Civitai page — directly once cached, else via /civitai/page."""
     return [
         {
             "sd_name": m.get("sd_name_in_api") or m.get("sd_name"),
@@ -3386,6 +3429,8 @@ def _public_checkpoints(body: dict) -> list[dict]:
             "is_sdxl": bool(m.get("is_sdxl")),
             "base_model": m.get("base_model"),
             "cover_url": m.get("cover_url"),
+            "hash": _hash_prefix10(m.get("hash_sha256")),
+            "civitai_url": "",
         }
         for m in (body.get("models") or [])
         if m.get("status") == 1 and (m.get("sd_name_in_api") or m.get("sd_name"))
@@ -3459,6 +3504,143 @@ def _civitai_headers(cfg: dict) -> dict:
     if key:
         headers["Authorization"] = f"Bearer {key}"
     return headers
+
+
+def _hash_prefix10(value) -> str:
+    """First 10 hex chars of a hash, lowercased — the AutoV2 form Civitai,
+    Novita and A1111 shorthashes share. "" for anything shorter or non-hex
+    (6/8-char legacy shorthashes are not AutoV2 and cannot be looked up)."""
+    h = str(value or "").strip().lower()
+    return h[:10] if re.fullmatch(r"[0-9a-f]{10,}", h) else ""
+
+
+def _read_ckpt_meta_cache() -> dict:
+    """The by-hash lookup cache: {AutoV2 prefix -> {"model_id": int|None,
+    "thumb_url": str, "name": str, "checked_at": iso}}. model_id None records
+    a checked miss, so unknown files are not re-asked on every request."""
+    path = _data_dir() / CIVITAI_CKPT_META_FILE
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[Image Gen] Failed to read {CIVITAI_CKPT_META_FILE}: {e}")
+        return {}
+    entries = data.get("entries") if isinstance(data, dict) else None
+    return entries if isinstance(entries, dict) else {}
+
+
+def _ckpt_meta_stale(entry) -> bool:
+    """Hits never expire (Civitai model ids are permanent); misses retry
+    after CIVITAI_HASH_MISS_TTL_S."""
+    if not isinstance(entry, dict):
+        return True
+    if entry.get("model_id"):
+        return False
+    try:
+        checked = datetime.fromisoformat(str(entry.get("checked_at") or ""))
+    except ValueError:
+        return True
+    return (datetime.now(timezone.utc) - checked).total_seconds() \
+        > CIVITAI_HASH_MISS_TTL_S
+
+
+async def _civitai_version_by_hash(cfg: dict, prefix: str) -> dict | None:
+    """One /model-versions/by-hash lookup: {"model_id", "thumb_url", "name"}
+    for the model whose file matches the AutoV2 prefix, or None when Civitai
+    knows no such file (a real answer — cached as a miss). RuntimeError on
+    transport/HTTP trouble (not cached). The thumbnail is the version's
+    mildest image (lowest nsfwLevel), routed through Civitai's resizing CDN
+    instead of the multi-MB original."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=10.0)) as client:
+            resp = await client.get(
+                f"{CIVITAI_BASE}/model-versions/by-hash/{prefix}",
+                headers=_civitai_headers(cfg))
+    except httpx.TransportError as e:
+        raise RuntimeError(f"Could not reach Civitai: {e}")
+    if resp.status_code == 404:
+        return None
+    if resp.status_code != 200:
+        raise RuntimeError(f"Civitai answered with HTTP {resp.status_code}")
+    body = resp.json() or {}
+    if not isinstance(body, dict):
+        return None
+    model_id = body.get("modelId")
+    if not model_id:
+        return None
+    images = [i for i in (body.get("images") or [])
+              if isinstance(i, dict) and i.get("url") and i.get("type") != "video"]
+    images.sort(key=lambda i: i.get("nsfwLevel") or 0)
+    thumb = str(images[0]["url"]) if images else ""
+    return {
+        "model_id": int(model_id),
+        "thumb_url": thumb.replace("/original=true/", "/width=450/"),
+        "name": str((body.get("model") or {}).get("name") or ""),
+    }
+
+
+# After a lookup fails on transport, skip further lookups until this
+# monotonic instant — /models must stay usable while Civitai is down.
+_civitai_hash_backoff = {"until": 0.0}
+
+
+async def _civitai_hash_meta(cfg: dict, prefixes: list[str],
+                             fetch_missing: bool = True) -> dict:
+    """Civitai metadata for AutoV2 prefixes: the on-disk cache, plus live
+    by-hash lookups for unknown/expired ones (bounded concurrency) when
+    fetch_missing — the local picker enriches eagerly, Novita search pages
+    read the cache only and resolve links lazily via /civitai/page. Returns
+    {prefix: cache entry} for every prefix known afterwards."""
+    wanted = [p for p in dict.fromkeys(prefixes) if p]
+    cache = _read_ckpt_meta_cache()
+    missing = [p for p in wanted if _ckpt_meta_stale(cache.get(p))]
+    if missing and fetch_missing \
+            and time.monotonic() >= _civitai_hash_backoff["until"]:
+        sem = asyncio.Semaphore(CIVITAI_HASH_CONCURRENCY)
+
+        async def _one(prefix: str):
+            async with sem:
+                return prefix, await _civitai_version_by_hash(cfg, prefix)
+
+        fetched: dict = {}
+        for res in await asyncio.gather(*(_one(p) for p in missing),
+                                        return_exceptions=True):
+            if isinstance(res, BaseException):
+                _civitai_hash_backoff["until"] = (
+                    time.monotonic() + CIVITAI_HASH_BACKOFF_S)
+                print(f"[Image Gen] Civitai hash lookup failed: {res}")
+                continue
+            prefix, meta = res
+            fetched[prefix] = {
+                "model_id": (meta or {}).get("model_id"),
+                "thumb_url": (meta or {}).get("thumb_url") or "",
+                "name": (meta or {}).get("name") or "",
+                "checked_at": _now(),
+            }
+        if fetched:
+            # Re-read before merging: a concurrent request may have written
+            # other prefixes while these lookups were in flight.
+            cache = {**_read_ckpt_meta_cache(), **fetched}
+            _atomic_write_json(_data_dir() / CIVITAI_CKPT_META_FILE,
+                               {"entries": cache})
+    return {p: cache[p] for p in wanted if isinstance(cache.get(p), dict)}
+
+
+def _apply_civitai_ckpt_meta(models: list[dict], meta: dict) -> None:
+    """Fill civitai_url/cover_url on model-picker entries from by-hash
+    metadata. An existing cover (Novita's own) is kept — it shows the exact
+    mirrored version; the Civitai thumb fills local entries, which have
+    none."""
+    for m in models:
+        entry = meta.get(m.get("hash") or "")
+        if not entry or not entry.get("model_id"):
+            continue
+        m["civitai_url"] = f"https://civitai.com/models/{entry['model_id']}"
+        if not m.get("cover_url") and entry.get("thumb_url"):
+            m["cover_url"] = entry["thumb_url"]
 
 
 def _civitai_version_to_entry(model: dict, version: dict,
@@ -5310,6 +5492,32 @@ def get_router():
                 low = q.lower()
                 models = [m for m in models
                           if low in m["sd_name"].lower() or low in m["name"].lower()]
+            # Civitai previews + page links (the WebUI itself has neither).
+            # Titles whose hash the WebUI has not computed yet fall back to
+            # the checkpoint folder's scan cache, then the install helper.
+            hashless = [m for m in models if not m["hash"]]
+            if hashless:
+                scan = _read_local_hash_cache(
+                    LOCAL_INSTALL_KINDS["checkpoint"]["cache_file"])
+                if scan is None or _hash_cache_stale(scan):
+                    _spawn_local_hash_scan(cfg, "checkpoint")
+                stems = _stem_hash_index(scan)
+                for m in hashless:
+                    m["hash"] = stems.get(
+                        _ckpt_title_stem(m["sd_name"]).casefold(), "")
+            if _helper_url(cfg) and any(not m["hash"] for m in models):
+                try:
+                    indexes = await _helper_hash_indexes(cfg)
+                    helper_stems = {stem.casefold(): _hash_prefix10(sha)
+                                    for sha, stem in indexes["checkpoint"].items()}
+                    for m in models:
+                        if not m["hash"]:
+                            m["hash"] = helper_stems.get(
+                                _ckpt_title_stem(m["sd_name"]).casefold(), "")
+                except RuntimeError as e:
+                    print(f"[Image Gen] Helper hash index failed: {e}")
+            _apply_civitai_ckpt_meta(
+                models, await _civitai_hash_meta(cfg, [m["hash"] for m in models]))
             return {"models": models, "next_cursor": "", "effective_query": q}
         if not cfg.get("api_key"):
             raise HTTPException(status_code=400, detail="No API key configured")
@@ -5323,6 +5531,11 @@ def get_router():
                     await _novita_search_fallback(cfg, q, limit))
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))
+        # Search pages never wait on Civitai: cards resolve their page link
+        # lazily through /civitai/page, and cached hashes get it directly.
+        _apply_civitai_ckpt_meta(
+            models, await _civitai_hash_meta(cfg, [m["hash"] for m in models],
+                                             fetch_missing=False))
         # First-party FLUX.2 rides its own endpoint, so it is not in /v3/model;
         # pin it to the top of matching first pages.
         if not cur and (not q or "flux" in q.lower()):
@@ -5332,6 +5545,8 @@ def get_router():
                 "is_sdxl": False,
                 "base_model": "Flux.2",
                 "cover_url": None,
+                "hash": "",
+                "civitai_url": "",
             })
         return {"models": models, "next_cursor": next_cursor,
                 "effective_query": effective_query}
@@ -5860,6 +6075,29 @@ def get_router():
         if _provider(cfg) == "local":
             await _annotate_browse_availability(cfg, result["items"], "checkpoint")
         return result
+
+    @router.get("/civitai/page")
+    async def civitai_page(hash: str = "", name: str = ""):
+        """Redirect to a model's Civitai page (the .red domain, like every
+        Civitai link in the UI), resolved from its AutoV2 file hash through
+        the by-hash cache. Model-picker cards use this as their image link
+        when the page is not known at render time (Novita search results), so
+        clicking costs at most one lookup instead of one per search result."""
+        cfg = _load_config()
+        prefix = _hash_prefix10(hash)
+        if not prefix:
+            raise HTTPException(status_code=404,
+                                detail="This model carries no usable file hash")
+        meta = (await _civitai_hash_meta(cfg, [prefix])).get(prefix)
+        if meta is None:   # lookup failed (unreachable/backoff) — not a miss
+            raise HTTPException(status_code=502,
+                                detail="Civitai could not be reached — try again")
+        if not meta.get("model_id"):
+            label = name.strip() or prefix
+            raise HTTPException(
+                status_code=404,
+                detail=f'"{label}" has no matching Civitai model page')
+        return RedirectResponse(f"https://civitai.red/models/{meta['model_id']}")
 
     @router.get("/civitai/model-versions/{model_id}")
     async def civitai_model_versions(model_id: int):
