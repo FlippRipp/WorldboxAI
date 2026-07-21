@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
 import { api } from 'api';
+import { storage } from 'storage';
 
 const BIOME_COLORS_KEY = 'terrainlab_biome_colors';
 
@@ -347,7 +348,7 @@ export default function TerrainLab({ onBack }) {
   const [palette, setPalette] = useState(null); // { realistic:[{id,name,color}], fantasy:[...] }
   // User colour overrides per mode: { realistic: { [id]: '#rrggbb' }, fantasy: {...} }.
   const [biomeColors, setBiomeColors] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(BIOME_COLORS_KEY)) || {}; }
+    try { return JSON.parse(storage.getItem(BIOME_COLORS_KEY)) || {}; }
     catch { return {}; }
   });
 
@@ -377,7 +378,7 @@ export default function TerrainLab({ onBack }) {
 
   // Persist colour edits so a reload restores the experiment.
   useEffect(() => {
-    try { localStorage.setItem(BIOME_COLORS_KEY, JSON.stringify(biomeColors)); }
+    try { storage.setItem(BIOME_COLORS_KEY, JSON.stringify(biomeColors)); }
     catch { /* ignore quota/availability errors */ }
   }, [biomeColors]);
 

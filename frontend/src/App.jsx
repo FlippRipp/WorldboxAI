@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { storage } from './lib/storage';
 import { ModuleEventProvider } from './hooks/useModuleEventBus';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useSession } from './hooks/useSession';
@@ -87,7 +88,7 @@ const PLAIN_MODES = new Set([
 // restores to the menu instead of a blank screen.
 function readSavedUiState() {
   try {
-    const saved = JSON.parse(localStorage.getItem(UI_STATE_KEY) || 'null');
+    const saved = JSON.parse(storage.getItem(UI_STATE_KEY) || 'null');
     const mode = saved?.mode;
     if (typeof mode !== 'string') return null;
     if (mode === 'storyteller-game') return saved.saveId ? saved : null;
@@ -115,7 +116,7 @@ function AppContent() {
   // Shown once, only when no AI provider is configured anywhere (fresh
   // install); a returning user whose key broke gets the menu card instead.
   const [showOnboarding, setShowOnboarding] = useState(() =>
-    localStorage.getItem(ONBOARDING_DONE_KEY) ? false : null
+    storage.getItem(ONBOARDING_DONE_KEY) ? false : null
   );
   const [showExitWarning, setShowExitWarning] = useState(false);
   const [editCharacterId, setEditCharacterId] = useState(null);
@@ -338,21 +339,21 @@ function AppContent() {
   // Removed when the player exits to the menu.
   useEffect(() => {
     if (currentMode === null) {
-      localStorage.removeItem(UI_STATE_KEY);
+      storage.removeItem(UI_STATE_KEY);
     } else if (currentMode === 'storyteller-game') {
       const id = session.sessionState?.active_save_id;
-      if (id) localStorage.setItem(UI_STATE_KEY, JSON.stringify({ mode: currentMode, saveId: id }));
+      if (id) storage.setItem(UI_STATE_KEY, JSON.stringify({ mode: currentMode, saveId: id }));
     } else if (currentMode === 'character-create') {
       // A brand-new character has no id to reload from the server, so a
       // relaunch lands on the character list instead; the editor's own draft
       // persistence brings the form content back when it's reopened.
-      localStorage.setItem(UI_STATE_KEY, JSON.stringify(
+      storage.setItem(UI_STATE_KEY, JSON.stringify(
         editCharacterId
           ? { mode: currentMode, editCharacterId }
           : { mode: 'character-creator' }
       ));
     } else {
-      localStorage.setItem(UI_STATE_KEY, JSON.stringify({ mode: currentMode }));
+      storage.setItem(UI_STATE_KEY, JSON.stringify({ mode: currentMode }));
     }
   }, [currentMode, session.sessionState?.active_save_id, editCharacterId]);
 
@@ -382,7 +383,7 @@ function AppContent() {
         // Save/character gone or backend restarted into a clean state — fall
         // back rather than looping on a broken restore.
         if (asyncRestore.mode === 'character-create') setCurrentMode('character-creator');
-        else localStorage.removeItem(UI_STATE_KEY);
+        else storage.removeItem(UI_STATE_KEY);
       } finally {
         if (alive) setResuming(false);
       }
@@ -442,7 +443,7 @@ function AppContent() {
   }, [showOnboarding]);
 
   const handleFinishOnboarding = useCallback((nextMode) => {
-    localStorage.setItem(ONBOARDING_DONE_KEY, '1');
+    storage.setItem(ONBOARDING_DONE_KEY, '1');
     setShowOnboarding(false);
     if (nextMode) setCurrentMode(nextMode);
   }, []);

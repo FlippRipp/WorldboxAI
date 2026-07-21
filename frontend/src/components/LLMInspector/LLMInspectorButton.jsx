@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useLLMInspector } from '../../hooks/useLLMInspector';
+import { storage } from '../../lib/storage';
 
 const STORAGE_KEY = 'worldbox_llm_inspector_pos';
 const DRAG_THRESHOLD = 4;
@@ -11,7 +12,7 @@ function maxOffsetX() {
 
 function loadPosition() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = storage.getItem(STORAGE_KEY);
     if (raw) {
       const p = JSON.parse(raw);
       if (typeof p.x === 'number' && typeof p.y === 'number') {
@@ -26,7 +27,7 @@ function loadPosition() {
 }
 
 function savePosition(pos) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(pos)); } catch (_) {}
+  try { storage.setItem(STORAGE_KEY, JSON.stringify(pos)); } catch (_) {}
 }
 
 export default function LLMInspectorButton() {

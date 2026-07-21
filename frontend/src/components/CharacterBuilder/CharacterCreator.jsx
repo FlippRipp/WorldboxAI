@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../../lib/api';
+import { storage } from '../../lib/storage';
 import CharacterModuleForm from './CharacterModuleForm';
 import ModuleTogglePanel from '../shared/ModuleTogglePanel';
 import ModuleInline from '../shared/ModuleInline';
@@ -12,7 +13,7 @@ const DRAFT_KEY = 'wb_character_draft';
 
 function readCharacterDraft() {
   try {
-    return JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null') || null;
+    return JSON.parse(storage.getItem(DRAFT_KEY) || 'null') || null;
   } catch {
     return null;
   }
@@ -89,7 +90,7 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
   // empty draft is indistinguishable from a fresh form, and save/back clear it.
   useEffect(() => {
     if (editCharacterId) return;
-    localStorage.setItem(DRAFT_KEY, JSON.stringify({
+    storage.setItem(DRAFT_KEY, JSON.stringify({
       moduleContext,
       gender,
       race,
@@ -108,7 +109,7 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
   // Backing out of an existing character's edit must not clear an unrelated
   // new-character draft.
   const clearDraft = () => {
-    if (!editCharacterId) localStorage.removeItem(DRAFT_KEY);
+    if (!editCharacterId) storage.removeItem(DRAFT_KEY);
   };
 
   const handleBack = () => {

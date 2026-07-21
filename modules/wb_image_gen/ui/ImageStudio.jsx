@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { storage } from 'storage';
 
 const API_BASE = '/api/modules/wb_image_gen';
 
@@ -1692,7 +1693,7 @@ function LoraRow({ entry, checkpointFamily, provider, canInstall, download, onIn
 const LORA_BROWSER_KEY = 'wb_image_gen_lora_browser';
 const LORA_COMPAT_FILTER_KEY = 'wb_image_gen_lora_compat_only';
 function loadLoraBrowserState() {
-  try { return JSON.parse(localStorage.getItem(LORA_BROWSER_KEY)) || null; } catch (e) { return null; }
+  try { return JSON.parse(storage.getItem(LORA_BROWSER_KEY)) || null; } catch (e) { return null; }
 }
 
 // LoRA browser (Civitai + Hugging Face) + local library. Browsing is proxied
@@ -1722,11 +1723,11 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   // selected checkpoint — the same coarse families generation uses to decide
   // what applies (Illustrious, NoobAI, Pony... all count as SDXL-class).
   const [compatOnly, setCompatOnly] = useState(() => {
-    try { return localStorage.getItem(LORA_COMPAT_FILTER_KEY) === '1'; } catch (e) { return false; }
+    try { return storage.getItem(LORA_COMPAT_FILTER_KEY) === '1'; } catch (e) { return false; }
   });
   const toggleCompatOnly = (on) => {
     setCompatOnly(on);
-    try { localStorage.setItem(LORA_COMPAT_FILTER_KEY, on ? '1' : '0'); } catch (e) { /* private mode */ }
+    try { storage.setItem(LORA_COMPAT_FILTER_KEY, on ? '1' : '0'); } catch (e) { /* private mode */ }
   };
   const [recheckBusy, setRecheckBusy] = useState(false);
   const [myLoras, setMyLoras] = useState(null); // null = not fetched yet
@@ -1922,7 +1923,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
 
   useEffect(() => {
     try {
-      localStorage.setItem(LORA_BROWSER_KEY, JSON.stringify({
+      storage.setItem(LORA_BROWSER_KEY, JSON.stringify({
         open, source, query, baseModel, loraType, category, sort, novitaOnly, matchCkpt,
         items, nextCursor, scrollTop: scrollTopRef.current,
       }));
@@ -1939,9 +1940,9 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
 
   const saveScrollTop = () => {
     try {
-      const state = JSON.parse(localStorage.getItem(LORA_BROWSER_KEY)) || {};
+      const state = JSON.parse(storage.getItem(LORA_BROWSER_KEY)) || {};
       state.scrollTop = scrollTopRef.current;
-      localStorage.setItem(LORA_BROWSER_KEY, JSON.stringify(state));
+      storage.setItem(LORA_BROWSER_KEY, JSON.stringify(state));
     } catch (e) { /* storage unavailable or full */ }
   };
 
@@ -2387,7 +2388,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
 const CKPT_BROWSER_KEY = 'wb_image_gen_ckpt_browser';
 
 function loadCkptBrowserState() {
-  try { return JSON.parse(localStorage.getItem(CKPT_BROWSER_KEY)) || null; } catch (e) { return null; }
+  try { return JSON.parse(storage.getItem(CKPT_BROWSER_KEY)) || null; } catch (e) { return null; }
 }
 
 function fmtSizeKB(kb) {
@@ -2602,7 +2603,7 @@ function CheckpointBrowser({ config, draft, set, setDraft }) {
 
   useEffect(() => {
     try {
-      localStorage.setItem(CKPT_BROWSER_KEY, JSON.stringify({
+      storage.setItem(CKPT_BROWSER_KEY, JSON.stringify({
         open, query, baseModel, category, sort, installedOnly,
         items, nextCursor, scrollTop: scrollTopRef.current,
       }));
@@ -2617,9 +2618,9 @@ function CheckpointBrowser({ config, draft, set, setDraft }) {
 
   const saveScrollTop = () => {
     try {
-      const state = JSON.parse(localStorage.getItem(CKPT_BROWSER_KEY)) || {};
+      const state = JSON.parse(storage.getItem(CKPT_BROWSER_KEY)) || {};
       state.scrollTop = scrollTopRef.current;
-      localStorage.setItem(CKPT_BROWSER_KEY, JSON.stringify(state));
+      storage.setItem(CKPT_BROWSER_KEY, JSON.stringify(state));
     } catch (e) { /* storage unavailable or full */ }
   };
 
@@ -2898,18 +2899,18 @@ export default function ImageStudio({ onBack }) {
   // Android killing the backgrounded webview (there is no reliable
   // "about to shut down" event to save on).
   const [testPrompt, setTestPrompt] = useState(() => {
-    try { return localStorage.getItem('wb_image_gen_test_prompt') || ''; } catch (e) { return ''; }
+    try { return storage.getItem('wb_image_gen_test_prompt') || ''; } catch (e) { return ''; }
   });
   const updateTestPrompt = (value) => {
     setTestPrompt(value);
-    try { localStorage.setItem('wb_image_gen_test_prompt', value); } catch (e) { /* ignore */ }
+    try { storage.setItem('wb_image_gen_test_prompt', value); } catch (e) { /* ignore */ }
   };
   const [testRefine, setTestRefine] = useState(() => {
-    try { return localStorage.getItem('wb_image_gen_test_refine') !== 'false'; } catch (e) { return true; }
+    try { return storage.getItem('wb_image_gen_test_refine') !== 'false'; } catch (e) { return true; }
   });
   const updateTestRefine = (value) => {
     setTestRefine(value);
-    try { localStorage.setItem('wb_image_gen_test_refine', String(value)); } catch (e) { /* ignore */ }
+    try { storage.setItem('wb_image_gen_test_refine', String(value)); } catch (e) { /* ignore */ }
   };
   const [testError, setTestError] = useState('');
   const [testBusy, setTestBusy] = useState(false);
@@ -2918,14 +2919,14 @@ export default function ImageStudio({ onBack }) {
   const [showKeyGuide, setShowKeyGuide] = useState(false);
   const [tab, setTab] = useState(() => {
     try {
-      const saved = localStorage.getItem('wb_image_gen_tab');
+      const saved = storage.getItem('wb_image_gen_tab');
       if (TABS.some((t) => t.id === saved)) return saved;
     } catch (e) { /* storage unavailable */ }
     return 'setup';
   });
   const switchTab = (id) => {
     setTab(id);
-    try { localStorage.setItem('wb_image_gen_tab', id); } catch (e) { /* ignore */ }
+    try { storage.setItem('wb_image_gen_tab', id); } catch (e) { /* ignore */ }
   };
 
   const applyConfig = useCallback((data) => {

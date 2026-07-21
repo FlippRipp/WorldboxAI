@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { storage } from 'storage';
 
 const FALLBACK_TIERS = [
   { min: 1, max: 4, label: 'Severely Impaired' },
@@ -89,7 +90,7 @@ const RESUME_KEY = 'wbrpg_resume_v1';
 function readResume(saveId) {
   if (!saveId) return null;
   try {
-    const data = JSON.parse(localStorage.getItem(RESUME_KEY) || 'null');
+    const data = JSON.parse(storage.getItem(RESUME_KEY) || 'null');
     return data && data.saveId === saveId ? data : null;
   } catch {
     return null;
@@ -100,7 +101,7 @@ function writeResume(saveId, patch) {
   if (!saveId) return;
   try {
     const cur = readResume(saveId) || { saveId };
-    localStorage.setItem(RESUME_KEY, JSON.stringify({ ...cur, ...patch, saveId }));
+    storage.setItem(RESUME_KEY, JSON.stringify({ ...cur, ...patch, saveId }));
   } catch { /* storage unavailable */ }
 }
 
@@ -110,8 +111,8 @@ function clearResume(saveId, keys) {
     const cur = readResume(saveId);
     if (!cur) return;
     for (const k of keys) delete cur[k];
-    if (Object.keys(cur).every((k) => k === 'saveId')) localStorage.removeItem(RESUME_KEY);
-    else localStorage.setItem(RESUME_KEY, JSON.stringify(cur));
+    if (Object.keys(cur).every((k) => k === 'saveId')) storage.removeItem(RESUME_KEY);
+    else storage.setItem(RESUME_KEY, JSON.stringify(cur));
   } catch { /* storage unavailable */ }
 }
 

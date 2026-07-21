@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
 import { api } from '../lib/api';
+import { storage } from '../lib/storage';
 import { COLOR_FIELDS, DEFAULT_COLORS, getPreset, matchPreset } from '../lib/themePresets';
 
 const ThemeContext = createContext(null);
@@ -22,7 +23,7 @@ export function ThemeProvider({ children }) {
   // screen), so it lives in localStorage rather than the server-side theme.
   const [density, setDensityState] = useState(() => {
     try {
-      return localStorage.getItem('wb_chat_density') === 'compact' ? 'compact' : 'comfortable';
+      return storage.getItem('wb_chat_density') === 'compact' ? 'compact' : 'comfortable';
     } catch {
       return 'comfortable';
     }
@@ -32,7 +33,7 @@ export function ThemeProvider({ children }) {
   const setDensity = useCallback((value) => {
     const next = value === 'compact' ? 'compact' : 'comfortable';
     setDensityState(next);
-    try { localStorage.setItem('wb_chat_density', next); } catch { /* private mode */ }
+    try { storage.setItem('wb_chat_density', next); } catch { /* private mode */ }
   }, []);
 
   // Persist to the backend, debounced so dragging a color picker doesn't spam.

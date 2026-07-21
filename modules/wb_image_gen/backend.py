@@ -653,10 +653,11 @@ def _data_dir() -> Path:
     return root
 
 
-def _config_dir() -> Path:
-    # config.json holds the Novita API key; API keys are app-global, so the
-    # config follows global_data_dir (the repo data dir, injected by the
-    # server) rather than the WB_DATA_DIR profile root the way images,
+def _shared_dir() -> Path:
+    # API keys and service addresses are app-global, shared across
+    # WB_DATA_DIR profile roots (demo mode included): credentials.json lives
+    # under global_data_dir (the repo data dir, injected by the server)
+    # rather than following the profile root the way config.json, images,
     # index, and caches (via _data_dir) do.
     base = _services.get("global_data_dir") or _services.get("data_dir")
     if base:
@@ -665,6 +666,17 @@ def _config_dir() -> Path:
         root = Path(__file__).resolve().parent.parent.parent / "data" / MODULE_ID
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+# The only config fields shared across profile roots: API keys, and the
+# addresses of machine-local services along with the credentials to reach
+# them. Everything else in GLOBAL_FIELDS ("global" there means shared by the
+# module's own generation profiles) follows the active data root.
+SHARED_CONFIG_FIELDS = (
+    "api_key", "civitai_api_key", "hf_api_key",
+    "local_base_url", "local_auth_user", "local_auth_pass",
+    "local_helper_url", "local_helper_token",
+)
 
 
 def _default_config() -> dict:
@@ -784,10 +796,28 @@ def _migrate_flat_store(stored: dict) -> dict:
 
 
 def _load_store() -> dict:
-    """The raw on-disk store: globals + shared lora_library + profiles.
-    Pre-profile flat files migrate in memory only (first save persists v2,
-    same pattern as the legacy value migrations in _effective_config)."""
-    path = _config_dir() / "config.json"
+    """The raw on-disk store: globals + shared lora_library + profiles, with
+    SHARED_CONFIG_FIELDS overlaid from the app-global credentials.json.
+    Absent credentials.json (pre-split installs), the values already in
+    config.json stand; the first save moves them over."""
+    store = _load_profile_store()
+    try:
+        with open(_shared_dir() / "credentials.json", "r", encoding="utf-8") as f:
+            creds = json.load(f)
+        if isinstance(creds, dict):
+            store.update({k: creds[k] for k in SHARED_CONFIG_FIELDS if k in creds})
+    except FileNotFoundError:
+        pass
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[Image Gen] Failed to read credentials.json: {e}")
+    return store
+
+
+def _load_profile_store() -> dict:
+    """The per-data-root part of the store. Pre-profile flat files migrate
+    in memory only (first save persists v2, same pattern as the legacy value
+    migrations in _effective_config)."""
+    path = _data_dir() / "config.json"
     stored = None
     if path.exists():
         try:
@@ -826,7 +856,12 @@ def _load_store() -> dict:
 
 
 def _save_store(store: dict) -> None:
-    _atomic_write_json(_config_dir() / "config.json", store)
+    _atomic_write_json(_shared_dir() / "credentials.json",
+                       {k: store[k] for k in SHARED_CONFIG_FIELDS if k in store})
+    # Keys and addresses live only in the shared file, so profile roots
+    # (e.g. the disposable demo dir) never hold secrets.
+    _atomic_write_json(_data_dir() / "config.json",
+                       {k: v for k, v in store.items() if k not in SHARED_CONFIG_FIELDS})
 
 
 def _effective_config(store: dict) -> dict:

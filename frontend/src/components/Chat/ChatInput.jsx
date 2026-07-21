@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useLayoutEffect } from 'react';
+import { storage } from '../../lib/storage';
 
 // Grow with content up to this cap, then scroll internally. Matches max-h-32.
 const MAX_HEIGHT = 128;
@@ -13,7 +14,7 @@ const DRAFT_KEY = 'wb_draft';
 const commandQuery = (text) => (/^\/\S*$/.test(text) ? text.toLowerCase() : null);
 
 export default function ChatInput({ commands = [], onSend, onContinue, onStop, onEditLast, onSwipePrev, onSwipeNext, onComposerFocus, restoredInput, busy, disabled }) {
-  const [inputValue, setInputValue] = useState(() => localStorage.getItem(DRAFT_KEY) || '');
+  const [inputValue, setInputValue] = useState(() => storage.getItem(DRAFT_KEY) || '');
   const [dismissed, setDismissed] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const taRef = useRef(null);
@@ -41,8 +42,8 @@ export default function ChatInput({ commands = [], onSend, onContinue, onStop, o
 
   // Keep the draft mirror current; sending clears the value, which removes it.
   useEffect(() => {
-    if (inputValue) localStorage.setItem(DRAFT_KEY, inputValue);
-    else localStorage.removeItem(DRAFT_KEY);
+    if (inputValue) storage.setItem(DRAFT_KEY, inputValue);
+    else storage.removeItem(DRAFT_KEY);
   }, [inputValue]);
 
   // Auto-grow: follow the content height. Keyed on the value so it covers

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { api } from 'api';
+import { storage } from 'storage';
 import { normalizeWorldData } from '../lib/mapspace';
 
 function ProgressBar({ filled, total, label }) {
@@ -147,7 +148,7 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, worldId, load
     onEnrichingChange(true);
     setEnrichResults([]);
     try {
-      localStorage.setItem(RUN_INTENT_KEY, JSON.stringify({
+      storage.setItem(RUN_INTENT_KEY, JSON.stringify({
         worldId, stepId, phase, count, layerId: layer, rework,
       }));
     } catch { /* private mode — resume just won't survive a kill */ }
@@ -247,7 +248,7 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, worldId, load
     } catch (e) {
       if (e.name !== 'AbortError') console.error('Enrichment run failed:', e);
     } finally {
-      try { localStorage.removeItem(RUN_INTENT_KEY); } catch { /* ignore */ }
+      try { storage.removeItem(RUN_INTENT_KEY); } catch { /* ignore */ }
       abortRef.current = null;
       onEnrichingChange(false);
       fetchProgress();
@@ -256,7 +257,7 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, worldId, load
 
   const stopEnriching = () => {
     // Tell the server to stop (it flushes finished nodes), then drop the stream.
-    try { localStorage.removeItem(RUN_INTENT_KEY); } catch { /* ignore */ }
+    try { storage.removeItem(RUN_INTENT_KEY); } catch { /* ignore */ }
     api.enrichCancel(worldId).catch(() => {});
     abortRef.current?.abort();
     abortRef.current = null;
@@ -270,11 +271,11 @@ export default function EnrichmentPanel({ stepId, stepLabel, data, worldId, load
   useEffect(() => {
     if (resumedRef.current || !worldId || enriching) return;
     let saved = null;
-    try { saved = JSON.parse(localStorage.getItem(RUN_INTENT_KEY) || 'null'); } catch { /* ignore */ }
+    try { saved = JSON.parse(storage.getItem(RUN_INTENT_KEY) || 'null'); } catch { /* ignore */ }
     if (!saved || saved.worldId !== worldId || saved.stepId !== stepId) return;
     resumedRef.current = true;
     if (saved.rework) {
-      try { localStorage.removeItem(RUN_INTENT_KEY); } catch { /* ignore */ }
+      try { storage.removeItem(RUN_INTENT_KEY); } catch { /* ignore */ }
       return;
     }
     const phase = saved.phase || 'all';

@@ -25,6 +25,7 @@ import re
 import sys
 import json
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timezone
 
@@ -70,6 +71,17 @@ modules_dir = os.path.join(base_dir, "modules")
 # stay under the repo's data/ regardless of profile (see provider_manager
 # below and wb_image_gen's config).
 data_dir = os.path.abspath(os.environ.get("WB_DATA_DIR") or os.path.join(base_dir, "data"))
+
+# Stable identifier for the active data root, reported on /api/health: the
+# frontend namespaces its localStorage (UI state, drafts, onboarding flag)
+# under it so demo mode and future profiles don't share or clobber the
+# default profile's browser-side state. The stock data/ dir maps to
+# "default", which the frontend translates to bare (un-prefixed) keys so
+# existing browsers keep their state.
+if data_dir == os.path.abspath(os.path.join(base_dir, "data")):
+    profile_id = "default"
+else:
+    profile_id = hashlib.sha1(data_dir.encode("utf-8")).hexdigest()[:8]
 
 registry = ModuleRegistry(modules_dir)
 registry.load_all_modules()
@@ -1651,6 +1663,7 @@ async def health_check():
 
     return {
         "status": "ok" if has_provider else "missing_api_key",
+        "profile_id": profile_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "modules": modules,
         "module_count": len(modules),

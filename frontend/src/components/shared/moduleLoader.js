@@ -16,11 +16,15 @@ import ReactDOM from 'react-dom';
 import * as Babel from '@babel/standalone';
 import * as d3Delaunay from 'd3-delaunay';
 import { api } from '../../lib/api';
+import { storage } from '../../lib/storage';
 
 const BUILTINS = {
   react: React,
   'react-dom': ReactDOM,
   api: { api },
+  // Profile-namespaced localStorage; module code must use this instead of
+  // window.localStorage so demo mode / profiles don't share browser state.
+  storage: { storage },
   // Exposed for module map UIs (e.g. wb_worldgen MapRenderer's Voronoi).
   'd3-delaunay': d3Delaunay,
 };

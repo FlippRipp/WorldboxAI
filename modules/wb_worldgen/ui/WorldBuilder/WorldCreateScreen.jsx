@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from 'api';
+import { storage } from 'storage';
 import AgentBuildObserver from './AgentBuildObserver';
 
 function AutoTextarea({ value, onChange, disabled, minRows = 3, placeholder }) {
@@ -39,15 +40,15 @@ const AI_NOTES_KEY = 'wb_worldgen_ai_notes';
 function WorldPromptField({ value, onChange, disabled, scenarioId }) {
   const [open, setOpen] = useState(false);
   const [instruction, setInstruction] = useState(() => {
-    try { return localStorage.getItem(AI_NOTES_KEY) || ''; } catch { return ''; }
+    try { return storage.getItem(AI_NOTES_KEY) || ''; } catch { return ''; }
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
     try {
-      if (instruction) localStorage.setItem(AI_NOTES_KEY, instruction);
-      else localStorage.removeItem(AI_NOTES_KEY);
+      if (instruction) storage.setItem(AI_NOTES_KEY, instruction);
+      else storage.removeItem(AI_NOTES_KEY);
     } catch { /* storage unavailable */ }
   }, [instruction]);
 
@@ -142,7 +143,7 @@ export const FORM_KEY = 'wb_worldgen_wizard_form';
 
 export function readSavedForm() {
   try {
-    return JSON.parse(localStorage.getItem(FORM_KEY) || 'null') || {};
+    return JSON.parse(storage.getItem(FORM_KEY) || 'null') || {};
   } catch {
     return {};
   }
@@ -152,7 +153,7 @@ export function readSavedForm() {
 // the world list's recovery affordances (reattach / finish-with-AI).
 export function pinAgentBuild(worldId) {
   try {
-    localStorage.setItem(FORM_KEY, JSON.stringify({ ...readSavedForm(), agentWorldId: worldId }));
+    storage.setItem(FORM_KEY, JSON.stringify({ ...readSavedForm(), agentWorldId: worldId }));
   } catch { /* storage unavailable — the observer is still reachable via recovery */ }
 }
 
@@ -186,7 +187,7 @@ export default function WorldCreateScreen({ onBack, onOpenWorlds, onExploreWorld
   // Mirror the form so a relaunch before the session starts loses nothing.
   useEffect(() => {
     try {
-      localStorage.setItem(FORM_KEY, JSON.stringify({ seedPrompt, scenarioId, agentWorldId }));
+      storage.setItem(FORM_KEY, JSON.stringify({ seedPrompt, scenarioId, agentWorldId }));
     } catch { /* storage unavailable */ }
   }, [seedPrompt, scenarioId, agentWorldId]);
 
