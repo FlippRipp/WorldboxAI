@@ -795,21 +795,37 @@ def _migrate_flat_store(stored: dict) -> dict:
     return store
 
 
+def _read_json_dict(path: Path) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[Image Gen] Failed to read {path.name}: {e}")
+        return {}
+
+
 def _load_store() -> dict:
     """The raw on-disk store: globals + shared lora_library + profiles, with
-    SHARED_CONFIG_FIELDS overlaid from the app-global credentials.json.
-    Absent credentials.json (pre-split installs), the values already in
-    config.json stand; the first save moves them over."""
+    SHARED_CONFIG_FIELDS resolved across profile roots. Per field: a
+    non-empty credentials.json value wins; otherwise a value the profile's
+    own config.json carries (pre-split installs); otherwise the global
+    root's legacy config.json, so a fresh profile root (demo) sees the
+    app's keys before the first post-split save. An empty credential never
+    overrides a real value — a credentials.json written from a pristine
+    profile root must not wipe keys that still live in a legacy config."""
     store = _load_profile_store()
-    try:
-        with open(_shared_dir() / "credentials.json", "r", encoding="utf-8") as f:
-            creds = json.load(f)
-        if isinstance(creds, dict):
-            store.update({k: creds[k] for k in SHARED_CONFIG_FIELDS if k in creds})
-    except FileNotFoundError:
-        pass
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"[Image Gen] Failed to read credentials.json: {e}")
+    creds = _read_json_dict(_shared_dir() / "credentials.json")
+    legacy = _read_json_dict(_shared_dir() / "config.json")
+    defaults = _default_store()
+    for k in SHARED_CONFIG_FIELDS:
+        value = creds.get(k)
+        if value not in (None, ""):
+            store[k] = value
+        elif store.get(k) in (None, "", defaults.get(k)) and legacy.get(k) not in (None, ""):
+            store[k] = legacy[k]
     return store
 
 

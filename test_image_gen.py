@@ -7520,3 +7520,42 @@ def test_helper_hash_indexes_cover_te_and_vae(tmp_path):
     helper = _load_helper(tmp_path)
     assert set(helper._hash_indexes()) \
         >= {"checkpoint", "lora", "upscaler", "text_encoder", "vae"}
+
+
+# --- Shared credentials across profile roots (WB_DATA_DIR) ---
+
+def test_shared_credentials_follow_global_root_and_survive_empty_overlay(tmp_path):
+    glob = tmp_path / "global"
+    prof = tmp_path / "profile"
+    backend = _load_backend()
+
+    # Pre-split install: keys and addresses still live in the global root's
+    # all-in-one config.json.
+    (glob / MID).mkdir(parents=True)
+    (glob / MID / "config.json").write_text(json.dumps(
+        {"api_key": "real-key", "local_base_url": "http://10.0.0.5:7860"}))
+    backend.set_services({"data_dir": str(glob), "global_data_dir": str(glob)})
+    assert backend._load_store()["api_key"] == "real-key"
+
+    # A fresh profile root (demo) sees the shared values before any save...
+    backend.set_services({"data_dir": str(prof), "global_data_dir": str(glob)})
+    store = backend._load_store()
+    assert store["api_key"] == "real-key"
+    assert store["local_base_url"] == "http://10.0.0.5:7860"
+
+    # ...and saving from it lands them in the shared credentials file, not
+    # in the profile root's config.
+    backend._save_store(store)
+    creds = json.loads((glob / MID / "credentials.json").read_text())
+    assert creds["api_key"] == "real-key"
+    assert creds["local_base_url"] == "http://10.0.0.5:7860"
+    assert "api_key" not in json.loads((prof / MID / "config.json").read_text())
+
+    # An empty credentials.json (e.g. written before keys were entered) must
+    # never wipe real values still present in a legacy config.
+    (glob / MID / "credentials.json").write_text(
+        json.dumps({"api_key": "", "local_base_url": ""}))
+    backend.set_services({"data_dir": str(glob), "global_data_dir": str(glob)})
+    healed = backend._load_store()
+    assert healed["api_key"] == "real-key"
+    assert healed["local_base_url"] == "http://10.0.0.5:7860"
