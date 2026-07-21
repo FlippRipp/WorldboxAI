@@ -1659,6 +1659,7 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   const canInstall = !!(config.local_install && config.local_install.lora);
   const [source, setSource] = useState(saved?.source || 'civitai');
   const [novitaOnly, setNovitaOnly] = useState(!!saved?.novitaOnly);
+  const [matchCkpt, setMatchCkpt] = useState(!!saved?.matchCkpt);
   const [query, setQuery] = useState(saved?.query || '');
   const [baseModel, setBaseModel] = useState(saved?.baseModel || '');
   const [loraType, setLoraType] = useState(saved?.loraType || 'LORA');
@@ -1710,7 +1711,11 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
     ? i.local_available === true
     : (i.novita_available === true ||
       (baseFamily(i.base_model) === 'flux' && i.download_url)));
-  const visibleItems = novitaOnly ? items.filter(usableNow) : items;
+  // "Match checkpoint": same family logic as the saved library's filter —
+  // with an unknown checkpoint family it fails open and hides nothing.
+  const compatNow = (i) => !checkpointFamily || baseFamily(i.base_model) === checkpointFamily;
+  const visibleItems = items.filter(
+    (i) => (!novitaOnly || usableNow(i)) && (!matchCkpt || compatNow(i)));
   const savedIds = new Set(library.map((e) => e.id));
   const isUnmatched = (e) => (isLocal
     ? !(e.local && e.local.name)
@@ -1871,11 +1876,11 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   useEffect(() => {
     try {
       localStorage.setItem(LORA_BROWSER_KEY, JSON.stringify({
-        open, source, query, baseModel, loraType, category, sort, novitaOnly,
+        open, source, query, baseModel, loraType, category, sort, novitaOnly, matchCkpt,
         items, nextCursor, scrollTop: scrollTopRef.current,
       }));
     } catch (e) { /* storage unavailable or full */ }
-  }, [open, source, query, baseModel, loraType, category, sort, novitaOnly, items, nextCursor]);
+  }, [open, source, query, baseModel, loraType, category, sort, novitaOnly, matchCkpt, items, nextCursor]);
 
   // Put the results grid back where it was once the restored items render.
   // Thumbnails have fixed heights, so the offset is valid before they load.
@@ -2143,6 +2148,20 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
               />
               {isLocal ? 'Installed only' : 'On Novita only'}
             </label>
+            <label
+              className="flex items-center gap-1.5 text-[11px] text-gray-400 shrink-0 cursor-pointer"
+              title={checkpointFamily
+                ? `Only show LoRAs that work with the selected checkpoint (${FAMILY_LABELS[checkpointFamily] || checkpointFamily}). Matching is by family — Illustrious, NoobAI, Pony and other SDXL-derived LoRAs all count as SDXL-class.`
+                : "The selected checkpoint's family is unknown, so this filter has no effect."}
+            >
+              <input
+                type="checkbox"
+                checked={matchCkpt}
+                onChange={(e) => setMatchCkpt(e.target.checked)}
+                className="accent-purple-500"
+              />
+              Match checkpoint
+            </label>
             {source === 'civitai' && !config.has_civitai_key && (
               <span className="text-[11px] text-yellow-600">Save a Civitai API key (Setup tab) to browse NSFW LoRAs.</span>
             )}
@@ -2260,10 +2279,11 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
                 : `Searching ${source === 'hf' ? 'Hugging Face' : 'Civitai'}…`}
             </p>
           )}
-          {!loading && novitaOnly && items.length > visibleItems.length && (
+          {!loading && (novitaOnly || matchCkpt) && items.length > visibleItems.length && (
             <p className="text-xs text-gray-600">
               {items.length - visibleItems.length} of {items.length} results hidden{' '}
-              ({isLocal ? 'not installed' : 'not on Novita'})
+              ({[novitaOnly && (isLocal ? 'not installed' : 'not on Novita'),
+                 matchCkpt && 'wrong base model'].filter(Boolean).join(' or ')})
               {visibleItems.length === 0 && nextCursor ? ' — try Load more' : ''}.
             </p>
           )}
