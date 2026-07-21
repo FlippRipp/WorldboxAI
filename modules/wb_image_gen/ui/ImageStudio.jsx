@@ -1595,6 +1595,7 @@ function LoraRow({ entry, checkpointFamily, provider, canInstall, download, onIn
 // to localStorage so it reopens where it was — across tab switches, page
 // reloads, and Android killing the backgrounded webview.
 const LORA_BROWSER_KEY = 'wb_image_gen_lora_browser';
+const LORA_COMPAT_FILTER_KEY = 'wb_image_gen_lora_compat_only';
 function loadLoraBrowserState() {
   try { return JSON.parse(localStorage.getItem(LORA_BROWSER_KEY)) || null; } catch (e) { return null; }
 }
@@ -1621,6 +1622,16 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState('');
   const [open, setOpen] = useState(!!saved?.open);
+  // Saved-library filter: show only LoRAs whose base-model family matches the
+  // selected checkpoint — the same coarse families generation uses to decide
+  // what applies (Illustrious, NoobAI, Pony... all count as SDXL-class).
+  const [compatOnly, setCompatOnly] = useState(() => {
+    try { return localStorage.getItem(LORA_COMPAT_FILTER_KEY) === '1'; } catch (e) { return false; }
+  });
+  const toggleCompatOnly = (on) => {
+    setCompatOnly(on);
+    try { localStorage.setItem(LORA_COMPAT_FILTER_KEY, on ? '1' : '0'); } catch (e) { /* private mode */ }
+  };
   const [recheckBusy, setRecheckBusy] = useState(false);
   const [myLoras, setMyLoras] = useState(null); // null = not fetched yet
   const [maxSlots, setMaxSlots] = useState(5);
@@ -1940,6 +1951,13 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
   const rematchLora = (id) => callLibrary(`/loras/${id}/match`, { method: 'POST' });
 
   const activeCount = library.filter((e) => e.active && baseFamily(e.base_model) === checkpointFamily).length;
+  // With an unknown checkpoint family everything would read as incompatible,
+  // so the filter only kicks in when the family is known.
+  const compatFilterOn = compatOnly && !!checkpointFamily;
+  const visibleLibrary = compatFilterOn
+    ? library.filter((e) => baseFamily(e.base_model) === checkpointFamily)
+    : library;
+  const hiddenCount = library.length - visibleLibrary.length;
 
   return (
     <section className={sectionCls}>
@@ -1948,6 +1966,22 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
           LoRAs {library.length > 0 && <span className="text-gray-600">({library.length} saved{activeCount > 0 ? `, ${activeCount} active` : ''})</span>}
         </h2>
         <div className="flex items-center gap-3">
+          {library.length > 0 && (
+            <label
+              className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-300 cursor-pointer select-none"
+              title={checkpointFamily
+                ? `Show only saved LoRAs that work with the selected checkpoint (${FAMILY_LABELS[checkpointFamily] || checkpointFamily}). Matching is by family, not exact base model — Illustrious, NoobAI, Pony and other SDXL-derived LoRAs all count as SDXL-class.`
+                : "The selected checkpoint's family is unknown, so this filter has no effect."}
+            >
+              <input
+                type="checkbox"
+                checked={compatOnly}
+                onChange={(e) => toggleCompatOnly(e.target.checked)}
+                className="accent-purple-500"
+              />
+              Match checkpoint{compatFilterOn && hiddenCount > 0 ? ` (${hiddenCount} hidden)` : ''}
+            </label>
+          )}
           {isLocal && canInstall && library.length > 0 && (
             <button
               onClick={recheckAll}
@@ -2200,9 +2234,15 @@ function LoraSection({ config, draft, set, library, setLibrary, checkpointFamily
 
       {library.length === 0 ? (
         <p className="text-sm text-gray-600 italic">No saved LoRAs yet — browse Civitai or Hugging Face to add some.</p>
+      ) : visibleLibrary.length === 0 ? (
+        <p className="text-sm text-gray-600 italic">
+          None of your {library.length} saved LoRA{library.length === 1 ? '' : 's'} match the
+          selected {FAMILY_LABELS[checkpointFamily] || checkpointFamily} checkpoint — untick
+          “Match checkpoint” to see them all.
+        </p>
       ) : (
         <div className="space-y-2">
-          {library.map((entry) => (
+          {visibleLibrary.map((entry) => (
             <LoraRow
               key={entry.id}
               entry={entry}
