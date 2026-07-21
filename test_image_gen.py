@@ -7533,7 +7533,8 @@ def test_shared_credentials_follow_global_root_and_survive_empty_overlay(tmp_pat
     # all-in-one config.json.
     (glob / MID).mkdir(parents=True)
     (glob / MID / "config.json").write_text(json.dumps(
-        {"api_key": "real-key", "local_base_url": "http://10.0.0.5:7860"}))
+        {"api_key": "real-key", "local_base_url": "http://10.0.0.5:7860",
+         "provider": "local", "enabled": True}))
     backend.set_services({"data_dir": str(glob), "global_data_dir": str(glob)})
     assert backend._load_store()["api_key"] == "real-key"
 
@@ -7542,6 +7543,8 @@ def test_shared_credentials_follow_global_root_and_survive_empty_overlay(tmp_pat
     store = backend._load_store()
     assert store["api_key"] == "real-key"
     assert store["local_base_url"] == "http://10.0.0.5:7860"
+    assert store["provider"] == "local"
+    assert store["enabled"] is True
 
     # ...and saving from it lands them in the shared credentials file, not
     # in the profile root's config.

@@ -668,11 +668,13 @@ def _shared_dir() -> Path:
     return root
 
 
-# The only config fields shared across profile roots: API keys, and the
-# addresses of machine-local services along with the credentials to reach
-# them. Everything else in GLOBAL_FIELDS ("global" there means shared by the
+# The config fields shared across profile roots: the connection setup — API
+# keys, the addresses of machine-local services along with the credentials
+# to reach them, which provider is in use, and whether the module is on.
+# Everything else in GLOBAL_FIELDS ("global" there means shared by the
 # module's own generation profiles) follows the active data root.
 SHARED_CONFIG_FIELDS = (
+    "enabled", "provider",
     "api_key", "civitai_api_key", "hf_api_key",
     "local_base_url", "local_auth_user", "local_auth_pass",
     "local_helper_url", "local_helper_token",
