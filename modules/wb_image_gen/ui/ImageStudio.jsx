@@ -1415,10 +1415,27 @@ function LoraRow({ entry, checkpointFamily, provider, canInstall, download, onIn
       )}
 
       {expanded && entry.active && (
+        <label
+          className="flex items-center gap-2 text-[11px] text-gray-500 hover:text-gray-300 cursor-pointer select-none w-fit"
+          title="On: the prompt-writer AI sees every trigger word below and weaves in only the ones that fit each image. Off: the first few trigger words are always included verbatim."
+        >
+          <input
+            type="checkbox"
+            checked={!!entry.triggers_llm}
+            onChange={(e) => onPatch(entry.id, { triggers_llm: e.target.checked })}
+            className="accent-purple-500"
+          />
+          AI picks which triggers fit each image
+        </label>
+      )}
+
+      {expanded && entry.active && (
         <div className="flex items-start gap-2">
           <label
-            className="text-[10px] uppercase tracking-wider shrink-0 pt-2.5 text-gray-500"
-            title="Trigger words woven into every prompt that uses this LoRA. Pulled from the model page — edit them here if they're wrong or missing. Comma-separated."
+            className={`text-[10px] uppercase tracking-wider shrink-0 pt-2.5 ${entry.triggers_llm ? 'text-purple-400' : 'text-gray-500'}`}
+            title={entry.triggers_llm
+              ? 'Candidate trigger words — before each image the prompt-writer AI includes only the ones that fit the scene. Comma-separated.'
+              : "Trigger words woven into every prompt that uses this LoRA. Pulled from the model page — edit them here if they're wrong or missing. Comma-separated."}
           >
             Triggers
           </label>

@@ -1357,22 +1357,37 @@ def _beat_scene(narration: str, beat: str) -> str:
             f"MOMENT OF THE SCENE: {beat}")
 
 
-def _active_trigger_words(cfg: dict) -> list[str]:
-    """Trained trigger words of the LoRAs that will actually be applied, so the
-    prompt-writer LLM can work them in and the LoRAs fire."""
+def _active_trigger_words(cfg: dict) -> tuple[list[str], list[str]]:
+    """Trained trigger words of the LoRAs that will actually be applied, split
+    by how the prompt writer should treat them: (mandatory, llm_picked).
+    Mandatory words the writer must weave in verbatim; llm_picked words (from
+    entries with triggers_llm on) are candidates the writer chooses from per
+    image. Mandatory entries contribute their first few words as before;
+    llm-picked entries contribute their full list -- the writer needs every
+    candidate to choose well. Mandatory collects first so a word shared by
+    both kinds of entry stays mandatory."""
     family = _checkpoint_family(cfg)
     provider = _provider(cfg)
-    words: list[str] = []
+    usable = [e for e in _active_loras(cfg)
+              if _entry_usable(e, family, provider)]
+    mandatory: list[str] = []
+    llm_picked: list[str] = []
     seen: set[str] = set()
-    for entry in _active_loras(cfg):
-        if not _entry_usable(entry, family, provider):
-            continue
-        for word in (entry.get("trained_words") or [])[:4]:
+
+    def add(words, out):
+        for word in words:
             word = str(word).strip().strip(",")
             if word and word.lower() not in seen:
                 seen.add(word.lower())
-                words.append(word)
-    return words[:12]
+                out.append(word)
+
+    for entry in usable:
+        if not entry.get("triggers_llm"):
+            add((entry.get("trained_words") or [])[:4], mandatory)
+    for entry in usable:
+        if entry.get("triggers_llm"):
+            add(entry.get("trained_words") or [], llm_picked)
+    return mandatory[:12], llm_picked
 
 
 def _render_template(template: str, narration: str, history: str) -> str:
@@ -1811,10 +1826,15 @@ async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
         if cfg.get("booru_break_separator"):
             rule += "\n" + BOORU_BREAK_RULE
         prompt += "\n\n" + rule
-    triggers = _active_trigger_words(cfg)
+    triggers, llm_triggers = _active_trigger_words(cfg)
     if triggers:
         prompt += ("\n\nMANDATORY: weave these trigger words into the output verbatim "
                    "(they activate style adapters): " + ", ".join(triggers))
+    if llm_triggers:
+        prompt += ("\n\nTRIGGER CHOICE: each of these trigger words activates one "
+                   "specific concept of a style adapter. Weave into the output, "
+                   "verbatim, ONLY the ones that fit the scene being depicted, "
+                   "and leave the rest out: " + ", ".join(llm_triggers))
     prompt += _character_block(cfg, characters, subject_mode)
     if character_notes:
         prompt += "\n\n" + character_notes
@@ -1842,7 +1862,8 @@ async def _write_image_prompt(cfg: dict, narration: str, history: str, sdk,
     if _looks_like_llm_refusal(image_prompt):
         raise RuntimeError(f"prompt writer refused: {image_prompt[:120]}")
     if style == "tags":
-        image_prompt = _filter_tags_by_usage(image_prompt, cfg, whitelist=triggers)
+        image_prompt = _filter_tags_by_usage(image_prompt, cfg,
+                                             whitelist=triggers + llm_triggers)
 
     # Tag-trained checkpoints expect their family's quality tags up front.
     prefix = _quality_tags(cfg)
@@ -4056,6 +4077,7 @@ def _normalize_lora_entry(item: dict) -> dict:
         "sd_name_override": "",
         "condition": "",     # condition / weight instructions for the AI modes
         "llm_mode": "off",   # what the per-image LLM decides; see LORA_LLM_MODES
+        "triggers_llm": False,  # prompt writer picks which trigger words fit each image
         "novita": None,
         "novita_checked_at": None,
     })
@@ -4843,6 +4865,7 @@ def get_router():
         condition: str | None = None
         llm_mode: str | None = None
         trained_words: list[str] | None = None
+        triggers_llm: bool | None = None
 
     class InstallRequest(BaseModel):
         # LoRA installs: an already-saved entry (lora_id) or a browse/version-
@@ -6064,6 +6087,8 @@ def get_router():
             # trimmed, non-empty, capped.
             entry["trained_words"] = [
                 str(w).strip() for w in patch.trained_words if str(w).strip()][:20]
+        if patch.triggers_llm is not None:
+            entry["triggers_llm"] = bool(patch.triggers_llm)
         _save_config(cfg)
         return {"entry": entry, "lora_library": cfg["lora_library"]}
 

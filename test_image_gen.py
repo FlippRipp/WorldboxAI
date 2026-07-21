@@ -2012,7 +2012,7 @@ def test_trigger_words_injected_for_usable_loras_only(tmp_path):
         _lora(id="3", active=False, trained_words=["also skipped"]),
         _lora(id="4", trained_words=["Glowing Runes", "bokeh"]),  # dedupe, case-insensitive
     ])
-    assert backend._active_trigger_words(cfg) == ["glowing runes", "bokeh"]
+    assert backend._active_trigger_words(cfg) == (["glowing runes", "bokeh"], [])
 
     captured = {}
     sdk = _make_sdk(reply="a scene with glowing runes", captured=captured)
@@ -2025,6 +2025,52 @@ def test_trigger_words_injected_for_usable_loras_only(tmp_path):
     asyncio.run(backend._write_image_prompt(
         _lora_cfg(backend), "narration", "", sdk))
     assert "trigger words" not in captured["prompts"][0]
+
+
+def test_llm_picked_trigger_words(tmp_path):
+    backend = _load_backend(tmp_path)
+    cfg = _lora_cfg(backend, lora_library=[
+        _lora(trained_words=["glowing runes"]),
+        # triggers_llm entries feed their FULL list (no per-entry cap) as
+        # candidates, minus words already mandatory elsewhere.
+        _lora(id="2", triggers_llm=True,
+              trained_words=["day", "night", "dawn", "dusk", "rain", "Glowing Runes"]),
+    ])
+    assert backend._active_trigger_words(cfg) == (
+        ["glowing runes"], ["day", "night", "dawn", "dusk", "rain"])
+
+    captured = {}
+    sdk = _make_sdk(reply="a scene with glowing runes at night", captured=captured)
+    asyncio.run(backend._write_image_prompt(cfg, "narration", "", sdk))
+    prompt = captured["prompts"][0]
+    assert "MANDATORY: weave these trigger words" in prompt
+    assert "glowing runes" in prompt
+    assert "TRIGGER CHOICE" in prompt
+    assert "day, night, dawn, dusk, rain" in prompt
+
+    # All-LLM triggers: no MANDATORY line at all.
+    cfg = _lora_cfg(backend, lora_library=[
+        _lora(triggers_llm=True, trained_words=["day", "night"])])
+    captured = {}
+    sdk = _make_sdk(reply="a scene at night", captured=captured)
+    asyncio.run(backend._write_image_prompt(cfg, "narration", "", sdk))
+    assert "MANDATORY: weave" not in captured["prompts"][0]
+    assert "TRIGGER CHOICE" in captured["prompts"][0]
+
+
+def test_triggers_llm_patch_roundtrip(tmp_path):
+    backend = _load_backend(tmp_path)
+    _enable(backend)
+    cfg = backend._load_config()
+    cfg["lora_library"] = [_lora(id="1")]
+    backend._save_config(cfg)
+
+    client = _client(backend)
+    body = client.patch("/loras/1", json={"triggers_llm": True}).json()
+    assert body["entry"]["triggers_llm"] is True
+    assert backend._load_config()["lora_library"][0]["triggers_llm"] is True
+    body = client.patch("/loras/1", json={"triggers_llm": False}).json()
+    assert body["entry"]["triggers_llm"] is False
 
 
 def test_flatten_civitai_model(tmp_path):
@@ -5395,7 +5441,7 @@ def test_local_payload_injects_lora_tags_only_at_payload_time(tmp_path):
     # Trigger words follow local usability now.
     cfg["lora_library"][0]["trained_words"] = ["inkwash"]
     cfg["lora_library"][3]["trained_words"] = ["neverapplied"]
-    words = backend._active_trigger_words(cfg)
+    words, _ = backend._active_trigger_words(cfg)
     assert "inkwash" in words and "neverapplied" not in words
 
     # The LLM-gated cfg copy flows straight into the tags.
