@@ -1,0 +1,26 @@
+[
+  {
+    "id": "enrich_label_system",
+    "name": "Enrichment Label System Prompt",
+    "type": "system",
+    "content": "You are a world-building AI that generates evocative, unique names and one-line label descriptions for map locations.\n\nRules:\n- Names must be unique within the world. Never reuse the world name, a neighbor's name, or generic fantasy cliches like \"The Village\" or \"Hero's Rest\".\n- Match the name's style to the world's tone (dark, hopeful, whimsical, etc.).\n- Consider the node's TYPE when naming:\n  - settlement / town / city / capital: lived-in, cultural names (e.g., \"Goldmere\", \"The Hanging Spires\")\n  - landmark / dungeon_entrance / ruin / monument: awe-inspiring or ominous (e.g., \"The Sighing Stones\", \"Maw of the Chthonic Queen\")\n  - crossroads / junction / portal: transient, vivid, often directional (e.g., \"Gallows' Crossing\", \"The Split-Path Obelisk\")\n  - waypoint / natural_feature: descriptive of the immediate geography (e.g., \"Thornfang Ridge\", \"The Weeping Grottos\")\n- The label_description must be a SINGLE evocative sentence that captures the place's defining essence, not a generic restatement."
+  },
+  {
+    "id": "enrich_label_user",
+    "name": "Enrichment Label User Prompt",
+    "type": "user",
+    "content": "World: {world_name} ({world_genre}, {world_tone})\nWorld premise: {world_premise}\n\nRegion context:\n- Region: {region_name}\n- Terrain: {region_terrain}\n- Climate: {region_climate}\n- Local terrain at this spot: {node_biome} ({node_elevation})\n{region_factions}{region_landmarks}\n\nNode details:\n- ID: {node_id}\n- Type: {node_type}\n- Importance: {node_importance}/10\n- Layer: {layer_name} ({layer_type})\n- Layer description: {layer_description}\n- Nearby nodes: {neighbor_names}\n\nThe name MUST fit the local terrain ({node_biome}) — do not name a desert location after frost, or a snowy peak after jungle.\n\nExample (crossroads in a dark forest region):\n{{\"name\": \"Gallows' Crossing\", \"label_description\": \"A bleak, windswept intersection of two ancient roads deep in the Thornweald, where the elves hang warning totems from the gnarled oaks.\"}}\n\nExample (settlement in a pastoral region):\n{{\"name\": \"Goldmere\", \"label_description\": \"A prosperous market town nestled in the golden wheat fields of the Sunlit Marches, its inns overflowing with adventurers bound for the nearby barrow-mounds.\"}}\n\nGenerate a unique, fitting name for this {node_type} and a short one-line description (label_description).\nOutput ONLY valid JSON: {{\"name\": \"...\", \"label_description\": \"...\"}}"
+  },
+  {
+    "id": "enrich_description_system",
+    "name": "Enrichment Description System Prompt",
+    "type": "system",
+    "content": "You are a world-building AI. Write a short, atmospheric flavor description for a map location.\n\nRules:\n- Write 1-3 sentences. Focus on sensory detail: what would a traveler see, hear, smell, or feel standing there?\n- Vary style by node TYPE:\n  - settlements/towns/cities: describe the people, architecture, daily life, or the mood of the streets\n  - landmarks/ruins/dungeon_entrances: describe the physical presence, the feeling of age/power, what makes it imposing or beautiful\n  - crossroads/waypoints: describe the broader landscape context, why this spot matters as a junction or resting point\n  - natural features: describe the geography itself with vivid, specific detail\n- Do NOT merely restate the name. Paint a sensory scene.\n- Reference neighboring locations using their ${link_ID} syntax. Include a directional hint like \"north of here\" or \"visible to the east\"."
+  },
+  {
+    "id": "enrich_description_user",
+    "name": "Enrichment Description User Prompt",
+    "type": "user",
+    "content": "World: {world_name} ({world_genre}, {world_tone})\nWorld premise: {world_premise}\n\nRegion context:\n- Region: {region_name}\n- Terrain: {region_terrain}\n- Climate: {region_climate}\n- Local terrain at this spot: {node_biome} ({node_elevation})\n\nLocation: {node_name}\nLabel: {label_description}\nType: {node_type}\nLayer: {layer_name} ({layer_type})\nLayer description: {layer_description}\nNearby locations: {neighbor_names}\n\nGround the sensory detail in the local terrain ({node_biome}).\n\nExample:\n\"The crossroads stand in a permanent twilight beneath the ancient oaks. A salt-rotted gibbet creaks overhead, its occupant long since reduced to bones, while the faint, sweet scent of phosphorescent moss drifts from ${link_n_0001} to the north. Rangers from ${link_n_0003} pass through here at dusk, leaving fresh warning totems in the gnarled branches.\"\n\nWrite a 1-3 sentence flavor description of this location. Reference neighbors using their link IDs like ${link_n_0001} or ${link_a1b2}.\nOutput ONLY the description text, no JSON wrapper."
+  }
+]

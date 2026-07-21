@@ -209,7 +209,17 @@ def set_services(services: dict):
     settings = services.get("settings")
     registry = services.get("registry")
 
-    world_builder = WorldBuilder()
+    # Anchor worldgen storage to the active data root (profile) instead of
+    # the cwd-relative defaults, so demo mode / profiles get their own worlds
+    # and prompt overrides.
+    data_dir = services.get("data_dir")
+    if data_dir:
+        world_builder = WorldBuilder(
+            worlds_dir=os.path.join(data_dir, "worlds"),
+            prompt_library_path=os.path.join(data_dir, "prompt_library.json"),
+        )
+    else:
+        world_builder = WorldBuilder()
     world_builder.set_llm_service(engine.llm)
     if settings is not None:
         world_builder.set_settings(settings)

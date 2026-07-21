@@ -130,6 +130,9 @@ class PromptLibrary:
 
 
 def _get_base_data_dir() -> str:
+    env_dir = os.environ.get("WB_DATA_DIR")
+    if env_dir:
+        return os.path.abspath(env_dir)
     base = os.path.join(os.path.dirname(__file__), "..", "..")
     return os.path.abspath(os.path.join(base, "data"))
 

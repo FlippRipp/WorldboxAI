@@ -7,8 +7,21 @@ cd "$(dirname "$0")"
 WB_PORT="${WB_PORT:-8321}"
 export WB_PORT
 
+# --demo: run against a throwaway copy of demo_data/ instead of data/, so
+# personal saves/characters/worlds are never shown. API keys stay global.
+DEMO_MODE=0
+for arg in "$@"; do
+    case "$arg" in
+        --demo) DEMO_MODE=1 ;;
+        *) echo "[WARN] Unknown argument: $arg" ;;
+    esac
+done
+
 echo "=============================================="
 echo "      WorldBox AI RPG Engine - Startup"
+if [ "$DEMO_MODE" = "1" ]; then
+    echo "                (DEMO MODE)"
+fi
 echo "=============================================="
 echo
 
@@ -117,6 +130,16 @@ cleanup() {
     rm -f "$BACKEND_LOG"
 }
 trap cleanup EXIT
+
+# ── Demo mode: stage a pristine data root and point the backend at it ──
+if [ "$DEMO_MODE" = "1" ]; then
+    echo "Demo mode: staging pre-generated content (your data/ stays untouched)..."
+    rm -rf .demo_run
+    cp -R demo_data .demo_run || { echo "[ERROR] Failed to stage demo data from demo_data/."; exit 1; }
+    WB_DATA_DIR="$PWD/.demo_run"
+    export WB_DATA_DIR
+    echo
+fi
 
 # ── Delete stale PID file, start backend in background ──
 rm -f .backend_pid.tmp

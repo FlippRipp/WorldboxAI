@@ -653,6 +653,20 @@ def _data_dir() -> Path:
     return root
 
 
+def _config_dir() -> Path:
+    # config.json holds the Novita API key; API keys are app-global, so the
+    # config follows global_data_dir (the repo data dir, injected by the
+    # server) rather than the WB_DATA_DIR profile root the way images,
+    # index, and caches (via _data_dir) do.
+    base = _services.get("global_data_dir") or _services.get("data_dir")
+    if base:
+        root = Path(base) / MODULE_ID
+    else:
+        root = Path(__file__).resolve().parent.parent.parent / "data" / MODULE_ID
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def _default_config() -> dict:
     return {
         "enabled": False,
@@ -773,7 +787,7 @@ def _load_store() -> dict:
     """The raw on-disk store: globals + shared lora_library + profiles.
     Pre-profile flat files migrate in memory only (first save persists v2,
     same pattern as the legacy value migrations in _effective_config)."""
-    path = _data_dir() / "config.json"
+    path = _config_dir() / "config.json"
     stored = None
     if path.exists():
         try:
@@ -812,7 +826,7 @@ def _load_store() -> dict:
 
 
 def _save_store(store: dict) -> None:
-    _atomic_write_json(_data_dir() / "config.json", store)
+    _atomic_write_json(_config_dir() / "config.json", store)
 
 
 def _effective_config(store: dict) -> dict:

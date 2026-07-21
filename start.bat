@@ -8,7 +8,7 @@ setlocal enabledelayedexpansion
 if /i not "%~f0"=="%TEMP%\worldbox_start.bat" (
     set "WORLDBOX_DIR=%~dp0"
     copy /y "%~f0" "%TEMP%\worldbox_start.bat" >nul
-    "%TEMP%\worldbox_start.bat"
+    "%TEMP%\worldbox_start.bat" %*
     exit /b
 )
 
@@ -18,8 +18,15 @@ title WorldBox
 :: Backend port; inherited by main.py and the Vite proxy.
 if not defined WB_PORT set WB_PORT=8321
 
+:: --demo: run against a throwaway copy of demo_data\ instead of data\, so
+:: personal saves/characters/worlds are never shown. API keys stay global.
+set DEMO_MODE=0
+if /i "%~1"=="--demo" set DEMO_MODE=1
+if /i "%~1"=="/demo" set DEMO_MODE=1
+
 echo ==============================================
 echo       WorldBox AI RPG Engine - Startup
+if "%DEMO_MODE%"=="1" echo                 (DEMO MODE)
 echo ==============================================
 echo.
 
@@ -97,6 +104,20 @@ if "%NEED_NPM_INSTALL%"=="1" (
         exit /b 1
     )
     cd ..
+    echo.
+)
+
+:: ── Demo mode: stage a pristine data root and point the backend at it ──
+if "%DEMO_MODE%"=="1" (
+    echo Demo mode: staging pre-generated content ^(your data\ stays untouched^)...
+    if exist .demo_run rmdir /s /q .demo_run
+    xcopy /e /i /q /y demo_data .demo_run >nul
+    if errorlevel 1 (
+        echo [ERROR] Failed to stage demo data from demo_data\.
+        pause
+        exit /b 1
+    )
+    set "WB_DATA_DIR=%CD%\.demo_run"
     echo.
 )
 

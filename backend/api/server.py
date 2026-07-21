@@ -63,7 +63,13 @@ app.add_middleware(
 
 base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 modules_dir = os.path.join(base_dir, "modules")
-data_dir = os.path.join(base_dir, "data")
+# WB_DATA_DIR selects the active data root — a "profile". Demo mode (and,
+# later, user profiles) point this at a different directory; everything
+# user-owned (saves, characters, worlds, scenarios, lorebooks, theme,
+# settings, logs) lives under it. API keys are deliberately app-global and
+# stay under the repo's data/ regardless of profile (see provider_manager
+# below and wb_image_gen's config).
+data_dir = os.path.abspath(os.environ.get("WB_DATA_DIR") or os.path.join(base_dir, "data"))
 
 registry = ModuleRegistry(modules_dir)
 registry.load_all_modules()
@@ -72,7 +78,9 @@ backend_settings = SettingsRegistry()
 # Global-scoped settings persist app-wide (not per save); without this bind
 # they would live only in memory and reset on every server restart.
 backend_settings.bind_global(os.path.join(data_dir, "global_engine_settings.json"))
-provider_manager = ProviderManager()
+# Anchored to the repo data dir, not data_dir: provider configs hold API
+# keys, which are shared across all profiles (demo mode included).
+provider_manager = ProviderManager(os.path.join(base_dir, "data", "providers"))
 engine = EngineGraph(registry, settings_registry=backend_settings, provider_manager=provider_manager)
 session_manager = GameSessionManager(data_dir, settings=backend_settings)
 engine.set_memory_path(session_manager.get_memory_path())
@@ -268,7 +276,7 @@ class PromptPipelineRequest(BaseModel):
 
 
 
-character_builder = CharacterBuilder()
+character_builder = CharacterBuilder(os.path.join(data_dir, "characters"))
 character_builder.set_llm_service(engine.llm)
 character_builder.set_settings(backend_settings)
 
@@ -281,6 +289,9 @@ _module_services = {
     "settings": backend_settings,
     "character_builder": character_builder,
     "data_dir": data_dir,
+    # Always the repo data dir, even when data_dir is a profile root: modules
+    # keep app-global state (e.g. API keys) here.
+    "global_data_dir": os.path.join(base_dir, "data"),
 }
 for _mod_id, _mod_data in registry.get_modules().items():
     _set_services = getattr(_mod_data.get("backend"), "set_services", None)

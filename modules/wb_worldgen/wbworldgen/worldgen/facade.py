@@ -48,12 +48,15 @@ from wbworldgen.worldgen.prompts import (  # noqa: F401
 
 
 class WorldBuilder:
-    def __init__(self, worlds_dir: str = "data/worlds"):
+    def __init__(self, worlds_dir: str = "data/worlds", prompt_library_path: str = None):
         self._steps: dict = {}
         self._ordered_ids: list[str] = []
         self._settings = None
 
-        self._persistence = WorldPersistence(worlds_dir)
+        if prompt_library_path is None:
+            self._persistence = WorldPersistence(worlds_dir)
+        else:
+            self._persistence = WorldPersistence(worlds_dir, prompt_library_path)
         self._worlds_dir = self._persistence._dir
         # Shared references so legacy direct-attribute access keeps working.
         self._enrichment_cache = self._persistence._enrichment_cache

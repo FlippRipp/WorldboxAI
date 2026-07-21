@@ -31,6 +31,9 @@ frontend/dist/
 Thumbs.db
 .DS_Store
 
+# Demo mode scratch data root (staged from demo_data/ on each --demo launch)
+.demo_run/
+
 # User data (characters, worlds, scenarios, saves, theme)
 data/logs/
 data/saves/
