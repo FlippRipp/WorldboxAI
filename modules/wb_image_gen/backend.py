@@ -2573,6 +2573,28 @@ def _match_anima_modules(modules: list[dict]) -> list[str]:
     return [p for p in (te_path, vae_path) if p]
 
 
+def _anima_modules_on_disk(cfg: dict) -> list[str]:
+    """The Qwen module paths found by scanning the install folders directly
+    (text encoder first), or [] unless both are present. This is the fallback
+    for Forge Neo's stale /sdapi/v1/sd-modules: Neo rebuilds that listing
+    only on a UI page load or its refresh button — no API route touches it
+    (refresh-vae refreshes the legacy sd_vae list, which sd-modules never
+    reads) — so files installed after the WebUI started stay invisible over
+    the API even though a render accepts their full paths just fine. Only
+    meaningful when the WebUI's folders are on this machine; elsewhere the
+    scan comes up empty and the caller falls back to its error path."""
+    candidates = []
+    for kind in ("text_encoder", "vae"):
+        folder = _local_install_dir(cfg, kind)
+        if folder is None or not folder.is_dir():
+            continue
+        exts = LOCAL_INSTALL_KINDS[kind]["exts"]
+        candidates += [{"filename": str(p)} for p in sorted(folder.rglob("*"))
+                       if p.is_file() and p.suffix.lower() in exts]
+    paths = _match_anima_modules(candidates)
+    return paths if len(paths) == 2 else []
+
+
 async def _local_anima_modules(cfg: dict) -> list[str] | None:
     """The forge_additional_modules value for an Anima render: both Qwen
     module paths when the WebUI has them, None to leave the payload alone
@@ -2600,11 +2622,16 @@ async def _local_anima_modules(cfg: dict) -> list[str] | None:
         if isinstance(options, dict) else None
     if isinstance(selected, list) and selected:
         return None
+    disk = _anima_modules_on_disk(cfg)
+    if disk:
+        return disk
     raise NonRetryableError(
         f"Anima needs its text encoder ({ANIMA_TEXT_ENCODER_FILE}) and VAE "
         f"({ANIMA_VAE_FILE}) installed next to the WebUI — install both "
         "from the Image Studio's Setup tab (or drop them into the WebUI's "
-        "models/text_encoder and models/VAE folders)")
+        "models/text_encoder and models/VAE folders). If both are already "
+        "installed, the WebUI just hasn't rescanned its module list: "
+        "reload its browser page or restart it")
 
 
 # The WebUI's APIs expose no usable file hashes (/sdapi/v1/loras only has
@@ -5754,6 +5781,11 @@ def get_router():
                         "installs migrate with migrate_image_server).")
                 else:
                     found = _match_anima_modules(modules)
+                    if len(found) < 2:
+                        # sd-modules may simply be stale (Forge Neo only
+                        # rescans it on a UI reload); renders still work —
+                        # _local_anima_modules passes the same disk paths.
+                        found = _anima_modules_on_disk(cfg) or found
                     out["anima_modules_found"] = len(found)
                     if len(found) < 2:
                         out["anima_warning"] = (
@@ -5761,7 +5793,10 @@ def get_router():
                             f"({ANIMA_TEXT_ENCODER_FILE}) and VAE "
                             f"({ANIMA_VAE_FILE}) next to the WebUI — "
                             "install both with one click below, or drop "
-                            "them into models/text_encoder and models/VAE.")
+                            "them into models/text_encoder and models/VAE. "
+                            "If both are already installed, reload the "
+                            "WebUI's browser page or restart it so it "
+                            "rescans them.")
         if _helper_url(cfg):
             try:
                 health = await _helper_request(cfg, "GET", "/wb-helper/health",

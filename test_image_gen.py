@@ -7523,6 +7523,28 @@ def test_local_anima_modules_resolution_and_payload(tmp_path):
     with pytest.raises(backend.NonRetryableError, match="text encoder"):
         asyncio.run(backend._local_anima_modules(cfg))
 
+    # Both files sit in the install folders but the WebUI's sd-modules
+    # listing predates them (Forge Neo only rescans on a UI reload, never
+    # over the API): the disk outranks the stale listing and the render
+    # proceeds with the on-disk paths.
+    te_dir = tmp_path / "models" / "text_encoder"
+    vae_dir = tmp_path / "models" / "VAE"
+    te_dir.mkdir(parents=True)
+    vae_dir.mkdir(parents=True)
+    (te_dir / backend.ANIMA_TEXT_ENCODER_FILE).write_bytes(b"x")
+    disk_cfg = {**cfg, "local_text_encoder_dir": str(te_dir),
+                "local_vae_dir": str(vae_dir)}
+    backend._local_modules_probe.clear()
+    # Only the text encoder on disk -> still the install hint (which now
+    # also mentions the rescan escape hatch for exactly this staleness).
+    with pytest.raises(backend.NonRetryableError, match="rescanned"):
+        asyncio.run(backend._local_anima_modules(disk_cfg))
+    (vae_dir / backend.ANIMA_VAE_FILE).write_bytes(b"x")
+    backend._local_modules_probe.clear()
+    assert asyncio.run(backend._local_anima_modules(disk_cfg)) == [
+        str(te_dir / backend.ANIMA_TEXT_ENCODER_FILE),
+        str(vae_dir / backend.ANIMA_VAE_FILE)]
+
 
 def test_anima_catalog_endpoint(tmp_path):
     backend = _load_backend(tmp_path)
@@ -7586,6 +7608,23 @@ def test_local_status_anima_diagnostics(tmp_path):
     body = client.get("/local/status").json()
     assert body["anima_modules_found"] == 1
     assert backend.ANIMA_TEXT_ENCODER_FILE in body["anima_warning"]
+
+    # Same stale listing but both files present in the install folders on
+    # disk (installed after the WebUI started — Forge Neo's sd-modules only
+    # rescans on a UI reload): the disk wins and the warning clears.
+    te_dir = tmp_path / "models" / "text_encoder"
+    vae_dir = tmp_path / "models" / "VAE"
+    te_dir.mkdir(parents=True)
+    vae_dir.mkdir(parents=True)
+    (te_dir / backend.ANIMA_TEXT_ENCODER_FILE).write_bytes(b"x")
+    (vae_dir / backend.ANIMA_VAE_FILE).write_bytes(b"x")
+    cfg = backend._load_config()
+    cfg["local_text_encoder_dir"] = str(te_dir)
+    cfg["local_vae_dir"] = str(vae_dir)
+    backend._save_config(cfg)
+    body = client.get("/local/status").json()
+    assert body["anima_modules_found"] == 2
+    assert "anima_warning" not in body
 
     # Both files: all green, no warning.
     holder["modules"] = [
