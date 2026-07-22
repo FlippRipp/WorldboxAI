@@ -2595,12 +2595,14 @@ def _anima_modules_on_disk(cfg: dict) -> list[str]:
     return paths if len(paths) == 2 else []
 
 
-async def _local_anima_modules(cfg: dict) -> list[str] | None:
+async def _local_anima_modules(cfg: dict) -> list[str]:
     """The forge_additional_modules value for an Anima render: both Qwen
-    module paths when the WebUI has them, None to leave the payload alone
-    when the user has manually selected modules in the WebUI (they may use
-    files this matcher doesn't know). Raises NonRetryableError with the
-    actionable diagnosis when Anima cannot render at all."""
+    module paths when the WebUI has them, otherwise the user's own WebUI-
+    side selection (they may use files this matcher doesn't know; echoing
+    it back keeps the server state unchanged while still letting the
+    payload drop the sd_vae pin Forge Neo chokes on). Raises
+    NonRetryableError with the actionable diagnosis when Anima cannot
+    render at all."""
     modules = await _local_list_modules(cfg)
     if modules is None:
         raise NonRetryableError(
@@ -2621,7 +2623,7 @@ async def _local_anima_modules(cfg: dict) -> list[str] | None:
     selected = (options or {}).get("forge_additional_modules") \
         if isinstance(options, dict) else None
     if isinstance(selected, list) and selected:
-        return None
+        return [str(p) for p in selected]
     disk = _anima_modules_on_disk(cfg)
     if disk:
         return disk
@@ -3392,7 +3394,7 @@ def _local_prompt_with_tags(cfg: dict, image_prompt: str) -> str:
 
 def _local_payload(cfg: dict, image_prompt: str,
                    scheduler_ok: bool = False,
-                   anima_modules: list[str] | None = None) -> dict:
+                   forge_modules: list[str] | None = None) -> dict:
     # No prompt cap here: local WebUIs chunk long prompts themselves.
     payload = {
         "prompt": _local_prompt_with_tags(cfg, image_prompt),
@@ -3421,12 +3423,19 @@ def _local_payload(cfg: dict, image_prompt: str,
         },
         "override_settings_restore_afterwards": False,
     }
-    # Anima renders carry their Qwen text encoder + VAE as Forge additional
-    # modules (resolved by _local_anima_modules); the sd_vae pin would fight
-    # that selection, so it rides only for the SD families.
-    if anima_modules:
+    # forge_modules is this render's VAE/text-encoder module selection for
+    # WebUIs with the sd-modules API (resolved by _local_render_modules):
+    # Anima's Qwen pair, or [] for the SD families — the explicit "no
+    # external modules, use the checkpoint's baked VAE" choice, which also
+    # flushes Qwen modules a previous Anima render left selected. On those
+    # WebUIs it REPLACES the sd_vae pin: since 05/2026 Forge Neo reads any
+    # override_settings.sd_vae other than None/"None" as a literal VAE
+    # file path to load, so "Automatic" crashes the render ("BufferError:
+    # Failed to load model..."). Without the modules API (classic A1111)
+    # the pin rides and stays valid there.
+    if forge_modules is not None:
         payload["override_settings"].pop("sd_vae", None)
-        payload["override_settings"]["forge_additional_modules"] = list(anima_modules)
+        payload["override_settings"]["forge_additional_modules"] = list(forge_modules)
     negative = str(cfg.get("negative_prompt") or "").strip()
     if negative:
         payload["negative_prompt"] = negative
@@ -3504,10 +3513,15 @@ def _local_b64_decode(image: str) -> bytes:
 
 
 async def _local_render_modules(cfg: dict) -> list[str] | None:
-    """The anima_modules payload argument for this render: resolved for Anima
-    profiles, None (field absent) for every other family."""
+    """The forge_modules payload argument for this render: the Qwen pair
+    for Anima profiles; [] for every other family when the WebUI has the
+    sd-modules API (the baked VAE is the right SD-family choice, and the
+    explicit empty selection flushes Qwen modules a previous Anima render
+    left behind); None — pin sd_vae instead — when there is no modules
+    API. A transient probe failure also lands on None; if the server is
+    actually a Forge Neo, that render fails and the retry re-probes."""
     if _checkpoint_family(cfg) != "anima":
-        return None
+        return [] if await _local_list_modules(cfg) is not None else None
     return await _local_anima_modules(cfg)
 
 
@@ -3515,21 +3529,21 @@ async def _local_generate(cfg: dict, image_prompt: str) -> tuple[bytes, str]:
     """One synchronous txt2img render against the local WebUI."""
     payload = _local_payload(cfg, image_prompt,
                              scheduler_ok=await _local_scheduler_ok(cfg),
-                             anima_modules=await _local_render_modules(cfg))
+                             forge_modules=await _local_render_modules(cfg))
     images = await _local_txt2img(cfg, payload)
     return _local_b64_decode(images[0]), "png"
 
 
 def _local_batch_payload(cfg: dict, image_prompts: list[str],
                          scheduler_ok: bool = False,
-                         anima_modules: list[str] | None = None) -> dict:
+                         forge_modules: list[str] | None = None) -> dict:
     """A txt2img payload that renders every prompt in one GPU batch via the
     bundled wb_prompt_batch.py script. The script reads the JSON prompt list
     from script_args and sets batch_size itself; the top-level prompt and
     batch_size stay in their single-image shape so the request remains a
     valid (if single-image) txt2img body."""
     payload = _local_payload(cfg, image_prompts[0], scheduler_ok=scheduler_ok,
-                             anima_modules=anima_modules)
+                             forge_modules=forge_modules)
     payload["script_name"] = LOCAL_BATCH_SCRIPT_TITLE
     payload["script_args"] = [json.dumps(
         [_local_prompt_with_tags(cfg, p) for p in image_prompts])]
@@ -3543,7 +3557,7 @@ async def _local_generate_batch(cfg: dict,
     with identical tag strings arrive here together."""
     payload = _local_batch_payload(cfg, image_prompts,
                                    scheduler_ok=await _local_scheduler_ok(cfg),
-                                   anima_modules=await _local_render_modules(cfg))
+                                   forge_modules=await _local_render_modules(cfg))
     images = await _local_txt2img(cfg, payload)
     # The script suppresses the grid, but a fork that ignores
     # do_not_save_grid prepends one; drop it by count.

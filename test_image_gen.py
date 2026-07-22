@@ -7523,35 +7523,49 @@ def test_local_anima_modules_resolution_and_payload(tmp_path):
     mods = asyncio.run(backend._local_anima_modules(cfg))
     assert mods == ["/m/text_encoder/qwen_3_06b_base.safetensors",
                     "/m/VAE/qwen_image_vae.safetensors"]
-    payload = backend._local_payload(cfg, "1girl", anima_modules=mods)
+    payload = backend._local_payload(cfg, "1girl", forge_modules=mods)
     assert payload["override_settings"]["forge_additional_modules"] == mods
     assert "sd_vae" not in payload["override_settings"]
     assert payload["override_settings"]["sd_model_checkpoint"] \
         == "anima-base-v1.0.safetensors"
 
-    # Non-Anima payloads keep the sd_vae pin exactly as before.
+    # Without the modules API (forge_modules None) the sd_vae pin rides —
+    # classic A1111 supports "Automatic" and has no module selection to go
+    # stale.
     plain = backend._local_payload(cfg, "1girl")
     assert plain["override_settings"]["sd_vae"] == "Automatic"
     assert "forge_additional_modules" not in plain["override_settings"]
 
-    # _local_render_modules only resolves for Anima profiles.
+    # Non-Anima on a modules-API WebUI -> []: Forge Neo reads any sd_vae
+    # override except None/"None" as a literal VAE file path (so the
+    # "Automatic" pin crashes it), and the explicit empty selection both
+    # picks the checkpoint's baked VAE and flushes Qwen modules a previous
+    # Anima render left selected.
     pony_cfg = {**cfg, "model_base": "Pony", "model_name": "p.safetensors"}
-    assert asyncio.run(backend._local_render_modules(pony_cfg)) is None
+    assert asyncio.run(backend._local_render_modules(pony_cfg)) == []
+    pony = backend._local_payload(pony_cfg, "1girl", forge_modules=[])
+    assert pony["override_settings"]["forge_additional_modules"] == []
+    assert "sd_vae" not in pony["override_settings"]
 
     # No modules API at all -> this WebUI cannot run Anima (classic A1111).
     backend._local_modules_probe.clear()
     holder["modules_exc"] = backend.LocalNotFoundError("no sd-modules")
     with pytest.raises(backend.NonRetryableError, match="Forge"):
         asyncio.run(backend._local_anima_modules(cfg))
+    # ...and non-Anima renders there keep the sd_vae pin (None -> no
+    # forge_additional_modules key in the payload).
+    assert asyncio.run(backend._local_render_modules(pony_cfg)) is None
 
     # Qwen files missing but the user picked modules in the WebUI's own UI
-    # -> leave the payload alone instead of failing.
+    # -> echo that selection (same server state, but the payload can drop
+    # the sd_vae pin) instead of failing.
     backend._local_modules_probe.clear()
     holder["modules_exc"] = None
     holder["modules"] = [{"model_name": "sdxl_vae",
                           "filename": "/m/VAE/sdxl_vae.safetensors"}]
     holder["options"] = {"forge_additional_modules": ["/m/custom_te.safetensors"]}
-    assert asyncio.run(backend._local_anima_modules(cfg)) is None
+    assert asyncio.run(backend._local_anima_modules(cfg)) \
+        == ["/m/custom_te.safetensors"]
 
     # Nothing installed and nothing selected -> the actionable install hint.
     backend._local_modules_probe.clear()
