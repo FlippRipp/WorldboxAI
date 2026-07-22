@@ -18,7 +18,7 @@ empty skips, empty directives, default levels, procedural root map.
 #: lore / hierarchy_design / map_generation feed the compiled contract (world
 #: ids, hierarchy, the map itself) and enrichment steps are engine-driven.
 #: terrain_generation is controlled by ``map_style``, not listed here.
-AI_SKIPPABLE = {"natural_landmarks", "society_factions"}
+AI_SKIPPABLE = {"codex", "natural_landmarks", "society_factions"}
 
 #: The generator a root map style pins the FIRST hierarchy level to
 #: ("abstract" pins nothing — the level's own generator stands, drawing a

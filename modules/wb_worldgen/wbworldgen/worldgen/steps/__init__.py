@@ -13,6 +13,7 @@ terrain_regions (see docs/systems/DEPRECATED_regions.md).
 from wbworldgen.worldgen.steps.world_form import WorldFormStep
 from wbworldgen.worldgen.steps.world_rules import WorldRulesStep
 from wbworldgen.worldgen.steps.lore import LoreStep
+from wbworldgen.worldgen.steps.codex import CodexStep
 from wbworldgen.worldgen.steps.hierarchy_design import HierarchyDesignStep
 from wbworldgen.worldgen.steps.terrain_generation import TerrainGenerationStep
 from wbworldgen.worldgen.steps.natural_landmarks import NaturalLandmarksStep
@@ -25,6 +26,7 @@ __all__ = [
     "WorldFormStep",
     "WorldRulesStep",
     "LoreStep",
+    "CodexStep",
     "HierarchyDesignStep",
     "TerrainGenerationStep",
     "NaturalLandmarksStep",

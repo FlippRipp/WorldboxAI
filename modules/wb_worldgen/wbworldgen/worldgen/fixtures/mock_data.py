@@ -36,6 +36,37 @@ def mock_lore(prompt: str, note: str = "") -> dict:
     }
 
 
+def mock_codex(prompt: str, note: str = "") -> dict:
+    return {
+        "domains": [
+            {"name": "biology", "reason": "The world's inhabitants are sentient fungal networks."},
+            {"name": "magic", "reason": "Spore-memory is the setting's supernatural system."},
+        ],
+        "entries": [
+            {
+                "domain": "biology",
+                "name": "Hyphal Minds",
+                "summary": "Sentient fungal networks that think as distributed colonies.",
+                "details": ("A hyphal mind has no single body: its thoughts run through "
+                            "kilometers of mycelium, and severing a strand costs it memories. "
+                            "Individuals 'bud' mobile fruiting bodies to act in the world; "
+                            "a body's death is an inconvenience, a network's death is final."),
+                "subject": "",
+            },
+            {
+                "domain": "magic",
+                "name": "Spore-Memory",
+                "summary": "Memories travel between minds as inhaled spores.",
+                "details": ("Any hyphal mind can encode a memory into spores and release it. "
+                            "Inhaled spores replay the memory as lived experience; ancient "
+                            "spore banks in the deep roots hold memories of the old world. "
+                            "Forged spore-memories are the gravest crime the networks know."),
+                "subject": "",
+            },
+        ],
+    }
+
+
 def mock_terrain_regions(prompt: str, note: str = "") -> dict:
     has_layers = bool(note and "layer" in note.lower())
     if has_layers:
@@ -285,6 +316,7 @@ MOCK_GENERATORS = {
     "world_form": mock_world_form,
     "world_rules": mock_rules,
     "lore": mock_lore,
+    "codex": mock_codex,
     "hierarchy_design": mock_hierarchy_design,
     "natural_landmarks": mock_natural_landmarks,
     "society_factions": mock_society_factions,

@@ -6,12 +6,16 @@ tests can reuse them without a stateful orchestrator object.
 
 
 def resolve_order(steps: dict) -> list[str]:
-    """Topologically order step ids by their ``after`` dependency.
+    """Topologically order step ids by their ``after`` dependency; ties
+    resolve in registration order (the B3 guard rail — chain-context order
+    feeds prompts, so ordering must be deterministic). ``remaining`` must
+    iterate in a stable order: with a set, two steps sharing one ``after``
+    would land in per-process hash order.
 
     Raises ValueError on a circular or missing dependency.
     """
     resolved: list[str] = []
-    remaining = set(steps.keys())
+    remaining = list(steps.keys())
 
     while remaining:
         placed = False

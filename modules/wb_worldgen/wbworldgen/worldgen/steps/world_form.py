@@ -109,8 +109,8 @@ class WorldFormStep(Step):
         "skip_steps": {
             "type": "list", "label": "Steps to Skip", "item_type": "string",
             "description": ("Ids of optional steps that add nothing for this world (rarely needed — "
-                            "prefer a 'keep this minimal' directive). Only natural_landmarks and "
-                            "society_factions may be listed; terrain is controlled by map_style."),
+                            "prefer a 'keep this minimal' directive). Only codex, natural_landmarks "
+                            "and society_factions may be listed; terrain is controlled by map_style."),
         },
         "step_directives": {
             "type": "list", "label": "Step Directives", "rerollable": True,

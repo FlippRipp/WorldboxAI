@@ -1008,6 +1008,7 @@ def test_register_default_steps_produces_known_pipeline(builder):
         "world_form",
         "world_rules",
         "lore",
+        "codex",
         "hierarchy_design",
         "terrain_generation",
         "natural_landmarks",

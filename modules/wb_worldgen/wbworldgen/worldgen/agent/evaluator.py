@@ -61,9 +61,15 @@ def _lint_findings(lint_report: dict) -> list:
 
 
 def _content_excerpts(compiled: dict) -> str:
-    """Structural excerpt of the built content: per map, its own description
+    """Structural excerpt of the built content: the codex (reference lore
+    the content must not contradict), then per map its own description
     plus the highest-importance named nodes with their content."""
+    from wbworldgen.worldgen.codex import render_excerpt
+
     lines = []
+    codex_render = render_excerpt(compiled)
+    if codex_render:
+        lines.append(codex_render)
     for mid, rec in _ms.maps_by_id(compiled).items():
         nodes = rec.get("nodes", [])
         named = sorted((n for n in nodes if n.get("name")),

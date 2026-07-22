@@ -282,6 +282,39 @@ def test_site_entry_formats_stay_in_lockstep(tmp_path):
     assert sorted(map(keyed, built)) == sorted(map(keyed, incremental))
 
 
+def test_build_world_entries_codex(tmp_path):
+    """Codex entries (the worldgen lorebook) embed one row per entry —
+    self-contained reference articles for semantic retrieval."""
+    manager = MemoryManager(str(tmp_path / "memory"), embedding_dim=3)
+    world = {
+        "codex": {
+            "domains": [{"name": "magic", "reason": "central"}],
+            "entries": [
+                {"domain": "magic", "name": "Soulforging",
+                 "summary": "Souls are worked like metal.",
+                 "details": "Each forging costs the smith a memory."},
+                {"domain": "biology", "name": "Deep Song",
+                 "summary": "The realm hums.", "details": "",
+                 "subject": "The Drowned Deeps"},
+                {"domain": "magic", "name": "", "summary": "dropped"},
+                {"domain": "magic", "name": "Bodyless"},
+                "junk",
+            ],
+        },
+    }
+    entries = manager._build_world_entries(world)
+    by_key = {(e["source_type"], e["source_id"]): e for e in entries}
+    forge = by_key[("codex", "magic:Soulforging")]
+    assert forge["text"] == ("Codex (magic) - Soulforging: Souls are worked "
+                             "like metal. Each forging costs the smith a memory.")
+    assert forge["region"] == ""
+    song = by_key[("codex", "biology:Deep Song")]
+    assert song["text"] == ("Codex (biology), about The Drowned Deeps - "
+                            "Deep Song: The realm hums.")
+    # Nameless/bodyless/junk entries embed nothing.
+    assert sum(1 for e in entries if e["source_type"] == "codex") == 2
+
+
 def test_build_world_entries_v2_maps_nodes_and_connections(tmp_path):
     """world_format 2: per-map entries, node entries (root map keeps the exact
     legacy flat format so migrated worlds' incremental entries still match),

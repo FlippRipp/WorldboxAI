@@ -172,6 +172,12 @@ def lint_world(compiled: dict, map_id: str = None, major_floor: int = None) -> d
         from wbworldgen.worldgen.notes import lint_notes
         problems.extend(lint_notes(compiled, compiled))
 
+        # Codex contract (lorebook): declared-but-empty domains, entries
+        # under undeclared domains, unbindable subjects. World-level like
+        # the note lints — the findings belong to no single map.
+        from wbworldgen.worldgen.codex import lint_codex
+        problems.extend(lint_codex(compiled))
+
     stats = []
     for mid, rec in scoped.items():
         nodes = rec.get("nodes", [])

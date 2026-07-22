@@ -242,6 +242,11 @@ class MapExpansionEngine:
             # generation call gets them in full.
             from wbworldgen.worldgen.notes import notes_matching_name
             context["child_notes"] = notes_matching_name(compiled, node.get("name", ""))
+            # Codex entries about this place (same pre-binding name match):
+            # the child map is the entry's subject, so its author reads the
+            # reference in full.
+            from wbworldgen.worldgen.codex import entries_matching_name
+            context["child_codex"] = entries_matching_name(compiled, node.get("name", ""))
             # The steering note rides the context dict, not the signature —
             # _live_expand is an established test patch point (the C1
             # guidance-channel precedent: never break existing patchers).
@@ -631,11 +636,19 @@ Output ONLY valid JSON:
 
         def _layer_notes(name: str) -> str:
             matched = notes_matching_name(world_state, name)
-            if not matched:
-                return ""
-            return ("\nThe world's creator agreed on design notes about this "
-                    "map — established facts it must embody:\n"
-                    + "\n".join(f"- {n}" for n in matched))
+            block = ""
+            if matched:
+                block = ("\nThe world's creator agreed on design notes about "
+                         "this map — established facts it must embody:\n"
+                         + "\n".join(f"- {n}" for n in matched))
+            # Codex entries about this layer (same pre-binding name match).
+            from wbworldgen.worldgen.codex import entries_matching_name
+            reference = entries_matching_name(world_state, name)
+            if reference:
+                block += ("\nThe world's codex holds reference lore about "
+                          "this map — it must not contradict it:\n"
+                          + "\n".join(f"- {n}" for n in reference))
+            return block
 
         parsed_root = await self._live_abstract_layer(
             lore, rules, user_prompt, world_kind=world_kind,
@@ -1204,6 +1217,11 @@ Output ONLY valid JSON:
                 f"\nThe world's creator agreed on design notes about {node_name} — "
                 "established facts this map must embody:\n"
                 + "\n".join(f"- {n}" for n in context["child_notes"]) + "\n")
+        if context.get("child_codex"):
+            must_include_line += (
+                f"\nThe world's codex holds reference lore about {node_name} — "
+                "this map must not contradict it:\n"
+                + "\n".join(f"- {n}" for n in context["child_codex"]) + "\n")
 
         levels_block = "\n".join(
             f"- {l.get('level_type')}: {l.get('guidance', l.get('label', ''))}"

@@ -25,6 +25,7 @@ PINNED_DEFAULT_ORDER = [
     "world_form",
     "world_rules",
     "lore",
+    "codex",
     "hierarchy_design",
     "terrain_generation",
     "natural_landmarks",
@@ -67,6 +68,10 @@ def test_builtin_contracts_are_declared():
     cat = capability_catalog()
     steps = {e["id"]: e for e in cat["steps"]}
     assert steps["world_rules"]["produces"] == ["rules"]
+    assert steps["codex"]["produces"] == ["codex"]
+    # The codex must not require anything: it can be generated from the
+    # seed prompt alone, and skipped worlds never enter the checker.
+    assert steps["codex"]["requires"] == []
     assert steps["hierarchy_design"]["produces"] == ["hierarchy"]
     assert steps["terrain_generation"]["requires"] == ["hierarchy"]
     assert steps["map_generation"]["requires"] == ["hierarchy"]
@@ -99,8 +104,9 @@ def test_every_legitimate_effective_pipeline_validates_clean():
     # Everything dynamic_skips can produce: any subset of the AI-skippable
     # steps plus terrain (map-style controlled) removed must stay valid —
     # the checker may never flag a pipeline today's wizard runs.
-    skippable = ("terrain_generation", "natural_landmarks", "society_factions")
-    for mask in range(8):
+    skippable = ("terrain_generation", "codex", "natural_landmarks",
+                 "society_factions")
+    for mask in range(16):
         removed = {sid for bit, sid in enumerate(skippable) if mask & (1 << bit)}
         effective = [sid for sid in PINNED_DEFAULT_ORDER if sid not in removed]
         assert check_data_dependencies(_step_items(effective)) == [], removed

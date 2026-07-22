@@ -479,6 +479,33 @@ class MemoryManager:
                 "source_id": era.get("name", ""),
                 "region": "",
             })
+        # Codex (the worldgen lorebook): each entry is a self-contained
+        # reference article, embedded individually — the codex step writes
+        # them for exactly this retrieval. Always-on truths live in the
+        # world rules block, which is ambient; the codex is retrieved depth.
+        codex = world_data.get("codex", {})
+        if isinstance(codex, dict):
+            for entry in codex.get("entries", []):
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("name") or "").strip()
+                body = " ".join(
+                    t for t in (str(entry.get("summary") or "").strip(),
+                                str(entry.get("details") or "").strip()) if t)
+                if not name or not body:
+                    continue
+                domain = str(entry.get("domain") or "").strip()
+                subject = str(entry.get("subject") or "").strip()
+                label = f"Codex ({domain})" if domain else "Codex"
+                if subject:
+                    label += f", about {subject}"
+                entries.append({
+                    "id": str(uuid.uuid4()),
+                    "text": f"{label} - {name}: {body}",
+                    "source_type": "codex",
+                    "source_id": f"{domain}:{name}" if domain else name,
+                    "region": "",
+                })
         for region in regions:
             region_name = region.get("name", "")
             landmarks = ", ".join(region.get("landmarks", []))

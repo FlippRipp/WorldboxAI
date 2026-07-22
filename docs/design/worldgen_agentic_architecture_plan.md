@@ -67,6 +67,10 @@ provider-side web search as an engine-level search slot with a
 per-provider toggle, surfaced as the availability-gated ``web_search``
 tool in both agents' catalogs) DESIGNED and LANDED 2026-07-20 on
 Filip's direction — the catalog is now 26 tools; see the v2e section.
+v2f (the codex: a lorebook step whose lore domains are themselves
+AI-declared, with blocking completeness lints, N3-scoped context
+injection, and per-entry embedding into the play-time semantic index)
+DESIGNED and LANDED 2026-07-22 with Filip — see the v2f section.
 Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
@@ -1814,6 +1818,95 @@ unrelated to any code here. Live verification outstanding: rides
 Filip's next live run (a search-grounded ideation — "a world like X" —
 through Go and the build).*
 
+### v2f — The codex: lorebook slots for world systems (designed and landed 2026-07-22)
+
+*Prompted by Filip 2026-07-22 ("we are missing slots for information that
+would usually go into something like a lorebook. how does magic work,
+races, technology, items etc — how could we solve this? and how can we
+make sure it's filled out properly?"), designed in the same conversation.
+The gap assessment that motivated it: the world-level info slots were
+world_rules (a 4-option magic_level select, a tech_era string, one-line
+custom_rules), lore (identity and history), and society_factions (the one
+domain with a real structured slot); species, magic mechanics, items,
+faiths etc. had no home — and the content calls writing hundreds of node
+descriptions saw only name/premise/genre/tone plus map-bound notes, so
+systems converged in ideation chat died at Go unless they became one-line
+notes. Meanwhile play-time already had full lorebook machinery
+(``backend/engine/lorebook.py``: SillyTavern import, per-save embedding
+into the ``world_entries`` semantic index) that worldgen never fed.*
+
+**Decisions (settled with Filip, 2026-07-22):**
+
+- **K1 — One ``codex`` step; the domain list is itself an AI decision.**
+  Not a fixed taxonomy of dedicated steps (magic_system, species, …) —
+  the app spans mundane modern worlds to sci-fi galaxies, and most
+  worlds would skip most of a fixed list. The ``hierarchy_design``
+  precedent applied to lore: the step declares which domains THIS world
+  needs (``domains``: name + reason; honestly empty is legal) and writes
+  ``entries`` under them — ``{domain, name, summary, details,
+  subject?}``, each a self-contained encyclopedia article written to be
+  retrieved alone. Sequenced lore → codex → hierarchy_design, so
+  hierarchy, landmarks, factions and maps all read it from chain
+  context. ``codex`` joins ``AI_SKIPPABLE`` (world_form may skip it
+  outright). File-drop step (P2): run_step/patch_step, the catalog, the
+  explorer's SchemaForm panel and world_form directives all pick it up
+  with zero new surface — the tool catalog stays 26.
+- **K2 — A declared domain is a checkable obligation (the
+  ``note_unbound`` pattern).** ``worldgen/codex.py`` is the pure read
+  seam (the notes.py precedent): reads, subject binding via
+  ``notes.bind_subject`` verbatim (one binding semantics for everything
+  subject-shaped), and ``lint_codex`` — ``codex_domain_empty`` (declared
+  but no entries: the reason the declaration exists), 
+  ``codex_unknown_domain`` (entry under an undeclared domain),
+  ``codex_unbound`` (subject matches nothing, or several maps
+  ambiguously). All blocking, all world-level (unscoped lints only),
+  deterministic — the offline floor of "filled out properly"; the
+  evaluator critique judges depth and contradictions above it.
+- **K3 — Visibility follows N3's rule.** Content calls see their scope:
+  node enrichment context carries world-wide entries by summary (the
+  structural unit written for exactly this — no token caps, P9) and the
+  node's own map's bound entries in full; child-map and parallel-layer
+  authors get the pre-binding name-match seam (``entries_matching_name``,
+  the ``notes_matching_name`` precedent); the evaluator's excerpt leads
+  with the full codex, so critique findings can cite contradictions
+  against it.
+- **K4 — Play-time is retrieval; load-bearing truths live in
+  world_rules (Filip's call).** ``memory._build_world_entries`` embeds
+  one row per entry (``source_type "codex"``, ``source_id
+  domain:name``) into the save's semantic world index — codex articles
+  are the best-shaped content that index holds. Deliberately NO
+  ``constant``/always-inject flag: the ambient ``<world_rules>`` block
+  (genre/tone/every custom rule, every storyteller turn) is the home
+  for truths that must never depend on similarity ("magic always costs
+  a memory"); the codex is the retrieved depth behind them. The step
+  guidance, the chat prompt and the build prompt all teach this
+  division of labor.
+- **K5 — Ideation feeds it through notes, guidance-level.** The design
+  partner's prompt probes how a world's systems actually WORK while the
+  idea is warm and records what the player settles as notes; the codex
+  expands them (world notes already reach its generation via the seed
+  seam, N3). No verbatim-enforcement seam like world_rules' agreed
+  rules: notes are already independently enforced by the verifier, so a
+  codex that contradicted them fails note verification anyway.
+
+*Landed 2026-07-22: ``steps/codex.py`` (registered lore → codex),
+``worldgen/codex.py``, the lint wiring, the enrichment-context /
+expansion / evaluator-excerpt seams, the ``memory.py`` embed, prompt
+guidance in both agents, the mock fixture, and the deliberate B3
+order-pin update (the pinned default pipeline gains ``codex`` between
+``lore`` and ``hierarchy_design`` — a prompt-visible chain-context
+change, made knowingly). One latent bug surfaced and fixed en route:
+``resolve_order`` iterated a **set**, so its tie-break was per-process
+hash order, not the declaration order B3's guard rail documents — it
+had never mattered because the built-in ``after`` chain was a strict
+linked list with no ties; ``codex.after = "lore"`` created the first
+real tie (lore gained a second dependent) and the order went
+nondeterministic across pytest processes. ``remaining`` is now a list
+in registration order, making the documented tie-break real. Verified
+by ``test_codex.py`` (module) + a codex case in the root
+``test_memory.py``; the skip-combination dependency test now walks all
+16 subsets of the four skippables.*
+
 ### Superseded: the plan-artifact design (refined and replaced 2026-07-19)
 
 The original Arc C made the plan a step: a `build_plan` artifact authored
@@ -1859,6 +1952,7 @@ file, before the 2026-07-19 Arc C rewrite).
 | 19 | C7a mid-build user messages + brief-edit tools | S–M | ✓ landed 2026-07-20 | a voice into the running build |
 | 20 | C7b merged conversational front door (+ the update_brief fix) | L | ✓ landed 2026-07-20 | one flow: chat the world into shape, watch it build, keep talking |
 | 21 | v2e research tool (engine search slot + provider toggle + gated web_search) | M | ✓ landed 2026-07-20 | worlds inspired by existing media — grounded, not guessed |
+| 22 | v2f codex (lorebook step + lints + context seams + play-time embed) | M | ✓ landed 2026-07-22 | how magic/species/technology work has a home — declared, checked, retrieved in play |
 
 (A5 landed before B1 — the reverse of the original ordering; nothing
 depended on the order.) RuntimeHost (`backend.py` half of A1) can ride along

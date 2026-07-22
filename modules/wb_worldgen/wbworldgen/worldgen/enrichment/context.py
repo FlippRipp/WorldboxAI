@@ -185,6 +185,13 @@ def build_enrichment_context(node: dict, all_nodes: list, compiled: dict, includ
     map_notes = notes_for_map(compiled, compiled, node.get("map_id", ""))
     if map_notes:
         result["notes"] = map_notes
+    # Codex (the world's reference lore): world-wide entries by summary,
+    # entries bound to this node's map in full — same visibility rule as
+    # notes (content calls see their scope).
+    from wbworldgen.worldgen.codex import node_context_block
+    codex_block = node_context_block(compiled, node.get("map_id", ""))
+    if codex_block:
+        result["codex"] = codex_block
     return result
 
 

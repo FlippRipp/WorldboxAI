@@ -476,6 +476,13 @@ requires/produces contract is listed in the catalog below and is enforced.
 produce its content; review, read_lint and evaluate verify it. Every major \
 location must end up named and described (the lint's unnamed/undescribed \
 major findings show the gap).
+- The codex step is the world's lorebook: it declares the lore domains THIS \
+world needs (magic, species, technology, items, ...) and writes standalone \
+reference entries under them — at play time each entry is retrieved \
+individually, and all generated content is judged against it. A declared \
+domain with no entries is a blocking lint finding. Always-on fundamental \
+truths belong in world_rules; the codex is the depth behind them. A world \
+that honestly has no such systems declares no domains.
 - Child maps (planet surfaces, city streets, interiors) are created ONLY \
 by expand_node on an expandable node — re-running map_generation cannot \
 add them and replaces the existing maps instead. The hierarchy's \
@@ -601,6 +608,13 @@ agree to; an empty list is fine early on.
 
 What makes a good world rule:
 {RULES_DOCTRINE}
+
+When the world has systems — magic, species, technology, faiths — probe how \
+they actually WORK while the idea is warm, and record what the player \
+settles as notes: the build expands those into the world's codex (its \
+lorebook of reference entries the storyteller draws on in play). \
+Fundamental always-on truths ("magic always costs a memory") belong in the \
+rules; the depth behind them belongs in notes.
 {research_block}
 ## When the idea is settled
 When the prompt captures it and the rules are concrete enough to judge a \
