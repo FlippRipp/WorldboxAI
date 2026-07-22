@@ -4477,8 +4477,11 @@ def test_local_payload_hires_fix(tmp_path):
     assert payload["hr_upscaler"] == "R-ESRGAN 4x+ Anime6B"
     assert payload["hr_second_pass_steps"] == 14
     assert payload["denoising_strength"] == 0.4
-    # Forge-specific key some builds require; ignored elsewhere.
-    assert payload["hr_additional_modules"] == []
+    # Forge-specific key some builds require; ignored elsewhere. The sentinel
+    # keeps the first-pass VAE/text-encoder modules for the hires pass — []
+    # would make Forge reload the model with built-ins only, which has no
+    # VAE at all on Anima checkpoints.
+    assert payload["hr_additional_modules"] == ["Use same choices"]
 
     # The GPU-batch payload inherits the hires pass — the script only
     # overrides prompts/batch_size, so every image in the batch upscales.
@@ -6248,6 +6251,31 @@ def test_download_pipeline_rejects_bad_hash_and_bad_names(tmp_path):
     assert "API key" in status["error"]
 
 
+def test_download_pipeline_rfc5987_filenames(tmp_path):
+    """Hugging Face sends filename*=UTF-8''x before filename="x"; capturing
+    the starred parameter raw used to install files as "UTF-8_x"."""
+    backend = _load_backend(tmp_path)
+    _enable_local(backend, local_lora_dir=str(tmp_path / "Lora"))
+
+    resp = _StreamResp([b"data"], headers={
+        "content-disposition": "inline; filename*=UTF-8''qwen_vae.safetensors; "
+                               'filename="qwen_vae.safetensors";'})
+    status, dest, _, _ = _run_download_pipeline(backend, tmp_path, resp)
+    assert status["status"] == "done"
+    assert status["filename"] == "qwen_vae.safetensors"
+    assert (dest / "qwen_vae.safetensors").read_bytes() == b"data"
+
+    # The parser prefers the plain parameter, decodes a starred-only header
+    # (percent-escapes included), tolerates unquoted values, and yields ""
+    # (-> the caller's fallback name) when the header says nothing.
+    cd = backend._content_disposition_filename
+    assert cd("inline; filename*=UTF-8''a%20b.safetensors; "
+              'filename="c.safetensors"') == "c.safetensors"
+    assert cd("attachment; filename*=UTF-8''a%20b.safetensors") == "a b.safetensors"
+    assert cd("attachment; filename=plain.safetensors") == "plain.safetensors"
+    assert cd("attachment") == "" and cd("") == ""
+
+
 def test_install_endpoint_validation_and_dedupe(tmp_path):
     backend = _load_backend(tmp_path)
     cfg = _enable_local(backend)   # no lora dir yet
@@ -7115,6 +7143,14 @@ def test_helper_downloads_verifies_and_indexes(tmp_path):
         srv.shutdown()
 
     assert helper._safe_filename("../../evil.exe", "Ink Style") == "Ink Style.safetensors"
+    # Same Content-Disposition rules as the app's backend: plain filename=
+    # wins, the RFC 5987 starred form decodes instead of mangling to UTF-8_.
+    assert helper._content_disposition_filename(
+        "inline; filename*=UTF-8''qwen_vae.safetensors; "
+        'filename="qwen_vae.safetensors";') == "qwen_vae.safetensors"
+    assert helper._content_disposition_filename(
+        "attachment; filename*=UTF-8''a%20b.safetensors") == "a b.safetensors"
+    assert helper._content_disposition_filename("attachment") == ""
     with pytest.raises(ValueError):
         helper._start_download({"kind": "lora", "url": "notaurl"})
 

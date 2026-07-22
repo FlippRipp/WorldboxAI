@@ -3206,7 +3206,27 @@ _remote_done_seen: set = set()
 DOWNLOAD_CHUNK = 1 << 20
 DOWNLOADS_KEEP_FINISHED = 20
 LOCAL_INSTALL_EXTS = (".safetensors", ".ckpt")
-_CONTENT_DISPOSITION_RE = re.compile(r'filename\*?="?([^";]+)"?')
+# Content-Disposition names the file two ways: plain filename="x" and the
+# RFC 5987 filename*=charset''percent-encoded form. The plain parameter is
+# preferred (no decoding needed; in practice both name the same file), the
+# starred one properly decoded — a naive capture of it used to install
+# Hugging Face files under a mangled "UTF-8_" prefix, because HF sends the
+# starred parameter first. Kept in sync with helper_server.py's copy.
+_CD_FILENAME_RE = re.compile(r'filename\s*=\s*"?([^";]+)', re.IGNORECASE)
+_CD_FILENAME_STAR_RE = re.compile(r"filename\*\s*=\s*[^;']*'[^;']*'([^;]+)",
+                                  re.IGNORECASE)
+
+
+def _content_disposition_filename(disposition: str) -> str:
+    """The filename a Content-Disposition header carries, or ""."""
+    match = _CD_FILENAME_RE.search(disposition or "")
+    if match:
+        return match.group(1).strip()
+    match = _CD_FILENAME_STAR_RE.search(disposition or "")
+    if match:
+        from urllib.parse import unquote
+        return unquote(match.group(1).strip().strip('"'))
+    return ""
 
 
 def _safe_install_filename(raw: str, fallback: str, kind: str = "lora") -> str:
@@ -3300,9 +3320,9 @@ async def _download_file_pipeline(dl_id: str, url: str, dest_dir: Path,
                 if resp.status_code != 200:
                     raise RuntimeError(f"Download failed (HTTP {resp.status_code})")
                 disposition = resp.headers.get("content-disposition", "")
-                match = _CONTENT_DISPOSITION_RE.search(disposition)
                 filename = _safe_install_filename(
-                    match.group(1) if match else "", fallback_name, kind=kind)
+                    _content_disposition_filename(disposition),
+                    fallback_name, kind=kind)
                 final_path = (dest_dir / filename).resolve()
                 if dest_dir.resolve() not in final_path.parents:
                     raise RuntimeError("Refusing a filename outside the install folder")
@@ -3419,9 +3439,16 @@ def _local_payload(cfg: dict, image_prompt: str,
     # Hires fix: render at base size, then upscale hires_scale x and
     # re-diffuse at low denoise — the standard fine-detail pass for SDXL
     # checkpoints. The enable_hr family of fields has existed since early
-    # A1111, so no probe is needed; hr_additional_modules is Forge-specific
-    # (some builds fail without the key) and unknown keys are ignored by
-    # A1111's API models.
+    # A1111, so no probe is needed. hr_additional_modules is Forge-specific
+    # and must carry the "Use same choices" sentinel, which keeps the
+    # first-pass VAE/text-encoder selection for the hires pass. The field
+    # cannot be omitted (both Forge variants crash iterating its None
+    # default), and [] is NOT neutral: Forge reads it as an explicit
+    # "checkpoint built-ins only" selection and reloads the model bare
+    # between the passes — dropping a WebUI-side VAE selection on SD/SDXL
+    # and killing Anima outright ("You do not have VAE state dict!"; its
+    # VAE and text encoder exist only as modules). Classic A1111's API
+    # models ignore the unknown key.
     if cfg.get("hires_enabled"):
         payload["enable_hr"] = True
         payload["hr_scale"] = float(cfg.get("hires_scale", 1.5))
@@ -3429,7 +3456,7 @@ def _local_payload(cfg: dict, image_prompt: str,
                                      or DEFAULT_HIRES_UPSCALER)
         payload["hr_second_pass_steps"] = int(cfg.get("hires_steps", 14))
         payload["denoising_strength"] = float(cfg.get("hires_denoise", 0.4))
-        payload["hr_additional_modules"] = []
+        payload["hr_additional_modules"] = ["Use same choices"]
     return payload
 
 

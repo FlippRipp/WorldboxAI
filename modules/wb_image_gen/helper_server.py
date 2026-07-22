@@ -45,12 +45,13 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-HELPER_VERSION = 3
+HELPER_VERSION = 4
 DEFAULT_PORT = 7861
 DOWNLOAD_CHUNK = 1 << 20
 DOWNLOADS_KEEP_FINISHED = 20
@@ -63,7 +64,13 @@ KIND_INSTALL_EXTS = {"upscaler": (".pth", ".pt", ".safetensors"),
                      "vae": (".safetensors", ".ckpt", ".pt")}
 KIND_DEFAULT_EXT = {"upscaler": ".pth"}
 SCAN_EXTS = (".safetensors", ".ckpt", ".pt", ".pth")
-_CONTENT_DISPOSITION_RE = re.compile(r'filename\*?="?([^";]+)"?')
+# Same parsing as the app's backend.py (kept in sync): prefer the plain
+# filename="x" parameter, decode the RFC 5987 filename*=charset''… form —
+# naively capturing the starred form used to install Hugging Face files
+# under a mangled "UTF-8_" prefix.
+_CD_FILENAME_RE = re.compile(r'filename\s*=\s*"?([^";]+)', re.IGNORECASE)
+_CD_FILENAME_STAR_RE = re.compile(r"filename\*\s*=\s*[^;']*'[^;']*'([^;]+)",
+                                  re.IGNORECASE)
 
 # Populated by main() before the server starts.
 KIND_DIRS: dict = {}        # "checkpoint"/"lora"/"upscaler" -> Path | None
@@ -197,6 +204,17 @@ def _hash_indexes() -> dict:
 # Downloads (mirrors the app's _download_file_pipeline, with threads)
 # --------------------------------------------------------------------------
 
+def _content_disposition_filename(disposition: str) -> str:
+    """The filename a Content-Disposition header carries, or ""."""
+    match = _CD_FILENAME_RE.search(disposition or "")
+    if match:
+        return match.group(1).strip()
+    match = _CD_FILENAME_STAR_RE.search(disposition or "")
+    if match:
+        return urllib.parse.unquote(match.group(1).strip().strip('"'))
+    return ""
+
+
 def _safe_filename(raw: str, fallback: str, kind: str = "lora") -> str:
     """A bare, whitelisted-extension filename that cannot escape the install
     folder (same rules as the app's local installs, per kind)."""
@@ -240,8 +258,7 @@ def _download_worker(dl_id: str, url: str, dest_dir: Path, fallback_name: str,
             raise RuntimeError(f"Download failed: {e.reason}")
         with resp:
             disposition = resp.headers.get("content-disposition", "")
-            match = _CONTENT_DISPOSITION_RE.search(disposition)
-            filename = _safe_filename(match.group(1) if match else "",
+            filename = _safe_filename(_content_disposition_filename(disposition),
                                       fallback_name, kind=kind)
             final_path = (dest_dir / filename).resolve()
             if dest_dir.resolve() not in final_path.parents:
