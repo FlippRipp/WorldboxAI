@@ -786,6 +786,25 @@ async def agent_build_cancel(world_id: str):
             "cancelling": agent_harness.cancel_build(world_id)}
 
 
+@router.post("/api/world/{world_id}/agent/continue")
+async def agent_build_continue(world_id: str):
+    """Continue a build stopped at its budget (v2g). A live paused session
+    resumes in place with another full configured allowance (``mode:
+    "granted"``); a stuck build with no live session — stopped before v2g
+    existed, or lost to a backend restart while paused — relaunches as a
+    fresh adopt run on the same world, content and recorded brief kept
+    (``mode: "relaunched"``). 404 when the world never had an agent build;
+    409 when its session is running or its build finished properly."""
+    from wbworldgen.worldgen.agent import harness as agent_harness
+    try:
+        result = agent_harness.continue_build(world_builder, world_id)
+    except ValueError as exc:
+        status = 404 if ("No agent build" in str(exc)
+                         or "Unknown world" in str(exc)) else 409
+        raise HTTPException(status_code=status, detail=str(exc))
+    return {"world_id": world_id, "continued": True, **result}
+
+
 class AgentMessageRequest(BaseModel):
     #: What the user says to the running build's agent — delivered verbatim
     #: at the next turn boundary (C7a/U3).

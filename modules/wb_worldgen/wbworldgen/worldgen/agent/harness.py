@@ -132,6 +132,14 @@ class AgentBuild:
         #: this attribute mirrors it for the snapshot.
         self.brief = brief or {"prompt": seed_prompt, "rules": [], "notes": []}
         self.status = "running"   # running | done | cancelled | failed | budget_exhausted
+        #: True while the build is parked at the budget wall (v2g): the
+        #: loop waits for a grant (agent/continue) or cancel instead of
+        #: terminating, so the session's working memory — todo, recent
+        #: observations, checkpoints — survives the user's decision.
+        self.paused = False
+        #: The build phase's live budget dict (D5), set when the build
+        #: starts; grant_budget() extends it in place.
+        self.budgets: dict = None
         self.todo: list = []
         self.log: list = []       # persisted events, each carrying its index "i"
         self.recent: list = []    # last few action/observation pairs, prompt-side
@@ -184,7 +192,8 @@ class AgentBuild:
     def snapshot(self) -> dict:
         return {
             "world_id": self.world_id, "status": self.status,
-            "phase": self.phase,
+            "phase": self.phase, "paused": self.paused,
+            "budgets": dict(self.budgets) if self.budgets else None,
             "seed_prompt": self.seed_prompt, "brief": self.brief,
             "turns": self.turns, "chat_turns": self.chat_turns,
             "ready": self.ready,
@@ -1064,10 +1073,44 @@ async def _chat_phase(handle: AgentBuild):
         await handle._wake.wait()
 
 
+async def _pause_for_budget(handle: AgentBuild, budgets: dict) -> bool:
+    """Park the build at the budget wall (v2g) instead of terminating: the
+    session — todo, recent observations, checkpoints — stays alive while
+    the user decides. ``grant_budget`` extends the budgets in place and
+    wakes the loop (True: resume); cancel ends the build at the wall
+    (False — the caller records today's ``budget_exhausted``). Both pause
+    and resume are ordinary persisted events, so observers see them live
+    and on replay."""
+    def _counters():
+        return {"turns": handle.turns,
+                "max_turns": budgets["max_turns"],
+                "tool_calls": handle.tool_calls,
+                "max_tool_calls": budgets["max_tool_calls"]}
+
+    handle.paused = True
+    try:
+        await _emit(handle, {"type": "budget", "paused": True, **_counters()})
+        while handle.turns >= budgets["max_turns"]:
+            if handle.cancel_requested:
+                return False
+            handle._wake.clear()
+            # Re-check after clearing: a grant or cancel that landed
+            # between the checks above and the clear must not be slept
+            # through. (User messages also wake this wait; they stay
+            # queued and drain at the first resumed turn.)
+            if handle.cancel_requested or handle.turns < budgets["max_turns"]:
+                continue
+            await handle._wake.wait()
+        await _emit(handle, {"type": "budget", "paused": False, **_counters()})
+        return True
+    finally:
+        handle.paused = False
+
+
 async def _run_build(handle: AgentBuild):
     builder = handle.builder
     services = builder.services
-    budgets = _budgets(builder)
+    budgets = handle.budgets = _budgets(builder)
 
     async def on_progress(evt: dict):
         await _emit(handle, {"type": "progress", "event": evt}, persist=False)
@@ -1076,10 +1119,18 @@ async def _run_build(handle: AgentBuild):
                       on_event=on_progress, build=handle)
     llm_failures = 0
     try:
-        while handle.turns < budgets["max_turns"]:
+        while True:
             if handle.cancel_requested:
                 handle.status = "cancelled"
                 break
+            if handle.turns >= budgets["max_turns"]:
+                # The budget wall (v2g): park and let the user decide —
+                # a grant resumes this same session, cancel ends it with
+                # the pre-v2g terminal status.
+                if not await _pause_for_budget(handle, budgets):
+                    handle.status = "budget_exhausted"
+                    break
+                continue
             handle.turns += 1
             # The turn boundary is where user messages land (C7a): queued
             # texts become this turn's freshest observations.
@@ -1193,8 +1244,6 @@ async def _run_build(handle: AgentBuild):
                                     if ok and checkpoint is not None else {}),
                                  **({"result": observation.get("result")} if ok
                                     else {"error": observation.get("error")})})
-        else:
-            handle.status = "budget_exhausted"
         if handle.cancel_requested and handle.status == "running":
             handle.status = "cancelled"
     except Exception as e:
@@ -1439,6 +1488,66 @@ def veto_notes(builder, world_id: str, note_ids: list) -> AgentBuild:
 
     return start_agent_build(
         builder, world_state.get("seed_prompt", ""), world_id=world_id)
+
+
+def grant_budget(world_id: str) -> dict:
+    """Extend a budget-paused build with another full configured allowance
+    for both budgets (v2g) and wake the parked loop, which resumes with
+    its working memory intact. The grant size is not a caller choice —
+    budgets stay structural, harness-enforced units (D5/P9); the user's
+    decision is only continue-or-stop. ValueError when the world has no
+    live paused build (never running, already finished, or currently
+    mid-turn)."""
+    handle = _BUILDS.get(world_id)
+    if handle is None or handle.status != "running" or not handle.paused:
+        raise ValueError(
+            f"No budget-paused build for '{world_id}' — continue applies "
+            "only to a build parked at its budget.")
+    base = _budgets(handle.builder)
+    handle.budgets["max_turns"] += base["max_turns"]
+    handle.budgets["max_tool_calls"] += base["max_tool_calls"]
+    handle.poke()
+    return {"max_turns": handle.budgets["max_turns"],
+            "max_tool_calls": handle.budgets["max_tool_calls"]}
+
+
+def continue_build(builder, world_id: str) -> dict:
+    """The Continue affordance (v2g), covering every era of stuck build. A
+    live budget-paused session gets a grant and resumes in place (working
+    memory intact). A stuck build with no live session — a world that hit
+    the wall before v2g existed (terminal ``budget_exhausted``), or a
+    paused session lost to a backend restart (artifact still says
+    running/paused) — is relaunched as a fresh adopt run on the same world:
+    the C6 recovery path, content and recorded brief kept, full fresh
+    allowance, but a new session with fresh working memory. Loud ValueError
+    otherwise (P7): a live non-paused session has nothing to continue, and
+    a design conversation or a finished world is not a stuck build."""
+    handle = _BUILDS.get(world_id)
+    if handle is not None and handle.status == "running":
+        if not handle.paused:
+            raise ValueError(
+                f"The build for '{world_id}' is running — continue applies "
+                "to a build stopped at its budget.")
+        return {"mode": "granted", **grant_budget(world_id)}
+    artifact = load_build_artifact(builder, world_id)
+    if artifact is None:
+        raise ValueError(f"No agent build for world '{world_id}'.")
+    if artifact.get("phase") == "chat":
+        raise ValueError(
+            f"'{world_id}' is a design conversation, not a stuck build — "
+            "send a message to resume it.")
+    if artifact.get("status") not in ("budget_exhausted", "running"):
+        raise ValueError(
+            f"The build for '{world_id}' is {artifact.get('status')} — "
+            "continue applies to a build stopped at its budget.")
+    try:
+        state = builder.load_world(world_id)
+    except FileNotFoundError:
+        raise ValueError(f"Unknown world: {world_id}")
+    seed = str(state.get("seed_prompt")
+               or artifact.get("seed_prompt") or "").strip()
+    relaunched = start_agent_build(builder, seed, world_id=world_id)
+    return {"mode": "relaunched", "status": relaunched.status}
 
 
 def cancel_build(world_id: str) -> bool:

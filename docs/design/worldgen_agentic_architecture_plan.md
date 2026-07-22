@@ -71,6 +71,12 @@ v2f (the codex: a lorebook step whose lore domains are themselves
 AI-declared, with blocking completeness lints, N3-scoped context
 injection, and per-entry embedding into the play-time semantic index)
 DESIGNED and LANDED 2026-07-22 with Filip — see the v2f section.
+v2g (budget pause-and-grant) LANDED 2026-07-22 on Filip's go: the
+budget wall now parks the live build for a user decision — Continue
+grants another full allowance and the same session resumes, working
+memory intact — with an adopt-relaunch fallback covering builds stuck
+from before v2g and paused sessions lost to a restart; see the v2g
+section.
 Records the structural assessment of
 `modules/wb_worldgen` and the phased plan discussed with Filip. Near-term
 extension axes: new map generators and new LLM passes. Long-term goal: an
@@ -1906,6 +1912,48 @@ in registration order, making the documented tie-break real. Verified
 by ``test_codex.py`` (module) + a codex case in the root
 ``test_memory.py``; the skip-combination dependency test now walks all
 16 subsets of the four skippables.*
+
+### v2g — The budget wall pauses, Continue grants more (landed 2026-07-22)
+
+*Filip's ask (2026-07-22): a build that hits its budget should offer a
+button to continue anyway. Two shapes were on the table — relaunch the
+world into a fresh adopt run (cheap, existing machinery) versus pause the
+live session and grant more budget in place — and pause-and-grant was
+chosen: a "continue" that discards the agent's working memory at the exact
+moment it ran out of turns is the weaker version of the feature.*
+
+- **The wall parks, it no longer terminates.** When the build loop
+  exhausts ``agent_max_turns`` it now parks in a wake-event wait (the C7a
+  idle pattern) instead of ending ``budget_exhausted``: ``status`` stays
+  ``"running"`` — so cancel, mid-build messages and the already-running
+  guards all keep working unchanged — with a new ``paused`` flag on the
+  handle, the snapshot and the artifact. Pause and resume are ordinary
+  persisted ``{"type": "budget"}`` events (live + replay). Messages
+  posted mid-pause stay queued and drain at the first resumed turn.
+- **One grant = another full configured allowance, both budgets.**
+  ``grant_budget`` extends the live budget dict in place
+  (``+agent_max_turns``, ``+agent_max_tool_calls``) and wakes the loop;
+  the session resumes with todo, recent observations and checkpoints
+  intact. The grant size is not a caller choice — budgets stay
+  structural, harness-enforced units (D5/P9); the user's decision is
+  only continue-or-stop. Cancel from the pause ends the build with the
+  pre-v2g terminal ``budget_exhausted``, so that status keeps meaning
+  "stopped at the wall".
+- **Continue covers every era of stuck build.** ``continue_build`` (the
+  ``POST agent/continue`` route) grants when a live paused session
+  exists, and otherwise falls back to the C6 adopt relaunch for stuck
+  builds with no live session — worlds that ended ``budget_exhausted``
+  before v2g existed, and paused sessions lost to a backend restart
+  (artifact still says running/paused): same world, content and
+  recorded brief kept, fresh allowance, honestly a new session (fresh
+  working memory). Chat-phase artifacts and properly finished builds
+  are refused loudly (P7).
+- **Observer:** paused chip + amber banner with the Continue button (the
+  terminal ``budget_exhausted`` banner gets one too, relaunch-flavored);
+  Cancel and the message box stay available while parked; budget events
+  render as ⏸/▶ log rows; a relaunch resets the stream the way the veto
+  path does. Browser verification rides Filip's next live run, per the
+  C3 pattern.
 
 ### Superseded: the plan-artifact design (refined and replaced 2026-07-19)
 

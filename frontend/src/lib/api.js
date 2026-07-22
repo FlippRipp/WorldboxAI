@@ -195,6 +195,9 @@ export const api = {
   agentVeto:              (worldId, noteIds) => request(`/api/world/${worldId}/agent/veto`, { method: 'POST', body: JSON.stringify({ note_ids: noteIds }) }),
   agentBuildStatus:       (worldId) => request(`/api/world/${worldId}/agent/status`),
   agentBuildCancel:       (worldId) => request(`/api/world/${worldId}/agent/cancel`, { method: 'POST' }),
+  // Continue a build parked at its budget (v2g): grants another full
+  // configured allowance (both budgets) and the same session resumes.
+  agentBuildContinue:     (worldId) => request(`/api/world/${worldId}/agent/continue`, { method: 'POST' }),
   // Speak into a running build (C7a): the text reaches the agent verbatim
   // at the next turn boundary. Returns {id, position}; the id is echoed by
   // the user_message event once the agent picks the message up.

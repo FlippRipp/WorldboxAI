@@ -18,6 +18,7 @@ import { api } from 'api';
 const STATUS_LABEL = {
   running: 'building…',
   designing: 'designing…',   // the running chat phase (C7b)
+  budget_paused: 'paused — budget exhausted',   // parked at the wall (v2g)
   done: 'finished',
   cancelled: 'cancelled',
   failed: 'failed',
@@ -27,6 +28,7 @@ const STATUS_LABEL = {
 const STATUS_STYLE = {
   running: 'bg-emerald-900/40 text-emerald-300 border-emerald-800',
   designing: 'bg-sky-900/40 text-sky-300 border-sky-800',
+  budget_paused: 'bg-amber-950/40 text-amber-300 border-amber-900',
   done: 'bg-emerald-900/40 text-emerald-300 border-emerald-800',
   cancelled: 'bg-gray-800 text-gray-400 border-gray-700',
   failed: 'bg-red-950/40 text-red-300 border-red-900',
@@ -309,6 +311,16 @@ function LogRow({ evt }) {
       </div>
     );
   }
+  if (evt.type === 'budget') {
+    // The budget wall (v2g): parked, or resumed with a fresh allowance.
+    return (
+      <div className="text-xs text-amber-300/90">
+        {evt.paused
+          ? `⏸ budget exhausted — paused (turn ${evt.turns}/${evt.max_turns}, ${evt.tool_calls} tool calls)`
+          : `▶ budget extended — continuing (turn ${evt.turns}/${evt.max_turns})`}
+      </div>
+    );
+  }
   return null;
 }
 
@@ -429,6 +441,7 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
   const [terminal, setTerminal] = useState(null);
   const [gone, setGone] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [continuing, setContinuing] = useState(false);
   const [vetoing, setVetoing] = useState(false);
   // Messages sent but not yet drained by the agent (C7a). Their bubbles
   // render as "queued" until the matching user_message event lands; the
@@ -535,6 +548,12 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
 
   const status = terminal ? terminal.status : (gone ? 'gone' : 'running');
   const running = status === 'running' && !gone;
+  // Parked at the budget wall (v2g): the session is still alive (status
+  // stays "running" server-side) but waits for Continue or Cancel. The
+  // newest persisted event is the truth — a pause is superseded the moment
+  // any later event lands (the resume event, or a terminal done).
+  const lastPersisted = events.length ? events[events.length - 1] : null;
+  const paused = running && lastPersisted?.type === 'budget' && lastPersisted.paused === true;
   // The session's phase (C7b): the last phase event wins (the Go flip is
   // an event), else the snapshot's word; old build artifacts have neither.
   const lastPhaseEvt = [...events].reverse().find((e) => e.type === 'phase');
@@ -586,6 +605,33 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
   const cancel = async () => {
     setCancelling(true);
     try { await api.agentBuildCancel(worldId); } catch { /* build may already be over */ }
+  };
+
+  // Continue past the budget wall (v2g). A live paused session resumes in
+  // place (the resume event flips the UI back — nothing to reset); a build
+  // stuck from before this feature, or whose paused session a backend
+  // restart lost, relaunches as a fresh adopt run on the same world — then
+  // follow the new stream from scratch, like the veto path.
+  const continueBuild = async () => {
+    if (continuing) return;
+    setContinuing(true);
+    try {
+      const res = await api.agentBuildContinue(worldId);
+      if (res.mode === 'relaunched') {
+        lastIRef.current = -1;
+        setEvents([]);
+        setTerminal(null);
+        setProgress(null);
+        setMeta(null);
+        setCancelling(false);
+        setPending([]);
+        setStreamEpoch((n) => n + 1);
+      }
+    } catch (e) {
+      alert('Continue failed: ' + e.message);
+    } finally {
+      setContinuing(false);
+    }
   };
 
   // Speak into the session: in the chat phase this IS the conversation; in
@@ -683,13 +729,13 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <h2 className="text-2xl font-bold text-gray-100 flex items-center gap-3">
-                {running && !inChat && (
+                {running && !inChat && !paused && (
                   <span className="inline-block w-5 h-5 border-2 border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin" />
                 )}
                 {inChat ? 'Design the world' : 'Agent build'}
-                <span className={`text-xs font-medium px-2 py-0.5 rounded-full border ${STATUS_STYLE[inChat && running ? 'designing' : status] || 'bg-gray-800 text-gray-400 border-gray-700'}`}>
+                <span className={`text-xs font-medium px-2 py-0.5 rounded-full border ${STATUS_STYLE[inChat && running ? 'designing' : paused ? 'budget_paused' : status] || 'bg-gray-800 text-gray-400 border-gray-700'}`}>
                   {gone ? 'not found'
-                    : (STATUS_LABEL[inChat && running ? 'designing' : status] || status)}
+                    : (STATUS_LABEL[inChat && running ? 'designing' : paused ? 'budget_paused' : status] || status)}
                 </span>
               </h2>
               <p className="text-gray-500 text-xs mt-1">
@@ -840,11 +886,39 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
           {status === 'failed' && (
             <p className="text-sm text-red-400">{terminal?.error || meta?.error || 'The build failed.'}</p>
           )}
+          {paused && (
+            <div className="text-sm bg-amber-950/30 border border-amber-900/60 rounded-lg p-3 space-y-2">
+              <p className="text-amber-300/90">
+                The build hit its budget before finishing
+                (turn {lastPersisted.turns}/{lastPersisted.max_turns},{' '}
+                {lastPersisted.tool_calls} tool calls). Continue grants another
+                full allowance and the agent picks up exactly where it stopped;
+                Cancel keeps the world as an in-progress draft.
+              </p>
+              <button
+                onClick={continueBuild}
+                disabled={continuing}
+                className="px-3 py-1.5 rounded-lg border border-amber-800 text-amber-300 hover:bg-amber-950/40 disabled:opacity-50 text-sm transition-colors"
+              >
+                {continuing ? 'Continuing…' : 'Continue building'}
+              </button>
+            </div>
+          )}
           {status === 'budget_exhausted' && (
-            <p className="text-sm text-amber-300/90">
-              The build hit its budget before finishing. The world remains as an
-              in-progress draft — finish it in the wizard, or start a new build.
-            </p>
+            <div className="text-sm bg-amber-950/30 border border-amber-900/60 rounded-lg p-3 space-y-2">
+              <p className="text-amber-300/90">
+                The build stopped at its budget before finishing. The world
+                remains as an in-progress draft — Continue relaunches the agent
+                on it with a fresh allowance (content and brief kept).
+              </p>
+              <button
+                onClick={continueBuild}
+                disabled={continuing}
+                className="px-3 py-1.5 rounded-lg border border-amber-800 text-amber-300 hover:bg-amber-950/40 disabled:opacity-50 text-sm transition-colors"
+              >
+                {continuing ? 'Continuing…' : 'Continue building'}
+              </button>
+            </div>
           )}
 
           <div>

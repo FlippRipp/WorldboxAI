@@ -126,6 +126,28 @@ def _run_build(builder, seed="a quiet land", world_id=None, subscribe=False):
     return run(go())
 
 
+def _run_build_paused(builder, world_id, action):
+    """Start a build, wait for it to park at the budget wall (v2g), hand
+    the paused handle to ``action`` (grant, cancel, mid-pause asserts),
+    then await the task."""
+    async def go():
+        handle = harness.start_agent_build(builder, "a quiet land",
+                                           world_id=world_id)
+        for _ in range(1000):
+            if handle.paused:
+                break
+            await asyncio.sleep(0.005)
+        else:
+            raise AssertionError("build never paused at the budget wall")
+        result = action(handle)
+        if asyncio.iscoroutine(result):
+            await result
+        await handle.task
+        return handle
+
+    return run(go())
+
+
 def _events_of(handle, kind):
     return [e for e in handle.log if e.get("type") == kind]
 
@@ -227,19 +249,138 @@ def test_protocol_errors_are_recoverable(builder, monkeypatch):
 # Budgets (D5)
 # ---------------------------------------------------------------------------
 
-def test_turn_budget_exhaustion_leaves_a_draft(builder, monkeypatch):
+def test_turn_budget_exhaustion_pauses_then_cancel_ends_it(builder, monkeypatch):
+    """The budget wall parks the build (v2g) instead of terminating; cancel
+    from the pause ends it with the pre-v2g terminal status."""
     wid = _content_world(builder)
     _settings(builder, **{"world.agent_max_turns": 5})
     _canned(monkeypatch, [{"action": {"tool": "read_world"}}] * 5)
-    handle, _ = _run_build(builder, world_id=wid)
+
+    def stop(handle):
+        # Parked, not over: the session is alive and says so everywhere —
+        # handle, snapshot, persisted artifact.
+        assert handle.status == "running" and handle.paused is True
+        assert handle.snapshot()["paused"] is True
+        assert harness.load_build_artifact(builder, wid)["paused"] is True
+        assert harness.cancel_build(wid) is True
+
+    handle = _run_build_paused(builder, wid, stop)
     assert handle.status == "budget_exhausted"
     assert handle.turns == 5
+    pause = _events_of(handle, "budget")
+    assert len(pause) == 1 and pause[0]["paused"] is True
+    assert pause[0]["turns"] == 5 and pause[0]["max_turns"] == 5
     assert handle.log[-1] == {"type": "done", "status": "budget_exhausted",
                               "phase": "build",
                               "turns": 5, "tool_calls": 5, "error": None,
                               "result": None, "i": handle.log[-1]["i"]}
     # The world stays an in-progress draft for the user to pick up.
     assert builder.load_world(wid)["complete"] is False
+
+
+def test_budget_grant_resumes_the_same_session(builder, monkeypatch):
+    """Continue at the wall (v2g): one grant = another full configured
+    allowance for both budgets, and the SAME session resumes — todo and
+    queued user messages survive the pause."""
+    wid = _content_world(builder)
+    _settings(builder, **{"world.agent_max_turns": 5})
+    _canned(monkeypatch, [{"todo": ["look around"],
+                           "action": {"tool": "read_world"}}]
+            + [{"action": {"tool": "read_lint"}}] * 4
+            + [{"done": {"summary": "finished after the grant"}}])
+
+    def grant(handle):
+        handle.post_message("keep going, nearly there")  # wakes, re-parks
+        granted = harness.grant_budget(wid)
+        assert granted == {"max_turns": 10, "max_tool_calls": 120}
+
+    handle = _run_build_paused(builder, wid, grant)
+    assert handle.status == "done"
+    assert handle.turns == 6
+    # Working memory crossed the wall: the turn-1 todo is still the todo.
+    assert handle.todo == [{"text": "look around", "status": "pending"}]
+    budget_evts = _events_of(handle, "budget")
+    assert [e["paused"] for e in budget_evts] == [True, False]
+    assert budget_evts[1]["max_turns"] == 10
+    # The message posted mid-pause drained at the first resumed turn.
+    msg = _events_of(handle, "user_message")
+    assert len(msg) == 1 and msg[0]["turn"] == 6 and "unread" not in msg[0]
+    assert builder.load_world(wid)["complete"] is True
+
+
+def test_grant_budget_requires_a_paused_build(builder, monkeypatch):
+    wid = _content_world(builder)
+    _canned(monkeypatch, [{"done": {"summary": "quick"}}])
+    handle, _ = _run_build(builder, world_id=wid)
+    assert handle.status == "done"
+    with pytest.raises(ValueError, match="No budget-paused build"):
+        harness.grant_budget(wid)
+    with pytest.raises(ValueError, match="No budget-paused build"):
+        harness.grant_budget("never_built")
+
+
+def test_continue_relaunches_a_pre_pause_stuck_build(builder, monkeypatch):
+    """A build that ended terminal ``budget_exhausted`` — as every stuck
+    build did before v2g — continues as a fresh adopt run on the same
+    world: content and recorded brief kept, fresh allowance."""
+    wid = _content_world(builder)
+    _settings(builder, **{"world.agent_max_turns": 5})
+    _canned(monkeypatch, [{"action": {"tool": "read_world"}}] * 5)
+    handle = _run_build_paused(builder, wid,
+                               lambda h: harness.cancel_build(wid))
+    assert handle.status == "budget_exhausted"
+    harness._BUILDS.clear()   # simulate the backend restart
+
+    _canned(monkeypatch, [{"done": {"summary": "picked back up"}}])
+
+    async def go():
+        result = harness.continue_build(builder, wid)
+        assert result["mode"] == "relaunched"
+        relaunched = harness.get_build(wid)
+        await relaunched.task
+        return relaunched
+
+    relaunched = run(go())
+    assert relaunched.status == "done"
+    assert relaunched.brief["prompt"] == "a quiet land"
+    assert builder.load_world(wid)["complete"] is True
+
+
+def test_continue_relaunches_an_orphaned_paused_build(builder, monkeypatch):
+    """A session lost to a backend restart WHILE paused leaves an artifact
+    that still says running/paused — continue relaunches it too."""
+    wid = _content_world(builder)
+    _settings(builder, **{"world.agent_max_turns": 5})
+    _canned(monkeypatch, [{"action": {"tool": "read_world"}}] * 5)
+    handle = _run_build_paused(builder, wid,
+                               lambda h: harness.cancel_build(wid))
+    # Rewind the artifact to what the restart-killed pause persisted.
+    path = harness._artifact_path(builder, wid)
+    artifact = json.loads(path.read_text(encoding="utf-8"))
+    artifact["status"], artifact["paused"] = "running", True
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    harness._BUILDS.clear()
+
+    _canned(monkeypatch, [{"done": {"summary": "revived"}}])
+
+    async def go():
+        result = harness.continue_build(builder, wid)
+        assert result["mode"] == "relaunched"
+        await harness.get_build(wid).task
+
+    run(go())
+    assert harness.get_build(wid).status == "done"
+
+
+def test_continue_refuses_non_stuck_builds(builder, monkeypatch):
+    wid = _content_world(builder)
+    _canned(monkeypatch, [{"done": {"summary": "quick"}}])
+    handle, _ = _run_build(builder, world_id=wid)
+    assert handle.status == "done"
+    with pytest.raises(ValueError, match="is done"):
+        harness.continue_build(builder, wid)
+    with pytest.raises(ValueError, match="No agent build"):
+        harness.continue_build(builder, "never_built")
 
 
 def test_tool_budget_forces_the_endgame(builder, monkeypatch):
@@ -270,7 +411,10 @@ def test_llm_failures_abort_after_three(builder, monkeypatch):
 def test_done_gate_refuses_structurally_empty_builds(builder, monkeypatch):
     _settings(builder, **{"world.agent_max_turns": 5})
     _canned(monkeypatch, [{"done": {"summary": "nothing happened"}}] * 5)
-    handle, _ = _run_build(builder)  # fresh empty draft
+    # A fresh empty draft: every done claim is refused until the wall, where
+    # the build parks (v2g) — cancel ends it.
+    handle = _run_build_paused(builder, None,
+                               lambda h: harness.cancel_build(h.world_id))
     assert handle.status == "budget_exhausted"
     first = _events_of(handle, "observation")[0]
     assert first["done_rejected"] is True
@@ -304,7 +448,8 @@ def test_done_claim_accepting_without_note_is_protocol_error(builder, monkeypatc
         {"done": {"summary": "x",
                   "accept_findings": ["lint:broken_link_token:root:n1"]}},
     ] * 5)
-    handle, _ = _run_build(builder, world_id=wid)
+    handle = _run_build_paused(builder, wid,
+                               lambda h: harness.cancel_build(h.world_id))
     observations = _events_of(handle, "observation")
     assert "requires a 'note'" in observations[0]["protocol_error"]
 
