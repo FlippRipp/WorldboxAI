@@ -204,6 +204,24 @@ function ChatBubble({ who, text, queued, unread }) {
   );
 }
 
+// The agent's typing indicator: an agent-side bubble with three pulsing
+// dots, shown in the chat phase while a reply completion is in flight.
+function TypingBubble() {
+  return (
+    <div className="flex pt-1 justify-start">
+      <div className="rounded-lg rounded-bl-sm px-3 py-2.5 border bg-emerald-950/40 border-emerald-900/70 flex items-center gap-1">
+        {[0, 200, 400].map((delay) => (
+          <span
+            key={delay}
+            className="w-1.5 h-1.5 rounded-full bg-emerald-300/80 animate-bounce"
+            style={{ animationDelay: `${delay}ms`, animationDuration: '1s' }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function LogRow({ evt }) {
   const [open, setOpen] = useState(false);
   if (evt.type === 'user_message') {
@@ -515,12 +533,6 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
   );
   const queuedMessages = pending.filter((m) => !landedIds.has(m.id));
 
-  // Keep the log pinned to the newest entry.
-  useEffect(() => {
-    const el = logRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [events.length, queuedMessages.length]);
-
   const status = terminal ? terminal.status : (gone ? 'gone' : 'running');
   const running = status === 'running' && !gone;
   // The session's phase (C7b): the last phase event wins (the Go flip is
@@ -533,6 +545,30 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
     (e) => e.type === 'turn' && e.phase === 'chat' && typeof e.ready === 'boolean',
   );
   const ready = lastOfferEvt ? lastOfferEvt.ready : !!meta?.ready;
+  // Typing indicator (chat phase): a reply completion is in flight whenever
+  // the newest chat event still expects one — a drained user_message, an
+  // action whose result feeds the next completion, or an observation the
+  // mini-loop continues past (ok, or a protocol error it retries). A turn
+  // with no follow-up or a terminal error observation means the agent is
+  // done talking. A message still queued client-side counts too — the
+  // server drains it the moment the session picks it up.
+  const lastChatEvt = [...events].reverse().find((e) => e.phase === 'chat');
+  const agentTyping = inChat && running && !!(
+    queuedMessages.length
+    || (lastChatEvt && (
+      lastChatEvt.type === 'user_message'
+      || lastChatEvt.type === 'action'
+      || (lastChatEvt.type === 'observation'
+        && (lastChatEvt.ok || lastChatEvt.protocol_error))
+    ))
+  );
+
+  // Keep the log pinned to the newest entry (the typing bubble counts —
+  // it appears at the bottom like any new row).
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [events.length, queuedMessages.length, agentTyping]);
   const turnEvents = events.filter((e) => e.type === 'turn' && e.phase !== 'chat');
   const chatTurns = Math.max(
     events.filter((e) => e.type === 'turn' && e.phase === 'chat').length,
@@ -825,6 +861,7 @@ export default function AgentBuildObserver({ worldId, onDismiss, onOpenWorlds, o
               {queuedMessages.map((m) => (
                 <ChatBubble key={m.id} who="user" text={m.text} queued />
               ))}
+              {agentTyping && <TypingBubble />}
             </div>
           </div>
 
