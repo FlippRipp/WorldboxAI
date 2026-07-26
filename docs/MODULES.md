@@ -180,17 +180,29 @@ on top of the per-story `__active_modules__` toggles:
   that fail validation or fail to import roll back completely. Note that a
   module's `backend.py` runs with the app's full permissions — install only
   trusted code.
+- **Update** replaces an installed module's folder with a fresh copy and
+  hot-reloads its backend. GitHub-installed modules re-download from their
+  recorded URL (per-module button, and the **Update all** button covers every
+  GitHub-sourced module at once — zip-installed ones are reported as skipped);
+  zip-installed modules update by uploading a new zip. The old version is kept
+  as a backup until the new backend imports cleanly, so a broken update rolls
+  back to the previous working files. The new archive's module id must match.
+  A module's HTTP routes (module-owned routers) keep serving the pre-update
+  handlers until the next restart; engine hooks and disk-served `.jsx`
+  widgets refresh immediately.
 - **Remove** deletes a manager-installed module's folder from disk. Built-in
   modules (shipped in the repo) can only be disabled, never removed.
 
 State lives in `data/modules_state.json` (`disabled` + `installed` module id
-lists), which is app-global and shared across profiles. Hot changes apply to
-engine dispatch immediately; a disabled module's already-mounted HTTP routes
-remain until the next restart (the UI no longer links to them).
+lists, plus per-module install `sources` used for updates), which is
+app-global and shared across profiles. Hot changes apply to engine dispatch
+immediately; a disabled module's already-mounted HTTP routes remain until the
+next restart (the UI no longer links to them).
 
 Manager endpoints: `GET /api/module-manager`,
 `PUT /api/module-manager/{mod_id}/enabled`, `POST /api/module-manager/install`,
-`DELETE /api/module-manager/{mod_id}`.
+`POST /api/module-manager/{mod_id}/update`,
+`POST /api/module-manager/update-all`, `DELETE /api/module-manager/{mod_id}`.
 
 ## Load Order
 

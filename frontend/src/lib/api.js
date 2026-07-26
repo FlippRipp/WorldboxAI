@@ -71,6 +71,10 @@ export const api = {
   installModuleZip:       (dataBase64, filename) => request('/api/module-manager/install', { method: 'POST', body: JSON.stringify({ source: 'zip', data_base64: dataBase64, filename }) }),
   installModuleGithub:    (url) => request('/api/module-manager/install', { method: 'POST', body: JSON.stringify({ source: 'github', url }) }),
   removeModule:           (modId) => request(`/api/module-manager/${modId}`, { method: 'DELETE' }),
+  // Update from the stored install source (GitHub), or from an uploaded zip.
+  updateModule:           (modId) => request(`/api/module-manager/${modId}/update`, { method: 'POST', body: JSON.stringify({}) }),
+  updateModuleZip:        (modId, dataBase64, filename) => request(`/api/module-manager/${modId}/update`, { method: 'POST', body: JSON.stringify({ data_base64: dataBase64, filename }) }),
+  updateAllModules:       () => request('/api/module-manager/update-all', { method: 'POST' }),
   getModuleConfigs:       () => request('/api/session/module-configs'),
   updateModuleConfigs:    (configs) => request('/api/session/module-configs', { method: 'PUT', body: JSON.stringify({ module_configs: configs }) }),
   getPromptPipeline:      () => request('/api/session/prompt-pipeline'),

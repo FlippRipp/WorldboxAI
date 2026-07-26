@@ -541,6 +541,7 @@ async def install_module(request: ModuleInstallRequest):
             zip_bytes = base64.b64decode(request.data_base64)
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid base64 zip data.")
+        source_record = {"type": "zip", "filename": request.filename or ""}
     elif request.source == "github":
         if not request.url:
             raise HTTPException(status_code=400, detail="Missing GitHub URL.")
@@ -550,16 +551,109 @@ async def install_module(request: ModuleInstallRequest):
             raise HTTPException(status_code=e.status, detail=str(e))
         subpath = ref["subpath"]
         zip_bytes = await _download_github_archive(ref)
+        source_record = {"type": "github", "url": request.url.strip()}
     else:
         raise HTTPException(status_code=400, detail="source must be 'zip' or 'github'.")
 
     try:
-        mod_data = registry.install_module_from_zip(zip_bytes, subpath=subpath)
+        mod_data = registry.install_module_from_zip(zip_bytes, subpath=subpath, source=source_record)
     except ModuleManagerError as e:
         raise HTTPException(status_code=e.status, detail=str(e))
     new_mod_id = mod_data["manifest"]["id"]
     _activate_module(new_mod_id, mod_data)
     return {"module": _manager_entry(new_mod_id)}
+
+
+class ModuleUpdateRequest(BaseModel):
+    # Zip upload update; omit both fields to update from the stored source.
+    data_base64: Optional[str] = None
+    filename: Optional[str] = None
+
+
+async def _update_one_module(mod_id: str, zip_bytes: bytes, subpath, source) -> dict:
+    """Run one module update and re-activate whatever backend object ends up
+    loaded — the updated one, or the restored old one after a rollback (a
+    reload re-imports backend.py, so services must be re-injected either way)."""
+    try:
+        previous_version = registry.update_module_from_zip(
+            mod_id, zip_bytes, subpath=subpath, source=source
+        )
+    finally:
+        mod_data = registry.get_modules().get(mod_id)
+        if mod_data is not None:
+            _activate_module(mod_id, mod_data)
+    entry = _manager_entry(mod_id)
+    return {
+        "module": entry,
+        "previous_version": previous_version,
+        "changed": entry["version"] != previous_version,
+    }
+
+
+async def _github_update_payload(mod_id: str):
+    """(zip_bytes, subpath, source) for updating a module from its stored
+    GitHub source. 400s when the module has no GitHub source to pull from."""
+    src = registry.get_source(mod_id)
+    if not src or src.get("type") != "github" or not src.get("url"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Module '{mod_id}' was installed from a zip file — upload a new zip to update it.",
+        )
+    try:
+        ref = parse_github_url(src["url"])
+    except ModuleManagerError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    return await _download_github_archive(ref), ref["subpath"], src
+
+
+@app.post("/api/module-manager/{mod_id}/update")
+async def update_module(mod_id: str, request: Optional[ModuleUpdateRequest] = None):
+    if request and request.data_base64:
+        try:
+            zip_bytes = base64.b64decode(request.data_base64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid base64 zip data.")
+        subpath = None
+        source = {"type": "zip", "filename": request.filename or ""}
+    else:
+        zip_bytes, subpath, source = await _github_update_payload(mod_id)
+
+    try:
+        return await _update_one_module(mod_id, zip_bytes, subpath, source)
+    except ModuleManagerError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+
+
+@app.post("/api/module-manager/update-all")
+async def update_all_modules():
+    """Update every manager-installed module that has a GitHub source.
+    Zip-installed modules are reported as skipped (nothing to pull from);
+    individual failures don't stop the rest."""
+    results = []
+    for entry in registry.manager_listing():
+        if entry["builtin"]:
+            continue
+        mod_id = entry["id"]
+        src = registry.get_source(mod_id)
+        if not src or src.get("type") != "github" or not src.get("url"):
+            results.append({"id": mod_id, "name": entry["name"], "status": "skipped",
+                            "reason": "installed from a zip file"})
+            continue
+        try:
+            zip_bytes, subpath, source = await _github_update_payload(mod_id)
+            outcome = await _update_one_module(mod_id, zip_bytes, subpath, source)
+            results.append({
+                "id": mod_id,
+                "name": entry["name"],
+                "status": "updated" if outcome["changed"] else "unchanged",
+                "previous_version": outcome["previous_version"],
+                "version": outcome["module"]["version"],
+            })
+        except HTTPException as e:
+            results.append({"id": mod_id, "name": entry["name"], "status": "error", "reason": e.detail})
+        except ModuleManagerError as e:
+            results.append({"id": mod_id, "name": entry["name"], "status": "error", "reason": str(e)})
+    return {"results": results}
 
 
 @app.delete("/api/module-manager/{mod_id}")

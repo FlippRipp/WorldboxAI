@@ -51,10 +51,10 @@ def build_zip(entries: dict) -> bytes:
     return buf.getvalue()
 
 
-def module_zip_entries(mod_id, prefix="", dependencies=None, backend="marker = True\n"):
+def module_zip_entries(mod_id, prefix="", dependencies=None, backend="marker = True\n", **extra):
     p = f"{prefix}/" if prefix else ""
     return {
-        f"{p}manifest.json": json.dumps(manifest_dict(mod_id, dependencies)),
+        f"{p}manifest.json": json.dumps(manifest_dict(mod_id, dependencies, **extra)),
         f"{p}backend.py": backend,
     }
 
@@ -151,7 +151,7 @@ def test_state_prunes_vanished_modules(tmp_path):
     registry.load_all_modules()
 
     saved = json.loads((tmp_path / "modules_state.json").read_text())
-    assert saved == {"disabled": [], "installed": []}
+    assert saved == {"disabled": [], "installed": [], "sources": {}}
 
 
 def test_enable_unknown_module_404(tmp_path):
@@ -192,7 +192,7 @@ def test_install_from_zip_root_and_remove(tmp_path):
     assert "wb_new" not in registry.get_modules()
     assert not (modules_dir / "wb_new").exists()
     saved = json.loads((tmp_path / "modules_state.json").read_text())
-    assert saved == {"disabled": [], "installed": []}
+    assert saved == {"disabled": [], "installed": [], "sources": {}}
 
 
 def test_install_from_github_style_wrapped_zip(tmp_path):
@@ -301,6 +301,110 @@ def test_remove_refused_with_loaded_dependent(tmp_path):
     registry.disable_module("wb_child")
     registry.remove_module("wb_dep")
     assert "wb_dep" not in registry.discovered
+
+
+# ---------------------------------------------------------------------------
+# Registry: update
+
+
+def test_update_module_replaces_files_and_reloads_backend(tmp_path):
+    registry, modules_dir = make_registry(tmp_path)
+    registry.load_all_modules()
+    registry.install_module_from_zip(build_zip(module_zip_entries("wb_up", backend="marker = 1\n")))
+    assert registry.get_modules()["wb_up"]["backend"].marker == 1
+
+    previous = registry.update_module_from_zip(
+        "wb_up", build_zip(module_zip_entries("wb_up", backend="marker = 2\n", version="2.0.0"))
+    )
+
+    assert previous == "1.0.0"
+    assert registry.get_modules()["wb_up"]["backend"].marker == 2
+    listing = {e["id"]: e for e in registry.manager_listing()}
+    assert listing["wb_up"]["version"] == "2.0.0"
+    assert json.loads((modules_dir / "wb_up" / "manifest.json").read_text())["version"] == "2.0.0"
+
+
+def test_update_rejects_mismatched_module_id(tmp_path):
+    registry, _ = make_registry(tmp_path)
+    registry.load_all_modules()
+    registry.install_module_from_zip(build_zip(module_zip_entries("wb_one")))
+
+    with pytest.raises(ModuleManagerError, match="wb_other"):
+        registry.update_module_from_zip("wb_one", build_zip(module_zip_entries("wb_other")))
+    listing = {e["id"]: e for e in registry.manager_listing()}
+    assert listing["wb_one"]["version"] == "1.0.0"
+
+
+def test_update_rolls_back_when_new_backend_breaks(tmp_path):
+    registry, modules_dir = make_registry(tmp_path)
+    registry.load_all_modules()
+    registry.install_module_from_zip(build_zip(module_zip_entries("wb_frag", backend="marker = 1\n")))
+
+    with pytest.raises(ModuleManagerError, match="failed to import"):
+        registry.update_module_from_zip(
+            "wb_frag",
+            build_zip(module_zip_entries("wb_frag", backend="raise RuntimeError('bad update')\n", version="2.0.0")),
+        )
+
+    # Old version is fully restored: files, listing, and a working backend.
+    assert registry.get_modules()["wb_frag"]["backend"].marker == 1
+    listing = {e["id"]: e for e in registry.manager_listing()}
+    assert listing["wb_frag"]["version"] == "1.0.0"
+    assert listing["wb_frag"]["load_error"] is None
+    assert json.loads((modules_dir / "wb_frag" / "manifest.json").read_text())["version"] == "1.0.0"
+
+
+def test_update_refused_for_builtin(tmp_path):
+    registry, modules_dir = make_registry(tmp_path)
+    write_module(modules_dir, "alpha", "wb_alpha")
+    registry.load_all_modules()
+
+    with pytest.raises(ModuleManagerError) as exc:
+        registry.update_module_from_zip("wb_alpha", build_zip(module_zip_entries("wb_alpha")))
+    assert exc.value.status == 403
+
+
+def test_update_disabled_module_swaps_files_without_loading(tmp_path):
+    registry, _ = make_registry(tmp_path)
+    registry.load_all_modules()
+    registry.install_module_from_zip(build_zip(module_zip_entries("wb_cold", backend="marker = 1\n")))
+    registry.disable_module("wb_cold")
+
+    registry.update_module_from_zip(
+        "wb_cold", build_zip(module_zip_entries("wb_cold", backend="marker = 2\n", version="2.0.0"))
+    )
+
+    listing = {e["id"]: e for e in registry.manager_listing()}
+    assert listing["wb_cold"]["version"] == "2.0.0"
+    assert listing["wb_cold"]["enabled"] is False
+    assert "wb_cold" not in registry.get_modules()
+
+    registry.enable_module("wb_cold")
+    assert registry.get_modules()["wb_cold"]["backend"].marker == 2
+
+
+def test_update_source_bookkeeping(tmp_path):
+    registry, _ = make_registry(tmp_path)
+    registry.load_all_modules()
+    github_src = {"type": "github", "url": "https://github.com/user/repo"}
+    registry.install_module_from_zip(build_zip(module_zip_entries("wb_src")), source=github_src)
+    assert registry.get_source("wb_src") == github_src
+
+    # A one-off zip upload over a GitHub-sourced module keeps the GitHub URL.
+    registry.update_module_from_zip(
+        "wb_src", build_zip(module_zip_entries("wb_src", version="2.0.0")),
+        source={"type": "zip", "filename": "manual.zip"},
+    )
+    assert registry.get_source("wb_src") == github_src
+
+    # Sources survive a restart and vanish with the module.
+    restarted = ModuleRegistry(str(tmp_path / "modules"), state_path=str(tmp_path / "modules_state.json"))
+    restarted.load_all_modules()
+    assert restarted.get_source("wb_src") == github_src
+    restarted.remove_module("wb_src")
+    assert restarted.get_source("wb_src") is None
+    saved = json.loads((tmp_path / "modules_state.json").read_text())
+    assert saved["sources"] == {}
 
 
 # ---------------------------------------------------------------------------
@@ -423,3 +527,82 @@ def test_manager_endpoints_install_github(tmp_path, monkeypatch):
 
     bad_source = client.post("/api/module-manager/install", json={"source": "carrier-pigeon"})
     assert bad_source.status_code == 400
+
+
+def test_manager_endpoints_update_zip(tmp_path, monkeypatch):
+    import base64
+
+    client, registry = make_manager_client(tmp_path, monkeypatch)
+    v1 = base64.b64encode(build_zip(module_zip_entries("wb_zup"))).decode("ascii")
+    client.post("/api/module-manager/install", json={"source": "zip", "data_base64": v1, "filename": "a.zip"})
+
+    # Without a stored GitHub source, a bare update request is a 400 that
+    # points at the zip-upload path.
+    bare = client.post("/api/module-manager/wb_zup/update", json={})
+    assert bare.status_code == 400
+    assert "zip" in bare.json()["detail"]
+
+    v2 = base64.b64encode(build_zip(module_zip_entries("wb_zup", version="2.0.0"))).decode("ascii")
+    updated = client.post(
+        "/api/module-manager/wb_zup/update", json={"data_base64": v2, "filename": "b.zip"}
+    )
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["previous_version"] == "1.0.0"
+    assert body["changed"] is True
+    assert body["module"]["version"] == "2.0.0"
+    assert registry.get_modules()["wb_zup"]["manifest"]["version"] == "2.0.0"
+
+
+def test_manager_endpoints_update_github_and_update_all(tmp_path, monkeypatch):
+    import base64
+
+    from fastapi import HTTPException
+
+    client, registry = make_manager_client(tmp_path, monkeypatch)
+
+    served = {"version": "1.0.0", "fail": False}
+
+    async def fake_download(ref):
+        if served["fail"]:
+            raise HTTPException(status_code=502, detail="GitHub unreachable")
+        return build_zip(module_zip_entries("wb_git", prefix="repo-main", version=served["version"]))
+
+    monkeypatch.setattr(server, "_download_github_archive", fake_download)
+
+    client.post("/api/module-manager/install", json={"source": "github", "url": "https://github.com/user/repo"})
+    zip_payload = base64.b64encode(build_zip(module_zip_entries("wb_zip"))).decode("ascii")
+    client.post("/api/module-manager/install", json={"source": "zip", "data_base64": zip_payload, "filename": "z.zip"})
+
+    # Per-module update pulls the new version from the stored URL.
+    served["version"] = "1.1.0"
+    updated = client.post("/api/module-manager/wb_git/update")
+    assert updated.status_code == 200
+    assert updated.json()["changed"] is True
+    assert updated.json()["module"]["version"] == "1.1.0"
+
+    # Update-all: github module unchanged this round, zip module skipped.
+    result = client.post("/api/module-manager/update-all")
+    assert result.status_code == 200
+    by_id = {r["id"]: r for r in result.json()["results"]}
+    assert by_id["wb_git"]["status"] == "unchanged"
+    assert by_id["wb_zip"]["status"] == "skipped"
+
+    # Update-all: a new version lands, and download failures don't blow up the call.
+    served["version"] = "2.0.0"
+    result = client.post("/api/module-manager/update-all")
+    by_id = {r["id"]: r for r in result.json()["results"]}
+    assert by_id["wb_git"]["status"] == "updated"
+    assert by_id["wb_git"]["previous_version"] == "1.1.0"
+    assert by_id["wb_git"]["version"] == "2.0.0"
+
+    served["fail"] = True
+    result = client.post("/api/module-manager/update-all")
+    by_id = {r["id"]: r for r in result.json()["results"]}
+    assert by_id["wb_git"]["status"] == "error"
+    assert "unreachable" in by_id["wb_git"]["reason"]
+    assert registry.get_modules()["wb_git"]["manifest"]["version"] == "2.0.0"
+
+    # Built-ins are refused.
+    builtin = client.post("/api/module-manager/wb_alpha/update", json={})
+    assert builtin.status_code in (400, 403)

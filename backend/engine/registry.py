@@ -110,7 +110,9 @@ class ModuleRegistry:
         self.state_path = state_path
         self.discovered = {}   # mod_id -> {mod_name, path, manifest} for every valid module folder
         self.load_errors = {}  # mod_id -> reason an *enabled* discovered module is not loaded
-        self._state = {"disabled": [], "installed": []}
+        # sources: mod_id -> {"type": "github", "url": ...} | {"type": "zip", "filename": ...}
+        # recorded at install time so installed modules can be updated later.
+        self._state = {"disabled": [], "installed": [], "sources": {}}
         self._load_state()
 
     # ------------------------------------------------------------------
@@ -126,6 +128,12 @@ class ModuleRegistry:
                 value = raw.get(key, [])
                 if isinstance(value, list):
                     self._state[key] = [v for v in value if isinstance(v, str)]
+            sources = raw.get("sources", {})
+            if isinstance(sources, dict):
+                self._state["sources"] = {
+                    mod_id: src for mod_id, src in sources.items()
+                    if isinstance(mod_id, str) and isinstance(src, dict) and isinstance(src.get("type"), str)
+                }
         except Exception as e:
             logger.warning(f"Failed to load module state from {self.state_path}: {e}")
 
@@ -138,6 +146,11 @@ class ModuleRegistry:
 
     def is_installed(self, mod_id: str) -> bool:
         return mod_id in self._state["installed"]
+
+    def get_source(self, mod_id: str) -> dict | None:
+        """The recorded install source for a manager-installed module, or None
+        (built-in, or installed before sources were recorded)."""
+        return self._state["sources"].get(mod_id)
 
     # ------------------------------------------------------------------
     # Discovery and startup loading
@@ -180,9 +193,13 @@ class ModuleRegistry:
         # state file never accumulates ghosts.
         pruned_disabled = [m for m in self._state["disabled"] if m in self.discovered]
         pruned_installed = [m for m in self._state["installed"] if m in self.discovered]
-        if pruned_disabled != self._state["disabled"] or pruned_installed != self._state["installed"]:
+        pruned_sources = {m: s for m, s in self._state["sources"].items() if m in self.discovered}
+        if (pruned_disabled != self._state["disabled"]
+                or pruned_installed != self._state["installed"]
+                or pruned_sources != self._state["sources"]):
             self._state["disabled"] = pruned_disabled
             self._state["installed"] = pruned_installed
+            self._state["sources"] = pruned_sources
             self._save_state()
 
         disabled_set = set(self._state["disabled"])
@@ -511,6 +528,7 @@ class ModuleRegistry:
                 "enabled": enabled,
                 "loaded": mod_id in self.loaded_modules,
                 "builtin": mod_id not in installed,
+                "source": self._state["sources"].get(mod_id),
                 "dependencies": manifest.get("dependencies", []),
                 "dependents": self._dependents_of(mod_id),
                 "load_error": self.load_errors.get(mod_id) if enabled else None,
@@ -577,13 +595,15 @@ class ModuleRegistry:
             self._state["disabled"].append(mod_id)
             self._save_state()
 
-    def install_module_from_zip(self, zip_bytes: bytes, subpath: str = None) -> dict:
+    def install_module_from_zip(self, zip_bytes: bytes, subpath: str = None, source: dict = None) -> dict:
         """Install a module from zip archive bytes (an upload or a downloaded
         GitHub archive), then enable it. The archive is unpacked to a temp dir,
         the module root located (manifest.json + backend.py, optionally under
         `subpath`), the manifest validated, and only then is the folder copied
         into the modules dir under the module id. Any failure rolls back
-        completely. Returns the loaded module entry."""
+        completely. `source` (a {"type": "github"/"zip", ...} record) is
+        persisted so the module can be updated later. Returns the loaded
+        module entry."""
         temp_dir = self._safe_extract_zip(zip_bytes)
         try:
             root = self._locate_module_root(temp_dir, subpath)
@@ -608,6 +628,8 @@ class ModuleRegistry:
         candidate = {"mod_name": mod_id, "path": dest, "manifest": manifest}
         self.discovered[mod_id] = candidate
         self._state["installed"].append(mod_id)
+        if source is not None:
+            self._state["sources"][mod_id] = source
         self._save_state()
 
         try:
@@ -619,6 +641,7 @@ class ModuleRegistry:
             self.load_errors.pop(mod_id, None)
             if mod_id in self._state["installed"]:
                 self._state["installed"].remove(mod_id)
+            self._state["sources"].pop(mod_id, None)
             self._save_state()
             shutil.rmtree(dest, ignore_errors=True)
             raise
@@ -651,8 +674,85 @@ class ModuleRegistry:
             if mod_id in self._state[key]:
                 self._state[key].remove(mod_id)
                 changed = True
+        if self._state["sources"].pop(mod_id, None) is not None:
+            changed = True
         if changed:
             self._save_state()
+
+    def update_module_from_zip(self, mod_id: str, zip_bytes: bytes, subpath: str = None, source: dict = None) -> str:
+        """Replace an installed module's folder with a new archive's contents
+        and hot-reload its backend. The old folder is kept as a backup until
+        the new version imports cleanly; any failure restores the previous
+        files and backend. Only manager-installed modules can be updated.
+        Returns the version string that was installed before the update."""
+        candidate = self.discovered.get(mod_id)
+        if candidate is None:
+            raise ModuleManagerError(f"Module '{mod_id}' not found.", status=404)
+        if mod_id not in self._state["installed"]:
+            raise ModuleManagerError(
+                f"Module '{mod_id}' is built-in and updates with the app itself.", status=403
+            )
+
+        temp_dir = self._safe_extract_zip(zip_bytes)
+        try:
+            root = self._locate_module_root(temp_dir, subpath)
+            new_manifest = self._validated_archive_manifest(root)
+            if new_manifest["id"] != mod_id:
+                raise ModuleManagerError(
+                    f"Archive contains module '{new_manifest['id']}' but '{mod_id}' is being updated."
+                )
+
+            enabled = mod_id not in self._state["disabled"]
+            if enabled:
+                missing = [
+                    dep for dep in new_manifest.get("dependencies", [])
+                    if dep not in self.loaded_modules
+                ]
+                if missing:
+                    raise ModuleManagerError(
+                        f"Cannot update '{mod_id}': the new version requires "
+                        f"{', '.join(repr(d) for d in missing)} to be enabled first.",
+                        status=409,
+                    )
+
+            previous_version = candidate["manifest"].get("version", "")
+            module_path = candidate["path"]
+            backup_dir = tempfile.mkdtemp(prefix="wb_module_backup_")
+            backup_path = os.path.join(backup_dir, mod_id)
+            shutil.move(module_path, backup_path)
+            try:
+                shutil.copytree(root, module_path)
+                new_candidate = {"mod_name": candidate["mod_name"], "path": module_path, "manifest": new_manifest}
+                if enabled:
+                    self.loaded_modules.pop(mod_id, None)
+                    if not self._load_module_backend(new_candidate):
+                        raise ModuleManagerError(
+                            f"Updated backend failed to import: {self.load_errors.get(mod_id, 'unknown error')}"
+                        )
+                self.discovered[mod_id] = new_candidate
+            except Exception:
+                # Restore the previous version: files, and backend if enabled.
+                shutil.rmtree(module_path, ignore_errors=True)
+                shutil.move(backup_path, module_path)
+                if enabled:
+                    self.loaded_modules.pop(mod_id, None)
+                    self._load_module_backend(candidate)
+                raise
+            finally:
+                shutil.rmtree(backup_dir, ignore_errors=True)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        # Source bookkeeping: a GitHub update refreshes the stored source, and
+        # any source is adopted when none is known. A manual zip upload over a
+        # GitHub-sourced module is a one-off override — the GitHub URL is kept
+        # so future updates still pull from the repository.
+        if source is not None:
+            existing = self._state["sources"].get(mod_id)
+            if source.get("type") == "github" or existing is None or existing.get("type") != "github":
+                self._state["sources"][mod_id] = source
+                self._save_state()
+        return previous_version
 
     # ------------------------------------------------------------------
     # Archive helpers
