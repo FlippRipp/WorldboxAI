@@ -20,6 +20,7 @@ import BranchNameDialog from './components/shared/BranchNameDialog';
 import MainMenu from './components/Menu/MainMenu';
 import OnboardingWizard from './components/Onboarding/OnboardingWizard';
 import SaveSelectScreen from './components/Menu/SaveSelectScreen';
+import ModuleManagerScreen from './components/Menu/ModuleManagerScreen';
 import ExitWarning from './components/Menu/ExitWarning';
 import CharacterListScreen from './components/CharacterBuilder/CharacterListScreen';
 import CharacterCreator from './components/CharacterBuilder/CharacterCreator';
@@ -556,6 +557,10 @@ function AppContent() {
 
   if (currentMode === 'lorebook-manager') {
     return <LorebookManager onBack={() => setCurrentMode(null)} />;
+  }
+
+  if (currentMode === 'module-manager') {
+    return <ModuleManagerScreen onBack={() => setCurrentMode(null)} />;
   }
 
   if (currentMode === 'server-logs') {

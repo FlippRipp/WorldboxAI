@@ -64,6 +64,13 @@ export const api = {
   rewriteAllModuleInstructions: (modId, { request: req, current = null, scenarioContext = null }) =>
     request(`/api/modules/${modId}/instructions/rewrite-all`, { method: 'POST', body: JSON.stringify({ request: req, current, scenario_context: scenarioContext }) }),
   getModules:             () => request('/api/modules'),
+  // App-wide module manager (enable/disable/install/remove; distinct from the
+  // per-story module toggles above)
+  getModuleManager:       () => request('/api/module-manager'),
+  setModuleEnabled:       (modId, enabled) => request(`/api/module-manager/${modId}/enabled`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
+  installModuleZip:       (dataBase64, filename) => request('/api/module-manager/install', { method: 'POST', body: JSON.stringify({ source: 'zip', data_base64: dataBase64, filename }) }),
+  installModuleGithub:    (url) => request('/api/module-manager/install', { method: 'POST', body: JSON.stringify({ source: 'github', url }) }),
+  removeModule:           (modId) => request(`/api/module-manager/${modId}`, { method: 'DELETE' }),
   getModuleConfigs:       () => request('/api/session/module-configs'),
   updateModuleConfigs:    (configs) => request('/api/session/module-configs', { method: 'PUT', body: JSON.stringify({ module_configs: configs }) }),
   getPromptPipeline:      () => request('/api/session/prompt-pipeline'),

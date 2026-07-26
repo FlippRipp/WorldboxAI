@@ -41,6 +41,8 @@ data/characters/
 data/worlds/
 data/scenarios/
 data/theme.json
+# App-wide module manager state (disabled + manager-installed module ids)
+data/modules_state.json
 
 # Image generation runtime data (API key, image index, downloaded images)
 data/wb_image_gen/

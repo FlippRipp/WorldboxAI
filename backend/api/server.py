@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from backend.engine.registry import ModuleRegistry
+from backend.engine.registry import ModuleRegistry, ModuleManagerError, parse_github_url, github_archive_url
 from backend.engine.graph import EngineGraph, CHARACTER_UPDATE_FIELDS
 from backend.engine.llm import LLMProviderError
 from backend.engine.llm_inspector import LLMInspector
@@ -24,8 +24,10 @@ import os
 import re
 import sys
 import json
+import base64
 import asyncio
 import hashlib
+import httpx
 import logging
 from datetime import datetime, timezone
 
@@ -83,7 +85,9 @@ if data_dir == os.path.abspath(os.path.join(base_dir, "data")):
 else:
     profile_id = hashlib.sha1(data_dir.encode("utf-8")).hexdigest()[:8]
 
-registry = ModuleRegistry(modules_dir)
+# Module enable/disable/install state is app-wide (like provider API keys):
+# anchored to the repo data dir so all profiles share one module set.
+registry = ModuleRegistry(modules_dir, state_path=os.path.join(base_dir, "data", "modules_state.json"))
 registry.load_all_modules()
 
 backend_settings = SettingsRegistry()
@@ -305,15 +309,26 @@ _module_services = {
     # keep app-global state (e.g. API keys) here.
     "global_data_dir": os.path.join(base_dir, "data"),
 }
-for _mod_id, _mod_data in registry.get_modules().items():
-    _set_services = getattr(_mod_data.get("backend"), "set_services", None)
+def _inject_module_services(mod_id: str, mod_data: dict):
+    _set_services = getattr(mod_data.get("backend"), "set_services", None)
     if callable(_set_services):
         try:
             _set_services(_module_services)
         except Exception as _exc:
-            logger.warning("Module %s set_services failed: %s", _mod_id, _exc)
+            logger.warning("Module %s set_services failed: %s", mod_id, _exc)
 
-for mod_id, mod_data in registry.get_modules().items():
+
+# Modules whose HTTP endpoints (router, assets, widgets) are already mounted on
+# the app. FastAPI can add routes at runtime but not remove them, so mounting
+# must be idempotent: a module disabled and re-enabled in one server lifetime
+# keeps its original routes instead of stacking duplicates.
+_mounted_module_ids = set()
+
+
+def _mount_module_endpoints(mod_id: str, mod_data: dict):
+    if mod_id in _mounted_module_ids:
+        return
+    _mounted_module_ids.add(mod_id)
     mod_path = mod_data["path"]
 
     # Mount module-owned API routes. Routers whose routes already carry an
@@ -337,17 +352,17 @@ for mod_id, mod_data in registry.get_modules().items():
     if os.path.exists(assets_path) and os.path.isdir(assets_path):
         app.mount(f"/assets/{mod_id}", StaticFiles(directory=assets_path), name=f"assets_{mod_id}")
         print(f"Mounted assets for {mod_id} at /assets/{mod_id}")
-        
+
     widget_path = os.path.join(mod_path, "widget.jsx")
     if os.path.exists(widget_path):
         from fastapi.responses import FileResponse
-        
+
         # We need a closure to capture the correct path for each iteration
         def create_widget_endpoint(path):
             async def get_widget():
                 return FileResponse(path, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
             return get_widget
-            
+
         app.get(f"/widgets/{mod_id}/widget.jsx")(create_widget_endpoint(widget_path))
         print(f"Mounted widget for {mod_id} at /widgets/{mod_id}/widget.jsx")
 
@@ -360,6 +375,18 @@ for mod_id, mod_data in registry.get_modules().items():
             return get_char_widget
         app.get(f"/widgets/{mod_id}/character_widget.jsx")(create_char_widget_endpoint(character_widget_path))
         print(f"Mounted character widget for {mod_id} at /widgets/{mod_id}/character_widget.jsx")
+
+
+def _activate_module(mod_id: str, mod_data: dict):
+    """Everything a freshly loaded module backend needs from the host: the
+    shared services dict and its HTTP endpoints. Used at startup for every
+    loaded module and again when the module manager hot-enables one."""
+    _inject_module_services(mod_id, mod_data)
+    _mount_module_endpoints(mod_id, mod_data)
+
+
+for mod_id, mod_data in registry.get_modules().items():
+    _activate_module(mod_id, mod_data)
 
 
 @app.get("/widgets/{mod_id}/{filename:path}")
@@ -435,6 +462,113 @@ async def get_modules():
             "has_instruction_slots": callable(getattr(mod_data.get("backend"), "get_instruction_slots", None)),
         })
     return {"modules": modules}
+
+
+# ---------------------------------------------------------------------------
+# Module manager: app-wide enable/disable, install (zip upload or GitHub
+# repository), and removal of manager-installed modules. Distinct from
+# /api/modules (the live set the game consumes) and namespaced away from
+# /api/modules/{mod_id}/* so module-owned routers can never collide.
+
+class ModuleEnabledRequest(BaseModel):
+    enabled: bool
+
+
+class ModuleInstallRequest(BaseModel):
+    source: str  # "zip" | "github"
+    data_base64: Optional[str] = None  # zip: base64-encoded archive bytes
+    filename: Optional[str] = None     # zip: original filename (informational)
+    url: Optional[str] = None          # github: repository URL
+
+
+MAX_GITHUB_ARCHIVE_BYTES = 100 * 1024 * 1024
+
+
+def _manager_entry(mod_id: str) -> dict:
+    for entry in registry.manager_listing():
+        if entry["id"] == mod_id:
+            return entry
+    raise HTTPException(status_code=404, detail=f"Module '{mod_id}' not found.")
+
+
+async def _download_github_archive(ref: dict) -> bytes:
+    url = github_archive_url(ref["owner"], ref["repo"], ref["branch"])
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+            resp = await client.get(url)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Could not download from GitHub: {e}")
+    if resp.status_code == 404:
+        raise HTTPException(
+            status_code=404,
+            detail="Repository or branch not found on GitHub (private repositories are not supported).",
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"GitHub returned HTTP {resp.status_code} for the archive download.")
+    if len(resp.content) > MAX_GITHUB_ARCHIVE_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Repository archive exceeds the {MAX_GITHUB_ARCHIVE_BYTES // (1024 * 1024)} MB download limit.",
+        )
+    return resp.content
+
+
+@app.get("/api/module-manager")
+async def module_manager_listing():
+    return {"modules": registry.manager_listing()}
+
+
+@app.put("/api/module-manager/{mod_id}/enabled")
+async def set_module_enabled(mod_id: str, request: ModuleEnabledRequest):
+    try:
+        if request.enabled:
+            mod_data = registry.enable_module(mod_id)
+            _activate_module(mod_id, mod_data)
+        else:
+            registry.disable_module(mod_id)
+    except ModuleManagerError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    return {"module": _manager_entry(mod_id)}
+
+
+@app.post("/api/module-manager/install")
+async def install_module(request: ModuleInstallRequest):
+    subpath = None
+    if request.source == "zip":
+        if not request.data_base64:
+            raise HTTPException(status_code=400, detail="Missing zip data.")
+        try:
+            zip_bytes = base64.b64decode(request.data_base64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid base64 zip data.")
+    elif request.source == "github":
+        if not request.url:
+            raise HTTPException(status_code=400, detail="Missing GitHub URL.")
+        try:
+            ref = parse_github_url(request.url)
+        except ModuleManagerError as e:
+            raise HTTPException(status_code=e.status, detail=str(e))
+        subpath = ref["subpath"]
+        zip_bytes = await _download_github_archive(ref)
+    else:
+        raise HTTPException(status_code=400, detail="source must be 'zip' or 'github'.")
+
+    try:
+        mod_data = registry.install_module_from_zip(zip_bytes, subpath=subpath)
+    except ModuleManagerError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    new_mod_id = mod_data["manifest"]["id"]
+    _activate_module(new_mod_id, mod_data)
+    return {"module": _manager_entry(new_mod_id)}
+
+
+@app.delete("/api/module-manager/{mod_id}")
+async def remove_installed_module(mod_id: str):
+    try:
+        registry.remove_module(mod_id)
+    except ModuleManagerError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    return {"ok": True}
 
 
 def _module_instruction_slots(mod_id: str) -> list[dict]:

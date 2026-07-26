@@ -160,6 +160,38 @@ Allowed prompt block types in module manifests:
 
 Module manifests cannot declare `engine_context`; that block is reserved for the engine.
 
+## App-Wide Module Management
+
+The main menu's **Modules** screen manages the module set for the whole app,
+on top of the per-story `__active_modules__` toggles:
+
+- **Enable / disable app-wide.** A disabled module is removed from the live
+  registry immediately: it vanishes from `GET /api/modules`, the story start
+  screen's module toggles, and engine dispatch — even for saves whose
+  `__active_modules__` lists it. Per-story config is untouched, so re-enabling
+  restores the previous behavior. Disabling is refused while an enabled module
+  depends on the target (disable dependents first); enabling is refused until
+  all dependencies are enabled.
+- **Install** from an uploaded `.zip` or a GitHub repository URL
+  (`https://github.com/user/repo`, optionally a `/tree/branch[/path]` link).
+  The archive is searched for a folder containing `manifest.json` +
+  `backend.py`, the manifest is validated with the standard registry rules,
+  and the module folder is copied into `modules/<id>` and hot-loaded. Installs
+  that fail validation or fail to import roll back completely. Note that a
+  module's `backend.py` runs with the app's full permissions — install only
+  trusted code.
+- **Remove** deletes a manager-installed module's folder from disk. Built-in
+  modules (shipped in the repo) can only be disabled, never removed.
+
+State lives in `data/modules_state.json` (`disabled` + `installed` module id
+lists), which is app-global and shared across profiles. Hot changes apply to
+engine dispatch immediately; a disabled module's already-mounted HTTP routes
+remain until the next restart (the UI no longer links to them).
+
+Manager endpoints: `GET /api/module-manager`,
+`PUT /api/module-manager/{mod_id}/enabled`, `POST /api/module-manager/install`,
+`DELETE /api/module-manager/{mod_id}`.
+
 ## Load Order
 
 `ModuleRegistry.load_all_modules()` performs three phases:

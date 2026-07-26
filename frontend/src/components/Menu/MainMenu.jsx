@@ -40,6 +40,12 @@ const CORE_MODES = [
     icon: '⚙️',
   },
   {
+    id: 'module-manager',
+    label: 'Modules',
+    description: 'Enable, disable, and install app-wide modules',
+    icon: '🧩',
+  },
+  {
     id: 'server-logs',
     label: 'Server Log',
     description: 'View backend server logs and filter for errors',
