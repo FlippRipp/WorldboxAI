@@ -229,6 +229,75 @@ async def on_command_<name>(args: list[str], state: dict, sdk) -> dict:
 
 Called when the player runs a slash command declared in the manifest's `commands` table. Return `{"message": "..."}` — surfaced to the player as an ephemeral popup, never written into the transcript. Optional keys: `module_data` / `module_data_replace` / `character_update` writebacks, and `error: True` to mark the command as failed. Commands dispatched by module UI buttons (`source: "button"` on the wire) skip the popup on success — the widget already reflects the outcome via `state_update` — but an `error: True` result (or a raised exception) always pops up.
 
+## Turn Lifecycle & Streaming Hooks
+
+Three optional hooks let a module observe a turn as it runs (live trigger
+scanning, TTS, haptics, translation). All three respect `__active_modules__`
+gating and receive the usual filtered state view.
+
+```python
+async def on_turn_start(state: dict, sdk) -> None:
+    ...
+```
+
+Fired at the turn entry point, before the first streamed token. Plain `def` is
+also accepted.
+
+```python
+def on_stream_token(token: str, state: dict, sdk) -> None:
+    ...
+```
+
+Called once per token the storyteller streams, in stream order. **Must be a
+plain sync function** — this is the one deliberate exception to the async-hook
+convention. The token path is hot: awaiting per token would stall streaming, so
+an `async def` registered under this name is skipped with a logged warning, not
+awaited. Keep the body O(token) and non-blocking; hand anything slower to a
+queue or background task. `state` is the module's filtered view built **once at
+turn start** and reused for every token of the turn — it does not update
+mid-turn. Exceptions are swallowed and never reach the streaming path or other
+subscribers; they are logged at most once per module per turn.
+
+```python
+async def on_turn_stopped(state: dict, sdk, reason: str) -> None:
+    ...
+```
+
+Fired when the turn ends. Plain `def` is also accepted. `reason` is:
+
+- `"completed"` — the turn finished and was saved;
+- `"cancelled"` — the player pressed Stop mid-generation;
+- `"error"` — the turn died on an exception before completing.
+
+**Guarantees.** For every turn that fired `on_turn_start`, `on_turn_stopped`
+fires exactly once — including cancelled and failed turns. Per turn, per
+module, the order is always `on_turn_start` → zero or more `on_stream_token`
+(in stream order) → `on_turn_stopped`; no token is delivered after
+`on_turn_stopped`. Veto rewrites don't re-stream (matching the UI), so a
+vetoed turn's tokens come from the first attempt only. The opening-scene
+generation (intro) is not a turn and fires none of these hooks. Hook
+exceptions are logged and isolated; they never affect the turn or other
+modules.
+
+## Feature Detection
+
+`EngineGraph` exposes the capability set
+
+```python
+MODULE_API_FEATURES = {"stream_tokens", "turn_lifecycle"}
+```
+
+Modules probe it with a safe `getattr` (older builds lack the attribute):
+
+```python
+features = getattr(services["engine"], "MODULE_API_FEATURES", set())
+if "stream_tokens" in features:
+    ...
+```
+
+Each capability has its own name so future additions stay independently
+detectable.
+
 ## State Access
 
 Modules receive a **filtered state dict** that only includes fields declared in `consumes`. Always present:

@@ -9,6 +9,7 @@ from backend.engine.settings_registry import SettingsRegistry
 from backend.engine.provider_manager import ProviderManager
 from copy import deepcopy
 import asyncio
+import inspect
 import json
 import os
 
@@ -38,6 +39,12 @@ def _stat_tier_label(val: int, tiers: list[dict]) -> str:
     return "Unknown"
 
 class EngineGraph:
+    # Module-visible capability flags. Modules probe this via
+    # getattr(services["engine"], "MODULE_API_FEATURES", set()) so the check is
+    # safe on builds that predate it; add one name per new capability so each
+    # stays independently detectable.
+    MODULE_API_FEATURES = frozenset({"stream_tokens", "turn_lifecycle"})
+
     def __init__(self, registry: ModuleRegistry, settings_registry: SettingsRegistry = None, provider_manager: ProviderManager = None):
         self.registry = registry
         self.sdk = WorldBoxSDK()
@@ -57,6 +64,12 @@ class EngineGraph:
         self.story_sources = {}
         self.sdk.llm._set_service(self.llm)
         self.sdk.memory._set_engine(self)
+        # Turn-lifecycle hook state, armed by dispatch_turn_start and disarmed
+        # by dispatch_turn_stopped. The subscriber list is what the hot token
+        # path iterates — it must stay empty outside a turn.
+        self._stream_subscribers = []
+        self._stream_errors_logged = set()
+        self._turn_hooks_armed = False
         self._register_settings()
         
         workflow = StateGraph(WorldState)
@@ -343,6 +356,84 @@ class EngineGraph:
             return None
         finally:
             self.sdk.llm._current_module = ""
+
+    def _collect_hook_subscribers(self, hook_name: str, state: dict, require_sync: bool = False):
+        """(mod_id, hook_fn, module_state) for active modules exposing a hook.
+
+        Each module's filtered state view is built here, once — the stream
+        token path reuses these views for every token of the turn.
+        """
+        active = state.get("module_configs", {}).get("__active_modules__")
+        active_set = set(active) if isinstance(active, list) else None
+        subscribers = []
+        for mod_id, mod_data in self.registry.get_modules().items():
+            if active_set is not None and mod_id not in active_set:
+                continue
+            hook_fn = getattr(mod_data["backend"], hook_name, None)
+            if hook_fn is None:
+                continue
+            if require_sync and asyncio.iscoroutinefunction(hook_fn):
+                print(f"[Engine] {mod_id}.{hook_name} must be a plain sync function "
+                      f"(the token path cannot await per token) — hook skipped.")
+                continue
+            module_state = self._build_module_state(state, mod_id, mod_data["manifest"].get("consumes", {}))
+            subscribers.append((mod_id, hook_fn, module_state))
+        return subscribers
+
+    async def _dispatch_lifecycle_hook(self, hook_name: str, state: dict, *extra_args):
+        for mod_id, hook_fn, module_state in self._collect_hook_subscribers(hook_name, state):
+            try:
+                self.sdk.llm._current_module = mod_id
+                result = hook_fn(module_state, self.sdk, *extra_args)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as e:
+                print(f"Error in {mod_id}.{hook_name}: {e}")
+            finally:
+                self.sdk.llm._current_module = ""
+
+    async def dispatch_turn_start(self, state: dict):
+        """Fire on_turn_start on active modules and arm per-turn streaming.
+
+        Must be paired with dispatch_turn_stopped: every armed turn fires
+        on_turn_stopped exactly once, on completion, cancel, or error.
+        """
+        self._stream_subscribers = self._collect_hook_subscribers(
+            "on_stream_token", state, require_sync=True)
+        self._stream_errors_logged = set()
+        self._turn_hooks_armed = True
+        await self._dispatch_lifecycle_hook("on_turn_start", state)
+
+    async def dispatch_turn_stopped(self, state: dict, reason: str):
+        """Fire on_turn_stopped(reason) for the turn armed by dispatch_turn_start.
+
+        ``reason`` is "completed", "cancelled", or "error". No-op when no turn
+        is armed, so overlapping call sites (normal completion, the cancel
+        handler, the error safety net) still produce exactly one dispatch.
+        """
+        if not self._turn_hooks_armed:
+            return
+        self._turn_hooks_armed = False
+        # Cleared before the hooks fire: no module sees a token after its
+        # on_turn_stopped.
+        self._stream_subscribers = []
+        await self._dispatch_lifecycle_hook("on_turn_stopped", state, reason)
+
+    def _wrap_stream_callback(self, emit_token):
+        """Emit each token to the UI as before, then fan it out to the
+        on_stream_token subscribers armed at turn start. Subscriber errors are
+        swallowed (logged once per module per turn) — they must never reach the
+        streaming path or other subscribers."""
+        async def emit_and_fan_out(token: str):
+            await emit_token(token)
+            for mod_id, hook_fn, module_state in self._stream_subscribers:
+                try:
+                    hook_fn(token, module_state, self.sdk)
+                except Exception as e:
+                    if mod_id not in self._stream_errors_logged:
+                        self._stream_errors_logged.add(mod_id)
+                        print(f"Error in {mod_id}.on_stream_token (suppressing repeats this turn): {e}")
+        return emit_and_fan_out
 
     async def ensure_memory(self):
         if self.memory is None:
@@ -821,7 +912,7 @@ class EngineGraph:
         # the client, so streaming again would produce a second visible response.
         story_result = await self.llm.generate_story_from_messages(
             compiled_prompt["messages"],
-            streaming_callback=None if needs_rewrite else self.sdk.ui.emit_token,
+            streaming_callback=None if needs_rewrite else self._wrap_stream_callback(self.sdk.ui.emit_token),
             inspector_ctx={"call_type": "storyteller", "step": "storyteller_node"},
             reasoning_callback=None if needs_rewrite else self.sdk.ui.emit_reasoning_token,
         )

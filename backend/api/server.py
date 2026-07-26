@@ -2409,10 +2409,12 @@ async def websocket_endpoint(websocket: WebSocket):
             engine.rollback_memory(regen_turn - 1)
             engine.set_memory_path(session_manager.get_memory_path())
             _init_world_index_for_save(session_manager.active_save_id)
+            await engine.dispatch_turn_start(session_manager.state)
             final_state = await engine.app.ainvoke(session_manager.state)
             active_state = session_manager.save_completed_turn(final_state, user_text=regen_input)
             session_manager.add_regenerated_swipe()
             active_state["swipes"] = session_manager.swipes_meta()
+            await engine.dispatch_turn_stopped(active_state, "completed")
             await chat_hub.send({"type": "done", "state": active_state})
         except asyncio.CancelledError:
             restore_after_aborted_regenerate()
@@ -2461,10 +2463,12 @@ async def websocket_endpoint(websocket: WebSocket):
 
         try:
             # Execute the LangGraph pipeline
+            await engine.dispatch_turn_start(session_manager.state)
             final_state = await engine.app.ainvoke(session_manager.state)
             active_state = session_manager.save_completed_turn(final_state, user_text=text)
             session_manager.begin_turn_swipes()
             active_state["swipes"] = session_manager.swipes_meta()
+            await engine.dispatch_turn_stopped(active_state, "completed")
 
             # Send final completion signal with the updated state. If the
             # client is gone this is a no-op: the turn is already saved, so a
@@ -2641,6 +2645,9 @@ async def websocket_endpoint(websocket: WebSocket):
             # previously active variant. Echo the input back (empty for
             # regenerate) so the client can restore the composer.
             print("Turn cancelled by client stop request.")
+            # Modules hear about the cancel first — for some (haptics) this is
+            # a kill switch, so nothing may delay it.
+            await engine.dispatch_turn_stopped(session_manager.state, "cancelled")
             session_manager.set_input("")
             state = dict(session_manager.state)
             state["swipes"] = session_manager.swipes_meta()
@@ -2663,6 +2670,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 "detail": str(exc),
                 "state": session_manager.state,
             })
+        finally:
+            # Safety net for the exactly-once guarantee: a turn whose pipeline
+            # died (the handlers above report their own errors and return
+            # normally) still fires on_turn_stopped. A no-op whenever the turn
+            # already stopped as "completed" or "cancelled".
+            await engine.dispatch_turn_stopped(session_manager.state, "error")
 
     # Turns run as a cancellable task (held by the hub, not this connection)
     # so the receive loop stays responsive: a {"action": "stop"} message can
