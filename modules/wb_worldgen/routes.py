@@ -706,6 +706,34 @@ async def agent_build_veto(world_id: str, request: AgentVetoRequest):
             "vetoed": request.note_ids}
 
 
+class AgentIterateRequest(BaseModel):
+    #: Free-text change/improvement request for a finished world — iterate
+    #: mode's whole input.
+    text: str = ""
+
+
+@router.post("/api/world/{world_id}/agent/iterate")
+async def agent_build_iterate(world_id: str, request: AgentIterateRequest):
+    """Iterate mode: relaunch the agent on a FINISHED world with a free-text
+    change request. The world goes back to an in-progress draft (content and
+    brief kept), the request becomes the build's primary goal, and the full
+    done-gate evaluation must pass before the world reads as finished
+    again. 400 for an empty request or an in-progress world, 409 while a
+    session is already running."""
+    from wbworldgen.worldgen.agent import harness as agent_harness
+    try:
+        world_builder.load_world(world_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Unknown world: {world_id}")
+    try:
+        handle = agent_harness.start_iterate_build(
+            world_builder, world_id, request.text)
+    except ValueError as exc:
+        status = 409 if "already running" in str(exc) else 400
+        raise HTTPException(status_code=status, detail=str(exc))
+    return {"world_id": handle.world_id, "status": handle.status}
+
+
 @router.get("/api/world/{world_id}/agent/status")
 async def agent_build_status(world_id: str):
     """Current build snapshot (status, turn/tool counters, todo, result).

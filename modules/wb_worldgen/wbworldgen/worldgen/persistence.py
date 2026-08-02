@@ -159,6 +159,12 @@ class WorldPersistence:
             # One-shot generations must resume as one-shot: /api/world/continue
             # keys off this after a backend restart mid-run.
             metadata["skip_review"] = True
+        if str(world_state.get("iterate_request") or "").strip():
+            # The standing change request of an iterate run: survives the
+            # load→save round-trip so a crashed or cancelled run still shows
+            # why the world went back to draft; the harness pops it from the
+            # state before the completing save_world.
+            metadata["iterate_request"] = str(world_state["iterate_request"]).strip()
         if world_state.get("agent_phase"):
             # Which phase the world's agent session is in ("chat" during the
             # C7b design conversation, "build" after Go) — the world list
@@ -203,6 +209,8 @@ class WorldPersistence:
         }
         if metadata.get("skip_review"):
             world_state["skip_review"] = True
+        if metadata.get("iterate_request"):
+            world_state["iterate_request"] = metadata["iterate_request"]
         if metadata.get("agent_phase"):
             world_state["agent_phase"] = metadata["agent_phase"]
         if metadata.get("scenario"):

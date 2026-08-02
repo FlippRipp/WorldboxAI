@@ -57,6 +57,7 @@ export default function WorldGenScreen({ onBack }) {
       <WorldExplorerScreen
         worldId={exploreWorldId}
         onBack={() => setView('list')}
+        onIterate={openObserver}
       />
     );
   }

@@ -42,11 +42,18 @@ function notesBoundToMap(notes, map) {
  * enrichment merged — so what it shows is the world as a session would
  * load it, not the raw generation-step snapshot.
  */
-export default function WorldExplorerScreen({ worldId, onBack }) {
+export default function WorldExplorerScreen({ worldId, onBack, onIterate }) {
   const [compiled, setCompiled] = useState(null);
   const [worldState, setWorldState] = useState(null); // raw step state, for the editing forms
   const [pipeline, setPipeline] = useState([]);
   const [error, setError] = useState(null);
+  // Iterate mode (finished worlds only): a free-text change request that
+  // relaunches the agent on this world; submitting hands off to the build
+  // observer via onIterate.
+  const [iterateOpen, setIterateOpen] = useState(false);
+  const [iterateText, setIterateText] = useState('');
+  const [iterateBusy, setIterateBusy] = useState(false);
+  const [iterateError, setIterateError] = useState(null);
   const [activeMapId, setActiveMapId] = useState(null);
   const [selectedNodeId, setSelectedNodeId] = useState(null);
   const [focusNodeId, setFocusNodeId] = useState(null);
@@ -129,6 +136,23 @@ export default function WorldExplorerScreen({ worldId, onBack }) {
     || worldState?.steps?.lore?.data?.world_name || worldId;
   const inProgress = worldState && worldState.complete === false;
 
+  const submitIterate = async () => {
+    const text = iterateText.trim();
+    if (!text || iterateBusy) return;
+    setIterateBusy(true);
+    setIterateError(null);
+    try {
+      await api.agentIterate(worldId, text);
+      setIterateOpen(false);
+      setIterateText('');
+      onIterate?.(worldId);
+    } catch (e) {
+      setIterateError(e.message);
+    } finally {
+      setIterateBusy(false);
+    }
+  };
+
   if (error) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center justify-center p-6">
@@ -196,10 +220,64 @@ export default function WorldExplorerScreen({ worldId, onBack }) {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {!inProgress && onIterate && (
+            <button
+              onClick={() => { setIterateError(null); setIterateOpen(true); }}
+              title="Ask the agent to change or improve this world"
+              className="px-2 py-1 rounded text-xs border border-purple-500/60 text-purple-300 hover:bg-purple-900/30 transition-colors"
+            >
+              ✨ Iterate
+            </button>
+          )}
           {panelToggle(leftOpen, setLeftOpen, 'Elements', 'left')}
           {panelToggle(rightOpen, setRightOpen, 'World Info', 'right')}
         </div>
       </header>
+
+      {iterateOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4"
+          onClick={() => { if (!iterateBusy) setIterateOpen(false); }}
+        >
+          <div
+            className="w-full max-w-lg bg-gray-900 border border-gray-700 rounded-xl p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-sm font-bold text-gray-100 mb-1">Iterate on {worldName}</h2>
+            <p className="text-xs text-gray-400 mb-3">
+              Describe what to change or improve. The world goes back to an
+              in-progress draft while the agent works, and is re-evaluated
+              (rules, lints, your design notes) before it counts as finished
+              again.
+            </p>
+            <textarea
+              value={iterateText}
+              onChange={(e) => setIterateText(e.target.value)}
+              autoFocus
+              rows={4}
+              placeholder="e.g. Make the northern continent harsher and give the factions real border tension…"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg p-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500 resize-none"
+            />
+            {iterateError && <p className="text-xs text-red-400 mt-2">{iterateError}</p>}
+            <div className="flex justify-end gap-2 mt-3">
+              <button
+                onClick={() => setIterateOpen(false)}
+                disabled={iterateBusy}
+                className="px-3 py-1.5 rounded text-xs text-gray-400 hover:text-gray-200 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitIterate}
+                disabled={iterateBusy || !iterateText.trim()}
+                className="px-3 py-1.5 rounded text-xs bg-purple-600 hover:bg-purple-500 text-white disabled:opacity-50 transition-colors"
+              >
+                {iterateBusy ? 'Starting…' : 'Start iteration'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="flex-1 flex overflow-hidden relative">
         {/* Left: everything the current map contains. Static column on

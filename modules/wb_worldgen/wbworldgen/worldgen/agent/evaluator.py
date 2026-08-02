@@ -101,12 +101,16 @@ def _content_excerpts(compiled: dict) -> str:
 
 
 async def generate_critique(services, rules: dict, lore: dict, lint_report: dict,
-                            excerpts: str, scope_note: str = "") -> list:
+                            excerpts: str, scope_note: str = "",
+                            change_request: str = "") -> list:
     """The critique LLM call (smartest slot). Returns the parsed findings
-    list; raises on failure. Module-level so tests monkeypatch it — the
-    same patch-point contract as the pass modules."""
+    list; raises on failure. ``change_request`` is iterate mode's standing
+    free-text request — when given it joins the rubric, so a world that
+    ignores it cannot pass the done-gate. Module-level so tests monkeypatch
+    it — the same patch-point contract as the pass modules."""
     import json as _json
 
+    change_request = str(change_request or "").strip()
     system = (
         "You are the quality evaluator for an AI-built game world. Judge the "
         "built content ONLY against the world's own rules and internal "
@@ -115,7 +119,13 @@ async def generate_critique(services, rules: dict, lore: dict, lint_report: dict
         "premise, and tonal breaks the rules forbid. Do NOT flag style, "
         "prose quality, or things the rules are silent on. An empty findings "
         "list is the normal outcome for a sound world.\n"
-        "The content is an EXCERPT — per-map location lists are truncated "
+        + ("The user relaunched this finished world with a change request "
+           "(quoted below); it is part of the rubric. Flag a 'problem' "
+           "finding (kind 'change_request') when the shown content gives no "
+           "sign the request was addressed — but judge only what the excerpt "
+           "can show, and treat requests about things the excerpt cannot "
+           "show as addressed.\n" if change_request else "")
+        + "The content is an EXCERPT — per-map location lists are truncated "
         "to the highest-importance entries (marked when so). Judge only "
         "what is shown; never flag counts, completeness, or absences "
         "inferred from the excerpt's own bounds.\n\n"
@@ -125,9 +135,12 @@ async def generate_critique(services, rules: dict, lore: dict, lint_report: dict
         "\"severity\": \"problem\"|\"nit\", \"map_id\": \"...\"|null, "
         "\"node_id\": \"...\"|null, \"finding\": \"one sentence\", "
         "\"suggestion\": \"one sentence\"}, ...]}")
+    request_block = (
+        f"\nThe user's standing change request (part of the rubric):\n"
+        f"{change_request}\n" if change_request else "")
     user_msg = f"""World rules (the rubric this world must honor):
 {_json.dumps(rules, indent=2, ensure_ascii=False)}
-
+{request_block}
 World: {lore.get('world_name', 'Unknown')}
 Premise: {lore.get('premise', '')}
 
@@ -180,7 +193,8 @@ async def evaluate_world(services, world_state: dict, compiled: dict,
         try:
             critique = await generate_critique(
                 services, rules, lore, lint_report,
-                _content_excerpts(compiled), scope_note)
+                _content_excerpts(compiled), scope_note,
+                change_request=str(world_state.get("iterate_request") or ""))
         except Exception as e:
             logger.warning("Evaluator critique call failed: %s", e)
             critique = []

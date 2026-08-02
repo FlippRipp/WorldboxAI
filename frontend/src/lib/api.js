@@ -204,6 +204,10 @@ export const api = {
   // omitted — and works from there.
   agentBuild:             (seedPrompt, scenarioId = null, rules = [], notes = [], worldId = null) => request('/api/world/agent/build', { method: 'POST', body: JSON.stringify({ seed_prompt: seedPrompt, rules, notes, ...(scenarioId ? { scenario_id: scenarioId } : {}), ...(worldId ? { world_id: worldId } : {}) }) }),
   agentVeto:              (worldId, noteIds) => request(`/api/world/${worldId}/agent/veto`, { method: 'POST', body: JSON.stringify({ note_ids: noteIds }) }),
+  // Iterate mode: relaunch the agent on a FINISHED world with a free-text
+  // change request. The world goes back to an in-progress draft and the full
+  // done-gate evaluation must pass before it reads as finished again.
+  agentIterate:           (worldId, text) => request(`/api/world/${worldId}/agent/iterate`, { method: 'POST', body: JSON.stringify({ text }) }),
   agentBuildStatus:       (worldId) => request(`/api/world/${worldId}/agent/status`),
   agentBuildCancel:       (worldId) => request(`/api/world/${worldId}/agent/cancel`, { method: 'POST' }),
   // Continue a build parked at its budget (v2g): grants another full

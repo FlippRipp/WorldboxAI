@@ -425,6 +425,21 @@ def _system_prompt(handle: AgentBuild, world_state: dict, budgets: dict) -> str:
             "finding with a reason the user will see.\n"
             + notes_render + "\n")
 
+    iterate = str(world_state.get("iterate_request") or "").strip()
+    iterate_block = ""
+    if iterate:
+        iterate_block = (
+            "\n### Change request (why this build is running)\n"
+            "The user finished this world, reviewed it, and relaunched you "
+            "with this request. It is this build's primary goal — plan your "
+            "todo around it. Change what it asks and leave the rest of the "
+            "world intact except where the change genuinely ripples. When "
+            "the request changes what the world should BE, record that in "
+            "the brief (update_rules / update_notes) so generation and "
+            "verification follow it; the final evaluation also judges the "
+            "world against this request directly.\n"
+            f"{iterate}\n")
+
     rules = ((world_state.get("steps", {}).get("world_rules") or {}).get("data")) or {}
     if rules:
         rules_block = json.dumps(rules, indent=2, ensure_ascii=False)
@@ -471,7 +486,7 @@ gate to wait for. Build a complete, coherent, playable world.
 
 ## The brief
 {prompt_text}
-{agreed_block}{notes_block}{scenario_block}
+{iterate_block}{agreed_block}{notes_block}{scenario_block}
 ## World rules (the evaluation rubric)
 {rules_block}
 
@@ -1187,6 +1202,10 @@ async def _run_build(handle: AgentBuild):
                 handle.status = "done"
                 world_state = builder.load_world(handle.world_id)
                 world_state["complete"] = True
+                # An iterate run's change request is satisfied the moment the
+                # gate passes — popping it here makes the completing save
+                # drop it, so the next iterate starts clean.
+                world_state.pop("iterate_request", None)
                 builder.save_world(handle.world_id, world_state)
                 break
 
@@ -1301,7 +1320,8 @@ async def _run_session(handle: AgentBuild):
 
 def start_agent_build(builder, seed_prompt: str, scenario: str = "",
                       scenario_id: str = None, world_id: str = None,
-                      rules: list = None, notes: list = None) -> AgentBuild:
+                      rules: list = None, notes: list = None,
+                      iterate_request: str = None) -> AgentBuild:
     """Create (or adopt) the world draft and launch the build loop as a
     server-side task. Returns the registered handle immediately; observers
     attach via its queue or the SSE route.
@@ -1317,6 +1337,14 @@ def start_agent_build(builder, seed_prompt: str, scenario: str = "",
     resetting it (tests, the veto fix run, and the v2 resume-onto-draft
     direction) — passing neither rules nor notes keeps the brief a
     previous launch recorded.
+
+    ``iterate_request`` is iterate mode's free-text change request (set by
+    ``start_iterate_build``): recorded in the world state so it survives
+    restarts, rendered into every turn's system prompt as the build's
+    primary goal, fed to the evaluator's critique, and cleared by the
+    completing save when the done-gate passes. When omitted, a request an
+    earlier interrupted iterate run recorded stays standing — a relaunch
+    (continue/adopt) still works toward it.
     """
     from wbworldgen.worldgen import notes as _notes
 
@@ -1342,6 +1370,8 @@ def start_agent_build(builder, seed_prompt: str, scenario: str = "",
     if rules or notes or not isinstance(state.get("brief"), dict):
         state["brief"] = {"prompt": state.get("seed_prompt", seed_prompt),
                           "rules": rules, "notes": notes}
+    if iterate_request is not None:
+        state["iterate_request"] = str(iterate_request).strip()
     # A starting build is by definition incomplete — without this, adopting
     # an already-saved world would record draft_complete and the draft would
     # read as finished before the agent did anything.
@@ -1488,6 +1518,31 @@ def veto_notes(builder, world_id: str, note_ids: list) -> AgentBuild:
 
     return start_agent_build(
         builder, world_state.get("seed_prompt", ""), world_id=world_id)
+
+
+def start_iterate_build(builder, world_id: str, request: str) -> AgentBuild:
+    """Iterate mode: relaunch the agent on a FINISHED world with a free-text
+    change request. The world goes back to an in-progress draft (the adopt
+    path — content and recorded brief kept), the request rides every turn's
+    system prompt as the build's primary goal, and the same done-gate
+    (lints + critique + note verifier) must pass before the world is marked
+    finished again. Only a finished world can be iterated — an in-progress
+    draft already has its recovery/continue paths, and a running session
+    raises like any double launch (P7)."""
+    text = str(request or "").strip()
+    if not text:
+        raise ValueError("Describe what to change or improve.")
+    existing = _BUILDS.get(world_id)
+    if existing is not None and existing.status == "running":
+        raise ValueError(f"An agent build is already running for '{world_id}'")
+    world_state = builder.load_world(world_id)
+    if not world_state.get("complete"):
+        raise ValueError(
+            f"World '{world_id}' is still in progress — iterate applies to "
+            "finished worlds; use continue/recover for a stuck draft.")
+    return start_agent_build(
+        builder, world_state.get("seed_prompt", ""), world_id=world_id,
+        iterate_request=text)
 
 
 def grant_budget(world_id: str) -> dict:
