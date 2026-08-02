@@ -108,6 +108,32 @@ const MAX_ZOOM = 40;
 // text); 2 doubles everything for readability, especially on touch screens.
 const UI_SCALE = 2;
 
+// Zoom-based level of detail. Zoom is multiplicative (each wheel notch is a
+// x1.15 step), so thresholds live in log2(zoom) space where notches are evenly
+// spaced: log2-zoom runs 0 (whole map) to log2(MAX_ZOOM) ~ 5.3 (deepest).
+// Labels fade out before their node shapes as the view zooms out, lowest
+// importance first, so a crowded map thins to its major locations instead of
+// turning into overlapping text. Small maps are exempt (LOD_MIN_NODES): they
+// have neither the lag nor the overlap, and would just look empty.
+const LOD_MIN_NODES = 30;
+// Width of the fade, in log2-zoom units: 0.25 ~ two wheel notches, so an
+// element goes from invisible to fully opaque within a short zoom flick.
+const LOD_FADE_BAND = 0.25;
+// Log2-zoom at which a node's shape / name label is fully visible. Shapes for
+// importance >= 8 and names for importance >= 9 never fade; an importance-1
+// node keeps its shape until ~5.5x and its name until ~12x zoom-out.
+const shapeLodThreshold = (imp) => (8 - imp) * 0.35;
+const nameLodThreshold = (imp) => (9 - imp) * 0.45;
+// Subtitles trail their name label by a fraction of a zoom step.
+const SUBTITLE_LOD_DELAY = 0.35;
+
+// Opacity ramp: 0 below (threshold - band), 1 above threshold.
+function lodFadeIn(logZoom, threshold, band = LOD_FADE_BAND) {
+  if (threshold <= 0 || logZoom >= threshold) return 1;
+  if (logZoom <= threshold - band) return 0;
+  return (logZoom - (threshold - band)) / band;
+}
+
 export default function MapRenderer({ nodes, edges, regions, config, layers, connections, activeLayerId, onLayerChange, mapsById, activeMapId, onMapChange, rootMapId, playerMapId, fogOfWar, navigateToLayer, focusNodeId, worldId, roads, playerTravel, onNodeSelect }) {
   const [hoveredNode, setHoveredNode] = useState(null);
   const [hoveredRegion, setHoveredRegion] = useState(null);
@@ -219,6 +245,29 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
 
   const sx = useCallback((x) => mapLayout.pad + x * mapLayout.scale, [mapLayout]);
   const sy = useCallback((y) => mapLayout.pad + y * mapLayout.scale, [mapLayout]);
+
+  // Road geometry is zoom-independent (stroke widths are in viewBox units and
+  // sx/sy only depend on the layout), so the scaled point strings — the
+  // expensive part of rendering hundreds of polylines — are computed once per
+  // data change rather than on every zoom/pan tick. The bounding box feeds the
+  // viewport culling test in the render passes below.
+  const roadViews = useMemo(() => (activeRoads || []).map((road) => {
+    if (!road.path || road.path.length < 2) return null;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    const pts = road.path.map(([x, y]) => {
+      const px = sx(x);
+      const py = sy(y);
+      if (px < minX) minX = px;
+      if (px > maxX) maxX = px;
+      if (py < minY) minY = py;
+      if (py > maxY) maxY = py;
+      return `${px},${py}`;
+    }).join(' ');
+    return { road, pts, minX, minY, maxX, maxY };
+  }), [activeRoads, sx, sy]);
 
   // Node ID -> index in activeNodes
   const nodeIndex = useMemo(() => {
@@ -804,6 +853,27 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
   // shrink with the container — near-unreadable in the mobile popup).
   const nodeScale = (viewBox.w / (containerSize.w || mapLayout.viewW)) * UI_SCALE;
 
+  // Level of detail: current zoom in log2 space (0 = whole map fits, ~5.3 =
+  // deepest zoom-in), only applied on maps big enough to need thinning.
+  const logZoom = Math.log2(defaultVB.w / Math.max(viewBox.w, 1e-6));
+  const lodEnabled = activeNodes.length > LOD_MIN_NODES;
+
+  // Viewport culling: skip elements wholly outside the visible viewBox. The
+  // node margin covers a marker's labels (drawn below and centered on it);
+  // roads only need their stroke width.
+  const viewRight = viewBox.x + viewBox.w;
+  const viewBottom = viewBox.y + viewBox.h;
+  const nodeCullPad = 60 * nodeScale;
+  const pointInView = (px, py) => (
+    px >= viewBox.x - nodeCullPad && px <= viewRight + nodeCullPad
+    && py >= viewBox.y - nodeCullPad && py <= viewBottom + nodeCullPad
+  );
+  const ROAD_CULL_PAD = 4;
+  const roadInView = (rv) => !(
+    rv.maxX < viewBox.x - ROAD_CULL_PAD || rv.minX > viewRight + ROAD_CULL_PAD
+    || rv.maxY < viewBox.y - ROAD_CULL_PAD || rv.minY > viewBottom + ROAD_CULL_PAD
+  );
+
   // Attach wheel listener with passive:false so preventDefault blocks page scroll
   useEffect(() => {
     const el = mapContainerRef.current;
@@ -1060,17 +1130,15 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
           {/* Minor paths: spurs from each hub to other locations. Render under
               the main roads; fade thinner/lighter the lower the node's
               importance. */}
-          {activeRoads && activeRoads.map((road, i) => {
-            if (road.tier !== 'path') return null;
-            if (!road.path || road.path.length < 2) return null;
-            const vis = edgeVisibility(road.from, road.to);
+          {roadViews.map((rv, i) => {
+            if (!rv || rv.road.tier !== 'path' || !roadInView(rv)) return null;
+            const vis = edgeVisibility(rv.road.from, rv.road.to);
             if (!vis) return null;
-            const imp = road.importance ?? 0;
-            const pts = road.path.map(([x, y]) => `${sx(x)},${sy(y)}`).join(' ');
+            const imp = rv.road.importance ?? 0;
             return (
               <polyline
                 key={`path-${i}`}
-                points={pts}
+                points={rv.pts}
                 opacity={vis}
                 fill="none"
                 stroke={`rgba(120,72,30,${(0.15 + imp * 0.05).toFixed(3)})`}
@@ -1086,16 +1154,14 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
           {/* City street fabric (city_roadnet): lanes under side streets
               under avenues, solid grey so the network reads as pavement,
               not trails. */}
-          {activeRoads && activeRoads.map((road, i) => {
-            if (road.tier !== 'lane') return null;
-            if (!road.path || road.path.length < 2) return null;
-            const vis = edgeVisibility(road.from, road.to);
+          {roadViews.map((rv, i) => {
+            if (!rv || rv.road.tier !== 'lane' || !roadInView(rv)) return null;
+            const vis = edgeVisibility(rv.road.from, rv.road.to);
             if (!vis) return null;
-            const pts = road.path.map(([x, y]) => `${sx(x)},${sy(y)}`).join(' ');
             return (
               <polyline
                 key={`lane-${i}`}
-                points={pts}
+                points={rv.pts}
                 opacity={vis}
                 fill="none"
                 stroke="rgba(148,163,184,0.18)"
@@ -1106,16 +1172,14 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
               />
             );
           })}
-          {activeRoads && activeRoads.map((road, i) => {
-            if (road.tier !== 'street') return null;
-            if (!road.path || road.path.length < 2) return null;
-            const vis = edgeVisibility(road.from, road.to);
+          {roadViews.map((rv, i) => {
+            if (!rv || rv.road.tier !== 'street' || !roadInView(rv)) return null;
+            const vis = edgeVisibility(rv.road.from, rv.road.to);
             if (!vis) return null;
-            const pts = road.path.map(([x, y]) => `${sx(x)},${sy(y)}`).join(' ');
             return (
               <polyline
                 key={`street-${i}`}
-                points={pts}
+                points={rv.pts}
                 opacity={vis}
                 fill="none"
                 stroke="rgba(148,163,184,0.30)"
@@ -1126,16 +1190,14 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
               />
             );
           })}
-          {activeRoads && activeRoads.map((road, i) => {
-            if (road.tier !== 'avenue') return null;
-            if (!road.path || road.path.length < 2) return null;
-            const vis = edgeVisibility(road.from, road.to);
+          {roadViews.map((rv, i) => {
+            if (!rv || rv.road.tier !== 'avenue' || !roadInView(rv)) return null;
+            const vis = edgeVisibility(rv.road.from, rv.road.to);
             if (!vis) return null;
-            const pts = road.path.map(([x, y]) => `${sx(x)},${sy(y)}`).join(' ');
             return (
               <polyline
                 key={`avenue-${i}`}
-                points={pts}
+                points={rv.pts}
                 opacity={vis}
                 fill="none"
                 stroke="rgba(148,163,184,0.55)"
@@ -1148,16 +1210,15 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
           })}
 
           {/* Roads: terrain-following least-cost paths between settlements */}
-          {activeRoads && activeRoads.map((road, i) => {
-            if (['path', 'street', 'avenue', 'lane'].includes(road.tier)) return null;
-            if (!road.path || road.path.length < 2) return null;
-            const vis = edgeVisibility(road.from, road.to);
+          {roadViews.map((rv, i) => {
+            if (!rv || ['path', 'street', 'avenue', 'lane'].includes(rv.road.tier)) return null;
+            if (!roadInView(rv)) return null;
+            const vis = edgeVisibility(rv.road.from, rv.road.to);
             if (!vis) return null;
-            const pts = road.path.map(([x, y]) => `${sx(x)},${sy(y)}`).join(' ');
             return (
               <polyline
                 key={`road-${i}`}
-                points={pts}
+                points={rv.pts}
                 opacity={vis}
                 fill="none"
                 stroke="rgba(120,72,30,0.85)"
@@ -1176,6 +1237,19 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
             const revealed = isNodeRevealed(node.id);
             const fringe = !revealed && isNodeFringe(node);
             if (!revealed && !fringe) return null;
+            const px = sx(node.x);
+            const py = sy(node.y);
+            if (!pointInView(px, py)) return null;
+            const imp = node.importance || 1;
+            const shapeOp = lodEnabled ? lodFadeIn(logZoom, shapeLodThreshold(imp)) : 1;
+            if (!shapeOp) return null;
+            // The fade bands never overlap: a shape is fully opaque before its
+            // name starts appearing, so nesting the label opacities inside the
+            // group's shape opacity can't double-fade anything.
+            const nameOp = lodEnabled ? lodFadeIn(logZoom, nameLodThreshold(imp)) : 1;
+            const subOp = lodEnabled
+              ? lodFadeIn(logZoom, nameLodThreshold(imp) + SUBTITLE_LOD_DELAY)
+              : 1;
             const r = getImportanceRadius(node.importance, nodeScale);
             const color = TYPE_COLORS[node.type] || '#6b7280';
             const isHovered = hoveredNode?.id === node.id;
@@ -1186,7 +1260,7 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
             return (
               <g
                 key={node.id}
-                opacity={fringe ? 0.45 : 1}
+                opacity={(fringe ? 0.45 : 1) * shapeOp}
                 onMouseEnter={() => setHoveredNode(node)}
                 onMouseLeave={() => setHoveredNode(null)}
                 onClick={() => {
@@ -1211,16 +1285,16 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
                 )}
                 {isPopulated && revealed && (
                   <circle
-                    cx={sx(node.x)}
-                    cy={sy(node.y)}
+                    cx={px}
+                    cy={py}
                     r={r + 4 * nodeScale}
                     fill={isConn ? 'url(#connection-glow)' : node.type === 'settlement' ? 'url(#settlement-glow)' : 'url(#landmark-glow)'}
                     opacity={isHovered ? 1 : 0.6}
                   />
                 )}
                 <NodeShape
-                  cx={sx(node.x)}
-                  cy={sy(node.y)}
+                  cx={px}
+                  cy={py}
                   r={r}
                   color={color}
                   isHovered={isHovered}
@@ -1229,23 +1303,25 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
                   connectionType={node.type}
                   scale={nodeScale}
                 />
-                {isPopulated && (
+                {isPopulated && nameOp > 0 && (
                   <>
                     <text
-                      x={sx(node.x)}
-                      y={sy(node.y) + r + 10 * nodeScale}
+                      x={px}
+                      y={py + r + 10 * nodeScale}
                       textAnchor="middle"
                       className="fill-amber-300 font-semibold"
+                      opacity={nameOp}
                       style={{ fontFamily: 'monospace', fontSize: 8 * nodeScale, pointerEvents: 'none' }}
                     >
                       {node.name.length > 18 ? node.name.slice(0, 17) + '\u2026' : node.name}
                     </text>
-                    {node.label_description && revealed && (
+                    {node.label_description && revealed && subOp > 0 && (
                       <text
-                        x={sx(node.x)}
-                        y={sy(node.y) + r + 20 * nodeScale}
+                        x={px}
+                        y={py + r + 20 * nodeScale}
                         textAnchor="middle"
                         className="fill-gray-500 italic"
+                        opacity={subOp}
                         style={{ fontFamily: 'monospace', fontSize: 7 * nodeScale, pointerEvents: 'none' }}
                       >
                         {node.label_description.length > 32 ? node.label_description.slice(0, 31) + '\u2026' : node.label_description}
@@ -1263,12 +1339,20 @@ export default function MapRenderer({ nodes, edges, regions, config, layers, con
           {canNavigate && activeNodes.map((node) => {
             const child = childMapForNode(node.id);
             if (!child || !isNodeRevealed(node.id)) return null;
+            if (!pointInView(sx(node.x), sy(node.y))) return null;
+            // The badge follows its node's LOD fade: no tap target may outlive
+            // the marker it belongs to.
+            const shapeOp = lodEnabled
+              ? lodFadeIn(logZoom, shapeLodThreshold(node.importance || 1))
+              : 1;
+            if (!shapeOp) return null;
             const r = getImportanceRadius(node.importance, nodeScale);
             const bx = sx(node.x) + r + 3 * nodeScale;
             const by = sy(node.y) - r - 3 * nodeScale;
             return (
               <g
                 key={`enter-${node.id}`}
+                opacity={shapeOp}
                 onClick={(e) => {
                   e.stopPropagation();
                   changeMap(child.map_id);
