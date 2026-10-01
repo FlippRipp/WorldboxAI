@@ -25,9 +25,15 @@ class LLMCallRecord:
     full_output: str = ""
     reasoning: str = ""
     error: str = ""
+    decision_parent_id: str = ""
+    decision_outcome: str = ""
+    fallback_reason: str = ""
+    estimated_cost_usd: float | None = None
+    pricing_date: str = ""
 
 
 CALL_TYPE_LABELS: dict[str, str] = {
+    "decision": "Jev decision",
     "nsfw_summary": "Non-graphic context",
     "storyteller": "Storyteller",
     "reader": "Reader",
@@ -75,6 +81,7 @@ class LLMInspector:
         module_source: str = "",
         streaming: bool = False,
         input_data: Any = None,
+        decision_parent_id: str = "",
     ) -> str:
         call_id = uuid.uuid4().hex[:8]
         record = LLMCallRecord(
@@ -88,6 +95,7 @@ class LLMInspector:
             status="running",
             input_summary=self._summarize(input_data, 200),
             full_input=input_data,
+            decision_parent_id=decision_parent_id,
         )
         self._records[call_id] = record
         self._calls.append(record)
@@ -104,6 +112,7 @@ class LLMInspector:
         error: str = "",
         cancelled: bool = False,
         reasoning: str = "",
+        metadata: dict = None,
     ):
         record = self._records.pop(call_id, None)
         if record is None:
@@ -121,6 +130,9 @@ class LLMInspector:
         record.tokens_out = tokens_out
         record.error = error
         record.status = "cancelled" if cancelled else ("error" if error else "complete")
+        for key, value in (metadata or {}).items():
+            if key in {"model", "duration_ms", "decision_outcome", "fallback_reason", "estimated_cost_usd", "pricing_date"}:
+                setattr(record, key, value)
 
         if self._call_logger:
             try:
@@ -203,4 +215,9 @@ class LLMInspector:
             "full_output": r.full_output,
             "reasoning": r.reasoning,
             "error": r.error,
+            "decision_parent_id": r.decision_parent_id,
+            "decision_outcome": r.decision_outcome,
+            "fallback_reason": r.fallback_reason,
+            "estimated_cost_usd": r.estimated_cost_usd,
+            "pricing_date": r.pricing_date,
         }

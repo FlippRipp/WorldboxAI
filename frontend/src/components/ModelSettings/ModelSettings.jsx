@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { api } from '../../lib/api';
+import JevSettings from './JevSettings';
 
 const SELECT_CLASS = "w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-gray-200 text-sm focus:border-purple-500 focus:outline-none";
 const BTN_PRIMARY = "px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg text-sm font-medium transition-colors disabled:opacity-50";
@@ -300,6 +301,7 @@ export default function ModelSettings({ onBack, embedded = false }) {
 
         {!embedded && <h2 className="text-2xl font-bold text-gray-100 mb-6">Model Settings</h2>}
 
+        <JevSettings />
         {/* Provider dropdown */}
         <div className="mb-6">
           <label className="text-sm text-gray-300 mb-2 block">Provider</label>
@@ -322,7 +324,7 @@ export default function ModelSettings({ onBack, embedded = false }) {
             {/* Active indicator */}
             {activeId === selectedId ? (
               <div className="px-4 py-2 bg-green-900/30 border border-green-700/50 rounded-lg text-green-400 text-sm">
-                This is your active provider. All AI calls use these models.
+                This is your active provider for text generation and embeddings.
               </div>
             ) : (
               <button

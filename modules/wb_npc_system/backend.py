@@ -4,6 +4,8 @@ import json
 import re
 import urllib.parse
 import uuid
+from backend.engine import jev_tasks
+from backend.engine.jev import Decision, fallback_generate
 
 
 NPC_ROLES = ["quest_giver", "antagonist", "ally", "informant", "rival", "neutral", "wildcard"]
@@ -506,7 +508,10 @@ async def _llm_scene_presence(state: dict, sdk, candidates: list[dict]) -> set[s
     """One fast-model call deciding which candidate characters are physically
     in the current scene. Used when there is no location tracking to consult.
     Falls back to name matching so a bad LLM reply never hides a character."""
-    scene = "\n".join(str(h) for h in state.get("history", [])[-RECENT_STORY_ENTRIES:])[-3000:]
+    selected, decision = await jev_tasks.npc_ids(sdk, state, candidates, "presence")
+    if selected is not None:
+        return selected
+    scene = "\n".join(str(h) for h in state.get("history", [])[-RECENT_STORY_ENTRIES:])
     listing = "\n".join(
         f"- {npc['id']} | {npc.get('name', '?')} ({npc.get('archetype', '')}): {npc.get('pitch', '')}"
         for npc in candidates
@@ -525,7 +530,7 @@ Respond with ONLY a JSON array of the present character ids (may be empty):
 ["npc_xxxxxxxx", ...]"""
 
     try:
-        result = await sdk.llm.generate(prompt, model_preference="fastest")
+        result = await fallback_generate(sdk, decision, prompt, "fastest")
         parsed = _parse_json_block(result)
         if isinstance(parsed, list):
             valid = {npc["id"] for npc in candidates}
@@ -630,7 +635,7 @@ async def on_gather_context(state: dict, sdk) -> dict | None:
 async def _introduction_pass(state: dict, sdk) -> dict | None:
     config = _config(state)
 
-    if not config.get("introduction_enabled", True):
+    if state.get("turn", 0) == 0 or not config.get("introduction_enabled", True):
         return None
 
     bank = _get_bank(state)
@@ -674,8 +679,10 @@ RULES:
 Respond with ONLY valid JSON:
 {{"introduce": true/false, "npc_id": "id or null", "reason": "one sentence why/why not"}}"""
 
+    decision, decision_call = await jev_tasks.introduce(sdk, state, candidates, prompt)
     try:
-        result = await sdk.llm.generate(prompt, model_preference="fastest")
+        result = (json.dumps(decision) if decision is not None else
+                  await fallback_generate(sdk, decision_call, prompt, "fastest"))
         result = result.strip()
         if result.startswith("```"):
             parts = result.split("```")
@@ -1322,6 +1329,9 @@ def _step_toward(world_data: dict, layer_id: str, current_node: str, target_node
 async def _llm_motivated_ids(state: dict, sdk, eligible: list[dict]) -> set[str]:
     """Ask the LLM, in a single batched call, which eligible NPCs have a
     narrative reason to travel toward the player right now."""
+    selected, decision = await jev_tasks.npc_ids(sdk, state, eligible, "motivation")
+    if selected is not None:
+        return selected
     scene = _scene_summary(state)
     listing = "\n".join(
         f"- {npc['id']} | {npc.get('name', '?')} ({npc.get('role', 'neutral')}): {npc.get('pitch', '')}"
@@ -1344,7 +1354,7 @@ Respond with ONLY a JSON array of the motivated character ids (may be empty):
 ["npc_xxxxxxxx", ...]"""
 
     try:
-        result = await sdk.llm.generate(prompt, model_preference="fastest")
+        result = await fallback_generate(sdk, decision, prompt, "fastest")
         result = result.strip()
         if result.startswith("```"):
             parts = result.split("```")
@@ -1586,8 +1596,14 @@ Respond with ONLY valid JSON:
 {{"updates": [{{"npc_id": "id from the list above", "<changed field>": "new value", "change_note": "one short sentence"}}]}}
 Return {{"updates": []}} if nothing durable changed."""
 
+    skip, decision = await jev_tasks.screen(sdk,
+        {**jev_tasks.npc_context(state, candidates), "task": prompt},
+        {f"npc_{i}": f"Does character {npc['id']!r} have any reportable change in THIS turn under the supplied tracking rules? Include revealed or adopted names, lasting appearance/personality changes, pitch/role/status changes, death/departure and noteworthy additions to notes. Exclude mere temporary emotions or conditions."
+         for i, npc in enumerate(candidates)}, jev_tasks.NPC, "npc:record_updates")
+    if skip:
+        return False
     try:
-        raw = await sdk.llm.generate(prompt, model_preference="balanced")
+        raw = await fallback_generate(sdk, decision, prompt, "balanced")
     except Exception as e:
         print(f"[NPC System] Change-tracking pass failed: {e}")
         return False
@@ -1734,8 +1750,16 @@ EXISTING CHARACTERS (DO NOT duplicate or create similar concepts):
 Respond with ONLY valid JSON:
 {{"npcs": [{{{need_field}"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description that always states hair color and eye color (or the being's closest equivalent) and visual age (how old they look)", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_map_id": "map_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}]}}"""
 
+    decision = Decision()
+    if demand_driven:
+        skip, decision = await jev_tasks.screen(sdk,
+            {**jev_tasks.npc_context(state, list(bank.values())), "task": prompt},
+            {"new_character": "Does the story actually need any NEW character now, because of a concrete scene, direction or thread that no EXISTING character (introduced or unintroduced) can serve?"},
+            jev_tasks.NPC, "npc:creation_screen")
+        if skip:
+            return _set_bank({"story_threads": threads}, bank) if (threads or bank_changed) else None
     try:
-        result = await sdk.llm.generate(prompt, model_preference="balanced")
+        result = await fallback_generate(sdk, decision, prompt, "balanced")
         result = result.strip()
         if result.startswith("```"):
             parts = result.split("```")

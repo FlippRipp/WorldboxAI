@@ -6,6 +6,25 @@
 
 **Manual NSFW mode:** [model switching, non-graphic summaries, and preserved story history](docs/nsfw-mode.md).
 
+**Optional Jev decisions:** In Settings → Model, save a TypeSafe API key in **Jev decisions**,
+test the saved key, and enable Jev for RPG and/or NPC workflows. It starts disabled and works
+alongside your selected provider. Uncertain decisions and errors use the existing models;
+NSFW mode retains its selected model. No save conversion is needed.
+
+Jev handles action rulings, practice skill selection, default-scale XP awards, NPC presence,
+introductions, and travel motivation. It can skip clearly unnecessary skill-event extraction,
+NPC record updates, and demand-driven NPC creation. Custom XP instructions keep the existing
+judge; descriptions, new skills, and character creation still use text models. The inspector
+shows the decision outcome, fallback links, token usage, and estimated Jev cost using rates
+dated 2026-10-01 ($0.042 per million input tokens; output free). Thresholds are initial routing
+policies, not verified accuracy guarantees.
+
+For an optional comparison on fictional examples, run `python -m tools.evaluate_jev --list`
+to inspect the cases offline, or `python -m tools.evaluate_jev --live --output _scratch/jev-evaluation.json`
+to make paid calls to both Jev and the configured helper models. This reports acceptance,
+correctness against curated answers, latency, tokens, and cost where available. It does not
+read saved adventures or replace end-to-end gameplay testing. [TypeSafe API documentation](https://docs.typesafe.ai/api).
+
 ![WorldBox banner](site/img/banner.jpg)
 
 ## The story is written by an AI. The rules are not.

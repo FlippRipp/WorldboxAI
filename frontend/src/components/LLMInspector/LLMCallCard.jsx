@@ -1,4 +1,5 @@
 const TYPE_COLORS = {
+  decision:       { bg: 'bg-cyan-900/30', text: 'text-cyan-300', border: 'border-cyan-700/50', icon: '⚡' },
   storyteller:    { bg: 'bg-purple-900/30', text: 'text-purple-300', border: 'border-purple-700/50', icon: '📖' },
   reader:         { bg: 'bg-blue-900/30', text: 'text-blue-300', border: 'border-blue-700/50', icon: '📊' },
   embedding:      { bg: 'bg-gray-800/30', text: 'text-gray-400', border: 'border-gray-700/50', icon: '🧬' },
@@ -88,6 +89,10 @@ export default function LLMCallCard({ call, expanded, onToggle }) {
             <span>Time: {formatTimestamp(call.timestamp)}</span>
             <span>Step: {call.step}</span>
             <span>Model: {call.model}</span>
+            {call.decision_outcome && <span>Decision: {call.decision_outcome}</span>}
+            {call.fallback_reason && <span>Fallback: {call.fallback_reason}</span>}
+            {call.decision_parent_id && <span>Decision source: {call.decision_parent_id}</span>}
+            {call.estimated_cost_usd != null && <span>Estimated cost: ${call.estimated_cost_usd.toFixed(6)} (rates {call.pricing_date}; output free)</span>}
             {call.streaming && <span className="text-purple-400">Streaming</span>}
             {isRunning && <span className="text-amber-300">In progress…</span>}
             {isCancelled && <span className="text-gray-400">Stopped by user</span>}

@@ -3,6 +3,7 @@ import asyncio
 import os
 import logging
 from backend.engine import nsfw
+from backend.engine.jev import Decision, FALLBACK_CONTEXT
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,8 @@ class LLMBridge:
         # length (e.g. "respond with ONLY valid JSON", "keep to one sentence", "2-3 paragraphs").
         # This parameter remains for backward compatibility but callers should not pass it.
         mod_src = self._current_module or "module"
+        fallback_ctx = FALLBACK_CONTEXT.get() or {}
+        mod_src = fallback_ctx.get("module_source", mod_src)
         model = self._pick_model(model_preference) if self._service else self._reader_model
 
         if self._mode == "mock":
@@ -77,7 +80,7 @@ class LLMBridge:
                     messages=messages,
                     model=model,
                     max_tokens=max_tokens,
-                    inspector_ctx={"call_type": "module_fast", "step": "module:generate", "module_source": mod_src},
+                    inspector_ctx={"call_type": "module_fast", "step": "module:generate", "module_source": mod_src, **fallback_ctx},
                 )
             if self._inspector:
                 cid = await self._inspector.start_call(call_type="module_fast", model=model, step="module:generate", module_source=mod_src, input_data=messages)
@@ -101,6 +104,13 @@ class LLMBridge:
                 raise
             logger.error(f"Module LLM call failed (model={model}): {e}")
             return ""
+
+    async def decide(self, state, questions, *, module: str, step: str):
+        service = getattr(self._service, "decisions", None)
+        if service is None:
+            return Decision(module=module, step=step)
+        return await service.decide(state, questions, module=module, step=step,
+            mode=self._mode, inspector=getattr(self._service, "inspector", None))
 
     def _pick_model(self, preference: str) -> str:
         if preference == "fastest":

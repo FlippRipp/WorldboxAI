@@ -6,6 +6,8 @@ import random
 import json
 import re
 from dataclasses import dataclass, field
+from backend.engine import jev_tasks
+from backend.engine.jev import Decision, fallback_generate
 
 
 STAT_NAMES = ["power", "agility", "vitality", "intelligence", "spirit", "charm"]
@@ -501,6 +503,8 @@ async def on_gather_context(state: dict, sdk) -> dict:
 
     updates = {}
 
+    practice_decision = {}
+
     # Start each turn with a clean assessment so a prior turn's ruling can't be
     # reused (e.g. to re-award XP) on a turn with no substantive player action.
     char.action_assessment = {}
@@ -522,10 +526,11 @@ async def on_gather_context(state: dict, sdk) -> dict:
 
         # Pre-assess action feasibility with a fast model call
         model_pref = config.get("practice_ai_model", "fastest")
-        recent_story = [entry[-1200:] for entry in (state.get("history") or [])[-2:]]
+        recent_story = list((state.get("history") or [])[-2:])
         assessment = await _assess_action(
             input_text, char, config, sdk, model_pref, state.get("world_data"), recent_story,
             instructions=state.get("module_instructions"),
+            practice_decision=practice_decision,
         )
         char.action_assessment = assessment
 
@@ -533,7 +538,12 @@ async def on_gather_context(state: dict, sdk) -> dict:
     progression = config.get("progression_system", "xp")
     if progression == "practice" and char.skills and input_text:
         active_skills = {n: d for n, d in char.skills.items() if d.get("type", "active") == "active"}
-        if active_skills:
+        if "skill" in practice_decision:
+            name = practice_decision["skill"]
+            if name in active_skills:
+                char.practice_counters.setdefault(name, 0)
+                char.practice_counters[name] += char.skills[name]["rating"]
+        elif active_skills:
             model_pref = config.get("practice_ai_model", "fastest")
             skill_names = [f"{_skill_prompt_label(n, d)} ({d['rating']}/10)" for n, d in active_skills.items()]
             prompt = (
@@ -557,7 +567,7 @@ async def on_gather_context(state: dict, sdk) -> dict:
     return updates
 
 
-async def _assess_action(input_text: str, char: Character, config: dict, sdk, model_pref: str = "fastest", world_data: dict = None, recent_story: list = None, instructions: dict = None) -> dict:
+async def _assess_action(input_text: str, char: Character, config: dict, sdk, model_pref: str = "fastest", world_data: dict = None, recent_story: list = None, instructions: dict = None, practice_decision: dict = None) -> dict:
     tier_list = config.get("stat_tiers", DEFAULT_STAT_TIERS) or DEFAULT_STAT_TIERS
     difficulty_label, difficulty_guidance, no_and_max, fail_max, success_min = _strictness_tier(config)
     outcome_parts = []
@@ -638,8 +648,16 @@ You are a referee, not a narrator: determine the outcome, do not describe it. Ne
 JSON response:
 {{"feasibility": int 1-10, "skill_used": "name or empty string", "difficulty": "trivial|easy|moderate|hard|extreme|impossible", "curse_triggered": "name or empty string", "passive_effects": "brief factual note on which passives apply and how, or empty string", "failure_reason": "empty string unless feasibility is {fail_span}; then one short factual clause naming the world rule, established fact, or decisive capability gap the attempt founders on"}}"""
 
+    decision_value, decision = await jev_tasks.assess_action(sdk, prompt, char.to_dict(),
+        config.get("progression_system", "xp") == "practice", fail_max,
+        {"world": world_data or {}, "story": recent_story or [], "character": char.to_dict()})
+    if decision_value is not None:
+        assessment, practiced = decision_value
+        if practice_decision is not None:
+            practice_decision["skill"] = practiced
+        return assessment
     try:
-        result = await sdk.llm.generate(prompt, model_preference=model_pref)
+        result = await fallback_generate(sdk, decision, prompt, model_pref)
         assessment = _parse_json_repair(result)
         if assessment is None:
             print(f"[RPG] Action assessment failed: unable to parse JSON response: {(result or '')[:200]}")
@@ -1046,12 +1064,16 @@ async def _judge_xp(char: "Character", state: dict, config: dict, sdk) -> bool:
         instructions=state.get("module_instructions"),
     )
     model_pref = config.get("xp_judge_ai_model", "balanced")
+    parsed, decision = None, Decision()
+    if _directive("xp_judgment", state.get("module_instructions")) == DIRECTIVE_XP_JUDGMENT:
+        parsed, decision = await jev_tasks.judge_xp(sdk, prompt)
     try:
-        raw = await sdk.llm.generate(prompt, model_preference=model_pref)
+        if parsed is None:
+            raw = await fallback_generate(sdk, decision, prompt, model_pref)
+            parsed = _parse_json_repair(raw)
     except Exception as e:
         print(f"[RPG] XP judgment failed: {type(e).__name__}: {e}")
         return False
-    parsed = _parse_json_repair(raw)
     if not isinstance(parsed, dict):
         return False
     try:
@@ -1077,8 +1099,8 @@ async def _detect_external_skill_events(char: "Character", state: dict, config: 
     # scene must always be in the prompt (a tail-truncated join of the last 3
     # scenes used to cut off the start of a long newest scene, missing skills
     # granted early in it). Earlier scenes are only context.
-    latest = str(history[-1])[-4000:]
-    earlier = "\n".join(str(h) for h in history[-3:-1])[-2000:]
+    latest = str(history[-1])
+    earlier = "\n".join(str(h) for h in history[-3:-1])
     earlier_block = f"EARLIER NARRATION (context only):\n{earlier}\n\n" if earlier else ""
 
     if char.skills:
@@ -1115,7 +1137,12 @@ For each added or altered skill, the description must capture the nuance of the 
 Respond with ONLY valid JSON:
 {{"added": [{{"name": "skill_name", "rating": 1-10, "description": "what it does, how it manifests, source, limits — 1-2 tight sentences", "trigger_words": ["word1", "word2"], "type": "active|passive|curse"}}], "removed": ["skill_name"], "altered": [{{"name": "existing_skill_name", "new_rating": 1-10, "description": "optional updated description"}}]}}"""
 
-    raw = await sdk.llm.generate(prompt, model_preference=model_pref)
+    skip, decision = await jev_tasks.screen(sdk, {"task": prompt, "character": char.to_dict()},
+        {"events": "Does THIS TURN'S scene impose any lasting skill addition, removal or alteration through an external force? Include revealed gifts, curses and mentor-granted knowledge; exclude own practice and temporary status effects."},
+        jev_tasks.RPG, "rpg:external_events")
+    if skip:
+        return False
+    raw = await fallback_generate(sdk, decision, prompt, model_pref)
 
     parsed = _parse_json_block(raw)
     if not isinstance(parsed, dict):

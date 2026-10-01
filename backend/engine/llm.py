@@ -417,6 +417,7 @@ class LLMService:
                 step=ctx.get("step", "simple_completion") + (" [NSFW]" if context and context.enabled and not nsfw.preparing() else ""),
                 module_source=ctx.get("module_source", ""),
                 input_data=messages,
+                decision_parent_id=ctx.get("decision_parent_id", ""),
             )
 
         try:

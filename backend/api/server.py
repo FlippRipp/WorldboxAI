@@ -3131,6 +3131,25 @@ async def websocket_endpoint(websocket: WebSocket):
 
 # === Provider Management Routes ===
 
+@app.get("/api/jev/config")
+async def get_jev_config():
+    return engine.llm.decisions.public_config()
+
+
+@app.put("/api/jev/config")
+async def update_jev_config(body: dict):
+    if chat_hub.turn_running():
+        raise HTTPException(status_code=409, detail="Wait for the current operation to finish.")
+    try:
+        return engine.llm.decisions.save(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/jev/test")
+async def test_jev_connection():
+    return await engine.llm.decisions.test_connection()
+
 class ProviderUpdateRequest(BaseModel):
     config: dict[str, Any]
 

@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from typing import Any
 from backend.engine.providers import PROVIDERS
+from backend.engine.jev import JevService
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +17,11 @@ class ProviderManager:
         self._dir.mkdir(parents=True, exist_ok=True)
         self._active_id = self._load_active()
         self._llm_service = None
+        self.decisions = JevService(self._dir / "jev" / "config.json")
 
     def set_llm_service(self, llm_service):
         self._llm_service = llm_service
+        llm_service.decisions = self.decisions
         print(f"[DEBUG] ProviderManager.set_llm_service: active_id='{self._active_id}'")
         if self._active_id:
             config = self.get_effective_config(self._active_id)
