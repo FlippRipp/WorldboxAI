@@ -112,6 +112,7 @@ class ProviderManager:
         if provider_id == "openrouter":
             model_fields = [
                 "storyteller_model",
+                "nsfw_model",
                 "reader_model",
                 "embedding_model",
                 "module_fast_model",

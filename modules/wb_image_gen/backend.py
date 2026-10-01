@@ -29,6 +29,9 @@ owned by this module and edited in the Image Studio main-menu screen -- not in
 per-save settings.
 """
 import asyncio
+from backend.engine import nsfw as adventure_nsfw
+from copy import deepcopy as _context_copy
+from contextlib import nullcontext
 import csv
 import hashlib
 import json
@@ -4762,10 +4765,24 @@ def _spawn_generation(*, save_id: str, turn: int, narration: str, history: str,
         "duration_s": None,
     }
 
+    # Hook tasks inherit their adventure context. Router-started tasks capture
+    # the requested save's mode, so switching stories later cannot reroute them.
+    scope_state = None
+    engine = _services.get("engine")
+    manager = _services.get("session_manager")
+    if adventure_nsfw.current() is None and engine is not None and manager is not None and save_id:
+        if save_id == manager.active_save_id:
+            scope_state = _context_copy(manager.state)
+        else:
+            saved = manager.save_manager.load_save(save_id)
+            scope_state = {"nsfw": saved.get("core", {}).get("nsfw", adventure_nsfw.empty())}
+
     async def _run():
-        await _append_record(record)
-        await _generation_pipeline(record_id, cfg, narration, history,
-                                   _hook_sdk(sdk), prompt_override, characters)
+        scope = adventure_nsfw.operation(scope_state, engine.llm) if scope_state is not None else nullcontext()
+        with scope:
+            await _append_record(record)
+            await _generation_pipeline(record_id, cfg, narration, history,
+                                       _hook_sdk(sdk), prompt_override, characters)
 
     task = asyncio.get_running_loop().create_task(_run())
     _tasks.add(task)

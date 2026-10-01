@@ -1,3 +1,4 @@
+from backend.engine import nsfw
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -285,6 +286,19 @@ class ModuleConfigsRequest(BaseModel):
 
 class ActiveModulesRequest(BaseModel):
     active_modules: list[str]
+
+
+@app.middleware("http")
+async def adventure_model_context(request, call_next):
+    path = request.url.path
+    scoped = path.startswith("/api/modules/wb_core_rpg/") or path == "/api/session/prompt-pipeline/preview"
+    if not scoped or not session_manager.active_save_id:
+        return await call_next(request)
+    if chat_hub.turn_running() and request.method != "GET":
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": "Wait for the current operation to finish."}, status_code=409)
+    with nsfw.operation(session_manager.state, engine.llm):
+        return await call_next(request)
 
 
 class PromptPipelineRequest(BaseModel):
@@ -1777,6 +1791,8 @@ async def rename_save(save_id: str, request: RenameSaveRequest):
 
 @app.post("/api/saves/{save_id}/undo")
 async def undo_save(save_id: str, request: UndoTurnRequest):
+    if chat_hub.turn_running():
+        raise HTTPException(status_code=409, detail="Wait for the current operation to finish.")
     if save_id != session_manager.active_save_id:
         raise HTTPException(status_code=409, detail="Undo is only supported for the active save.")
     try:
@@ -1799,6 +1815,8 @@ class SwipeRequest(BaseModel):
 
 @app.post("/api/session/swipe")
 async def select_swipe(request: SwipeRequest):
+    if chat_hub.turn_running():
+        raise HTTPException(status_code=409, detail="Wait for the current operation to finish.")
     try:
         state = session_manager.select_swipe(request.index)
         # Keep the vector DB consistent with the rolled-back turn (the variant's
@@ -1819,6 +1837,8 @@ class EditMessageRequest(BaseModel):
 
 @app.put("/api/session/messages/{index}")
 async def edit_message(index: int, request: EditMessageRequest):
+    if chat_hub.turn_running():
+        raise HTTPException(status_code=409, detail="Wait for the current operation to finish.")
     try:
         state = session_manager.edit_message(index, request.content)
         return {"session": session_manager.get_status(), "state": state}
@@ -1828,6 +1848,8 @@ async def edit_message(index: int, request: EditMessageRequest):
 
 @app.delete("/api/session/messages/{index}")
 async def delete_message(index: int):
+    if chat_hub.turn_running():
+        raise HTTPException(status_code=409, detail="Wait for the current operation to finish.")
     try:
         state = session_manager.delete_message(index)
         engine.rollback_memory(session_manager.state.get("turn", 0))
@@ -2618,11 +2640,13 @@ async def websocket_endpoint(websocket: WebSocket):
         except Exception as exc:
             print(f"Failed to restore active swipe after aborted regenerate: {exc}")
 
-    async def handle_regenerate():
+    async def handle_regenerate(nsfw_retry=False):
         # Re-run the most recent turn, keeping each generation as a swipe.
         try:
             regen_turn = session_manager.prepare_regenerate()
         except (ValueError, FileNotFoundError) as exc:
+            if nsfw_retry:
+                raise
             await chat_hub.send({
                 "type": "error", "code": "regenerate_unavailable",
                 "message": str(exc), "detail": str(exc),
@@ -2633,22 +2657,34 @@ async def websocket_endpoint(websocket: WebSocket):
         # reloaded while this turn generates (client closed and reopened the
         # story), which would blank input_text before the save.
         regen_input = session_manager.state.get("input_text", "")
+        if nsfw_retry:
+            nsfw.enable(session_manager.state)
+        if nsfw.current():
+            nsfw.current().bind(session_manager.state)
         try:
+            if nsfw.current() and not nsfw.current().enabled:
+                await nsfw.current().prepare_sections()
             engine.rollback_memory(regen_turn - 1)
             engine.set_memory_path(session_manager.get_memory_path())
             _init_world_index_for_save(session_manager.active_save_id)
             await engine.dispatch_turn_start(session_manager.state)
             final_state = await engine.app.ainvoke(session_manager.state)
+            if nsfw.current():
+                nsfw.current().check()
             active_state = session_manager.save_completed_turn(final_state, user_text=regen_input)
             session_manager.add_regenerated_swipe()
             active_state["swipes"] = session_manager.swipes_meta()
             await engine.dispatch_turn_stopped(active_state, "completed")
-            await chat_hub.send({"type": "done", "state": active_state})
+            if not nsfw_retry:
+                await chat_hub.send({"type": "done", "state": active_state})
+            return True
         except asyncio.CancelledError:
             restore_after_aborted_regenerate()
             raise
         except LLMProviderError as exc:
             restore_after_aborted_regenerate()
+            if nsfw_retry:
+                raise
             await chat_hub.send_or_queue({
                 "type": "error", "code": "llm_provider_unavailable",
                 "message": "The AI provider is temporarily unavailable. Please try again in a moment.",
@@ -2657,6 +2693,8 @@ async def websocket_endpoint(websocket: WebSocket):
         except Exception as exc:
             print(f"Unexpected error during regenerate: {exc}")
             restore_after_aborted_regenerate()
+            if nsfw_retry:
+                raise
             await chat_hub.send_or_queue({
                 "type": "error", "code": "regenerate_failed",
                 "message": "Regeneration failed.", "detail": str(exc),
@@ -2666,7 +2704,7 @@ async def websocket_endpoint(websocket: WebSocket):
     async def handle_turn(data):
         # Update state with user input
         text = data.get("text", "")
-        if engine.settings.get("storyteller.auto_mode"):
+        if engine.settings.get("storyteller.auto_mode") and not data.get("retry_exact"):
             # Storyteller auto mode: the AI plays the player. Whatever was
             # typed stays out of the story and only steers the generated action,
             # which then runs as a completely normal player turn. On generation
@@ -2693,6 +2731,8 @@ async def websocket_endpoint(websocket: WebSocket):
             # Execute the LangGraph pipeline
             await engine.dispatch_turn_start(session_manager.state)
             final_state = await engine.app.ainvoke(session_manager.state)
+            if nsfw.current():
+                nsfw.current().check()
             active_state = session_manager.save_completed_turn(final_state, user_text=text)
             session_manager.begin_turn_swipes()
             active_state["swipes"] = session_manager.swipes_meta()
@@ -2701,8 +2741,12 @@ async def websocket_endpoint(websocket: WebSocket):
             # Send final completion signal with the updated state. If the
             # client is gone this is a no-op: the turn is already saved, so a
             # later sync replays it from authoritative state.
-            await chat_hub.send({"type": "done", "state": active_state})
+            if not data.get("nsfw_retry"):
+                await chat_hub.send({"type": "done", "state": active_state})
         except LLMProviderError as exc:
+            if data.get("nsfw_retry"):
+                raise
+            remember_failed_input(text)
             print(f"LLM provider error during WebSocket turn: {exc}")
             session_manager.set_input("")
             await chat_hub.send_or_queue({
@@ -2713,6 +2757,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 "state": session_manager.state,
             })
         except Exception as exc:
+            if data.get("nsfw_retry"):
+                raise
+            remember_failed_input(text)
             print(f"Unexpected error during WebSocket turn: {exc}")
             session_manager.set_input("")
             await chat_hub.send_or_queue({
@@ -2847,6 +2894,100 @@ async def websocket_endpoint(websocket: WebSocket):
 
         return False
 
+    def persist_nsfw():
+        # Mode/context updates do not overwrite the pre-turn rollback snapshot.
+        import json as _json
+        import os as _os
+        path = session_manager.save_manager.saves_dir / session_manager.active_save_id / "Core" / "nsfw.json"
+        pending = path.with_suffix(".pending")
+        pending.write_text(_json.dumps(nsfw.ensure(session_manager.state), ensure_ascii=False, indent=2), encoding="utf-8")
+        _os.replace(pending, path)
+        session_manager.save_manager._pack_save(session_manager.active_save_id)
+
+    def remember_failed_input(text):
+        nsfw.ensure(session_manager.state)["failed_input"] = text
+        persist_nsfw()
+
+    async def handle_nsfw(data):
+        from copy import deepcopy as _deepcopy
+        context = nsfw.current()
+        context.require_model()
+        if not isinstance(data.get("enabled"), bool):
+            raise ValueError("The NSFW mode setting must be true or false.")
+        before = _deepcopy(session_manager.state["nsfw"])
+        try:
+            if data.get("enabled"):
+                nsfw.enable(session_manager.state)
+            else:
+                await engine.sdk.ui.emit_status("nsfw_summary", "Preparing story summary...")
+                # Prepare on a private copy; cancellation cannot commit half a transition.
+                context.data = _deepcopy(before)
+                await context.prepare_sections()
+                await context.prepare_derived()
+                if engine.memory is not None:
+                    for memory in engine.memory.list_all_memories(limit=engine.memory.get_memory_count()):
+                        if any(section["start_turn"] <= memory.get("turn_generated", -1) <= section.get("end_turn", -1) for section in context.data["sections"]):
+                            await context.rewrite(memory["text"], "memory")
+                context.check()
+                for section in context.data["sections"]:
+                    section["closed"] = True
+                context.data["enabled"] = False
+                session_manager.state["nsfw"] = context.data
+            persist_nsfw()
+        except BaseException:
+            session_manager.state["nsfw"] = before
+            context.data = before
+            raise
+        context.bind(session_manager.state)
+        await chat_hub.send({"type": "done", "state": session_manager.state})
+
+    async def handle_nsfw_retry():
+        from copy import deepcopy as _deepcopy
+        context = nsfw.current()
+        context.require_model()
+        before = _deepcopy(session_manager.state)
+        pending = before["nsfw"].get("failed_input")
+        attempts = _deepcopy(before["nsfw"].get("previous_attempts", []))
+        checkpoint = nsfw.memory_checkpoint(session_manager.get_memory_path())
+        checkpoint.__enter__()
+        try:
+            if pending is not None:
+                nsfw.enable(session_manager.state)
+                context.bind(session_manager.state)
+                await handle_turn({"text": pending, "retry_exact": True, "nsfw_retry": True})
+            else:
+                last = next((m for m in reversed(before.get("chat_messages", [])) if m.get("role") == "ai"), None)
+                if last:
+                    attempts.append({"turn": before.get("turn"), "content": last["content"]})
+                await handle_regenerate(nsfw_retry=True)
+            session_manager.state["nsfw"]["previous_attempts"] = attempts
+            persist_nsfw()
+            # Only the successful retry is canonical; the refusal remains in the archive.
+            session_manager.begin_turn_swipes()
+            session_manager.state["swipes"] = session_manager.swipes_meta()
+            await chat_hub.send({"type": "done", "state": session_manager.state})
+        except BaseException as exc:
+            checkpoint.__exit__(type(exc), exc, exc.__traceback__)
+            session_manager.state = before
+            context.bind(before)
+            persist_nsfw()
+            raise
+        else:
+            checkpoint.__exit__(None, None, None)
+
+    async def handle_nsfw_summary_edit(data):
+        context = nsfw.current()
+        section = next((s for s in context.data["sections"] if s["id"] == data.get("section_id")), None)
+        text = str(data.get("summary") or "").strip()
+        if not section or not section.get("closed") or not text:
+            raise ValueError("Choose a completed section and provide a non-empty summary.")
+        if section.get("source_revision") != nsfw.digest(nsfw.section_messages(session_manager.state, section)):
+            raise ValueError("The source changed; regenerate its summary before editing it.")
+        section["summary"] = text
+        section["manual"] = True
+        persist_nsfw()
+        await chat_hub.send({"type": "done", "state": session_manager.state})
+
     async def run_action(data):
         action = data.get("action", "turn")
         # Every action generates into the active save; without one there is
@@ -2859,8 +3000,21 @@ async def websocket_endpoint(websocket: WebSocket):
                 "state": session_manager.state,
             })
             return
+        scope = nsfw.operation(session_manager.state, engine.llm)
+        context = scope.__enter__()
         try:
-            if action == "intro":
+            if action not in {"nsfw_mode", "nsfw_summary", "nsfw_retry"}:
+                if context.enabled:
+                    context.require_model()
+                else:
+                    await context.prepare_sections()
+            if action == "nsfw_mode":
+                await handle_nsfw(data)
+            elif action == "nsfw_retry":
+                await handle_nsfw_retry()
+            elif action == "nsfw_summary":
+                await handle_nsfw_summary_edit(data)
+            elif action == "intro":
                 await handle_intro()
             elif action == "regenerate":
                 await handle_regenerate()
@@ -2894,7 +3048,7 @@ async def websocket_endpoint(websocket: WebSocket):
             await chat_hub.send_or_queue({
                 "type": "error",
                 "code": "turn_failed",
-                "message": "The turn failed unexpectedly.",
+                "message": str(exc) if isinstance(exc, (nsfw.ContextPreparationError, ValueError)) else "The turn failed unexpectedly.",
                 "detail": str(exc),
                 "state": session_manager.state,
             })
@@ -2903,7 +3057,10 @@ async def websocket_endpoint(websocket: WebSocket):
             # died (the handlers above report their own errors and return
             # normally) still fires on_turn_stopped. A no-op whenever the turn
             # already stopped as "completed" or "cancelled".
-            await engine.dispatch_turn_stopped(session_manager.state, "error")
+            try:
+                await engine.dispatch_turn_stopped(session_manager.state, "error")
+            finally:
+                scope.__exit__(None, None, None)
 
     # Turns run as a cancellable task (held by the hub, not this connection)
     # so the receive loop stays responsive: a {"action": "stop"} message can
@@ -2994,6 +3151,8 @@ async def get_active_provider():
 
 @app.put("/api/providers/active")
 async def set_active_provider(body: dict):
+    if chat_hub.turn_running():
+        raise HTTPException(status_code=409, detail="Wait for the current operation to finish.")
     provider_id = body.get("provider_id", "")
     if not provider_id:
         raise HTTPException(status_code=400, detail="provider_id is required")
@@ -3014,6 +3173,8 @@ async def get_provider_config(provider_id: str):
 
 @app.put("/api/providers/{provider_id}/config")
 async def update_provider_config(provider_id: str, request: ProviderUpdateRequest):
+    if chat_hub.turn_running():
+        raise HTTPException(status_code=409, detail="Wait for the current operation to finish.")
     try:
         provider_manager.save_config(provider_id, request.config)
         return {"id": provider_id, "config": provider_manager.get_config(provider_id)}

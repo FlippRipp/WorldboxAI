@@ -504,3 +504,14 @@ PROVIDERS = {
         ],
     },
 }
+
+# Optional adventure override; credentials remain owned by the active provider.
+for _definition in PROVIDERS.values():
+    _definition["fields"]["nsfw_model"] = {
+        "type": "text", "label": "NSFW Model", "default": "",
+        "description": "Manually selected model for narration and supporting adventure calls in NSFW mode.",
+    }
+PROVIDERS["openrouter"]["fields"]["openrouter_nsfw_provider"] = {
+    "type": "text", "label": "NSFW Provider", "default": "",
+    "description": "Optional upstream provider for the NSFW model.",
+}

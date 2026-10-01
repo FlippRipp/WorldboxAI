@@ -4,6 +4,8 @@
 
 🌐 **[Project page](https://flippripp.github.io/WorldboxAI/)** · 📚 [Documentation](docs/index.md) · 🚀 [Quick Start](#quick-start)
 
+**Manual NSFW mode:** [model switching, non-graphic summaries, and preserved story history](docs/nsfw-mode.md).
+
 ![WorldBox banner](site/img/banner.jpg)
 
 ## The story is written by an AI. The rules are not.

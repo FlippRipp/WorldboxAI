@@ -28,6 +28,7 @@ class LLMCallRecord:
 
 
 CALL_TYPE_LABELS: dict[str, str] = {
+    "nsfw_summary": "Non-graphic context",
     "storyteller": "Storyteller",
     "reader": "Reader",
     "embedding": "Embedding",

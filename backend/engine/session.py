@@ -4,6 +4,7 @@ from typing import Any, Optional
 import json
 import re
 import shutil
+from backend.engine import nsfw
 
 from backend.engine.save_manager import SaveManager
 from backend.engine.prompt_pipeline import PromptCompiler, STORY_STYLE_FIELDS
@@ -71,6 +72,7 @@ class GameSessionManager:
             "last_prompt_trace": [],
             "turn": 0,
             "story_style": {},
+            "nsfw": nsfw.empty(),
         }
 
     def _require_active_save(self):
@@ -241,6 +243,7 @@ class GameSessionManager:
             "current_context": [],
             "history": history,
             "chat_messages": chat_messages,
+            "nsfw": saved_state.get("core", {}).get("nsfw", nsfw.empty()),
             "prompt_pipeline": self.prompt_compiler.normalize_pipeline(prompt_pipeline),
             "continue_prompt": self.save_manager.load_continue_prompt(),
             "last_prompt_trace": [],
@@ -272,6 +275,8 @@ class GameSessionManager:
             with open(scenario_file, "r", encoding="utf-8") as f:
                 state["scenario_data"] = _json.load(f)
 
+        nsfw.ensure(state)
+        state["nsfw"].pop("preparing", None)
         return state
 
     def set_input(self, input_text: str):
@@ -307,6 +312,7 @@ class GameSessionManager:
         previous_history = self.state.get("history", [])
         final_history = final_state.get("history", previous_history)
         assistant_text = final_history[-1] if len(final_history) > len(previous_history) and final_history else None
+        nsfw.ensure(self.state)
         chat_messages = list(self.state.get("chat_messages", []))
         now = datetime.now(timezone.utc).isoformat()
         if user_text:
@@ -337,6 +343,11 @@ class GameSessionManager:
             "revealed_node_ids": final_state.get("revealed_node_ids", self.state.get("revealed_node_ids", [])),
             "sticky_world_entries": final_state.get("sticky_world_entries", self.state.get("sticky_world_entries", {})),
         }
+        if nsfw.current():
+            self.state["nsfw"] = nsfw.current().data
+        nsfw.ensure(self.state)
+        nsfw.record_turn(self.state, chat_messages[len(chat_messages) - (int(bool(user_text)) + int(bool(assistant_text))):] if user_text or assistant_text else [])
+        self.state["nsfw"]["failed_input"] = None
         turn = self.state.get("turn", 0)
         self.save_manager.save_turn(self.active_save_id, self.state, turn)
         return self.state

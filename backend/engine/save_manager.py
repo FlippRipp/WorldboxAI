@@ -195,6 +195,10 @@ class SaveManager:
         else:
             state["core"]["chat_messages"] = []
 
+        nsfw_path = save_path / "Core" / "nsfw.json"
+        if nsfw_path.exists():
+            state["core"]["nsfw"] = json.loads(nsfw_path.read_text(encoding="utf-8"))
+
         module_configs_path = save_path / "Core" / "module_configs.json"
         if module_configs_path.exists():
             with open(module_configs_path, "r", encoding="utf-8") as f:
@@ -247,6 +251,12 @@ class SaveManager:
         if "chat_messages" in state:
             with open(save_path / "Core" / "chat_messages.json", "w", encoding="utf-8") as f:
                 json.dump(state["chat_messages"], f, indent=2)
+
+        if "nsfw" in state:
+            nsfw_path = save_path / "Core" / "nsfw.json"
+            pending = nsfw_path.with_suffix(".pending")
+            pending.write_text(json.dumps(state["nsfw"], ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(pending, nsfw_path)
 
         if "module_configs" in state:
             with open(save_path / "Core" / "module_configs.json", "w", encoding="utf-8") as f:
@@ -386,7 +396,7 @@ class SaveManager:
             chars_dir = save_path / "Characters"
             mods_dir = save_path / "Module_States"
             core_dir = save_path / "Core"
-            for file in ["metadata.json", "chat_history.json", "chat_messages.json", "prompt_pipeline.json"]:
+            for file in ["metadata.json", "chat_history.json", "chat_messages.json", "prompt_pipeline.json", "nsfw.json"]:
                 fpath = core_dir / file
                 if fpath.exists():
                     zipf.write(fpath, os.path.join("Core", file))
@@ -441,6 +451,8 @@ class SaveManager:
         with zipfile.ZipFile(snap_path, 'r') as zipf:
             names = {n.replace("\\", "/") for n in zipf.namelist()}
             zipf.extractall(save_path)
+        if "Core/nsfw.json" not in names:
+            (save_path / "Core" / "nsfw.json").unlink(missing_ok=True)
         meta = dict(live_meta)
         if "Core/metadata.json" in names:
             try:
@@ -523,7 +535,7 @@ class SaveManager:
         dest_zip.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(dest_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
             core_dir = save_path / "Core"
-            for file in ["metadata.json", "chat_history.json", "chat_messages.json", "prompt_pipeline.json"]:
+            for file in ["metadata.json", "chat_history.json", "chat_messages.json", "prompt_pipeline.json", "nsfw.json"]:
                 fpath = core_dir / file
                 if fpath.exists():
                     zipf.write(fpath, os.path.join("Core", file))
@@ -539,7 +551,10 @@ class SaveManager:
         for f in (save_path / "Characters").glob("*.json"): f.unlink()
         for f in (save_path / "Module_States").glob("*.json"): f.unlink()
         with zipfile.ZipFile(src_zip, 'r') as zipf:
+            names = {n.replace('\\', '/') for n in zipf.namelist()}
             zipf.extractall(save_path)
+        if 'Core/nsfw.json' not in names:
+            (save_path / 'Core' / 'nsfw.json').unlink(missing_ok=True)
         self._pack_save(save_id)
         return self.load_save(save_id)
 

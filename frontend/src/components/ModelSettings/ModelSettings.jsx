@@ -81,6 +81,7 @@ function ConfirmationDialog({ message, onConfirm, onCancel }) {
 const MODEL_SLOTS = [
   { key: 'storyteller_model', label: 'Storyteller Model', orProviderKey: 'openrouter_storyteller_provider', fallback: false },
   { key: 'storyteller_fallback_models', label: 'Fallback Models', orProviderKey: 'openrouter_fallback_provider', fallback: true },
+  { key: 'nsfw_model', label: 'NSFW Model', orProviderKey: 'openrouter_nsfw_provider', fallback: false },
   { key: 'reader_model', label: 'Reader Model', orProviderKey: 'openrouter_reader_provider', fallback: false },
   { key: 'embedding_model', label: 'Embedding Model', orProviderKey: 'openrouter_embedding_provider', fallback: false, embedding: true },
   { key: 'module_fast_model', label: 'Module Fast Model', orProviderKey: 'openrouter_fast_provider', fallback: false },

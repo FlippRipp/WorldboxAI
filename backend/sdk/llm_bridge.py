@@ -2,6 +2,7 @@
 import asyncio
 import os
 import logging
+from backend.engine import nsfw
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,9 @@ class LLMBridge:
                 await self._inspector.end_call(cid, prompt, cancelled=True)
             raise
         except Exception as e:
+            if nsfw.current() and nsfw.current().enabled:
+                nsfw.current().error = e
+                raise
             logger.error(f"Module LLM call failed (model={model}): {e}")
             return ""
 

@@ -6,6 +6,7 @@ import asyncio
 from typing import Any
 from litellm import acompletion, aembedding
 from backend.engine.providers import PROVIDERS
+from backend.engine import nsfw
 from backend.engine.schemas import MemorySummary, MemoryImportance
 from backend.engine.llm_inspector import LLMInspector
 
@@ -90,6 +91,8 @@ class LLMService:
         self.mode = (mode or os.getenv("LLM_MODE", "live")).strip().lower()
         self.storyteller_model = "gemini/gemini-2.5-flash"
         self.storyteller_fallback_models = []
+        self.nsfw_model = ""
+        self._nsfw_provider_route = ""
         self.reader_model = "gemini/gemini-2.5-flash"
         self.embedding_model = "gemini/gemini-embedding-001"
         self.module_fast_model = "gemini/gemini-2.5-flash"
@@ -157,6 +160,9 @@ class LLMService:
                     val = str(val).strip().lower()
                 setattr(self, attr, val)
 
+        self.nsfw_model = str(config.get("nsfw_model") or "").strip()
+        self._nsfw_provider_route = (str(config.get("openrouter_nsfw_provider") or config.get("openrouter_provider") or "").strip() if provider_id == "openrouter" else "")
+
         # Slots the provider config left empty must never keep another
         # provider's leftover/default model — degrade to this provider's
         # reader model instead so every call stays on the configured provider.
@@ -210,7 +216,11 @@ class LLMService:
     def _provider_route_kwargs(self, model: str) -> dict:
         """Return litellm kwargs that pin the OpenRouter upstream provider for
         ``model`` via the request-body ``provider`` routing param, or ``{}``."""
-        prov = self._or_provider_routes.get(model)
+        context = nsfw.current()
+        if context and (context.enabled or nsfw.preparing()) and model == context.model:
+            prov = context.provider_route
+        else:
+            prov = self._or_provider_routes.get(model)
         if not prov:
             return {}
         return {"extra_body": {"provider": {"order": [prov]}}}
@@ -296,7 +306,8 @@ class LLMService:
                 reason = "web search is toggled off in Model Settings"
             raise LLMProviderError(f"Web search unavailable: {reason}")
 
-        model = self.module_fast_model
+        context = nsfw.current()
+        model = context.require_model() if context and context.enabled else self.module_fast_model
         # OpenRouter's base search price includes up to 10 results; more is
         # billed per result — a hard external API constraint, clamped here.
         max_results = max(1, min(int(max_results or 5), 10))
@@ -320,6 +331,8 @@ class LLMService:
                 "plainly. Never invent facts the results do not support.")},
             {"role": "user", "content": query},
         ]
+        if context:
+            messages = await context.messages(messages)
         _llm_log_req("web_search", model, messages,
                      f"plugins: web/exa | max_results: {max_results}"
                      + (f" | domains: {domains}" if domains else ""))
@@ -361,12 +374,19 @@ class LLMService:
                 await self.inspector.end_call(cid, messages, "", error=str(e))
             raise
 
-    async def simple_completion(self, messages: list[dict[str, str]], model: str = None, max_tokens: int = None, temperature: float = None, top_p: float = None, response_format: Any = None, inspector_ctx: dict = None, return_reasoning: bool = False, return_usage: bool = False):
+    async def simple_completion(self, messages: list[dict[str, str]], model: str = None, max_tokens: int = None, temperature: float = None, top_p: float = None, response_format: Any = None, inspector_ctx: dict = None, return_reasoning: bool = False, return_usage: bool = False, _context_prepared: bool = False):
         # NOTE: `max_tokens` should NOT be used for content generation. It cuts off LLM output
         # mid-sentence and causes bugs. Prefer prompt-level output control instead
         # (e.g. "respond ONLY with valid JSON", "keep to one sentence", "3 paragraphs of prose").
         # This parameter remains for backward compatibility but callers should avoid passing it.
         model = model or self.reader_model
+        context = nsfw.current()
+        if context and not nsfw.preparing():
+            context.check()
+            if context.enabled:
+                model = context.require_model()
+            if not _context_prepared:
+                messages = await context.messages(messages)
         kwargs = {"model": model, "messages": messages}
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
@@ -394,7 +414,7 @@ class LLMService:
             cid = await self.inspector.start_call(
                 call_type=ctx.get("call_type", "reader"),
                 model=model,
-                step=ctx.get("step", "simple_completion"),
+                step=ctx.get("step", "simple_completion") + (" [NSFW]" if context and context.enabled and not nsfw.preparing() else ""),
                 module_source=ctx.get("module_source", ""),
                 input_data=messages,
             )
@@ -403,6 +423,8 @@ class LLMService:
             response = await acompletion(**kwargs)
             message = response.choices[0].message
             content = message.content or ""
+            if context and context.enabled and not nsfw.preparing() and not content.strip():
+                raise LLMProviderError("The NSFW model returned no text.")
             reasoning = getattr(message, 'reasoning_content', '') or ''
             usage = response.usage.to_dict() if hasattr(response, 'usage') else {}
             _llm_log_res("simple_completion", content, usage, response.choices[0].finish_reason)
@@ -425,9 +447,14 @@ class LLMService:
         except Exception as e:
             if self.inspector and cid:
                 await self.inspector.end_call(cid, messages, "", error=str(e))
+            if context and context.enabled:
+                context.error = e
             raise
 
     async def get_embedding(self, text: str, inspector_ctx: dict = None) -> list[float]:
+        context = nsfw.current()
+        if context and (context.enabled or context.data["sections"]) and not nsfw.preparing():
+            text = await context.rewrite(text, "embedding")
         ctx = inspector_ctx or {}
         cid = None
         if self.inspector:
@@ -480,6 +507,9 @@ class LLMService:
         list input). Falls back to per-text calls if the provider rejects the batch."""
         if not texts:
             return []
+        context = nsfw.current()
+        if context and (context.enabled or context.data["sections"]):
+            return [await self.get_embedding(t, inspector_ctx) for t in texts]
         if self.mode == "mock":
             return [await self.get_embedding(t, inspector_ctx=inspector_ctx) for t in texts]
 
@@ -528,6 +558,9 @@ class LLMService:
         where ``reasoning`` is the model's thinking (separate channel or a <think> block,
         empty when the model produced none), ``model`` is the model that answered (after
         fallbacks), and ``usage`` is the provider's token usage dict ({} when unreported)."""
+        context = nsfw.current()
+        if context:
+            messages = await context.messages(messages, preserve_last_user=True)
         ctx = inspector_ctx or {}
         if self.mode == "mock":
             story = self._mock_story_from_messages(messages)
@@ -588,6 +621,10 @@ Respond ONLY with valid JSON. Do not include markdown formatting like ```json.
             except Exception as e:
                 print(f"Failed to parse Reader JSON on attempt {attempt + 1}: {e}")
 
+        if nsfw.current() and nsfw.current().enabled:
+            error = nsfw.ContextPreparationError("The NSFW model did not return valid game-state updates.")
+            nsfw.current().error = error
+            raise error
         return {}
 
     async def summarize_memory(self, text: str) -> str:
@@ -705,7 +742,11 @@ Return a JSON object with:
 
     async def _complete_story_with_fallbacks(self, messages: list[dict[str, str]], streaming_callback=None, inspector_ctx: dict = None, reasoning_callback=None) -> dict[str, str]:
         errors = []
-        models = [self.storyteller_model] + [model for model in self.storyteller_fallback_models if model != self.storyteller_model]
+        context = nsfw.current()
+        if context:
+            context.check()
+        models = ([context.require_model()] if context and context.enabled else
+                  [self.storyteller_model] + [model for model in self.storyteller_fallback_models if model != self.storyteller_model])
         # Only stream on the very first attempt. If it fails (even after partial tokens
         # were already sent to the client), retry without streaming to avoid sending a
         # second response stream on top of the first.
@@ -745,7 +786,7 @@ Return a JSON object with:
             cid = await self.inspector.start_call(
                 call_type=ctx.get("call_type", "storyteller"),
                 model=model,
-                step=ctx.get("step", "storyteller"),
+                step=ctx.get("step", "storyteller") + (" [NSFW]" if nsfw.current() and nsfw.current().enabled else ""),
                 module_source=ctx.get("module_source", ""),
                 streaming=bool(streaming_callback),
                 input_data=messages,
@@ -779,6 +820,8 @@ Return a JSON object with:
                     if content:
                         full_text += content
                         await streaming_callback(content)
+                if nsfw.current() and nsfw.current().enabled and not full_text.strip():
+                    raise LLMProviderError("The NSFW model returned no story text.")
                 full_text, full_reasoning = _split_think(full_text, full_reasoning)
                 _llm_log_res("storyteller_stream", full_text, usage or None)
                 if self.inspector and cid:
@@ -797,6 +840,7 @@ Return a JSON object with:
                 top_p=self._top_p,
                 max_tokens=self._max_output_tokens,
                 return_usage=True,
+                _context_prepared=True,
             )
             result, reasoning = _split_think(result, reasoning)
             if reasoning_callback and reasoning:

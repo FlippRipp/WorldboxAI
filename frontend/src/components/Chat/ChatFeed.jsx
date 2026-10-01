@@ -195,7 +195,7 @@ function SwipeControls({ swipes, busy, onPrev, onNext, onRegenerate }) {
 // parent must pass identity-stable props: reconciled `message` objects,
 // ref-backed handler proxies, and per-message `swipes`/`editRequest` (null
 // except on the block they target).
-const MessageBlock = memo(function MessageBlock({ message, index, isLastAssistant, swipes, busy, editRequest, messageTurn, onBranchMessage, onRegenerate, onSwipe, onEditMessage, onDeleteMessage, modules, slotState, moduleConfigs }) {
+const MessageBlock = memo(function MessageBlock({ message, index, isLastAssistant, swipes, busy, editRequest, messageTurn, onBranchMessage, onRegenerate, onNsfwRetry, onSwipe, onEditMessage, onDeleteMessage, modules, slotState, moduleConfigs }) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system' || message.error;
   const styleKey = isSystem ? 'system' : isUser ? 'user' : 'assistant';
@@ -307,6 +307,10 @@ const MessageBlock = memo(function MessageBlock({ message, index, isLastAssistan
           </div>
         )}
 
+        {isLastAssistant && showSwipes && !editing && <button
+          disabled={busy} onClick={onNsfwRetry}
+          className="mt-3 text-xs text-amber-200 hover:text-amber-100 disabled:opacity-50">Retry in NSFW mode</button>}
+
         {/* Module-contributed per-message content (e.g. story illustrations). */}
         {!isUser && !isSystem && !editing && modules?.length > 0 && (
           <SlotRenderer
@@ -360,7 +364,7 @@ function PostProcessingLine({ status }) {
   );
 }
 
-export function ChatFeed({ messages, currentStream, currentReasoning, swipes, busy, postProcessing, pipelineStatus, editRequest, currentTurn, density = 'comfortable', scrollControlRef, onUserScroll, onBranchMessage, onRegenerate, onSwipe, onEditMessage, onDeleteMessage, modules, slotState, moduleConfigs }) {
+export function ChatFeed({ messages, currentStream, currentReasoning, swipes, busy, postProcessing, pipelineStatus, editRequest, currentTurn, density = 'comfortable', scrollControlRef, onUserScroll, onBranchMessage, onRegenerate, onNsfwRetry, onSwipe, onEditMessage, onDeleteMessage, modules, slotState, moduleConfigs }) {
   // Auto-scroll the feed as messages/tokens grow, but only while the user is at
   // the bottom; scrolling up cancels it until they return to the bottom.
   const feed = useStickToBottom([messages, currentStream, currentReasoning], { onUserScroll });
@@ -369,10 +373,11 @@ export function ChatFeed({ messages, currentStream, currentReasoning, swipes, bu
   // MessageBlocks don't re-render when a parent render recreates the
   // callbacks. The ref always holds the latest ones.
   const handlersRef = useRef(null);
-  handlersRef.current = { onBranchMessage, onRegenerate, onSwipe, onEditMessage, onDeleteMessage };
+  handlersRef.current = { onBranchMessage, onRegenerate, onNsfwRetry, onSwipe, onEditMessage, onDeleteMessage };
   const stable = useRef({
     onBranchMessage: (turn) => handlersRef.current.onBranchMessage?.(turn),
     onRegenerate: () => handlersRef.current.onRegenerate?.(),
+    onNsfwRetry: () => handlersRef.current.onNsfwRetry?.(),
     onSwipe: (i) => handlersRef.current.onSwipe?.(i),
     onEditMessage: (i, content) => handlersRef.current.onEditMessage?.(i, content),
     onDeleteMessage: (i) => handlersRef.current.onDeleteMessage?.(i),
@@ -529,6 +534,7 @@ export function ChatFeed({ messages, currentStream, currentReasoning, swipes, bu
               editRequest={editRequest?.index === idx ? editRequest : null}
               messageTurn={messageTurns[idx]}
               onBranchMessage={stable.onBranchMessage}
+              onNsfwRetry={stable.onNsfwRetry}
               onRegenerate={stable.onRegenerate}
               onSwipe={stable.onSwipe}
               onEditMessage={stable.onEditMessage}

@@ -216,7 +216,12 @@ export function useWebSocket(onStateChange, onLLMCall) {
         setPipelineStatus(null);
         streamRef.current = '';
         reasoningRef.current = '';
-        setMessages(prev => [...prev, { role: 'system', content: data.message || 'Turn failed.', error: true }]);
+        if (data.state) {
+          if (Array.isArray(data.state.chat_messages)) setMessages(mapServerMessages(data.state.chat_messages, data.state.turn));
+          setSwipes(data.state.swipes || null);
+          onStateChangeRef.current?.(data.state);
+        }
+        setMessages(prev => [...prev, { role: 'system', content: data.detail || data.message || 'Turn failed.', error: true }]);
         if (data.onError) data.onError(data);
       } else if (data.type === 'generation_snapshot') {
         // A turn survived a disconnect (or page reload) and is still running
@@ -328,6 +333,14 @@ export function useWebSocket(onStateChange, onLLMCall) {
     }
   }, [resetStream]);
 
+  const sendNsfwAction = useCallback((action, payload = {}) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setPostProcessing(true);
+      if (action === 'nsfw_mode' && !payload.enabled) setPipelineStatus({ stage: 'nsfw_summary', label: 'Preparing story summary...' });
+      wsRef.current.send(JSON.stringify({ action, ...payload }));
+    }
+  }, []);
+
   const sendContinue = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       // A "continue" turn injects no player message, so don't add a user bubble;
@@ -389,6 +402,6 @@ export function useWebSocket(onStateChange, onLLMCall) {
   return {
     isConnected, isReconnecting, messages, currentStream, currentReasoning, swipes, postProcessing, pipelineStatus, restoredInput,
     commandResult, clearCommandResult,
-    sendMessage, sendCommand, sendRegenerate, sendContinue, sendIntro, sendStop, setMessages, setSwipes, applyServerState,
+    sendNsfwAction, sendMessage, sendCommand, sendRegenerate, sendContinue, sendIntro, sendStop, setMessages, setSwipes, applyServerState,
   };
 }
