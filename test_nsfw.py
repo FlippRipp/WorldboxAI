@@ -36,6 +36,8 @@ def fake_provider(monkeypatch, calls):
         if kwargs["model"] == "alternate":
             if kwargs["messages"][0]["content"].startswith("Rewrite"):
                 content = kwargs["messages"][-1]["content"].replace(SECRET, SAFE)
+                if "complete archived context and a fields list" in kwargs["messages"][0]["content"]:
+                    content = json.dumps({"fields": json.loads(content)["fields"]})
             else:
                 content = "{}"
         else:
@@ -108,6 +110,153 @@ def test_all_outbound_context_is_non_graphic_and_originals_survive(monkeypatch):
     assert state["history"] == before["history"]
     assert state["chat_messages"] == before["chat_messages"]
     assert all(SECRET not in json.dumps(c["messages"]) for c in calls if c["model"] != "alternate")
+
+
+def test_derived_notes_are_one_contextual_batch_and_reused(monkeypatch):
+    calls = []
+    fake_provider(monkeypatch, calls)
+    state = adventure()
+    hero = state["characters"]["hero"]
+    hero.update(name="Alex", race="human", gender="female", status="active",
+                personality=["friendly", SECRET], short_appearance="A weathered traveller.")
+    state["module_data"] = {"wb_plot_director": {"direction": {"premise": SECRET + " premise"},
+                                              "momentum": "building", "suspended": False}}
+    nsfw.record_turn(state, [])
+    state["turn"] = 2
+    nsfw.record_turn(state, [])
+    canonical = deepcopy(state)
+    llm = service()
+
+    async def run():
+        with nsfw.operation(state, llm) as context:
+            await context.prepare_derived()
+            assert len(calls) == 1
+            payload = json.loads(calls[0]["messages"][-1]["content"])
+            assert payload["context"] == state["nsfw"]["sections"][0]["originals"]
+            assert len(payload["context"]) == 2
+            assert {f["text"] for f in payload["fields"]} == {
+                "friendly", SECRET, "A weathered traveller.", SECRET + " premise"}
+            assert not any(f["text"] in {"human", "female", "active", "building"} for f in payload["fields"])
+            await context.prepare_derived()
+            assert len(calls) == 1
+        state["nsfw"]["enabled"] = False
+        with nsfw.operation(state, llm) as context:
+            assert (await context.messages([{"role": "system", "content": SECRET}]))[0]["content"] == SAFE
+            assert len(calls) == 1  # prepared prose needs no second model call
+            outgoing = await context.messages([{"role": "system", "content": "Personality: " + SECRET + "\nHP: 8"}])
+            assert outgoing[0]["content"] == "Personality: " + SAFE + "\nHP: 8"
+            assert SECRET not in calls[-1]["messages"][-1]["content"]
+            assert "__WB_PREPARED_" in calls[-1]["messages"][-1]["content"]
+            count = len(calls)
+            await context.messages([{"role": "system", "content": "Personality: " + SECRET + "\nHP: 8"}])
+            assert len(calls) == count
+        # Persisted representations work after reload, not just within one call.
+        reloaded = json.loads(json.dumps(state))
+        with nsfw.operation(reloaded, llm) as context:
+            assert (await context.messages([{"role": "system", "content": SECRET}]))[0]["content"] == SAFE
+            assert len(calls) == count
+        nsfw.enable(state)
+        with nsfw.operation(state, llm) as context:
+            assert (await context.messages([{"role": "system", "content": SECRET}]))[-1]["content"] == SECRET
+            assert len(calls) == count
+    asyncio.run(run())
+    for key in ("characters", "module_data", "history", "chat_messages"):
+        assert state[key] == canonical[key]
+
+
+def test_labels_only_state_does_not_make_derived_calls(monkeypatch):
+    calls = []
+    fake_provider(monkeypatch, calls)
+    state = adventure()
+    state["nsfw"]["sections"][0]["originals"] = {
+        "1": {"characters": {"hero": {"id": "hero", "name": "Alex", "race": "human", "hp": 8,
+                                      "status": "active", "inventory_ids": ["sword"]}}}}
+    asyncio.run(nsfw.AdventureContext(state, service()).prepare_derived())
+    assert calls == []
+
+
+def test_derived_revision_rebuilds_and_legacy_word_cache_is_ignored(monkeypatch):
+    calls = []
+    fake_provider(monkeypatch, calls)
+    state = adventure()
+    state["nsfw"]["representations"][nsfw.digest(["note", SECRET])] = {
+        "source": SECRET, "text": "obsolete per-word rewrite", "purpose": "note"}
+    async def run():
+        context = nsfw.AdventureContext(state, service())
+        await context.prepare_derived()
+        assert len(calls) == 1
+        section = state["nsfw"]["sections"][0]
+        section["originals"]["1"]["characters"]["hero"]["personality"] = SECRET + " revised"
+        assert not list(context.prepared_pairs())
+        await context.prepare_derived()
+        assert len(calls) == 2
+        assert await context.prepare_prompt(SECRET + " revised") == SAFE + " revised"
+        assert len(calls) == 2
+        assert section["prepared_notes"]["fields"][0]["source"] == SECRET + " revised"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("bad_result", [
+    "not JSON", '{"fields": []}',
+    '{"fields": [{"path": ["1", "characters", "hero", "hp"], "text": "9"}]}',
+    '{"fields": [{"path": ["1", "characters", "hero", "personality"], "text": ""}]}',
+])
+def test_invalid_derived_output_is_not_cached_or_committed(bad_result):
+    state = adventure()
+    before = deepcopy(state)
+    async def completion(*args, **kwargs):
+        return bad_result
+    llm = SimpleNamespace(nsfw_model="alternate", simple_completion=completion)
+    with pytest.raises(nsfw.ContextPreparationError):
+        asyncio.run(nsfw.AdventureContext(state, llm).prepare_derived())
+    assert state == before
+
+
+def test_manual_summary_is_reused_verbatim_and_placeholder_loss_fails(monkeypatch):
+    calls = []
+    fake_provider(monkeypatch, calls)
+    state = adventure()
+    llm = service()
+    async def run():
+        context = nsfw.AdventureContext(state, llm)
+        await context.prepare_sections()
+        section = state["nsfw"]["sections"][0]
+        section["summary"] = "Player's authoritative correction."
+        section["manual"] = True
+        text = "Story events (non-graphic summary):\n" + section["summary"]
+        assert await context.prepare_prompt(text) == text
+        assert section["summary"] not in calls[-1]["messages"][-1]["content"]
+        async def damaged(*args, **kwargs):
+            return "Model omitted the prepared context."
+        llm.simple_completion = damaged
+        with pytest.raises(nsfw.ContextPreparationError, match="placeholder"):
+            await context.prepare_prompt("New prefix: " + section["summary"])
+    asyncio.run(run())
+
+
+def test_prepared_notes_preserve_json_escaping_and_do_not_replace_partial_words(monkeypatch):
+    calls = []
+    fake_provider(monkeypatch, calls)
+    state = adventure()
+    section = state["nsfw"]["sections"][0]
+    safe_note = 'An accented name: Renée.\nA promise: "Return tomorrow."'
+    section["prepared_notes"] = {
+        "revision": nsfw.digest(section["originals"]),
+        "fields": [{"path": ["1", "characters", "hero", "personality"], "source": SECRET, "text": safe_note}],
+    }
+    async def run():
+        context = nsfw.AdventureContext(state, service())
+        assert await context.prepare_prompt(SECRET) == safe_note
+        assert calls == []
+        for ascii_only in (False, True):
+            source = json.dumps({"notes": SECRET, "hp": 8}, ensure_ascii=ascii_only)
+            result = await context.prepare_prompt(source)
+            assert json.loads(result) == {"notes": safe_note, "hp": 8}
+            # The fallback receives valid JSON and never the original note.
+            assert json.loads(calls[-1]["messages"][-1]["content"])["hp"] == 8
+        await context.prepare_prompt("prefix" + SECRET + "suffix")
+        assert "__WB_PREPARED_" not in calls[-1]["messages"][-1]["content"]
+    asyncio.run(run())
 
 
 def test_embedding_keeps_embedding_model_but_not_original_text(monkeypatch):
@@ -217,6 +366,9 @@ def ws_client(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "chat_hub", server.ChatHub())
     monkeypatch.setattr(server.engine.llm, "nsfw_model", "alternate")
     async def completion(*args, **kwargs):
+        if kwargs.get("inspector_ctx", {}).get("step") == "nsfw:notes_v2":
+            payload = json.loads(args[0][-1]["content"])
+            return json.dumps({"fields": [{**f, "text": SAFE} for f in payload["fields"]]})
         return SAFE
     monkeypatch.setattr(server.engine.llm, "simple_completion", completion)
     async def pipeline(state):
