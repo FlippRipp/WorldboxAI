@@ -4767,10 +4767,12 @@ def _spawn_generation(*, save_id: str, turn: int, narration: str, history: str,
 
     # Hook tasks inherit their adventure context. Router-started tasks capture
     # the requested save's mode, so switching stories later cannot reroute them.
+    # Studio images use a synthetic history id, not an adventure save.
     scope_state = None
     engine = _services.get("engine")
     manager = _services.get("session_manager")
-    if adventure_nsfw.current() is None and engine is not None and manager is not None and save_id:
+    if (adventure_nsfw.current() is None and engine is not None
+            and manager is not None and save_id and save_id != "__studio__"):
         if save_id == manager.active_save_id:
             scope_state = _context_copy(manager.state)
         else:

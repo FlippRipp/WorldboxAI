@@ -2829,6 +2829,71 @@ def test_generate_endpoint_studio_override_and_busy(tmp_path):
     assert record["image_prompt"] == "a red door"
 
 
+@pytest.mark.parametrize("refine", [False, True])
+@pytest.mark.parametrize("active_save_id", [None, "another_adventure"])
+def test_studio_generate_with_session_services_does_not_load_a_save(
+        tmp_path, monkeypatch, refine, active_save_id):
+    backend = _load_backend(tmp_path)
+    _enable_local(backend)
+    save_loads = []
+    scopes = []
+    pending = []
+
+    def load_save(save_id):
+        save_loads.append(save_id)
+        raise FileNotFoundError(f"Save {save_id} not found.")
+
+    async def write_prompt(prompt, model_preference="balanced", max_tokens=None):
+        scopes.append(("prompt", backend.adventure_nsfw.current()))
+        return "a refined moonlit castle"
+
+    async def generate(cfg, prompt):
+        scopes.append(("image", backend.adventure_nsfw.current()))
+        return b"studio image", "png"
+
+    append_record = backend._append_record
+
+    async def capture_pending(record):
+        pending.append((record["save_id"], record["status"]))
+        await append_record(record)
+
+    llm = SimpleNamespace(generate=write_prompt, _current_module="")
+    manager = SimpleNamespace(
+        active_save_id=active_save_id,
+        state={"nsfw": {**backend.adventure_nsfw.empty(), "enabled": True}},
+        save_manager=SimpleNamespace(load_save=load_save))
+    backend.set_services({
+        "data_dir": str(tmp_path),
+        "engine": SimpleNamespace(sdk=SimpleNamespace(llm=llm), llm=llm),
+        "session_manager": manager,
+    })
+    monkeypatch.setattr(backend, "_local_generate", generate)
+    monkeypatch.setattr(backend, "_append_record", capture_pending)
+
+    with _client(backend) as client:
+        response = client.post("/generate", json={
+            "save_id": "__studio__", "prompt_override": "castle by the sea",
+            "refine": refine,
+        })
+        assert response.status_code == 200
+        record_id = response.json()["record_id"]
+        for _ in range(100):
+            record = next((r for r in backend._read_index()
+                           if r["id"] == record_id), None)
+            if record and record["status"] in ("done", "error"):
+                break
+            time.sleep(0.02)
+
+    assert save_loads == []
+    assert pending == [("__studio__", "pending")]
+    assert record["status"] == "done", record.get("error")
+    assert record["save_id"] == "__studio__"
+    assert record["image_prompt"] == (
+        "a refined moonlit castle" if refine else "castle by the sea")
+    assert scopes == ([("prompt", None)] if refine else []) + [("image", None)]
+    assert (backend._data_dir() / "images" / record["filename"]).read_bytes() == b"studio image"
+
+
 def test_generate_retry_replaces_failed_record(tmp_path):
     backend = _load_backend(tmp_path)
     _enable(backend)
