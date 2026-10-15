@@ -3219,6 +3219,11 @@ async def fetch_provider_models(provider_id: str):
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@app.get("/api/providers/openrouter/endpoints")
+async def fetch_openrouter_endpoints(model: str):
+    return await provider_manager.fetch_openrouter_endpoints(model)
+
+
 @app.post("/api/providers/{provider_id}/preset")
 async def apply_provider_preset(provider_id: str, request: PresetApplyRequest):
     try:

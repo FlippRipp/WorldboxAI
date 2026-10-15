@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../../lib/api';
 import JevSettings from './JevSettings';
+import OpenRouterProviderSelect from './OpenRouterProviderSelect';
 
 const SELECT_CLASS = "w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-gray-200 text-sm focus:border-purple-500 focus:outline-none";
 const BTN_PRIMARY = "px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg text-sm font-medium transition-colors disabled:opacity-50";
@@ -103,6 +104,21 @@ export default function ModelSettings({ onBack, embedded = false }) {
   const [keyLocked, setKeyLocked] = useState(false);
   const [keyValue, setKeyValue] = useState('');
   const [connecting, setConnecting] = useState(false);
+  const endpointRequests = useRef(new Map());
+
+  const fetchOpenRouterProviders = useCallback((model, refresh = false) => {
+    const cache = endpointRequests.current;
+    if (!refresh && cache.has(model)) return cache.get(model);
+    const request = api.fetchOpenRouterProviders(model).then((result) => {
+      if (result.error) throw new Error(result.error);
+      return result.providers || [];
+    }).catch((error) => {
+      if (cache.get(model) === request) cache.delete(model);
+      throw error;
+    });
+    cache.set(model, request);
+    return request;
+  }, []);
 
   const loadProviders = useCallback(async () => {
     try {
@@ -262,24 +278,6 @@ export default function ModelSettings({ onBack, embedded = false }) {
   const presets = pdef.presets || [];
   const isOpenRouter = selectedId === 'openrouter';
 
-  const orProviders = useMemo(() => {
-    if (!isOpenRouter || models.length === 0) return [];
-    const set = new Set();
-    for (const m of models) {
-      if (m.provider) set.add(m.provider);
-    }
-    return [...set].sort();
-  }, [isOpenRouter, models]);
-
-  const orEmbeddingProviders = useMemo(() => {
-    if (!isOpenRouter || models.length === 0) return [];
-    const set = new Set();
-    for (const m of models) {
-      if (m.is_embedding && m.provider) set.add(m.provider);
-    }
-    return [...set].sort();
-  }, [isOpenRouter, models]);
-
   const getModelsForSlot = useCallback((slot) => {
     if (slot.embedding) {
       return models.filter(m => m.is_embedding);
@@ -414,19 +412,19 @@ export default function ModelSettings({ onBack, embedded = false }) {
                         <label className="text-sm text-gray-300">{slot.label}</label>
                         {fdef.description && <p className="text-xs text-gray-500 mb-1">{fdef.description}</p>}
                         {isOpenRouter && (
-                          <select
+                          <OpenRouterProviderSelect
+                            label={`${slot.label} provider`}
+                            modelValue={curVal}
+                            fallback
                             value={config[slot.orProviderKey] || ''}
-                            onChange={(e) => handleOrProviderChange(slot.orProviderKey, e.target.value)}
-                            className={`${SELECT_CLASS} mb-1`}
-                          >
-                            <option value="">Any provider (let OpenRouter decide)</option>
-                            {orProviders.map((p) => (
-                              <option key={p} value={p}>{p}</option>
-                            ))}
-                          </select>
+                            onChange={(provider) => handleOrProviderChange(slot.orProviderKey, provider)}
+                            fetchProviders={fetchOpenRouterProviders}
+                            className="mb-2"
+                          />
                         )}
                         <input
                           type="text"
+                          aria-label={slot.label}
                           value={curVal}
                           onChange={(e) => handleFieldChange(slot.key, e.target.value)}
                           className={`${SELECT_CLASS} font-mono`}
@@ -439,8 +437,9 @@ export default function ModelSettings({ onBack, embedded = false }) {
                     <div key={slot.key}>
                       <label className="text-sm text-gray-300">{slot.label}</label>
                       {fdef.description && <p className="text-xs text-gray-500 mb-1">{fdef.description}</p>}
-                      <div className="flex flex-col sm:flex-row gap-2">
+                      <div className="flex flex-col sm:flex-row items-start gap-2">
                         <select
+                          aria-label={slot.label}
                           value={curVal}
                           onChange={(e) => handleFieldChange(slot.key, e.target.value)}
                           className={`sm:flex-1 min-w-0 ${SELECT_CLASS} font-mono`}
@@ -453,16 +452,14 @@ export default function ModelSettings({ onBack, embedded = false }) {
                           ))}
                         </select>
                         {isOpenRouter && (
-                          <select
+                          <OpenRouterProviderSelect
+                            label={`${slot.label} provider`}
+                            modelValue={curVal}
                             value={config[slot.orProviderKey] || ''}
-                            onChange={(e) => handleOrProviderChange(slot.orProviderKey, e.target.value)}
-                            className={`sm:flex-1 min-w-0 ${SELECT_CLASS}`}
-                          >
-                            <option value="">Any provider (let OpenRouter decide)</option>
-                            {(slot.embedding ? orEmbeddingProviders : orProviders).map((p) => (
-                              <option key={p} value={p}>{p}</option>
-                            ))}
-                          </select>
+                            onChange={(provider) => handleOrProviderChange(slot.orProviderKey, provider)}
+                            fetchProviders={fetchOpenRouterProviders}
+                            className="w-full sm:flex-1 min-w-0"
+                          />
                         )}
                       </div>
                     </div>

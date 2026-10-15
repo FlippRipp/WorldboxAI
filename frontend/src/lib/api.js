@@ -141,6 +141,7 @@ export const api = {
   updateProviderConfig:   (id, config) => request(`/api/providers/${id}/config`, { method: 'PUT', body: JSON.stringify({ config }) }),
   testProvider:           (id) => request(`/api/providers/${id}/test`, { method: 'POST' }),
   fetchProviderModels:    (id) => request(`/api/providers/${id}/models`),
+  fetchOpenRouterProviders: (model) => request(`/api/providers/openrouter/endpoints?model=${encodeURIComponent(model)}`),
   applyProviderPreset:    (id, preset) => request(`/api/providers/${id}/preset`, { method: 'POST', body: JSON.stringify({ preset }) }),
 
   // Scenarios (basic story source)

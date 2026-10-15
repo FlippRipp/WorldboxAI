@@ -3,6 +3,7 @@ import os
 import logging
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from backend.engine.providers import PROVIDERS
 from backend.engine.jev import JevService
 
@@ -220,8 +221,8 @@ class ProviderManager:
                         arch = m.get("architecture", {}) if isinstance(m.get("architecture"), dict) else {}
                         output_modalities = arch.get("output_modalities", [])
                         is_emb = "embeddings" in output_modalities or "embed" in mid.lower()
-                        provider = mid.split("/")[0] if "/" in mid else None
-                        raw_models.append({"id": mid, "is_embedding": is_emb, "provider": provider})
+                        # Model ID prefixes identify authors, not hosting providers.
+                        raw_models.append({"id": mid, "is_embedding": is_emb, "provider": None})
                     models = sorted(raw_models, key=lambda x: x["id"].lower())
             elif method == "gemini":
                 litellm.api_key = api_key
@@ -246,6 +247,49 @@ class ProviderManager:
             return {"models": models, "error": None}
         except Exception as e:
             return {"models": [], "error": str(e)}
+
+    async def fetch_openrouter_endpoints(self, model: str) -> dict:
+        """Return the selected model's actual OpenRouter routing endpoints."""
+        try:
+            if not isinstance(model, str):
+                raise ValueError("An OpenRouter model ID is required (author/model).")
+            model = model.strip()
+            # OpenRouter also publishes its own models (for example openrouter/auto).
+            if model.startswith("openrouter/") and model.count("/") >= 2:
+                model = model.removeprefix("openrouter/")
+            parts = model.split("/")
+            if len(parts) != 2 or any(not part.strip() or part in (".", "..") for part in parts):
+                raise ValueError("An OpenRouter model ID is required (author/model).")
+            model_path = "/".join(quote(part, safe="") for part in parts)
+
+            import httpx
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(f"https://openrouter.ai/api/v1/models/{model_path}/endpoints")
+                response.raise_for_status()
+                payload = response.json()
+
+            data = payload.get("data") if isinstance(payload, dict) else None
+            endpoints = data.get("endpoints") if isinstance(data, dict) else None
+            if not isinstance(endpoints, list):
+                raise ValueError("OpenRouter returned an invalid endpoint list.")
+
+            providers = {}
+            for endpoint in endpoints:
+                tag = endpoint.get("tag") if isinstance(endpoint, dict) else None
+                name = endpoint.get("provider_name") if isinstance(endpoint, dict) else None
+                if not isinstance(tag, str) or not tag.strip() or not isinstance(name, str) or not name.strip():
+                    raise ValueError("OpenRouter returned an endpoint without a provider tag or name.")
+                _, _, variant = tag.partition("/")
+                label = f"{name} ({variant})" if variant else name
+                providers.setdefault(tag, {"id": tag, "label": label})
+
+            return {
+                "providers": sorted(providers.values(), key=lambda provider: (provider["label"].casefold(), provider["id"])),
+                "error": None,
+            }
+        except Exception as exc:
+            detail = str(exc) or type(exc).__name__
+            return {"providers": [], "error": f"Unable to load OpenRouter providers: {detail}"}
 
     def _apply_api_keys(self, provider_id: str, config: dict):
         api_key = config.get("api_key", "")
