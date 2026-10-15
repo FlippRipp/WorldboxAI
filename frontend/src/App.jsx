@@ -801,11 +801,11 @@ function PromptStudioStandalone({ onBack }) {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col">
-      <div className="p-4 border-b border-gray-700 bg-gray-900">
+    <div className="h-dvh overflow-hidden bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col">
+      <div className="shrink-0 px-3 sm:px-4 border-b border-gray-700 bg-gray-900">
         <button
           onClick={onBack}
-          className="flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors"
+          className="min-h-11 flex items-center gap-2 text-sm text-gray-400 hover:text-gray-200 transition-colors"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -813,7 +813,7 @@ function PromptStudioStandalone({ onBack }) {
           Back to Menu
         </button>
       </div>
-      <div className="flex-1 overflow-hidden">
+      <div className="flex-1 min-h-0 overflow-hidden">
         <PromptStudio
           isOpen={true}
           onClose={onBack}

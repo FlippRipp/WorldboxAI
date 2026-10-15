@@ -68,7 +68,7 @@ function BlockCard({ block, index, draft, dragIndex, onMove, onRemove, onEdit, o
 
   return (
     <div
-      className={`relative border border-l-4 rounded-lg p-3 space-y-3 transition-colors ${
+      className={`relative min-w-0 border border-l-4 rounded-lg p-3 space-y-3 transition-colors ${
         isOff
           ? 'border-l-red-500/70 bg-gray-800/60 border-dashed border-red-900/40'
           : `${catColor} ${isDefault ? 'bg-purple-950/40 border-purple-800/60' : 'bg-gray-950/80 border-gray-700'}`
@@ -84,9 +84,9 @@ function BlockCard({ block, index, draft, dragIndex, onMove, onRemove, onEdit, o
           Disabled
         </span>
       )}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="cursor-grab text-gray-500 text-xs select-none">{'\u22EE\u22EE'}</span>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2 min-w-0 flex-1 basis-full sm:basis-auto">
+          <span className="hidden sm:inline cursor-grab text-gray-500 text-xs select-none" aria-hidden="true">{'\u22EE\u22EE'}</span>
           <span className="text-xs font-mono text-gray-500">#{index + 1}</span>
           {isDefault && (
             <span className="text-[10px] px-1.5 py-0.5 bg-purple-700/50 text-purple-300 rounded font-semibold uppercase tracking-wide">Core</span>
@@ -99,41 +99,43 @@ function BlockCard({ block, index, draft, dragIndex, onMove, onRemove, onEdit, o
               <span className="w-1.5 h-1.5 rounded-full bg-white inline-block" />OFF
             </span>
           )}
-          <span className={`text-sm font-semibold truncate max-w-[160px] ${isOff ? 'text-gray-500 line-through decoration-red-500/50' : 'text-gray-200'}`} title={block.id}>
+          <span className={`min-w-0 text-sm font-semibold [overflow-wrap:anywhere] ${isOff ? 'text-gray-500 line-through decoration-red-500/50' : 'text-gray-200'}`} title={block.id}>
             {displayName || block.id}
           </span>
-          {displayName && (
-            <span className="text-[10px] font-mono text-gray-600 truncate max-w-[100px]" title={block.id}>{block.id}</span>
+          {block.display_name && block.display_name !== block.id && (
+            <span className="min-w-0 text-[10px] font-mono text-gray-500 break-all" title={block.id}>{block.id}</span>
           )}
           {block.category && (
             <span className="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded">{CATEGORY_LABELS[block.category] || block.category}</span>
           )}
         </div>
-        <div className="flex items-center gap-1 text-xs">
+        <div className="grid w-full grid-cols-6 gap-1 text-xs sm:flex sm:w-auto sm:shrink-0">
           <button
             onClick={() => onToggle(index, isOff)}
-            className={`px-2 py-1 rounded font-semibold transition-colors ${
+            className={`min-h-11 min-w-0 sm:min-h-8 sm:min-w-8 px-2 py-1 rounded font-semibold transition-colors ${
               isOff
                 ? 'bg-red-950/70 text-red-300 hover:bg-red-900'
                 : 'bg-emerald-900/50 text-emerald-300 hover:bg-emerald-800'
             }`}
             title={isOff ? 'Block is off — click to enable' : 'Block is on — click to disable'}
+            aria-label={`${isOff ? 'Enable' : 'Disable'} ${displayName}`}
+            aria-pressed={!isOff}
           >
             {isOff ? 'OFF' : 'ON'}
           </button>
-          <button onClick={() => onMove(index, -1)} disabled={index === 0} className="px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 rounded transition-colors">&#8593;</button>
-          <button onClick={() => onMove(index, 1)} disabled={index === draft.length - 1} className="px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 rounded transition-colors">&#8595;</button>
-          <button onClick={() => onEdit(block, index)} className="px-2 py-1 bg-gray-800 hover:bg-gray-700 rounded transition-colors" title="Edit block">&#9998;</button>
-          <button onClick={() => onSaveAsTemplate(block)} className="px-2 py-1 bg-gray-800 hover:bg-gray-700 rounded transition-colors" title="Save as template">&#9733;</button>
-          <button onClick={() => onRemove(index)} className="px-2 py-1 bg-red-950/70 hover:bg-red-900 text-red-200 rounded transition-colors" title="Remove">&#10005;</button>
+          <button onClick={() => onMove(index, -1)} disabled={index === 0} className="min-h-11 min-w-0 sm:min-h-8 sm:min-w-8 px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 rounded transition-colors" aria-label={`Move ${displayName} up`} title="Move up">&#8593;</button>
+          <button onClick={() => onMove(index, 1)} disabled={index === draft.length - 1} className="min-h-11 min-w-0 sm:min-h-8 sm:min-w-8 px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 rounded transition-colors" aria-label={`Move ${displayName} down`} title="Move down">&#8595;</button>
+          <button onClick={() => onEdit(block, index)} className="min-h-11 min-w-0 sm:min-h-8 sm:min-w-8 px-2 py-1 bg-gray-800 hover:bg-gray-700 rounded transition-colors" title="Edit block" aria-label={`Edit ${displayName}`}>&#9998;</button>
+          <button onClick={() => onSaveAsTemplate(block)} className="min-h-11 min-w-0 sm:min-h-8 sm:min-w-8 px-2 py-1 bg-gray-800 hover:bg-gray-700 rounded transition-colors" title="Save as template" aria-label={`Save ${displayName} as template`}>&#9733;</button>
+          <button onClick={() => onRemove(index)} className="min-h-11 min-w-0 sm:min-h-8 sm:min-w-8 px-2 py-1 bg-red-950/70 hover:bg-red-900 text-red-200 rounded transition-colors" title="Remove" aria-label={`Remove ${displayName}`}>&#10005;</button>
         </div>
       </div>
 
-      <div className={`text-xs ${isOff ? 'text-gray-600 italic' : 'text-gray-400'}`}>
+      <div className={`text-xs [overflow-wrap:anywhere] ${isOff ? 'text-gray-600 italic' : 'text-gray-400'}`}>
         {isOff ? 'Excluded from the compiled prompt — this block is skipped.' : getBlockDescription(block)}
       </div>
 
-      <div className={`grid grid-cols-3 gap-2 text-[10px] ${isOff ? 'text-gray-700' : 'text-gray-600'}`}>
+      <div className={`grid grid-cols-3 gap-2 text-[10px] [overflow-wrap:anywhere] ${isOff ? 'text-gray-700' : 'text-gray-600'}`}>
         <span>{blockLabel(block.type)}</span>
         <span>{block.role_type}</span>
         <span>{block.placement === 'chat_injection' ? `injected @ depth ${block.depth ?? 0} · order ${block.order ?? 100}` : 'system top'}</span>
@@ -155,9 +157,9 @@ function QuickEditSection({ category, label, draft, defaults, onUpdateBlock, onU
       : isOff ? 'bg-gray-950/80 border-dashed border-red-900/40'
       : 'bg-gray-900/70 border-gray-700'
     }`}>
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <h4 className={`text-xs font-semibold uppercase tracking-wide ${isOff ? 'text-gray-500 line-through decoration-red-500/50' : 'text-gray-300'}`}>{displayName}</h4>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <h4 className={`min-w-0 text-xs font-semibold uppercase tracking-wide [overflow-wrap:anywhere] ${isOff ? 'text-gray-500 line-through decoration-red-500/50' : 'text-gray-300'}`}>{displayName}</h4>
           {isOff && (
             <span className="text-[10px] px-1.5 py-0.5 bg-red-600 text-white rounded font-bold uppercase tracking-wide flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-white inline-block" />OFF
@@ -165,19 +167,19 @@ function QuickEditSection({ category, label, draft, defaults, onUpdateBlock, onU
           )}
         </div>
         {!missing && (
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2">
             <button
               onClick={() => onOpenEditModal(block, draft.indexOf(block))}
-              className="text-xs px-2 py-0.5 bg-gray-700 hover:bg-gray-600 rounded transition-colors"
+              className="min-h-11 sm:min-h-8 text-xs px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded transition-colors"
               title="Edit full block"
             >
               &#9998; Edit Full
             </button>
-            <label className={`flex items-center gap-1 text-xs ${isOff ? 'text-red-300' : 'text-gray-400'}`}>
+            <label className={`flex min-h-11 sm:min-h-8 items-center gap-2 px-1 text-xs ${isOff ? 'text-red-300' : 'text-gray-400'}`}>
               <input type="checkbox" checked={block.enabled !== false} onChange={(e) => {
                 const idx = draft.indexOf(block);
                 if (idx >= 0) onUpdateBlock(idx, { enabled: e.target.checked });
-              }} className="accent-purple-500" />
+              }} className="h-4 w-4 accent-purple-500" aria-label={`Enable ${displayName}`} />
               {isOff ? 'off' : 'on'}
             </label>
           </div>
@@ -185,14 +187,14 @@ function QuickEditSection({ category, label, draft, defaults, onUpdateBlock, onU
       </div>
 
       {missing ? (
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="text-xs text-gray-500 italic">This section is not configured.</p>
           <button
             onClick={() => {
               const defBlock = defaults.find((d) => d.category === category);
               if (defBlock) onRestoreBlock(defBlock);
             }}
-            className="text-xs px-3 py-1.5 bg-purple-700 hover:bg-purple-600 text-white rounded transition-colors"
+            className="min-h-11 sm:min-h-8 text-xs px-3 py-1.5 bg-purple-700 hover:bg-purple-600 text-white rounded transition-colors"
           >
             + Restore Default
           </button>
@@ -206,13 +208,15 @@ function QuickEditSection({ category, label, draft, defaults, onUpdateBlock, onU
               if (idx >= 0) onUpdateConfig(idx, 'text', e.target.value);
             }}
             rows={4}
-            className="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 font-mono resize-y"
+            className="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-base sm:text-sm text-gray-100 font-mono resize-y"
+            aria-label={`${displayName} prompt text`}
             placeholder="Enter prompt text..."
           />
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => setShowMacros(showMacros === `${category}_quick` ? null : `${category}_quick`)}
-              className="text-xs px-2 py-0.5 bg-purple-900/50 hover:bg-purple-800 rounded text-purple-300 transition-colors"
+              className="min-h-11 sm:min-h-8 text-xs px-3 py-1 bg-purple-900/50 hover:bg-purple-800 rounded text-purple-300 transition-colors"
+              aria-expanded={showMacros === `${category}_quick`}
             >
               {showMacros === `${category}_quick` ? 'Hide Macros' : 'Variables'}
             </button>
@@ -241,12 +245,12 @@ function MacroPanel({ macros, onInsert }) {
   };
 
   return (
-    <div className="bg-gray-800 border border-gray-600 rounded-lg p-2 shadow-lg max-h-40 overflow-y-auto">
+    <div className="min-w-0 w-full bg-gray-800 border border-gray-600 rounded-lg p-2 shadow-lg max-h-48 overflow-y-auto overscroll-contain">
       {macros.map((m) => (
         <button
           key={m.key}
           onClick={() => handleInsert(m.key)}
-          className="block w-full text-left px-2 py-1 text-xs hover:bg-gray-700 rounded text-gray-300"
+          className="block min-h-11 sm:min-h-8 w-full text-left px-2 py-2 text-xs [overflow-wrap:anywhere] hover:bg-gray-700 rounded text-gray-300"
           title={m.description}
         >
           <code className="text-purple-300 font-mono">{m.key}</code>
@@ -261,50 +265,50 @@ function EditBlockModal({ editingBlock, macros, showMacros, setShowMacros, onSav
   if (!editingBlock) return null;
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60" role="dialog" aria-modal="true">
-      <div className="bg-gray-800 rounded-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto mx-4 shadow-2xl">
-        <div className="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900 rounded-t-xl">
-          <h3 className="text-lg font-semibold text-gray-100">Edit Block</h3>
-          <button onClick={onCancel} className="text-gray-400 hover:text-white text-xl leading-none">&times;</button>
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 sm:p-4" role="dialog" aria-modal="true" aria-labelledby="edit-prompt-block-title">
+      <div className="flex min-w-0 flex-col bg-gray-800 w-full max-w-2xl h-[100dvh] sm:h-auto max-h-[100dvh] sm:max-h-[90dvh] overflow-hidden sm:rounded-xl shadow-2xl">
+        <div className="shrink-0 px-4 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))] sm:p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900">
+          <h3 id="edit-prompt-block-title" className="text-lg font-semibold text-gray-100">Edit Block</h3>
+          <button onClick={onCancel} className="flex min-h-11 min-w-11 sm:min-h-8 sm:min-w-8 items-center justify-center rounded text-gray-400 hover:text-white hover:bg-gray-800 text-xl leading-none" aria-label="Close block editor">&times;</button>
         </div>
-        <div className="p-4 space-y-4">
-          <div className="grid grid-cols-2 gap-3">
-            <label className="text-xs text-gray-400 space-y-1">
+        <div className="flex-1 sm:flex-initial min-h-0 overflow-y-auto overscroll-contain p-4 space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label className="min-w-0 text-xs text-gray-400 space-y-1">
               <span>ID</span>
-              <input value={editingBlock.id || ''} onChange={(e) => onSetEditingBlock({ ...editingBlock, id: e.target.value })} className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 font-mono" />
+              <input value={editingBlock.id || ''} onChange={(e) => onSetEditingBlock({ ...editingBlock, id: e.target.value })} className="min-w-0 w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-base sm:text-sm text-gray-100 font-mono" />
             </label>
-            <label className="text-xs text-gray-400 space-y-1">
+            <label className="min-w-0 text-xs text-gray-400 space-y-1">
               <span>Display Name</span>
-              <input value={editingBlock.display_name || ''} onChange={(e) => onSetEditingBlock({ ...editingBlock, display_name: e.target.value })} className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100" placeholder="Friendly name..." />
+              <input value={editingBlock.display_name || ''} onChange={(e) => onSetEditingBlock({ ...editingBlock, display_name: e.target.value })} className="min-w-0 w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-base sm:text-sm text-gray-100" placeholder="Friendly name..." />
             </label>
           </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-            <label className="text-xs text-gray-400 space-y-1">
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
+            <label className="min-w-0 text-xs text-gray-400 space-y-1">
               <span>Type</span>
-              <select value={editingBlock.type || 'static_text'} onChange={(e) => onSetEditingBlock({ ...editingBlock, type: e.target.value, ...(e.target.value === 'chat_history' ? { placement: 'system_relative', depth: null, order: null } : {}) })} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-sm text-gray-100">
+              <select value={editingBlock.type || 'static_text'} onChange={(e) => onSetEditingBlock({ ...editingBlock, type: e.target.value, ...(e.target.value === 'chat_history' ? { placement: 'system_relative', depth: null, order: null } : {}) })} className="min-w-0 w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-base sm:text-sm text-gray-100">
                 {BLOCK_TYPES.map((t) => <option key={t} value={t}>{blockLabel(t)}</option>)}
               </select>
             </label>
-            <label className="text-xs text-gray-400 space-y-1">
+            <label className="min-w-0 text-xs text-gray-400 space-y-1">
               <span>Role</span>
-              <select value={editingBlock.role_type || 'system'} onChange={(e) => onSetEditingBlock({ ...editingBlock, role_type: e.target.value })} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-sm text-gray-100">
+              <select value={editingBlock.role_type || 'system'} onChange={(e) => onSetEditingBlock({ ...editingBlock, role_type: e.target.value })} className="min-w-0 w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-base sm:text-sm text-gray-100">
                 {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
               </select>
             </label>
-            <label className="text-xs text-gray-400 space-y-1">
+            <label className="min-w-0 text-xs text-gray-400 space-y-1">
               <span>Placement</span>
-              <select value={editingBlock.placement || 'system_relative'} disabled={editingBlock.type === 'chat_history'} onChange={(e) => onSetEditingBlock({ ...editingBlock, placement: e.target.value, depth: e.target.value === 'chat_injection' ? (editingBlock.depth ?? 0) : null, order: e.target.value === 'chat_injection' ? (editingBlock.order ?? 100) : null })} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-sm text-gray-100 disabled:opacity-40">
+              <select value={editingBlock.placement || 'system_relative'} disabled={editingBlock.type === 'chat_history'} onChange={(e) => onSetEditingBlock({ ...editingBlock, placement: e.target.value, depth: e.target.value === 'chat_injection' ? (editingBlock.depth ?? 0) : null, order: e.target.value === 'chat_injection' ? (editingBlock.order ?? 100) : null })} className="min-w-0 w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-base sm:text-sm text-gray-100 disabled:opacity-40">
                 {PLACEMENTS.map((p) => <option key={p} value={p}>{blockLabel(p)}</option>)}
               </select>
             </label>
-            <label className="text-xs text-gray-400 space-y-1">
+            <label className="min-w-0 text-xs text-gray-400 space-y-1">
               <span>Depth</span>
-              <input type="number" min="0" value={editingBlock.placement === 'chat_injection' ? (editingBlock.depth ?? 0) : ''} disabled={editingBlock.placement !== 'chat_injection'} onChange={(e) => onSetEditingBlock({ ...editingBlock, depth: Math.max(0, parseInt(e.target.value || '0', 10)) })} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-sm text-gray-100 disabled:opacity-40" />
+              <input type="number" min="0" value={editingBlock.placement === 'chat_injection' ? (editingBlock.depth ?? 0) : ''} disabled={editingBlock.placement !== 'chat_injection'} onChange={(e) => onSetEditingBlock({ ...editingBlock, depth: Math.max(0, parseInt(e.target.value || '0', 10)) })} className="min-w-0 w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-base sm:text-sm text-gray-100 disabled:opacity-40" />
             </label>
-            <label className="text-xs text-gray-400 space-y-1">
+            <label className="min-w-0 text-xs text-gray-400 space-y-1">
               <span>Order</span>
-              <input type="number" value={editingBlock.placement === 'chat_injection' ? (editingBlock.order ?? 100) : ''} disabled={editingBlock.placement !== 'chat_injection'} onChange={(e) => { const parsed = parseInt(e.target.value, 10); onSetEditingBlock({ ...editingBlock, order: Number.isNaN(parsed) ? 100 : parsed }); }} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-sm text-gray-100 disabled:opacity-40" />
+              <input type="number" value={editingBlock.placement === 'chat_injection' ? (editingBlock.order ?? 100) : ''} disabled={editingBlock.placement !== 'chat_injection'} onChange={(e) => { const parsed = parseInt(e.target.value, 10); onSetEditingBlock({ ...editingBlock, order: Number.isNaN(parsed) ? 100 : parsed }); }} className="min-w-0 w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-base sm:text-sm text-gray-100 disabled:opacity-40" />
             </label>
           </div>
 
@@ -317,26 +321,26 @@ function EditBlockModal({ editingBlock, macros, showMacros, setShowMacros, onSav
           )}
 
           <div className="grid grid-cols-2 gap-3">
-            <label className="text-xs text-gray-400 space-y-1">
+            <label className="min-w-0 text-xs text-gray-400 space-y-1">
               <span>Category</span>
-              <select value={editingBlock.category || 'other'} onChange={(e) => onSetEditingBlock({ ...editingBlock, category: e.target.value })} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-sm text-gray-100">
+              <select value={editingBlock.category || 'other'} onChange={(e) => onSetEditingBlock({ ...editingBlock, category: e.target.value })} className="min-w-0 w-full bg-gray-900 border border-gray-700 rounded px-2 py-2 text-base sm:text-sm text-gray-100">
                 {CATEGORIES.map((c) => <option key={c} value={c}>{CATEGORY_LABELS[c] || c}</option>)}
               </select>
             </label>
-            <label className="text-xs text-gray-400 space-y-1">
+            <div className="min-w-0 text-xs text-gray-400 space-y-1">
               <span>Enabled</span>
-              <label className="flex items-center gap-2 py-2">
-                <input type="checkbox" checked={editingBlock.enabled !== false} onChange={(e) => onSetEditingBlock({ ...editingBlock, enabled: e.target.checked })} className="accent-purple-500" />
+              <label className="flex min-h-11 items-center gap-2 py-2">
+                <input type="checkbox" checked={editingBlock.enabled !== false} onChange={(e) => onSetEditingBlock({ ...editingBlock, enabled: e.target.checked })} className="h-4 w-4 accent-purple-500" aria-label="Enable block" />
                 <span className="text-sm text-gray-300">{editingBlock.enabled !== false ? 'Active' : 'Disabled'}</span>
               </label>
-            </label>
+            </div>
           </div>
 
-          <label className="text-xs text-gray-400 space-y-1">
-            <span>Generation Types (empty = all)</span>
+          <fieldset className="min-w-0 text-xs text-gray-400 space-y-1">
+            <legend>Generation Types (empty = all)</legend>
             <div className="flex flex-wrap gap-1">
               {GENERATION_TYPES.map((gt) => (
-                <label key={gt} className={`text-[10px] px-2 py-1 rounded cursor-pointer transition-colors ${(editingBlock.generation_types || []).includes(gt) ? 'bg-purple-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}>
+                <label key={gt} className={`flex min-h-11 sm:min-h-8 items-center text-xs px-3 py-1 rounded cursor-pointer transition-colors focus-within:ring-2 focus-within:ring-purple-400 ${(editingBlock.generation_types || []).includes(gt) ? 'bg-purple-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}>
                   <input
                     type="checkbox"
                     checked={(editingBlock.generation_types || []).includes(gt)}
@@ -345,33 +349,35 @@ function EditBlockModal({ editingBlock, macros, showMacros, setShowMacros, onSav
                       const next = e.target.checked ? [...current, gt] : current.filter((g) => g !== gt);
                       onSetEditingBlock({ ...editingBlock, generation_types: next.length > 0 ? next : null });
                     }}
-                    className="hidden"
+                    className="sr-only"
                   />
                   {blockLabel(gt)}
                 </label>
               ))}
             </div>
-          </label>
+          </fieldset>
 
           {(editingBlock.type === 'static_text' || editingBlock.type === 'module_prompt') && (
-            <label className="block text-xs text-gray-400 space-y-1">
-              <span>Text</span>
+            <div className="min-w-0 text-xs text-gray-400 space-y-1">
+              <label htmlFor="edit-prompt-block-text">Text</label>
               <textarea
+                id="edit-prompt-block-text"
                 value={editingBlock.config?.text || ''}
                 onChange={(e) => onUpdateEditingConfig('text', e.target.value)}
                 rows={12}
-                className="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 font-mono resize-y"
+                className="min-w-0 w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-base sm:text-sm text-gray-100 font-mono resize-y"
               />
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setShowMacros(showMacros === `edit_${editingBlock.id}` ? null : `edit_${editingBlock.id}`)}
-                  className="text-xs px-2 py-0.5 bg-purple-900/50 hover:bg-purple-800 rounded text-purple-300 transition-colors"
+                  className="min-h-11 sm:min-h-8 text-xs px-3 py-1 bg-purple-900/50 hover:bg-purple-800 rounded text-purple-300 transition-colors"
+                  aria-expanded={showMacros === `edit_${editingBlock.id}`}
                 >
                   {showMacros === `edit_${editingBlock.id}` ? 'Hide Variables' : 'Insert Variable'}
                 </button>
               </div>
               {showMacros === `edit_${editingBlock.id}` && <MacroPanel macros={macros} onInsert={() => setShowMacros(null)} />}
-            </label>
+            </div>
           )}
 
           {editingBlock.type === 'chat_history' && (
@@ -386,7 +392,7 @@ function EditBlockModal({ editingBlock, macros, showMacros, setShowMacros, onSav
                   onUpdateEditingConfig('max_turns', raw === '' ? null : Math.max(0, parseInt(raw, 10) || 0));
                 }}
                 placeholder="All"
-                className="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100"
+                className="min-w-0 w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-base sm:text-sm text-gray-100"
               />
               <p className="text-[11px] text-gray-500">
                 A turn is one player message plus the replies that follow it. Leave empty to
@@ -399,13 +405,13 @@ function EditBlockModal({ editingBlock, macros, showMacros, setShowMacros, onSav
           {editingBlock.type === 'engine_context' && (
             <label className="block text-xs text-gray-400 space-y-1">
               <span>Empty Context Text</span>
-              <input value={editingBlock.config?.empty_text || ''} onChange={(e) => onUpdateEditingConfig('empty_text', e.target.value)} className="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100" />
+              <input value={editingBlock.config?.empty_text || ''} onChange={(e) => onUpdateEditingConfig('empty_text', e.target.value)} className="min-w-0 w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-base sm:text-sm text-gray-100" />
             </label>
           )}
         </div>
-        <div className="p-4 border-t border-gray-700 bg-gray-900 rounded-b-xl flex justify-end gap-2">
-          <button onClick={onCancel} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded font-medium transition-colors">Cancel</button>
-          <button onClick={onSave} className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-medium transition-colors">Apply Changes</button>
+        <div className="shrink-0 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4 border-t border-gray-700 bg-gray-900 flex justify-end gap-2">
+          <button onClick={onCancel} className="min-h-11 flex-1 sm:flex-none px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded font-medium transition-colors">Cancel</button>
+          <button onClick={onSave} className="min-h-11 flex-1 sm:flex-none px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-medium transition-colors">Apply Changes</button>
         </div>
       </div>
     </div>
@@ -429,6 +435,9 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
   const [templateCategory, setTemplateCategory] = useState('');
   const [showMacros, setShowMacros] = useState(null);
   const [showAddMenu, setShowAddMenu] = useState(false);
+  const [showTools, setShowTools] = useState(false);
+  const [showActions, setShowActions] = useState(false);
+  const [showQuickEdit, setShowQuickEdit] = useState(false);
   const [continueText, setContinueText] = useState('');
   const [continueDefault, setContinueDefault] = useState('');
   const [continueSaving, setContinueSaving] = useState(false);
@@ -436,6 +445,8 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
   const importFileRef = useRef(null);
   const stImportRef = useRef(null);
   const addMenuRef = useRef(null);
+  const actionsRef = useRef(null);
+  const toolsRef = useRef(null);
 
   const loadTemplates = async () => {
     try {
@@ -499,6 +510,8 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
       setPreview(null);
       setError('');
       setHasUnsavedChanges(false);
+      setShowTools(false);
+      setShowActions(false);
       loadTemplates();
       loadMacros();
       loadDefaults();
@@ -512,6 +525,9 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
     const handler = (e) => {
       if (addMenuRef.current && !addMenuRef.current.contains(e.target)) {
         setShowAddMenu(false);
+      }
+      if (actionsRef.current && !actionsRef.current.contains(e.target)) {
+        setShowActions(false);
       }
     };
     document.addEventListener('mousedown', handler);
@@ -558,6 +574,8 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
       }];
     });
     setHasUnsavedChanges(true);
+    setShowTools(false);
+    setActiveTab('pipeline');
   };
 
   const updateConfig = (index, key, value) => {
@@ -709,6 +727,8 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
     try {
       const data = await onPreview(draft);
       setPreview(data);
+      setShowTools(true);
+      toolsRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
     } catch (err) {
       setError(err.message || 'Failed to preview prompt pipeline.');
     } finally {
@@ -749,6 +769,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
   };
 
   const handleImport = (e) => {
+    setShowActions(false);
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
@@ -769,6 +790,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
   };
 
   const handleImportST = (e) => {
+    setShowActions(false);
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
@@ -824,31 +846,36 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
   const quickEditProps = { draft, defaults, onUpdateBlock: updateBlock, onUpdateConfig: updateConfig, onOpenEditModal: openEditModal, onRestoreBlock: restoreBlock, macros, showMacros, setShowMacros };
 
   return (
-    <div className={standalone ? "h-full flex flex-col" : "fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4"} role="dialog" aria-modal="true">
-      <div className="bg-gray-800 w-full max-w-7xl rounded-lg shadow-2xl border border-gray-700 flex flex-col max-h-[94vh]">
-        <div className="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900 rounded-t-lg">
-          <div>
-            <h2 className="text-xl font-bold text-gray-100">Prompt Studio</h2>
-            <p className="text-xs text-gray-500 mt-1">Edit pipeline, manage prompt templates, insert variables, import/export.</p>
+    <div className={standalone ? "h-full min-h-0 flex flex-col text-gray-100" : "fixed inset-0 z-50 flex items-center justify-center bg-black/75 sm:p-4 text-gray-100"} role="dialog" aria-modal="true" aria-label="Prompt Studio">
+      <div className={`bg-gray-800 w-full min-h-0 shadow-2xl border-gray-700 flex flex-col overflow-hidden ${standalone ? 'h-full' : 'h-dvh sm:h-[94dvh] sm:max-w-7xl sm:rounded-lg sm:border'}`}>
+        <div className="px-3 py-2 sm:p-4 shrink-0 border-b border-gray-700 flex justify-between items-center gap-2 bg-gray-900">
+          <div className="min-w-0">
+            <h2 className="text-lg sm:text-xl font-bold text-gray-100">Prompt Studio</h2>
+            <p className="hidden sm:block text-xs text-gray-500 mt-1">Edit pipeline, manage prompt templates, insert variables, import/export.</p>
           </div>
-          <div className="flex items-center gap-2">
-            <button onClick={handleExport} className="text-xs px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded transition-colors" title="Export pipeline as JSON">Export</button>
-            <label className="text-xs px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded transition-colors cursor-pointer">
+          <div className="flex items-center gap-2 shrink-0">
+            <div className="relative" ref={actionsRef}>
+              <button onClick={() => setShowActions((value) => !value)} aria-expanded={showActions} aria-controls="prompt-studio-actions" className="sm:hidden min-h-11 px-3 text-sm bg-gray-700 rounded">More ⋯</button>
+              <div id="prompt-studio-actions" className={`${showActions ? 'flex' : 'hidden'} absolute right-0 top-full mt-2 z-40 w-44 flex-col gap-2 p-2 rounded-lg border border-gray-600 bg-gray-900 shadow-xl sm:static sm:mt-0 sm:flex sm:w-auto sm:flex-row sm:border-0 sm:bg-transparent sm:p-0 sm:shadow-none`}>
+            <button onClick={() => { handleExport(); setShowActions(false); }} className="min-h-11 sm:min-h-0 text-sm sm:text-xs px-3 py-2 sm:py-1.5 bg-gray-700 hover:bg-gray-600 rounded transition-colors" title="Export pipeline as JSON">Export</button>
+            <label className="min-h-11 sm:min-h-0 flex items-center justify-center text-sm sm:text-xs px-3 py-2 sm:py-1.5 bg-gray-700 hover:bg-gray-600 rounded transition-colors cursor-pointer">
               Import
               <input ref={importFileRef} type="file" accept=".json" onChange={handleImport} className="hidden" />
             </label>
-            <label className="text-xs px-3 py-1.5 bg-emerald-900/50 hover:bg-emerald-800 border border-emerald-700/50 rounded transition-colors cursor-pointer" title="Import a SillyTavern prompt preset (.json)">
+            <label className="min-h-11 sm:min-h-0 flex items-center justify-center text-sm sm:text-xs px-3 py-2 sm:py-1.5 bg-emerald-900/50 hover:bg-emerald-800 border border-emerald-700/50 rounded transition-colors cursor-pointer" title="Import a SillyTavern prompt preset (.json)">
               Import ST
               <input ref={stImportRef} type="file" accept=".json" onChange={handleImportST} className="hidden" />
             </label>
-            <button onClick={handleReset} className="text-xs px-3 py-1.5 bg-red-950/70 hover:bg-red-900 text-red-200 rounded transition-colors" title="Reset to defaults">Reset</button>
-            <button onClick={handleClose} className="text-gray-400 hover:text-white text-2xl leading-none ml-2" aria-label="Close prompt editor">&times;</button>
+            <button onClick={() => { setShowActions(false); handleReset(); }} className="min-h-11 sm:min-h-0 text-sm sm:text-xs px-3 py-2 sm:py-1.5 bg-red-950/70 hover:bg-red-900 text-red-200 rounded transition-colors" title="Reset to defaults">Reset</button>
+              </div>
+            </div>
+            <button onClick={handleClose} className="min-h-11 min-w-11 text-gray-400 hover:text-white text-2xl leading-none" aria-label="Close prompt editor">&times;</button>
           </div>
         </div>
 
-        <div className="flex-1 overflow-hidden p-4 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_380px] gap-4">
-          <div className="overflow-y-auto space-y-4 min-w-0 pr-1">
-            <div className="flex items-center gap-2 border-b border-gray-700 pb-2">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain xl:overflow-hidden p-3 sm:p-4 flex flex-col xl:grid xl:grid-cols-[minmax(0,1fr)_320px] gap-3 sm:gap-4">
+          <div className="shrink-0 xl:min-h-0 xl:overflow-y-auto space-y-4 min-w-0 xl:pr-1">
+            <div className="grid grid-cols-3 gap-1 sm:flex sm:items-center sm:gap-2 border-b border-gray-700 pb-2" aria-label="Prompt editor sections">
               {[
                 { key: 'pipeline', label: 'Pipeline Blocks' },
                 { key: 'library', label: 'Prompt Library' },
@@ -857,7 +884,8 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                 <button
                   key={tab.key}
                   onClick={() => setActiveTab(tab.key)}
-                  className={`text-sm px-4 py-1.5 rounded transition-colors ${activeTab === tab.key ? 'bg-purple-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+                  aria-pressed={activeTab === tab.key}
+                  className={`min-h-11 sm:min-h-0 text-xs sm:text-sm px-2 sm:px-4 py-2 sm:py-1.5 rounded transition-colors ${activeTab === tab.key ? 'bg-purple-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
                 >
                   {tab.label}
                 </button>
@@ -867,6 +895,10 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
             {activeTab === 'pipeline' && (
               <>
                 <section className="space-y-3">
+                  <button onClick={() => setShowQuickEdit((value) => !value)} aria-expanded={showQuickEdit} aria-controls="prompt-quick-edit" className="xl:hidden min-h-11 w-full flex items-center justify-between px-3 bg-gray-900/70 border border-gray-700 rounded-lg text-sm text-purple-300">
+                    Quick Edit <span aria-hidden="true">{showQuickEdit ? '−' : '+'}</span>
+                  </button>
+                  <div id="prompt-quick-edit" className={`${showQuickEdit ? 'block' : 'hidden'} xl:block space-y-3`}>
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <h3 className="text-sm font-semibold uppercase tracking-wide text-purple-300">Quick Edit</h3>
@@ -875,6 +907,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                   </div>
                   <QuickEditSection category="system_prompt" label="Main Prompt" {...quickEditProps} />
                   <QuickEditSection category="post_history" label="Post-History Instructions" {...quickEditProps} />
+                  </div>
                 </section>
 
                 {missingDefaults.length > 0 && (
@@ -902,17 +935,17 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <h3 className="text-sm font-semibold uppercase tracking-wide text-purple-300">Pipeline Blocks</h3>
-                      <p className="text-xs text-gray-500 mt-0.5">Drag to reorder. Chat injections use depth relative to latest player message; order breaks ties at the same depth (lower first).</p>
+                      <p className="text-xs text-gray-500 mt-0.5">Use the arrows or drag to reorder blocks.</p>
                     </div>
-                    <div className="relative" ref={addMenuRef}>
+                    <div className="relative w-full sm:w-auto" ref={addMenuRef}>
                       <button
                         onClick={() => setShowAddMenu((v) => !v)}
-                        className="px-3 py-2 bg-purple-700 hover:bg-purple-600 rounded text-sm transition-colors"
+                        className="w-full sm:w-auto min-h-11 sm:min-h-0 px-3 py-2 bg-purple-700 hover:bg-purple-600 rounded text-sm transition-colors"
                       >
                         + Add Block
                       </button>
                       {showAddMenu && (
-                        <div className="absolute right-0 mt-1 w-64 bg-gray-800 border border-gray-600 rounded-lg shadow-xl z-30 py-1">
+                        <div className="absolute left-0 sm:left-auto sm:right-0 mt-1 w-64 max-w-[calc(100vw-3rem)] bg-gray-800 border border-gray-600 rounded-lg shadow-xl z-30 py-1 [&_button]:min-h-11 sm:[&_button]:min-h-0">
                           <div className="px-3 py-1.5 text-[10px] text-gray-500 uppercase tracking-wide">Add New Block</div>
                           <button onClick={addStaticBlock} className="block w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-gray-700 transition-colors">Static Text Block</button>
                           <button onClick={addEngineContextBlock} className="block w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-gray-700 transition-colors">Engine Context Block</button>
@@ -970,7 +1003,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                   </div>
                 </div>
 
-                <div className="flex flex-wrap gap-1">
+                <div className="flex flex-wrap gap-1 [&_button]:min-h-11 sm:[&_button]:min-h-0">
                   <button
                     onClick={() => setTemplateCategory('')}
                     className={`text-xs px-2 py-1 rounded transition-colors ${!templateCategory ? 'bg-purple-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
@@ -990,11 +1023,11 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
 
                 <div className="space-y-2">
                   {templates.map((tpl) => (
-                    <div key={tpl.id} className="bg-gray-900/70 border border-gray-700 rounded-lg p-3 flex items-start justify-between gap-3">
+                    <div key={tpl.id} className="bg-gray-900/70 border border-gray-700 rounded-lg p-3 flex flex-col sm:flex-row sm:items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-sm font-semibold text-gray-200">{tpl.name}</span>
-                          <span className="text-[10px] font-mono text-gray-600">{tpl.id}</span>
+                          <span className="text-sm font-semibold text-gray-200 break-words [overflow-wrap:anywhere]">{tpl.name}</span>
+                          <span className="text-[10px] font-mono text-gray-500 break-all">{tpl.id}</span>
                           <span className={`text-[10px] px-1 py-0.5 rounded ${(CATEGORY_COLORS[tpl.category] || 'border-l-gray-500').replace('border-l-', 'bg-').replace('-400', '-900/50')} text-gray-400`}>
                             {CATEGORY_LABELS[tpl.category] || tpl.category}
                           </span>
@@ -1010,7 +1043,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                           </div>
                         )}
                       </div>
-                      <div className="flex items-center gap-1 shrink-0">
+                      <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto [&_button]:min-h-11 sm:[&_button]:min-h-0 [&_button]:flex-1 sm:[&_button]:flex-none">
                         <button
                           onClick={() => insertTemplate(tpl.id)}
                           className="text-xs px-2 py-1 bg-purple-700 hover:bg-purple-600 rounded transition-colors"
@@ -1051,11 +1084,11 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                   value={continueText}
                   onChange={(e) => { setContinueText(e.target.value); setContinueDirty(true); }}
                   rows={8}
-                  className="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 font-mono resize-y"
+                  className="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-base sm:text-sm text-gray-100 font-mono resize-y"
                   placeholder="Continue the story from where it left off..."
                 />
 
-                <div className="flex items-center gap-2 flex-wrap">
+                <div className="flex items-center gap-2 flex-wrap [&_button]:min-h-11 sm:[&_button]:min-h-0">
                   <button
                     onClick={() => setShowMacros(showMacros === 'continue' ? null : 'continue')}
                     className="text-xs px-2 py-0.5 bg-purple-900/50 hover:bg-purple-800 rounded text-purple-300 transition-colors"
@@ -1088,7 +1121,12 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
             )}
           </div>
 
-          <aside className="space-y-4 min-w-0 overflow-y-auto pr-1">
+          <aside ref={toolsRef} className="order-first xl:order-none shrink-0 min-w-0 xl:min-h-0 xl:overflow-y-auto xl:pr-1">
+            <button onClick={() => setShowTools((value) => !value)} aria-expanded={showTools} aria-controls="prompt-studio-tools" className="xl:hidden min-h-11 w-full flex items-center justify-between gap-2 px-3 bg-gray-900/70 border border-gray-700 rounded-lg text-sm text-purple-300">
+              <span>{standalone ? 'Module Blocks' : 'Modules & Preview'} <span className="text-gray-400">({modulePromptBlocks.length})</span></span>
+              <span aria-hidden="true">{showTools ? '−' : '+'}</span>
+            </button>
+            <div id="prompt-studio-tools" className={`${showTools ? 'block' : 'hidden'} xl:block space-y-4 pt-3 xl:pt-0`}>
             {!standalone && (
             <section className="bg-gray-900/70 border border-gray-700 rounded-lg p-4">
               <div className="flex items-center justify-between gap-3 mb-3">
@@ -1098,7 +1136,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                 </div>
                 <button onClick={handlePreview} disabled={isPreviewing} className="text-xs px-2 py-1 bg-purple-700 hover:bg-purple-600 disabled:opacity-50 rounded transition-colors">{isPreviewing ? '...' : 'Preview'}</button>
               </div>
-              <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
+              <div className="space-y-3 xl:max-h-96 xl:overflow-y-auto xl:pr-1">
                 {previewMessages.map((message, index) => (
                   <div key={`${message.role}-${index}`} className="bg-gray-800/70 border border-gray-700 rounded p-3 text-xs">
                     <div className="flex justify-between gap-2 mb-2">
@@ -1123,7 +1161,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                 its position and toggle it like any other block — it is skipped automatically when
                 the module isn't active. Uninserted blocks are appended after the pipeline.
               </p>
-              <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
+              <div className="space-y-3 xl:max-h-64 xl:overflow-y-auto xl:pr-1">
                 {modulePromptBlocks.map((block) => {
                   const inDraft = draft.some((b) => b.id === block.namespacedId);
                   return (
@@ -1139,7 +1177,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                       <button
                         onClick={() => insertModuleBlock(block)}
                         disabled={inDraft}
-                        className="mt-2 w-full text-[11px] px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed text-gray-200 transition-colors"
+                        className="mt-2 w-full min-h-11 sm:min-h-0 text-xs px-2 py-2 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed text-gray-200 transition-colors"
                       >
                         {inDraft ? '✓ In pipeline' : '+ Insert into pipeline'}
                       </button>
@@ -1156,7 +1194,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                 <h3 className="text-sm font-semibold uppercase tracking-wide text-purple-300">{preview ? 'Preview Trace' : 'Last Trace'}</h3>
                 <button onClick={onRefresh} className="text-xs px-2 py-1 bg-gray-800 hover:bg-gray-700 rounded transition-colors">Refresh</button>
               </div>
-              <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+              <div className="space-y-2 xl:max-h-80 xl:overflow-y-auto xl:pr-1">
                 {orderedTrace.map((entry) => (
                   <div key={`${entry.id}-${entry.message_index}`} className="bg-gray-800/70 border border-gray-700 rounded p-3 text-xs">
                     <div className="flex justify-between gap-2">
@@ -1180,15 +1218,16 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
               )}
             </section>
             )}
+            </div>
           </aside>
         </div>
 
-        <div className="p-4 border-t border-gray-700 bg-gray-900 rounded-b-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="text-sm text-red-300 min-h-5">{error}</div>
-          <div className="flex justify-end gap-2">
-            <button onClick={handleClose} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded font-medium transition-colors">Close</button>
-            <button onClick={handlePreview} disabled={isPreviewing} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white rounded font-medium transition-colors">{isPreviewing ? '...' : 'Preview'}</button>
-            <button onClick={handleSave} disabled={isSaving} className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded font-medium transition-colors">{isSaving ? 'Saving...' : 'Save Pipeline'}</button>
+        <div className="shrink-0 px-3 py-2 sm:p-4 pb-[max(0.5rem,env(safe-area-inset-bottom))] border-t border-gray-700 bg-gray-900 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className={`${error ? 'block' : 'hidden sm:block'} text-sm text-red-300 min-w-0 break-words`} role="status">{error || (hasUnsavedChanges ? 'Unsaved changes' : '')}</div>
+          <div className="flex justify-end gap-2 sm:ml-auto">
+            <button onClick={handleClose} className="min-h-11 flex-1 sm:flex-none px-3 sm:px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded text-sm font-medium transition-colors">Close</button>
+            {!standalone && <button onClick={handlePreview} disabled={isPreviewing} className="min-h-11 flex-1 sm:flex-none px-3 sm:px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white rounded text-sm font-medium transition-colors">{isPreviewing ? '...' : 'Preview'}</button>}
+            <button onClick={handleSave} disabled={isSaving} className="min-h-11 flex-[2] sm:flex-none px-3 sm:px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded text-sm font-medium transition-colors">{isSaving ? 'Saving...' : hasUnsavedChanges ? 'Save Changes' : 'Save Pipeline'}</button>
           </div>
         </div>
       </div>
