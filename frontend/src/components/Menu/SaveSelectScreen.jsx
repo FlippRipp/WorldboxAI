@@ -28,7 +28,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
   // Scenario selection is independent of the story source: it can be used
   // alone or combined with a world, in which case the world supplies the
   // setting and the scenario supplies the opening message.
-  //   null | { id, modificationRequest }
+  //   null | { id, modificationRequest, revisionMode }
   const [selectedScenario, setSelectedScenario] = useState(null);
   // Per-module instruction overrides for the new story ({mod_id: {slot_id:
   // text}}). Pre-filled from the selected scenario and editable before
@@ -122,7 +122,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
       return;
     }
     if (selectedScenario?.id === id) return;
-    setSelectedScenario({ id });
+    setSelectedScenario({ id, revisionMode: 'strict' });
     try {
       const { scenario } = await api.loadScenario(id);
       setEnabledModules(new Set(
@@ -292,6 +292,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
         startPreference: pref,
         startLocationNodeId: pickedNodeId,
         scenarioRequest: selectedScenario?.modificationRequest?.trim() || null,
+        scenarioRevisionMode: selectedScenario?.revisionMode || 'strict',
         characterId: selectedCharacter ? selectedCharacter.id : null,
         activeModules: modules.map((m) => m.id).filter((id) => enabledModules.has(id)),
         moduleInstructions: Object.keys(moduleInstructions).length ? moduleInstructions : null,
@@ -510,10 +511,41 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                   )}
                   {selectedScenario && (
                     <div className="space-y-2 pt-2 mt-3 border-t border-gray-700">
-                      <p className="text-xs text-gray-400">Request changes to this scenario (optional)</p>
+                      <fieldset aria-describedby="scenario-revision-help" className="space-y-2">
+                        <legend className="text-xs text-gray-400">Revision mode</legend>
+                        <div className="inline-flex gap-1 rounded-lg border border-gray-700 bg-gray-900 p-1">
+                          {['strict', 'flexible'].map((mode) => (
+                            <label
+                              key={mode}
+                              className={`flex cursor-pointer items-center gap-2 rounded-md px-3 py-1 text-xs transition-colors ${
+                                (selectedScenario.revisionMode || 'strict') === mode
+                                  ? 'bg-purple-900/50 text-purple-200'
+                                  : 'text-gray-400 hover:bg-gray-800'
+                              }`}
+                            >
+                              <input
+                                type="radio"
+                                name="scenario-revision-mode"
+                                value={mode}
+                                checked={(selectedScenario.revisionMode || 'strict') === mode}
+                                onChange={() => setSelectedScenario((prev) => ({ ...prev, revisionMode: mode }))}
+                                className="accent-purple-500"
+                              />
+                              {mode === 'strict' ? 'Strict' : 'Flexible'}
+                            </label>
+                          ))}
+                        </div>
+                        <p id="scenario-revision-help" className="text-xs text-gray-500">
+                          {selectedScenario.revisionMode === 'flexible'
+                            ? 'Changes as much as needed to make your requested result coherent.'
+                            : 'Keeps the original premise and setting while applying your changes.'}
+                        </p>
+                      </fieldset>
+                      <label htmlFor="scenario-change-request" className="block text-xs text-gray-400">Request changes to this scenario (optional)</label>
                       <input
+                        id="scenario-change-request"
                         value={selectedScenario.modificationRequest || ''}
-                        onChange={(e) => setSelectedScenario({ id: selectedScenario.id, modificationRequest: e.target.value })}
+                        onChange={(e) => setSelectedScenario((prev) => ({ ...prev, modificationRequest: e.target.value }))}
                         placeholder="e.g., set it in winter, add a rival"
                         className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-purple-500"
                       />

@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # their startup output is captured too.
 log_store = LogStore()
 install_log_capture(log_store)
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
@@ -264,6 +264,7 @@ class CreateSaveRequest(BaseModel):
     start_preference: Optional[str] = None
     start_location_node_id: Optional[str] = None
     scenario_request: Optional[str] = None
+    scenario_revision_mode: Literal["strict", "flexible"] = "strict"
     character_id: Optional[str] = None
     active_modules: Optional[list[str]] = None
     # Per-module instruction-slot overrides, {mod_id: {slot_id: text}}. The
@@ -1515,6 +1516,7 @@ async def create_save(request: CreateSaveRequest):
             # and intro. The library scenario is never touched.
             if request.scenario_request and request.scenario_request.strip():
                 scenario["pending_modification_request"] = request.scenario_request.strip()
+                scenario["revision_mode"] = request.scenario_revision_mode
 
         def _persist_scenario():
             # Write the save's scenario copy (parallel to World/world_data.json)

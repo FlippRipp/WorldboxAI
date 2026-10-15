@@ -29,6 +29,7 @@ export const api = {
                             start_preference: opts.startPreference ?? null,
                             start_location_node_id: opts.startLocationNodeId ?? null,
                             scenario_request: opts.scenarioRequest ?? null,
+                            scenario_revision_mode: opts.scenarioRevisionMode ?? 'strict',
                             character_id: opts.characterId ?? null,
                             active_modules: opts.activeModules ?? null,
                             module_instructions: opts.moduleInstructions ?? null,

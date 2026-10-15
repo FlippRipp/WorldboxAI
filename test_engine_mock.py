@@ -1,11 +1,144 @@
 import asyncio
 import os
 import tempfile
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 import backend.engine.llm as llm_module
 from backend.engine.graph import EngineGraph
 from backend.engine.llm import LLMService
 from backend.engine.registry import ModuleRegistry
+
+
+def _scenario_revision_engine():
+    # Exercise the actual intro orchestration without loading modules or making
+    # provider calls; the captured messages are what the provider would receive.
+    engine = object.__new__(EngineGraph)
+    engine.sdk = SimpleNamespace(ui=SimpleNamespace(
+        emit_status=AsyncMock(), emit_reasoning_token=AsyncMock(),
+    ))
+    engine.llm = SimpleNamespace(
+        simple_completion=AsyncMock(return_value='{"scenario_description": "Revised setting."}'),
+        generate_story_from_messages=AsyncMock(return_value={
+            "content": "Revised opening.", "reasoning": "",
+        }),
+    )
+    return engine
+
+
+@pytest.mark.parametrize("revision_mode", [None, "strict"])
+def test_scenario_revision_preserves_original_strict_prompts(revision_mode):
+    engine = _scenario_revision_engine()
+    scenario = {
+        "scenario_description": "Original setting.",
+        "starting_prompt": "Original opening.",
+        "pending_modification_request": "Set it in winter.",
+    }
+    if revision_mode is not None:
+        scenario["revision_mode"] = revision_mode
+    state = {"scenario_data": scenario}
+
+    asyncio.run(engine.generate_intro(state))
+
+    description_messages = engine.llm.simple_completion.call_args.args[0]
+    assert description_messages[0]["content"] == (
+        "You revise role-play scenario descriptions. Apply the player's requested "
+        "changes while keeping the same base premise, setting, and roughly the same "
+        'length. Output only valid JSON: {"scenario_description": "..."}'
+    )
+    opening_messages = engine.llm.generate_story_from_messages.call_args.args[0]
+    assert opening_messages[0]["content"] == "\n\n".join([
+        "You are a creative storyteller adapting the opening message of a text-based RPG scenario.",
+        "<scenario>", "Revised setting.", "</scenario>",
+        "<original_opening>", "Original opening.", "</original_opening>",
+        "<instructions>",
+        "Rewrite the opening message so it satisfies the player's requested changes while keeping the original's base situation, voice, structure, and approximate length.",
+        "Output only the rewritten opening as narrative prose — no preamble, lists, or XML tags.",
+        "</instructions>",
+    ])
+
+
+def test_flexible_revision_updates_description_before_adapting_opening():
+    engine = _scenario_revision_engine()
+    request = "Make the protagonist a rescue pilot on a distant planet."
+    scenario = {
+        "scenario_description": "A blacksmith owes the king a sword.",
+        "starting_prompt": "You hammer a blade in the castle forge.",
+        "pending_modification_request": request,
+        "revision_mode": "flexible",
+    }
+    state = {"scenario_data": scenario}
+    stream = AsyncMock()
+
+    result = asyncio.run(engine.generate_intro(state, stream))
+
+    description_call = engine.llm.simple_completion.call_args
+    description_messages = description_call.args[0]
+    assert scenario["scenario_description"] in description_messages[1]["content"]
+    assert request in description_messages[1]["content"]
+    assert description_call.kwargs["response_format"] == {"type": "json_object"}
+    opening_call = engine.llm.generate_story_from_messages.call_args
+    opening_messages = opening_call.args[0]
+    assert "<scenario>\n\nRevised setting.\n\n</scenario>" in opening_messages[0]["content"]
+    assert scenario["scenario_description"] not in opening_messages[0]["content"]
+    assert scenario["starting_prompt"] in opening_messages[0]["content"]
+    assert request in opening_messages[1]["content"]
+    assert opening_call.args[1] is stream
+    for messages in (description_messages, opening_messages):
+        instructions = messages[0]["content"].lower()
+        assert "priority" in instructions
+        assert "coheren" in instructions
+    assert "keeping the same base premise" not in description_messages[0]["content"]
+    assert "keeping the original's base situation" not in opening_messages[0]["content"]
+    assert result == {"content": "Revised opening.", "reasoning": ""}
+    assert state["scenario_data"]["scenario_description"] == "Revised setting."
+    assert state["scenario_data"]["starting_prompt"] == "Revised opening."
+    assert state["scenario_data"]["revision_mode"] == "flexible"
+    assert state["scenario_data"]["applied_modification_request"] == request
+    assert "pending_modification_request" not in state["scenario_data"]
+    # The engine revises the save's new copy, without changing the input record.
+    assert scenario["starting_prompt"] == "You hammer a blade in the castle forge."
+    assert scenario["pending_modification_request"] == request
+
+
+@pytest.mark.parametrize("revision_mode", ["strict", "flexible"])
+def test_revision_mode_without_request_keeps_literal_opening(revision_mode):
+    engine = _scenario_revision_engine()
+    stream = AsyncMock()
+    state = {"scenario_data": {
+        "scenario_description": "Original setting.",
+        "starting_prompt": "Original opening.",
+        "revision_mode": revision_mode,
+        "pending_modification_request": "  ",
+    }}
+
+    result = asyncio.run(engine.generate_intro(state, stream))
+
+    assert result == {"content": "Original opening.", "reasoning": ""}
+    stream.assert_awaited_once_with("Original opening.")
+    engine.llm.simple_completion.assert_not_awaited()
+    engine.llm.generate_story_from_messages.assert_not_awaited()
+
+
+def test_flexible_revision_with_empty_description_still_adapts_opening():
+    engine = _scenario_revision_engine()
+    state = {"scenario_data": {
+        "scenario_description": "",
+        "starting_prompt": "Original opening.",
+        "revision_mode": "flexible",
+        "pending_modification_request": "Set it in winter.",
+    }}
+
+    result = asyncio.run(engine.generate_intro(state))
+
+    engine.llm.simple_completion.assert_not_awaited()
+    engine.llm.generate_story_from_messages.assert_awaited_once()
+    messages = engine.llm.generate_story_from_messages.call_args.args[0]
+    assert "Set it in winter." in messages[1]["content"]
+    assert result["content"] == "Revised opening."
+    assert state["scenario_data"]["scenario_description"] == ""
 
 
 def set_env(name: str, value: str | None):

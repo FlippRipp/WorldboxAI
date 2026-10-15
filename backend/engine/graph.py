@@ -656,12 +656,27 @@ class EngineGraph:
         description = (scenario_data.get("scenario_description") or "").strip()
         if not description:
             return updated
-        messages = [
-            {"role": "system", "content": (
+        if scenario_data.get("revision_mode") == "flexible":
+            instruction = (
+                "You revise role-play scenario descriptions. Treat the player's requested "
+                "changes as the priority and change as much as needed for the revised scenario "
+                "to make sense as a coherent whole. You may rework the premise, setting, "
+                "character roles, relationships, motivations, events, tone, structure, and "
+                "length when the request or its consequences require it. Resolve contradictions "
+                "and update connected details even when the player has not listed every "
+                "necessary change. Preserve compatible details where useful and respect "
+                "anything the player explicitly asks to keep. Return a complete, self-contained "
+                "scenario description, not an explanation of the edits. "
+                "Output only valid JSON: {\"scenario_description\": \"...\"}"
+            )
+        else:
+            instruction = (
                 "You revise role-play scenario descriptions. Apply the player's requested "
                 "changes while keeping the same base premise, setting, and roughly the same "
                 "length. Output only valid JSON: {\"scenario_description\": \"...\"}"
-            )},
+            )
+        messages = [
+            {"role": "system", "content": instruction},
             {"role": "user", "content": (
                 f"<scenario_description>\n{description}\n</scenario_description>\n\n"
                 f"<requested_changes>\n{request_text}\n</requested_changes>"
@@ -692,7 +707,22 @@ class EngineGraph:
         parts.append(original_opening)
         parts.append("</original_opening>")
         parts.append("<instructions>")
-        parts.append("Rewrite the opening message so it satisfies the player's requested changes while keeping the original's base situation, voice, structure, and approximate length.")
+        if scenario_data.get("revision_mode") == "flexible":
+            parts.append(
+                "Rewrite the opening message to fully realize the player's requested changes. "
+                "Change as much as needed for the scene to make sense, including its base "
+                "situation, setting, character roles, relationships, motivations, events, "
+                "voice, structure, and length. Follow through on the request's consequences "
+                "even when the player has not listed every necessary change. Give the player's "
+                "request priority and use the revised scenario description above, when present, "
+                "as context. Keep the opening consistent with these changes, replacing "
+                "conflicting details from the original opening. Preserve compatible details "
+                "where useful and respect "
+                "anything the player explicitly asks to keep. Write a complete, coherent "
+                "opening scene that gives the player a situation to act on."
+            )
+        else:
+            parts.append("Rewrite the opening message so it satisfies the player's requested changes while keeping the original's base situation, voice, structure, and approximate length.")
         parts.append("Output only the rewritten opening as narrative prose — no preamble, lists, or XML tags.")
         parts.append("</instructions>")
         messages = [

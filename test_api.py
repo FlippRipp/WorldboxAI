@@ -1,4 +1,7 @@
 from fastapi.testclient import TestClient
+import json
+
+import pytest
 
 import backend.api.server as server
 from backend.engine.llm import LLMProviderError
@@ -109,6 +112,81 @@ def test_create_save_with_world_and_scenario(tmp_path, monkeypatch):
     # provider so it can derive the start location from the scenario's opening.
     assert seen["scenario"]["starting_prompt"] == "The wagon wheel snaps at dusk."
     assert seen["scenario"]["pending_modification_request"] == "set it in winter"
+
+
+@pytest.mark.parametrize("revision_mode", [None, "strict", "flexible"])
+def test_scenario_revision_mode_survives_reload_without_changing_library(
+    tmp_path, monkeypatch, revision_mode,
+):
+    client, session_manager = make_client(tmp_path, monkeypatch)
+    from backend.engine.scenario import ScenarioStore
+
+    store = ScenarioStore(str(tmp_path / "data"))
+    record = store.save_scenario({
+        "name": "Original scenario",
+        "scenario_description": "A blacksmith owes the king a sword.",
+        "starting_prompt": "You hammer a blade in the castle forge.",
+    })
+    monkeypatch.setattr(server, "scenario_store", store)
+    library_path = store.scenarios_dir / f"{record['id']}.json"
+    library_before = library_path.read_bytes()
+    payload = {
+        "save_id": "revised_story",
+        "scenario_id": record["id"],
+        "scenario_request": "  Make the protagonist a rescue pilot.  ",
+    }
+    if revision_mode is not None:
+        payload["scenario_revision_mode"] = revision_mode
+
+    response = client.post("/api/saves", json=payload)
+
+    assert response.status_code == 200
+    expected_mode = revision_mode or "strict"
+    saved_path = tmp_path / "data" / "saves" / "revised_story" / "Scenario" / "scenario.json"
+    persisted = json.loads(saved_path.read_text(encoding="utf-8"))
+    assert persisted["revision_mode"] == expected_mode
+    assert persisted["pending_modification_request"] == "Make the protagonist a rescue pilot."
+    assert session_manager.state["scenario_data"] == persisted
+    # A new manager simulates a restart between story creation and its intro.
+    reloaded = GameSessionManager(str(tmp_path / "data"))
+    reloaded.load_save("revised_story")
+    assert reloaded.state["scenario_data"] == persisted
+    assert library_path.read_bytes() == library_before
+
+
+def test_revision_mode_without_changes_does_not_mark_scenario_for_revision(tmp_path, monkeypatch):
+    client, session_manager = make_client(tmp_path, monkeypatch)
+    from backend.engine.scenario import ScenarioStore
+
+    store = ScenarioStore(str(tmp_path / "data"))
+    record = store.save_scenario({"name": "Untouched", "starting_prompt": "Literal opening."})
+    monkeypatch.setattr(server, "scenario_store", store)
+
+    response = client.post("/api/saves", json={
+        "save_id": "unchanged_story",
+        "scenario_id": record["id"],
+        "scenario_request": "  ",
+        "scenario_revision_mode": "flexible",
+    })
+
+    assert response.status_code == 200
+    assert session_manager.state["scenario_data"] == record
+
+
+@pytest.mark.parametrize("revision_mode", ["unknown", None])
+def test_invalid_scenario_revision_mode_rejected_before_save_creation(
+    tmp_path, monkeypatch, revision_mode,
+):
+    client, session_manager = make_client(tmp_path, monkeypatch)
+
+    response = client.post("/api/saves", json={
+        "save_id": "invalid_revision",
+        "scenario_revision_mode": revision_mode,
+    })
+
+    assert response.status_code == 422
+    assert session_manager.active_save_id == "autosave"
+    assert not (tmp_path / "data" / "saves" / "invalid_revision").exists()
 
 
 def test_create_save_passes_picked_start_location(tmp_path, monkeypatch):
