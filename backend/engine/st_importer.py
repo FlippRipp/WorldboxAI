@@ -84,6 +84,24 @@ class SillyTavernImporter:
             }
             blocks.append(block)
 
+        # Different ST identifiers can produce the same display-name slug or
+        # sanitized id. Preserve every block and reserve natural ids before
+        # allocating suffixes so a collision cannot rename another block.
+        reserved_ids = {block["id"] for block in blocks}
+        used_ids = set()
+        next_suffix = {}
+        for block in blocks:
+            base_id = block["id"]
+            if base_id in used_ids:
+                suffix = next_suffix.get(base_id, 2)
+                candidate = f"{base_id}_{suffix}"
+                while candidate in reserved_ids or candidate in used_ids:
+                    suffix += 1
+                    candidate = f"{base_id}_{suffix}"
+                block["id"] = candidate
+                next_suffix[base_id] = suffix + 1
+            used_ids.add(block["id"])
+
         return {
             "blocks": blocks,
             "stats": {

@@ -376,6 +376,86 @@ def test_st_import_carries_injection_order():
     print("ST import injection order test passed.")
 
 
+def test_st_import_preserves_disabled_prompts_with_matching_display_names():
+    from copy import deepcopy
+    from backend.engine.st_importer import SillyTavernImporter
+
+    first_id = "019f62e8-892f-7004-9f5d-a76527a7fcc9"
+    second_id = "d7bfe956-b315-4049-845d-ad4a6f9bfd28"
+    name = "\U0001f4d6Story Mode \u270d\U0001f3fb"
+    raw = {
+        "prompts": [
+            {"identifier": first_id, "name": name,
+             "content": "First story mode instructions.", "role": "system"},
+            {"identifier": second_id, "name": name,
+             "content": "Different story mode instructions.", "role": "assistant",
+             "injection_position": 1, "injection_depth": 2, "injection_order": 42},
+        ],
+        "prompt_order": [{"order": [
+            {"identifier": first_id, "enabled": False},
+            {"identifier": second_id, "enabled": False},
+        ]}],
+    }
+    original = deepcopy(raw)
+    importer = SillyTavernImporter()
+
+    result = importer.import_preset(raw)
+    blocks = result["blocks"]
+
+    assert [block["id"] for block in blocks] == ["st_story_mode", "st_story_mode_2"]
+    assert [block["display_name"] for block in blocks] == [name, name]
+    assert [block["config"]["text"] for block in blocks] == [
+        "First story mode instructions.", "Different story mode instructions.",
+    ]
+    assert [block["enabled"] for block in blocks] == [False, False]
+    assert blocks[1]["role_type"] == "assistant"
+    assert blocks[1]["placement"] == "chat_injection"
+    assert blocks[1]["depth"] == 2
+    assert blocks[1]["order"] == 42
+    assert result["stats"] == {"total": 2, "imported": 2, "skipped": 0, "skipped_ids": []}
+    assert len(PromptCompiler().normalize_pipeline(blocks)) == 2
+    assert importer.import_preset(raw) == result
+    assert raw == original
+
+
+def test_st_import_disambiguates_sanitized_ids_and_reserves_natural_suffixes():
+    from backend.engine.st_importer import SillyTavernImporter
+
+    identifiers = ["Story-A", "story_a", "story_a_2", "STORY_A", "story_a_3"]
+    raw = {"prompts": [
+        {"identifier": identifier, "name": f"Prompt {index}",
+         "content": f"Instructions {index}.", "enabled": index % 2 == 0}
+        for index, identifier in enumerate(identifiers)
+    ]}
+    importer = SillyTavernImporter()
+
+    blocks = importer.import_preset(raw)["blocks"]
+
+    assert [block["id"] for block in blocks] == [
+        "story_a", "story_a_4", "story_a_2", "story_a_5", "story_a_3",
+    ]
+    assert [block["config"]["text"] for block in blocks] == [
+        f"Instructions {index}." for index in range(len(identifiers))
+    ]
+    assert [block["enabled"] for block in blocks] == [True, False, True, False, True]
+    assert len(PromptCompiler().normalize_pipeline(blocks)) == len(identifiers)
+    assert importer.import_preset(raw)["blocks"] == blocks
+
+
+def test_st_import_skipped_prompts_do_not_reserve_ids():
+    from backend.engine.st_importer import SillyTavernImporter
+
+    result = SillyTavernImporter().import_preset({"prompts": [
+        {"identifier": "Story-A", "content": "First."},
+        {"identifier": "story_a", "content": "Second."},
+        {"identifier": "story_a_2", "content": "{{// Empty placeholder}}"},
+    ]})
+
+    assert [block["id"] for block in result["blocks"]] == ["story_a", "story_a_2"]
+    assert result["stats"]["imported"] == 2
+    assert result["stats"]["skipped"] == 1
+
+
 def test_command_messages_stay_out_of_the_prompt():
     # Slash-command exchanges live in the transcript for the player but must
     # never reach the storyteller LLM.

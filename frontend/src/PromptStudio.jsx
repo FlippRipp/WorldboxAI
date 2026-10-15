@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import { api } from './lib/api';
+import { appendImportedBlocks } from './lib/promptImport';
 
 const BLOCK_TYPES = ['static_text', 'engine_context', 'world_context', 'character_context', 'module_prompt', 'chat_history'];
 const ROLES = ['system', 'user', 'assistant'];
@@ -793,7 +794,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
         }
         msg.push(``, `Add ${blocks.length} blocks to the current pipeline?`);
         if (confirm(msg.join('\n'))) {
-          setDraft((prev) => [...prev, ...cloneBlocks(blocks)]);
+          setDraft((prev) => appendImportedBlocks(prev, cloneBlocks(blocks)));
           setHasUnsavedChanges(true);
         }
       } catch (err) {
