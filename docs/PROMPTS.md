@@ -1,5 +1,54 @@
 # WorldBox Prompt Pipeline
 
+## SillyTavern preset compatibility
+
+Prompt Studio's **Import ST** reads a preset into a reviewable draft and displays
+an import report before adding blocks. It preserves the selected prompt order,
+disabled entries, injection depth/order, and generation restrictions. When
+multiple orders exist, character ID `100001` is preferred; otherwise the last
+valid order is used, with a notice. Entries missing from that order stay disabled.
+Character-card, lorebook, and history placeholders are not imported or repositioned;
+keep native Worldbox context/history blocks and arrange them as needed.
+
+Balanced inline and scoped comments are removed. Imported static blocks have
+`config.st_macros: true`; the editor exposes this as **Resolve SillyTavern variables
+and dice**. Supported inline macros are `setvar`, `getvar`, `addvar`, `incvar`,
+`decvar`, `roll`, `user`, `trim`, and `noop`. Names are case-insensitive, nested
+expressions work, and `{{user}}` maps to the Worldbox player name. Variables are
+rebuilt in enabled pipeline order for each prompt build; setters can produce no
+message while still supplying values to later blocks. Reads never execute stored
+text as new commands. `getvar::name::fallback` is a Worldbox extension for an unset
+value. There is no persistent/global SillyTavern variable store or script runtime.
+
+Dice support `NdM`, `dM`, and an optional integer `+N`/`-N`. Each block's random
+sequence is seeded by save, turn, and block ID, so preview/rewrite/regeneration of
+the same turn is stable even when another block is filtered out. New turns use
+new sequences. Invalid dice or expressions are removed with diagnostics. Execution
+limits reject more than 1,000 dice, more than 2,147,483,647 sides, or nesting beyond
+128 levels; they do not truncate prompt text or stored templates.
+
+`normal`, `continue`, and `regenerate` restrictions apply on their matching story
+actions. Native `storytelling` filters cover all three. `swipe`, `quiet`, and
+`impersonate` restrictions remain stored but have no matching Worldbox action;
+they do not run during ordinary storytelling. Unknown-only restrictions disable
+the block and remain blocked until explicitly adapted to a supported action.
+
+Chat rendering supports nested collapsed `<details>/<summary>` panels and the
+`<internal_states>` wrapper. Dialogue tags support cyan, pink, teal, orange, gold,
+violet, salmon, orchid, yellow, and plum, with optional `shout`, `whisper`,
+`measured`, or `tremble` tones (for example `<gold:measured>`). Legacy font/span
+text colors accept those names and literal `#RGB`/`#RRGGBB`. Other inline styling,
+scripts, image tags, and event handlers remain excluded.
+
+The report identifies removed macros, unresolved variables, unused model settings,
+unsupported actions, and extension dependencies. It validates active templates
+without baking evaluated values into the imported text. Runtime diagnostics also
+appear in the prompt preview/trace. Regex extensions, automatic image triggers,
+persistent relationship state, character assets, and provider settings are not
+recreated. State panels display AI-written notes; they do not update native game
+stats. Existing imports are not migrated automatically: re-import into a draft
+and remove old copies, or adapt them in the editor.
+
 WorldBox now has a prompt block compiler and a first-pass frontend Prompt Studio. Saves store a configurable prompt block array, the frontend can edit save-owned blocks, and the engine can preview or run the combined save/module block list as the Storyteller LLM message payload.
 
 ## Current Files

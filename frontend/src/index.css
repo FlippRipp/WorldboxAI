@@ -127,6 +127,50 @@
 .md-content > :first-child { margin-top: 0; }
 .md-content > :last-child { margin-bottom: 0; }
 
+.md-content .story-dialogue-color .text-quote { color: inherit; }
+.md-content .story-color-cyan { color: cyan; }
+.md-content .story-color-pink { color: pink; }
+.md-content .story-color-teal { color: teal; }
+.md-content .story-color-orange { color: orange; }
+.md-content .story-color-gold { color: gold; }
+.md-content .story-color-violet { color: violet; }
+.md-content .story-color-salmon { color: salmon; }
+.md-content .story-color-orchid { color: orchid; }
+.md-content .story-color-yellow { color: yellow; }
+.md-content .story-color-plum { color: plum; }
+.md-content .story-tone-shout { font-size: 1.1em; font-weight: 800; }
+.md-content .story-tone-whisper { font-size: 0.9em; font-style: italic; }
+.md-content .story-tone-measured { font-weight: 600; letter-spacing: 0.025em; }
+.md-content .story-tone-tremble { font-style: italic; letter-spacing: 0.05em; }
+
+.md-content details {
+  margin: 0.5rem 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--color-gray-700);
+  border-radius: 0.5rem;
+  background: var(--color-gray-850);
+}
+.md-content details > summary {
+  min-height: 44px;
+  padding: 0.625rem 0.75rem;
+  color: var(--color-purple-300);
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.md-content details > summary:focus-visible {
+  outline: 2px solid var(--color-purple-400);
+  outline-offset: 2px;
+  border-radius: 0.5rem;
+}
+.md-content details[open] > summary { border-bottom: 1px solid var(--color-gray-700); }
+.md-content .story-state-body { padding: 0.5rem 0.75rem; }
+.md-content .story-state-body > :first-child { margin-top: 0; }
+.md-content .story-state-body > :last-child { margin-bottom: 0; }
+.md-content details details { background: var(--color-gray-900); }
+.md-content .story-internal-states { margin-top: 0.75rem; min-width: 0; }
+
 .md-content p { margin-bottom: 0.5rem; }
 
 .md-content h1, .md-content h2 { font-size: 1.25rem; font-weight: 600; margin: 1rem 0 0.5rem; }

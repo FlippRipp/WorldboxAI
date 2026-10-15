@@ -959,6 +959,7 @@ async def preview_prompt_pipeline(request: PromptPipelineRequest):
         return {
             "messages": compiled["messages"],
             "trace": compiled["trace"],
+            "warnings": compiled.get("warnings", []),
         }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

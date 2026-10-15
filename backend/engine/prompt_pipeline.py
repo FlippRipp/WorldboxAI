@@ -1,14 +1,17 @@
 from backend.engine import nsfw
 import re
+import random
 from copy import deepcopy
 from typing import Any
+from backend.engine.st_macros import STMacroContext
 
 
 ALLOWED_BLOCK_TYPES = {"static_text", "engine_context", "module_prompt", "world_context", "character_context", "chat_history"}
 ALLOWED_PLACEMENTS = {"system_relative", "chat_injection"}
 ALLOWED_ROLES = {"system", "user", "assistant"}
 ALLOWED_CATEGORIES = {"system_prompt", "post_history", "narrator", "world_context", "character", "utility", "other"}
-ALLOWED_GENERATION_TYPES = {"storytelling", "world_building", "character_creation", "narration", "combat", "memory", "validation"}
+ST_GENERATION_ACTIONS = {"normal", "continue", "regenerate", "swipe", "quiet", "impersonate"}
+ALLOWED_GENERATION_TYPES = {"storytelling", "world_building", "character_creation", "narration", "combat", "memory", "validation"} | ST_GENERATION_ACTIONS
 
 # Default insertion order for chat_injection blocks; matches the lorebook
 # entry default so pipeline blocks and lore injections share one scale.
@@ -374,6 +377,16 @@ class PromptCompiler:
         generation_type: str | None = None,
     ) -> dict[str, Any]:
         blocks = self.normalize_pipeline(pipeline if pipeline is not None else state.get("prompt_pipeline"))
+        generation_type = generation_type or "storytelling"
+        action = state.get("prompt_generation_action") or ("normal" if (state.get("input_text") or "").strip() else "continue")
+        active_types = {generation_type}
+        if generation_type == "storytelling":
+            active_types.add(action)
+        # Rebuild variables from enabled templates for each compilation. Dice
+        # stay stable across previews/retries of this turn, and change next turn.
+        # Neither previews nor imported macros mutate the saved game state.
+        macro_context = STMacroContext()
+        macro_warnings = {}
 
         # A pipeline may anchor a module's block into the stack: an entry whose
         # id matches a module block's namespaced id (e.g.
@@ -440,11 +453,13 @@ class PromptCompiler:
                     continue
                 has_history_block = True
 
-            if generation_type:
-                block_gen_types = block.get("generation_types")
-                if block_gen_types and generation_type not in block_gen_types:
-                    trace.append(self._trace(block, skipped=True, reason=f"filtered: {generation_type}"))
-                    continue
+            block_gen_types = block.get("generation_types")
+            if block.get("config", {}).get("st_unsupported_triggers") and not block_gen_types:
+                trace.append(self._trace(block, skipped=True, reason="unsupported SillyTavern action restriction"))
+                continue
+            if block_gen_types and not active_types.intersection(block_gen_types):
+                trace.append(self._trace(block, skipped=True, reason=f"filtered: {action if generation_type == 'storytelling' else generation_type}"))
+                continue
 
             if not block.get("enabled", True):
                 trace.append(self._trace(block, skipped=True, reason="disabled"))
@@ -461,7 +476,18 @@ class PromptCompiler:
                 system_entries.append((None, entry))
                 continue
 
-            content = self._render_block(block, state)
+            if block["type"] == "static_text" and block.get("config", {}).get("st_macros"):
+                # Filtering another block must not consume this block's dice.
+                macro_context.rng = random.Random(
+                    f"st:{state.get('active_save_id', '')}:{state.get('turn', 0)}:{block['id']}")
+                warning_start = len(macro_context.warnings)
+                # Resolve ST syntax before substituting native world/player data:
+                # literal text supplied by the player must never become commands.
+                content = self.resolve_macros(macro_context.render(block["config"]["text"]), state)
+                if len(macro_context.warnings) > warning_start:
+                    macro_warnings[block["id"]] = macro_context.warnings[warning_start:]
+            else:
+                content = self._render_block(block, state)
             if not content.strip():
                 trace.append(self._trace(block, skipped=True, reason="empty"))
                 continue
@@ -541,9 +567,15 @@ class PromptCompiler:
                     entry["message_index"] = final_index_by_base[entry["message_index"]]
             trace.extend(injection_trace)
 
+        warnings = []
+        for entry in trace:
+            if entry["id"] in macro_warnings:
+                entry["warnings"] = macro_warnings[entry["id"]]
+                warnings.extend({"block_id": entry["id"], "message": message} for message in entry["warnings"])
         return {
             "messages": messages,
             "trace": trace,
+            "warnings": warnings,
         }
 
     def _validate_unique_block_ids(self, blocks: list[dict[str, Any]]):

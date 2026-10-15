@@ -281,6 +281,7 @@ class GameSessionManager:
 
     def set_input(self, input_text: str):
         self.state["input_text"] = input_text
+        self.state["prompt_generation_action"] = "normal" if (input_text or "").strip() else "continue"
 
     @staticmethod
     def build_message_meta(model: Optional[str] = None, usage: Optional[dict] = None) -> dict[str, Any]:
@@ -332,6 +333,7 @@ class GameSessionManager:
             **final_state,
             "active_save_id": self.active_save_id,
             "input_text": "",
+            "prompt_generation_action": None,
             "current_context": [],
             "lore_depth_injections": [],
             "chat_messages": chat_messages,
@@ -515,6 +517,7 @@ class GameSessionManager:
         self.save_manager.restore_turn_snapshot(self.active_save_id, turn - 1)
         self.state = self.load_active_state()
         self.set_input(manifest.get("user_input", ""))
+        self.state["prompt_generation_action"] = "regenerate"
         return turn
 
     def add_regenerated_swipe(self) -> dict[str, Any]:

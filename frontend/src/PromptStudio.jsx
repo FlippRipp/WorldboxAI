@@ -1,12 +1,13 @@
 import { useEffect, useState, useRef } from 'react';
 import { api } from './lib/api';
 import { appendImportedBlocks } from './lib/promptImport';
+import STImportReport from './components/STImportReport';
 
 const BLOCK_TYPES = ['static_text', 'engine_context', 'world_context', 'character_context', 'module_prompt', 'chat_history'];
 const ROLES = ['system', 'user', 'assistant'];
 const PLACEMENTS = ['system_relative', 'chat_injection'];
 const CATEGORIES = ['system_prompt', 'post_history', 'narrator', 'world_context', 'character', 'utility', 'other'];
-const GENERATION_TYPES = ['storytelling', 'world_building', 'character_creation', 'narration', 'combat', 'memory', 'validation'];
+const GENERATION_TYPES = ['storytelling', 'world_building', 'character_creation', 'narration', 'combat', 'memory', 'validation', 'normal', 'continue', 'regenerate', 'swipe', 'quiet', 'impersonate'];
 
 const DEFAULT_BLOCK_IDS = ['core_narrator_rules', 'world_rules_context', 'player_character_context', 'engine_context', 'storyteller_task', 'chat_history'];
 
@@ -355,10 +356,15 @@ function EditBlockModal({ editingBlock, macros, showMacros, setShowMacros, onSav
                 </label>
               ))}
             </div>
+            <p className="text-gray-500">Storytelling includes normal, continue, and regenerate. Imported swipe, quiet, and impersonate restrictions are retained, but those SillyTavern actions are not available here.</p>
           </fieldset>
 
           {(editingBlock.type === 'static_text' || editingBlock.type === 'module_prompt') && (
             <div className="min-w-0 text-xs text-gray-400 space-y-1">
+              {editingBlock.type === 'static_text' && <label className="flex min-h-11 items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={!!editingBlock.config?.st_macros} onChange={(event) => onUpdateEditingConfig('st_macros', event.target.checked)} className="h-4 w-4 accent-purple-500" />
+                Resolve SillyTavern variables and dice
+              </label>}
               <label htmlFor="edit-prompt-block-text">Text</label>
               <textarea
                 id="edit-prompt-block-text"
@@ -423,6 +429,8 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
   const [isSaving, setIsSaving] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [preview, setPreview] = useState(null);
+  const [importReport, setImportReport] = useState(null);
+  const [showImportReport, setShowImportReport] = useState(false);
   const [error, setError] = useState('');
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
@@ -508,6 +516,8 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
     if (isOpen) {
       setDraft(cloneBlocks(promptPipeline));
       setPreview(null);
+      setImportReport(null);
+      setShowImportReport(false);
       setError('');
       setHasUnsavedChanges(false);
       setShowTools(false);
@@ -798,27 +808,9 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
       try {
         const raw = JSON.parse(evt.target.result);
         const result = await api.importSillyTavernPreset(raw);
-        const { blocks, stats } = result;
-        const msg = [
-          `SillyTavern import complete.`,
-          ``,
-          `Total entries: ${stats.total}`,
-          `Imported as blocks: ${stats.imported}`,
-          `Skipped: ${stats.skipped}`,
-        ];
-        if (stats.skipped_ids.length > 0 && stats.skipped_ids.length <= 10) {
-          msg.push(``, `Skipped items:`);
-          stats.skipped_ids.forEach((s) => msg.push(`  - ${s.name || s.id}: ${s.reason}`));
-        }
-        if (blocks.length === 0) {
-          setError('No blocks could be imported from this file.');
-          return;
-        }
-        msg.push(``, `Add ${blocks.length} blocks to the current pipeline?`);
-        if (confirm(msg.join('\n'))) {
-          setDraft((prev) => appendImportedBlocks(prev, cloneBlocks(blocks)));
-          setHasUnsavedChanges(true);
-        }
+        setImportReport({ ...result, fileName: file.name, applied: false });
+        setShowImportReport(true);
+        setError('');
       } catch (err) {
         setError(`ST Import failed: ${err.message}`);
       }
@@ -842,6 +834,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
     .sort((a, b) => a.message_index - b.message_index);
   const skippedTrace = activeTrace.filter((entry) => entry.skipped);
   const previewMessages = preview?.messages || [];
+  const runtimeWarnings = activeTrace.flatMap((entry) => (entry.warnings || []).map((message) => ({ id: entry.id, message })));
 
   const quickEditProps = { draft, defaults, onUpdateBlock: updateBlock, onUpdateConfig: updateConfig, onOpenEditModal: openEditModal, onRestoreBlock: restoreBlock, macros, showMacros, setShowMacros };
 
@@ -875,6 +868,14 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
 
         <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain xl:overflow-hidden p-3 sm:p-4 flex flex-col xl:grid xl:grid-cols-[minmax(0,1fr)_320px] gap-3 sm:gap-4">
           <div className="shrink-0 xl:min-h-0 xl:overflow-y-auto space-y-4 min-w-0 xl:pr-1">
+            {importReport && <div className="flex items-center justify-between gap-3 rounded-lg border border-amber-800/60 bg-amber-950/30 p-3 text-sm">
+              <span>{importReport.applied ? 'SillyTavern blocks added.' : 'SillyTavern import ready.'} {importReport.warnings?.length || 0} compatibility notices.</span>
+              <button onClick={() => setShowImportReport(true)} className="min-h-11 shrink-0 px-3 rounded bg-gray-700 hover:bg-gray-600">View report</button>
+            </div>}
+            {!!runtimeWarnings.length && <details className="rounded-lg border border-amber-800/60 bg-amber-950/30 p-3 text-sm text-amber-100">
+              <summary className="cursor-pointer">Prompt variable warnings ({runtimeWarnings.length})</summary>
+              <ul className="mt-2 space-y-2">{runtimeWarnings.map((warning, index) => <li key={index} className="break-words">{warning.id}: {warning.message}</li>)}</ul>
+            </details>}
             <div className="grid grid-cols-3 gap-1 sm:flex sm:items-center sm:gap-2 border-b border-gray-700 pb-2" aria-label="Prompt editor sections">
               {[
                 { key: 'pipeline', label: 'Pipeline Blocks' },
@@ -1242,6 +1243,14 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
         onUpdateEditingConfig={updateEditingConfig}
         onSetEditingBlock={setEditingBlock}
       />
+
+      {showImportReport && importReport && <STImportReport report={importReport} onClose={() => setShowImportReport(false)} onAdd={() => {
+        setDraft((prev) => appendImportedBlocks(prev, cloneBlocks(importReport.blocks)));
+        setHasUnsavedChanges(true);
+        setImportReport((report) => ({ ...report, applied: true }));
+        setShowImportReport(false);
+        setActiveTab('pipeline');
+      }} />}
 
       {showCloseConfirm && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60" role="dialog" aria-modal="true">

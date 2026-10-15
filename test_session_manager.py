@@ -280,6 +280,7 @@ def test_prepare_regenerate_rolls_back_location(tmp_path):
     left them."""
     session = _seed_travel_turns(tmp_path)
     assert session.prepare_regenerate() == 1
+    assert session.state["prompt_generation_action"] == "regenerate"
     assert session.state["player_location_node_id"] == "n_village"
     assert session.state["revealed_node_ids"] == ["n_village"]
 

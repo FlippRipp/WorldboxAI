@@ -4,6 +4,7 @@ class WorldState(TypedDict):
     nsfw: dict[str, Any]         # Versioned original and non-graphic adventure context
     active_save_id: Optional[str] # Current save/session id
     input_text: Optional[str]    # The player's input command
+    prompt_generation_action: Optional[str] # Normal/continue/regenerate; distinct from prompt workflow category
     last_input_text: Optional[str] # The just-completed turn's player input, kept for post-turn phases (librarian)
     module_data: dict[str, Any]  # e.g., {"wb_core_rpg": {"hp": 100}}
     module_configs: dict[str, Any] # User settings for modules
