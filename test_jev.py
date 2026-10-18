@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -172,6 +173,13 @@ def rpg_state(rpg, **extra):
             'module_configs': {'wb_core_rpg': {}}, 'module_data': {'wb_core_rpg': rpg}, **extra}
 
 
+def npc_module_state(state):
+    from backend.engine.graph import EngineGraph
+    path = Path(__file__).parent / 'modules' / 'wb_npc_system' / 'manifest.json'
+    manifest = json.loads(path.read_text(encoding='utf-8'))
+    return EngineGraph._build_module_state(None, state, 'wb_npc_system', manifest['consumes'])
+
+
 def test_action_practice_passives_curses_and_exact_skill(tmp_path):
     backend = load_rpg()
     skills = {'fire': {'rating': 3, 'type': 'active'}, 'fire dance': {'rating': 4, 'type': 'active'},
@@ -212,6 +220,35 @@ def test_failure_reason_uses_existing_fact_and_custom_directive(tmp_path):
         instructions={'action_assessment': 'Respect immutable physics.'}))
     assert 'Gravity cannot be reversed.' in result['failure_reason']
     assert 'Respect immutable physics.' in requests[0]['state']['task']
+    assert len(requests) == 2 and not generated
+
+
+@pytest.mark.parametrize('source,labels,value', [
+    ('context.character.stats.power', ('power',), '1'),
+    ('context.character.hp', ('hp',), '2'),
+    ('context.character.skills.lifting.rating', ('lifting', 'rating'), '3'),
+])
+def test_scalar_failure_evidence_keeps_identity_in_narrator_ruling(tmp_path, source, labels, value):
+    backend = load_rpg()
+    def values(request):
+        if 'evidence' in request['questions']:
+            options = request['questions']['evidence']['criteria']
+            evidence = next(k for k, v in options.items()
+                            if isinstance(v, dict) and v['source'] == source)
+            assert options[evidence]['text'] == value
+            return {'category': 'capability', 'evidence': evidence}
+        return {'substantive': 1, 'feasibility': '1', 'difficulty': 'extreme'}
+    _, sdk, requests, generated, _ = setup_jev(tmp_path, values)
+    char = backend.Character.from_dict(_char(stats={'power': 1}, hp=2,
+        skills={'lifting': {'rating': 3, 'type': 'active'}}))
+    action = 'Lift the heavy portcullis.'
+    char.action_assessment = run(backend._assess_action(action, char, {}, sdk))
+
+    reason = char.action_assessment['failure_reason']
+    assert all(label in reason.lower() for label in labels)
+    assert value in reason
+    narrator_prompt = backend._build_action_feasibility_prompt(char, action, {})
+    assert reason in narrator_prompt
     assert len(requests) == 2 and not generated
 
 
@@ -256,6 +293,55 @@ def test_npc_presence_atomic_and_fallback(tmp_path, probabilities, expected, fal
     candidates = [{'id': 'n1', 'name': 'A'}, {'id': 'n2', 'name': 'B'}]
     result = run(backend._llm_scene_presence(npc_state(), sdk, candidates))
     assert result == expected and len(generated) == int(fallback)
+
+
+@pytest.mark.parametrize('phase', ['presence', 'introduction'])
+@pytest.mark.parametrize('current_action', ['I seek a smith to repair my sword.', ''])
+@pytest.mark.parametrize('project_state', [False, True])
+def test_npc_preturn_decisions_use_current_action(tmp_path, phase, current_action, project_state):
+    from test_npc_system import _unmet_npc
+    backend = load_npc()
+    _, sdk, requests, generated, _ = setup_jev(tmp_path)
+    candidate = _unmet_npc('n1', 'Borin')
+    state = npc_state({'n1': candidate})
+    state['last_input_text'] = 'I leave the smithy and hide alone in the forest.'
+    state['input_text'] = current_action
+    if project_state:
+        state = npc_module_state(state)
+
+    if phase == 'presence':
+        assert run(backend._llm_scene_presence(state, sdk, [candidate])) == set()
+    else:
+        assert run(backend._introduction_pass(state, sdk)) is None
+
+    assert len(requests) == 1 and not generated
+    assert requests[0]['state']['player_action'] == current_action
+
+
+@pytest.mark.parametrize('phase', ['motivation', 'records', 'creation'])
+@pytest.mark.parametrize('completed_action', ['I ask Borin to bring me the antidote.', ''])
+def test_npc_postturn_decisions_use_completed_action(tmp_path, phase, completed_action):
+    from test_npc_system import _present_npc
+    backend = load_npc()
+    _, sdk, requests, _, _ = setup_jev(tmp_path)
+    candidate = _present_npc('n1', 'Borin')
+    bank = {} if phase == 'creation' else {'n1': candidate}
+    state = npc_state(bank, mutation_config={'generator_frequency': 1},
+                      history=['Borin waits beside the player at the tavern.'])
+    state['last_input_text'] = completed_action
+    state['input_text'] = 'I hide from Borin in the forest.'
+    state = npc_module_state(state)
+    bank = state['module_data']['wb_npc_system']['characters']
+
+    if phase == 'motivation':
+        assert run(backend._llm_motivated_ids(state, sdk, [candidate])) == set()
+    elif phase == 'records':
+        assert not run(backend._track_character_changes(state, bank, sdk))
+    else:
+        run(backend.on_librarian(state, sdk))
+
+    assert len(requests) == 1
+    assert requests[0]['state']['player_action'] == completed_action
 
 
 def test_npc_motivation_and_record_screen(tmp_path):

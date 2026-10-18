@@ -47,7 +47,10 @@ async def grounded_reason(sdk, state, facts, categories, module, step):
         category, evidence = d.pick("category"), d.pick("evidence")
         if "unsupported" in (category, evidence):
             raise Uncertain("reason needs a generated explanation")
-        text = f"{categories[category]} — established context: {mapping[evidence][1]}"
+        source, fact = mapping[evidence]
+        # Scalar evidence needs its field identity (e.g. power = 1), not just its value.
+        label = re.sub(r":\d+$", "", source).removeprefix("context.").replace(".", " > ")
+        text = f"{categories[category]} — established context: {label} = {fact}"
         await d.finish("accepted")
         return text, d
     except asyncio.CancelledError:
@@ -166,9 +169,10 @@ async def screen(sdk, state, questions, module, step):
     return skip, d
 
 
-def npc_context(state, candidates):
+def npc_context(state, candidates, *, player_action):
+    """The caller selects its phase's action; an empty Continue stays empty."""
     return {"recent_story": list(state.get("history", []))[-5:],
-            "player_action": state.get("last_input_text") or state.get("input_text", ""),
+            "player_action": player_action,
             "characters": candidates, "turn": state.get("turn", 0),
             "location": {k: v for k, v in state.items() if k.startswith("player_location")},
             "story_threads": state.get("module_data", {}).get(NPC, {}).get("story_threads", []),
@@ -184,7 +188,9 @@ async def npc_ids(sdk, state, candidates, kind):
                    "Does this off-screen character have a concrete story reason RIGHT NOW to travel toward the player, such as a goal, grudge, debt, errand or plot tie? Most characters should not.")
     questions = {f"npc_{i}": noul({"question": instruction, "character_id": npc["id"]})
                  for i, npc in enumerate(candidates)}
-    d = await ask(sdk, npc_context(state, candidates), questions, NPC, f"npc:{kind}")
+    action_key = "input_text" if kind == "presence" else "last_input_text"
+    context = npc_context(state, candidates, player_action=state.get(action_key, ""))
+    d = await ask(sdk, context, questions, NPC, f"npc:{kind}")
     try:
         selected = {npc["id"] for i, npc in enumerate(candidates) if d.yes(f"npc_{i}")}
         await d.finish("accepted")
@@ -197,7 +203,8 @@ async def npc_ids(sdk, state, candidates, kind):
 async def introduce(sdk, state, candidates, prompt):
     mapping, options = _options(candidates, lambda npc: npc)
     options["unsupported"] = "The decision needs reasoning not represented by the eligible candidates."
-    context = {**npc_context(state, candidates), "task": prompt}
+    context = {**npc_context(state, candidates, player_action=state.get("input_text", "")),
+               "task": prompt}
     d = await ask(sdk, context, {"npc": choice(
         "Choose the single eligible character the scene naturally calls for now, or none. Respect the supplied introduction rules.", options)}, NPC, "npc:introduction")
     try:

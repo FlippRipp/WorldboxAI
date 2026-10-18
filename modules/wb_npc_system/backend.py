@@ -1597,7 +1597,8 @@ Respond with ONLY valid JSON:
 Return {{"updates": []}} if nothing durable changed."""
 
     skip, decision = await jev_tasks.screen(sdk,
-        {**jev_tasks.npc_context(state, candidates), "task": prompt},
+        {**jev_tasks.npc_context(state, candidates, player_action=state.get("last_input_text", "")),
+         "task": prompt},
         {f"npc_{i}": f"Does character {npc['id']!r} have any reportable change in THIS turn under the supplied tracking rules? Include revealed or adopted names, lasting appearance/personality changes, pitch/role/status changes, death/departure and noteworthy additions to notes. Exclude mere temporary emotions or conditions."
          for i, npc in enumerate(candidates)}, jev_tasks.NPC, "npc:record_updates")
     if skip:
@@ -1753,7 +1754,8 @@ Respond with ONLY valid JSON:
     decision = Decision()
     if demand_driven:
         skip, decision = await jev_tasks.screen(sdk,
-            {**jev_tasks.npc_context(state, list(bank.values())), "task": prompt},
+            {**jev_tasks.npc_context(state, list(bank.values()), player_action=state.get("last_input_text", "")),
+             "task": prompt},
             {"new_character": "Does the story actually need any NEW character now, because of a concrete scene, direction or thread that no EXISTING character (introduced or unintroduced) can serve?"},
             jev_tasks.NPC, "npc:creation_screen")
         if skip:
