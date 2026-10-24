@@ -11,7 +11,6 @@ import time
 
 import httpx
 
-from backend.engine import nsfw
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 PRICE_DATE = "2026-10-01"
@@ -151,14 +150,10 @@ class JevService:
     async def decide(self, state, questions, *, module, step, mode="live", inspector=None, test=False):
         result = Decision(module=module, step=step, inspector=inspector)
         config = self._config()
-        context = nsfw.current()
         slot = {"wb_core_rpg": "rpg_enabled", "wb_npc_system": "npc_enabled"}.get(module)
         if not test:
             if mode == "mock" or not config["enabled"] or not slot or not config[slot]:
                 result.reason = "disabled or unavailable"
-                return result
-            if context and context.enabled:
-                result.reason = "adventure model routing"
                 return result
         if not config["api_key"]:
             result.reason = "missing API key"
@@ -179,14 +174,6 @@ class JevService:
                         raise Uncertain("unsupported option count")
                 elif question.get("type") != "noul":
                     raise Uncertain("unsupported question type")
-            # Preserve the adventure's existing non-graphic context projection.
-            if context and not test:
-                messages = await context.messages([{"role": "user", "content": json.dumps(
-                    {"state": state, "questions": questions}, ensure_ascii=False)}])
-                projected = json.loads(messages[-1]["content"])
-                if projected.get("questions") != questions:
-                    raise Uncertain("context projection changed decision definitions")
-                request["state"] = projected["state"]
             async def send():
                 async with httpx.AsyncClient(transport=self.transport, timeout=self.timeout) as client:
                     response = await client.post(ENDPOINT, json=request,
@@ -232,9 +219,6 @@ class JevService:
             result.model, result.reason = payload["model"], ""
         except asyncio.CancelledError:
             await result.finish("cancelled")
-            raise
-        except nsfw.ContextPreparationError:
-            await result.finish("fallback", "adventure context preparation failed")
             raise
         except Exception as exc:
             # Never log response bodies or exception messages that may echo credentials.

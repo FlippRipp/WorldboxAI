@@ -333,14 +333,6 @@ export function useWebSocket(onStateChange, onLLMCall) {
     }
   }, [resetStream]);
 
-  const sendNsfwAction = useCallback((action, payload = {}) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      setPostProcessing(true);
-      if (action === 'nsfw_mode' && !payload.enabled) setPipelineStatus({ stage: 'nsfw_summary', label: 'Preparing story summary...' });
-      wsRef.current.send(JSON.stringify({ action, ...payload }));
-    }
-  }, []);
-
   const sendContinue = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       // A "continue" turn injects no player message, so don't add a user bubble;
@@ -402,6 +394,6 @@ export function useWebSocket(onStateChange, onLLMCall) {
   return {
     isConnected, isReconnecting, messages, currentStream, currentReasoning, swipes, postProcessing, pipelineStatus, restoredInput,
     commandResult, clearCommandResult,
-    sendNsfwAction, sendMessage, sendCommand, sendRegenerate, sendContinue, sendIntro, sendStop, setMessages, setSwipes, applyServerState,
+    sendMessage, sendCommand, sendRegenerate, sendContinue, sendIntro, sendStop, setMessages, setSwipes, applyServerState,
   };
 }

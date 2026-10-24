@@ -45,7 +45,7 @@ export default function JevSettings() {
   return <section className="mb-6 p-4 rounded-xl bg-gray-800/50 border border-gray-700 space-y-3" aria-label="Jev decisions">
     <h3 className="text-lg font-semibold text-gray-100">Jev decisions</h3>
     <p className="text-sm text-gray-400">Speed up RPG rulings and NPC decisions. Uncertain answers use your existing models. Storytelling keeps its current model.</p>
-    <p className="text-xs text-gray-500">Optional TypeSafe connection, independent of the provider below. NSFW mode keeps using its selected model.</p>
+    <p className="text-xs text-gray-500">Optional TypeSafe connection, independent of the provider below.</p>
     {config && <>
       <div className="flex flex-wrap gap-5 text-sm text-gray-200">
         {[['enabled', 'Enable Jev'], ['rpg_enabled', 'RPG decisions'], ['npc_enabled', 'NPC decisions']].map(([field, label]) =>

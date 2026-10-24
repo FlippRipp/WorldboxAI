@@ -2836,7 +2836,7 @@ def test_studio_generate_with_session_services_does_not_load_a_save(
     backend = _load_backend(tmp_path)
     _enable_local(backend)
     save_loads = []
-    scopes = []
+    calls = []
     pending = []
 
     def load_save(save_id):
@@ -2844,11 +2844,11 @@ def test_studio_generate_with_session_services_does_not_load_a_save(
         raise FileNotFoundError(f"Save {save_id} not found.")
 
     async def write_prompt(prompt, model_preference="balanced", max_tokens=None):
-        scopes.append(("prompt", backend.adventure_nsfw.current()))
+        calls.append("prompt")
         return "a refined moonlit castle"
 
     async def generate(cfg, prompt):
-        scopes.append(("image", backend.adventure_nsfw.current()))
+        calls.append("image")
         return b"studio image", "png"
 
     append_record = backend._append_record
@@ -2860,7 +2860,7 @@ def test_studio_generate_with_session_services_does_not_load_a_save(
     llm = SimpleNamespace(generate=write_prompt, _current_module="")
     manager = SimpleNamespace(
         active_save_id=active_save_id,
-        state={"nsfw": {**backend.adventure_nsfw.empty(), "enabled": True}},
+        state={},
         save_manager=SimpleNamespace(load_save=load_save))
     backend.set_services({
         "data_dir": str(tmp_path),
@@ -2890,7 +2890,7 @@ def test_studio_generate_with_session_services_does_not_load_a_save(
     assert record["save_id"] == "__studio__"
     assert record["image_prompt"] == (
         "a refined moonlit castle" if refine else "castle by the sea")
-    assert scopes == ([("prompt", None)] if refine else []) + [("image", None)]
+    assert calls == (["prompt"] if refine else []) + ["image"]
     assert (backend._data_dir() / "images" / record["filename"]).read_bytes() == b"studio image"
 
 

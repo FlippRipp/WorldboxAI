@@ -1,4 +1,3 @@
-from backend.engine import nsfw
 import re
 import random
 from copy import deepcopy
@@ -687,7 +686,7 @@ class PromptCompiler:
 
     def _chat_history_messages(self, state: dict[str, Any], max_turns: int | None = None) -> list[dict[str, str]]:
         messages = []
-        for message in nsfw.projected_messages(state):
+        for message in state.get("chat_messages", []):
             role = message.get("role")
             content = message.get("content")
             if not isinstance(content, str) or not content.strip():

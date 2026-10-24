@@ -4,12 +4,10 @@
 
 🌐 **[Project page](https://flippripp.github.io/WorldboxAI/)** · 📚 [Documentation](docs/index.md) · 🚀 [Quick Start](#quick-start)
 
-**Manual NSFW mode:** [model switching, non-graphic summaries, and preserved story history](docs/nsfw-mode.md).
-
 **Optional Jev decisions:** In Settings → Model, save a TypeSafe API key in **Jev decisions**,
 test the saved key, and enable Jev for RPG and/or NPC workflows. It starts disabled and works
-alongside your selected provider. Uncertain decisions and errors use the existing models;
-NSFW mode retains its selected model. No save conversion is needed.
+alongside your selected provider. Uncertain decisions and errors use the existing models.
+No save conversion is needed.
 
 Jev handles action rulings, practice skill selection, default-scale XP awards, NPC presence,
 introductions, and travel motivation. It can skip clearly unnecessary skill-event extraction,

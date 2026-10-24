@@ -8,7 +8,6 @@ import Header from './components/Header/Header';
 import Sidebar from './components/Sidebar/Sidebar';
 import { ChatFeed } from './components/Chat/ChatFeed';
 import ChatInput from './components/Chat/ChatInput';
-import NsfwControls from './components/Chat/NsfwControls';
 import CommandResultModal from './components/Chat/CommandResultModal';
 import SlotRenderer from './components/Slots/SlotRenderer';
 import SettingsModal from './SettingsModal';
@@ -129,7 +128,6 @@ function AppContent() {
   const handleStateFromServer = useCallback((state) => {
     setGameState(prev => ({
       ...prev,
-      nsfw: state.nsfw || prev.nsfw,
       module_data: state.module_data || prev.module_data || {},
       module_configs: state.module_configs || prev.module_configs || {},
       characters: state.characters || prev.characters || {},
@@ -664,7 +662,6 @@ function AppContent() {
             scrollControlRef={feedScrollRef}
             onUserScroll={handleFeedUserScroll}
             onBranchMessage={handleBranchMessage}
-            onNsfwRetry={() => ws.sendNsfwAction("nsfw_retry")}
             onRegenerate={handleRegenerate}
             onSwipe={handleSwipe}
             onEditMessage={handleEditMessage}
@@ -681,10 +678,6 @@ function AppContent() {
             </div>
           )}
 
-          <NsfwControls value={gameState.nsfw}
-            busy={ws.currentStream != null || ws.postProcessing}
-            disabled={!ws.isConnected || ws.isReconnecting}
-            status={ws.pipelineStatus} onAction={ws.sendNsfwAction} />
           <ChatInput
             commands={slashCommands}
             onSend={handleSend}

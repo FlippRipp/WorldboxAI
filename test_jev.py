@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from backend.engine.jev import JevService, choice, noul, Uncertain, fallback_generate
-from backend.engine import jev_tasks, nsfw
+from backend.engine import jev_tasks
 from backend.engine.llm_inspector import LLMInspector
 from backend.engine.llm_call_log import LLMCallLog
 from test_rpg_xp_gain import _load_backend as load_rpg, _char
@@ -81,15 +81,6 @@ def test_disabled_missing_and_mock_never_call_network(tmp_path, mode, updates):
     assert not result.answers and not requests
     with pytest.raises(Uncertain):
         result.yes('ok')
-
-
-def test_nsfw_routing_bypasses_jev(tmp_path):
-    service, _, requests, _, _ = setup_jev(tmp_path)
-    async def task():
-        with nsfw.operation({'nsfw': {**nsfw.empty(), 'enabled': True}}, SimpleNamespace(nsfw_model='special')):
-            return await service.decide('private story', {'ok': noul('yes?')}, module=jev_tasks.NPC, step='test')
-    assert not run(task()).answers
-    assert not requests
 
 
 @pytest.mark.parametrize('status', [401, 422, 429, 500, 529])
@@ -488,29 +479,15 @@ def test_concurrent_fallbacks_keep_explicit_attribution(tmp_path, monkeypatch):
     assert all(r['module_source'] == r['decision_parent_id'] and r['step'] == r['module_source'] + ':fallback' for r in records)
 
 
-def test_projection_preserves_decision_keys_and_blocks_changed_schema(tmp_path):
+def test_decision_receives_original_state_and_questions(tmp_path):
     service, _, requests, _, _ = setup_jev(tmp_path, {'ok': 1})
-    class Projector:
-        enabled = False
-        async def messages(self, messages):
-            content = json.loads(messages[0]['content'])
-            content['state'] = 'Projected non-graphic facts'
-            if getattr(self, 'tamper', False):
-                content['questions'] = {}
-            return [{'role': 'user', 'content': json.dumps(content)}]
-    projector = Projector()
-    async def task():
-        token = nsfw._operation.set(projector)
-        try:
-            d = await service.decide('original', {'ok': noul('yes?')}, module=jev_tasks.RPG, step='test')
-            await d.finish('accepted')
-            projector.tamper = True
-            failed = await service.decide('original', {'ok': noul('yes?')}, module=jev_tasks.RPG, step='test')
-            assert not failed.answers
-        finally:
-            nsfw._operation.reset(token)
-    run(task())
-    assert len(requests) == 1 and requests[0]['state'] == 'Projected non-graphic facts'
+    questions = {'ok': noul('yes?')}
+    original = {'history': 'Original adventure facts', 'hp': 8}
+    decision = run(service.decide(original, questions, module=jev_tasks.RPG, step='test'))
+    assert decision.answers
+    assert len(requests) == 1
+    assert requests[0]['state'] == original
+    assert requests[0]['questions'] == questions
 
 
 def test_evaluation_cases_have_valid_expected_answers():

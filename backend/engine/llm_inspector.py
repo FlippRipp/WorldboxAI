@@ -34,7 +34,6 @@ class LLMCallRecord:
 
 CALL_TYPE_LABELS: dict[str, str] = {
     "decision": "Jev decision",
-    "nsfw_summary": "Non-graphic context",
     "storyteller": "Storyteller",
     "reader": "Reader",
     "embedding": "Embedding",

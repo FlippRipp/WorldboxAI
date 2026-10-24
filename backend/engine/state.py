@@ -1,7 +1,6 @@
 from typing import TypedDict, Any, Optional
 
 class WorldState(TypedDict):
-    nsfw: dict[str, Any]         # Versioned original and non-graphic adventure context
     active_save_id: Optional[str] # Current save/session id
     input_text: Optional[str]    # The player's input command
     prompt_generation_action: Optional[str] # Normal/continue/regenerate; distinct from prompt workflow category

@@ -9,7 +9,6 @@ import pytest
 from backend.engine.graph import EngineGraph
 from backend.engine.prompt_pipeline import PromptCompiler
 from backend.engine.st_importer import SillyTavernImporter
-from backend.engine import nsfw
 
 
 def preset_pipeline():
@@ -35,7 +34,6 @@ def state_for(action="normal", turn=4):
             "prompt_generation_action": action,
             "characters": {"default_player": {"name": "Robin"}},
             "prompt_pipeline": preset_pipeline()}
-    nsfw.ensure(state)
     return state
 
 
