@@ -50,6 +50,19 @@ FIT_MAX_REJECTS = 2
 DEFER_MAX_STREAK = 2
 ABANDON_COOLDOWN_FACTOR = 2
 PIVOT_COOLDOWN_TURNS = 3  # min turns between pivot-driven thread replacements
+# In-world time thresholds (when wb_time_tracker is active; falls back to turns when absent):
+MIN_THREAD_LIFESPAN_MINUTES = 180   # 3 hours: rapid-fire dialogue turns (<3h) won't expire an active thread early
+COOLDOWN_REST_SKIP_MINUTES = 360    # 6 hours: sleeping/traveling satisfies a normal quiet period once >=1 turn passes
+MIN_COOLDOWN_MINUTES = 30           # 30 minutes: rapid dialogue turns (<30m) wait up to 2 extra turns before weaving
+TIME_OF_DAY_BANDS = (
+    (0, 5, "the dead of night"),
+    (5, 8, "early morning"),
+    (8, 12, "morning"),
+    (12, 14, "midday"),
+    (14, 18, "afternoon"),
+    (18, 21, "evening"),
+    (21, 24, "night"),
+)
 # Evidence marker distinguishing likes the player typed in themselves from
 # AI-observed ones; player-set entries survive a /plot reset.
 PLAYER_SET_EVIDENCE = "set directly by the player"
@@ -246,6 +259,8 @@ def _empty_thread() -> dict:
         "status": "none",  # none | active | resolved | expired | abandoned
         "created_turn": 0,
         "closed_turn": 0,
+        "created_minutes": 0,
+        "closed_minutes": 0,
     }
 
 
@@ -302,6 +317,7 @@ def _default_data() -> dict:
         "pending_nudge": "",
         "last_nudge_turn": 0,
         "last_closed_turn": 0,
+        "last_closed_minutes": 0,
         "next_thread_turn": 0,  # earliest turn a new thread may be generated
         "defer_streak": 0,      # consecutive generator defers (readiness escape)
         "direction_seed_attempts": 0,  # failed initial-direction reads (capped)
@@ -706,8 +722,120 @@ def _direction_block(data: dict) -> str:
     return "\n".join(lines) + "\n\n"
 
 
+def _get_time_clock(state: dict) -> dict | None:
+    """Return the active wb_time_tracker clock dict if present, else None."""
+    time_data = (state.get("module_data") or {}).get("wb_time_tracker")
+    if not isinstance(time_data, dict):
+        return None
+    clock = time_data.get("clock")
+    if not isinstance(clock, dict):
+        return None
+    return clock
+
+
+def _current_minutes(state: dict) -> int | None:
+    """Return total in-world minutes elapsed from wb_time_tracker, or None when
+    the time module is inactive/uninitialized."""
+    clock = _get_time_clock(state)
+    if clock is None:
+        return None
+    try:
+        return int(clock.get("total_minutes_elapsed", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _time_of_day_label(hour: int) -> str:
+    for start, end, label in TIME_OF_DAY_BANDS:
+        if start <= hour < end:
+            return label
+    return "night"
+
+
+def _format_clock_text(clock: dict) -> str:
+    year = int(clock.get("year", 1) or 1)
+    month = int(clock.get("month", 1) or 1)
+    day = int(clock.get("day", 1) or 1)
+    hour = int(clock.get("hour", 8) or 0)
+    minute = int(clock.get("minute", 0) or 0)
+    return (
+        f"Year {year}, Month {month}, Day {day} -- "
+        f"{hour:02d}:{minute:02d} ({_time_of_day_label(hour)})"
+    )
+
+
+def _format_duration_minutes(minutes: int) -> str:
+    minutes = max(0, int(minutes or 0))
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    days, rem = divmod(minutes, 24 * 60)
+    hours, mins = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} day{'s' if days != 1 else ''}")
+    if hours:
+        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if not days and mins:
+        parts.append(f"{mins} minute{'s' if mins != 1 else ''}")
+    return ", ".join(parts) or "0 minutes"
+
+
+def _should_expire_thread(state: dict, thread: dict, turn: int, thread_max_turns: int) -> bool:
+    """Whether an active thread has reached the end of its lifespan.
+    When wb_time_tracker is active, rapid-fire dialogue turns (<3 hours of
+    in-world time) do not prematurely expire an active thread at thread_max_turns,
+    up to a hard safety ceiling of 2x thread_max_turns."""
+    turns_elapsed = turn - int(thread.get("created_turn", 0) or 0)
+    if turns_elapsed < thread_max_turns:
+        return False
+    cur_minutes = _current_minutes(state)
+    if cur_minutes is None:
+        return True
+    if turns_elapsed >= thread_max_turns * 2:
+        return True
+    created_minutes = int(thread.get("created_minutes", 0) or 0)
+    return max(0, cur_minutes - created_minutes) >= MIN_THREAD_LIFESPAN_MINUTES
+
+
+def _in_quiet_period(state: dict, data: dict, turn: int) -> bool:
+    """Whether the story is still in its between-thread breather.
+    Falls back to pure turn counting when wb_time_tracker is absent.
+    When wb_time_tracker is active:
+    - A major in-world rest/travel skip (>=6h, or >=12h after an abandoned
+      thread) satisfies the breather once at least 1 turn has passed.
+    - Rapid 1-minute dialogue turns where <30 in-world minutes have passed
+      extend the breather by up to 2 extra turns so a new plot thread does not
+      drop into the middle of the same conversation."""
+    next_thread_turn = int(data.get("next_thread_turn", 0) or 0)
+    last_closed_turn = int(data.get("last_closed_turn", 0) or 0)
+    if next_thread_turn <= 0 or (last_closed_turn > 0 and next_thread_turn <= last_closed_turn):
+        return False
+
+    cur_minutes = _current_minutes(state)
+    if cur_minutes is None:
+        return turn < next_thread_turn
+
+    last_closed_minutes = int(data.get("last_closed_minutes", 0) or 0)
+    minutes_since_close = max(0, cur_minutes - last_closed_minutes)
+    last_outcome = (data.get("thread_history") or [{}])[-1].get("outcome", "")
+    skip_threshold = COOLDOWN_REST_SKIP_MINUTES * (
+        ABANDON_COOLDOWN_FACTOR if last_outcome == "abandoned" else 1
+    )
+    if turn > last_closed_turn and minutes_since_close >= skip_threshold:
+        return False
+
+    if turn < next_thread_turn:
+        return True
+
+    if minutes_since_close < MIN_COOLDOWN_MINUTES and turn < next_thread_turn + 2:
+        return True
+
+    return False
+
+
 def _setting_material(state: dict) -> list[str]:
-    """Scenario and world rules/lore blocks shared by every generation prompt."""
+    """Scenario, world rules/lore, and in-world clock blocks shared by every
+    generation prompt."""
     parts = []
 
     scenario = state.get("scenario_data")
@@ -732,6 +860,12 @@ def _setting_material(state: dict) -> list[str]:
                 lines.append(f"{label}: {value}")
         if lines:
             parts.append("<world>\n" + "\n".join(lines) + "\n</world>")
+
+    clock = _get_time_clock(state)
+    if clock is not None:
+        parts.append(
+            f"<in_world_time>\nCurrent in-world date and time: {_format_clock_text(clock)}.\n</in_world_time>"
+        )
 
     return parts
 
@@ -878,15 +1012,21 @@ Respond with ONLY valid JSON:
     return None if _is_profile_empty(profile) else profile
 
 
-def _history_block(data: dict) -> str:
+def _history_block(data: dict, state: dict | None = None) -> str:
     """Closed threads with their lasting consequences -- the story's memory.
     Generation builds on these instead of merely avoiding repeats."""
+    cur_minutes = _current_minutes(state) if state is not None else None
     past = []
     for entry in data.get("thread_history", [])[-6:]:
         if not entry.get("title"):
             continue
         fallout = str(entry.get("consequence") or entry.get("note") or "").strip()
-        line = f'- "{entry.get("title", "")}" -- {entry.get("outcome", "")} (turn {entry.get("closed_turn", 0)})'
+        closed_turn = entry.get("closed_turn", 0)
+        when_label = f"turn {closed_turn}"
+        if cur_minutes is not None and "closed_minutes" in entry:
+            elapsed = max(0, cur_minutes - int(entry.get("closed_minutes", 0) or 0))
+            when_label += f", {_format_duration_minutes(elapsed)} ago in-world"
+        line = f'- "{entry.get("title", "")}" -- {entry.get("outcome", "")} ({when_label})'
         if fallout:
             line += f": {fallout}"
         past.append(line)
@@ -955,7 +1095,7 @@ CHALLENGE DIFFICULTY:
 {_direction_block(data)}STORY MATERIAL:
 {_story_material(state)}
 
-{_storylines_block(state)}{_character_roster(state)}{_character_sheet_block(state)}{_history_block(data)}{_directive("thread_generation", state.get("module_instructions"))}{different}{critique_block}{pivot_block}{defer_block}
+{_storylines_block(state)}{_character_roster(state)}{_character_sheet_block(state)}{_history_block(data, state)}{_directive("thread_generation", state.get("module_instructions"))}{different}{critique_block}{pivot_block}{defer_block}
 
 Respond with ONLY valid JSON:
 {{"title": "3-6 words", "mode": "spectacle|intrigue|character|variety", "hook": "how it surfaces in the story, one sentence", "challenge": "what stands in the way -- the opposition or situational tension itself, one sentence, never what the player should do about it", "stakes": "what is at risk or what could be gained, one sentence", "appeal": "which player preference this serves, a few words"}}"""
@@ -990,6 +1130,7 @@ Respond with ONLY valid JSON:
             print(f"[Plot Director] Thread generation failed {attempts} times; going dormant.")
         return {"gen_attempts": attempts, "status": status}
 
+    cur_minutes = _current_minutes(state)
     print(f"[Plot Director] Turn {turn}: new thread ready -- {title}")
     return {
         "gen_attempts": 0,
@@ -1007,6 +1148,7 @@ Respond with ONLY valid JSON:
             appeal=str(parsed.get("appeal", "")).strip(),
             status="active",
             created_turn=turn,
+            created_minutes=cur_minutes if cur_minutes is not None else 0,
         ),
     }
 
@@ -1153,7 +1295,8 @@ Respond with ONLY valid JSON:
 
 
 def _finalize_thread(updates: dict, data: dict, thread: dict, outcome: str, turn: int,
-                     note: str = "", consequence: str = "", cooldown: int = 0) -> None:
+                     note: str = "", consequence: str = "", cooldown: int = 0,
+                     closed_minutes: int | None = None) -> None:
     """Close the active thread into history, clear the nudge, and start the
     quiet period (cooldown 0 keeps the old replace-immediately behavior). The
     caller regenerates afterwards (overwriting "thread" on success); writing
@@ -1163,19 +1306,25 @@ def _finalize_thread(updates: dict, data: dict, thread: dict, outcome: str, turn
         **{k: thread.get(k, v) for k, v in _empty_thread().items()},
         "status": outcome,
         "closed_turn": turn,
+        "closed_minutes": closed_minutes if closed_minutes is not None else int(thread.get("closed_minutes", 0) or 0),
     })
     history = list(data.get("thread_history", []))
-    history.append({
+    entry = {
         "title": thread.get("title", ""),
         "outcome": outcome,
         "created_turn": int(thread.get("created_turn", 0) or 0),
         "closed_turn": turn,
         "note": note,
         "consequence": consequence,
-    })
+    }
+    if closed_minutes is not None:
+        entry["closed_minutes"] = closed_minutes
+    history.append(entry)
     updates["thread_history"] = history[-THREAD_HISTORY_CAP:]
     updates["pending_nudge"] = ""
     updates["last_closed_turn"] = turn
+    if closed_minutes is not None:
+        updates["last_closed_minutes"] = closed_minutes
     updates["next_thread_turn"] = turn + max(0, int(cooldown))
     updates["ignored_streak"] = 0
     updates["momentum"] = "resolving" if outcome == "resolved" else "observing"
@@ -1201,7 +1350,8 @@ async def _close_thread(state: dict, sdk, data: dict, updates: dict, thread: dic
         base_profile = updates.get("profile") or data.get("profile") or _default_profile()
         updates["profile"] = _clean_profile(deep_fields, base_profile)
     _finalize_thread(updates, data, thread, outcome, turn,
-                     note=note, consequence=consequence, cooldown=cooldown)
+                     note=note, consequence=consequence, cooldown=cooldown,
+                     closed_minutes=_current_minutes(state))
     if turn >= int(updates["next_thread_turn"]):
         updates.update(await _generate_checked_thread(
             state, sdk, {**data, **updates},
@@ -1338,14 +1488,19 @@ async def _run_librarian_llm_pass(state: dict, sdk, base_updates: dict | None = 
 
     # When no thread is active and we are still inside a quiet period, spend
     # zero LLM calls.
-    if thread.get("status") != "active" and turn < int(data.get("next_thread_turn", 0) or 0):
+    if thread.get("status") != "active" and _in_quiet_period(state, data, turn):
         return {"module_data": {MODULE_ID: updates}} if updates else None
 
     # Joining a story already in progress (or finishing the initial observation
     # window) with an unobserved profile: read the story so far once, so both
     # the initial direction and the first thread cater to how the player has
     # actually been playing. Preserves any player-seeded likes/dislikes.
-    if thread.get("status") != "active" and turn >= 2 and _is_profile_unobserved(data.get("profile") or {}):
+    if (
+        thread.get("status") != "active"
+        and not data.get("thread_history")
+        and turn >= 2
+        and _is_profile_unobserved(data.get("profile") or {})
+    ):
         cur_profile = _clean_profile({}, data.get("profile") or _default_profile())
         kept_dislikes = cur_profile["dislikes"]
         kept_likes = [e for e in cur_profile["likes"] if e.get("evidence") == PLAYER_SET_EVIDENCE]
@@ -1386,7 +1541,7 @@ async def _run_librarian_llm_pass(state: dict, sdk, base_updates: dict | None = 
 
     # Deterministic expiry, checked before spending an assessment call.
     thread_max_turns = max(1, int(config.get("thread_max_turns", 12) or 12))
-    if turn - int(thread.get("created_turn", 0) or 0) >= thread_max_turns:
+    if _should_expire_thread(state, thread, turn, thread_max_turns):
         print(f"[Plot Director] Turn {turn}: thread expired -- {thread.get('title', '')}")
         await _close_thread(state, sdk, data, updates, thread, "expired", turn, cooldown=cooldown)
         return {"module_data": {MODULE_ID: updates}}
@@ -2013,7 +2168,7 @@ async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
     thread = data.get("thread") or {}
     if thread.get("status") != "active":
         next_thread_turn = int(data.get("next_thread_turn", 0) or 0)
-        if state.get("turn", 0) < next_thread_turn:
+        if _in_quiet_period(state, data, state.get("turn", 0)):
             return {
                 "message": f"[Plot] Between threads -- letting the story breathe (a new thread arrives around turn {next_thread_turn}).",
                 "signal": "end_turn",

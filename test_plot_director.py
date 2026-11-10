@@ -1788,3 +1788,121 @@ def test_live_turn_defers_librarian_to_background_task():
 
     asyncio.run(run_lifecycle())
 
+
+def test_time_tracker_expiry_protects_rapid_dialogue_and_respects_hard_cap():
+    """When wb_time_tracker is active, rapid back-and-forth dialogue turns (<3h
+    in-world) do not prematurely expire an active thread at thread_max_turns,
+    until either 3h of in-world time pass or the 2x hard turn cap is reached."""
+    backend = _load_backend()
+    data = _active_data(backend, created_turn=1)
+    data["thread"]["created_minutes"] = 100
+
+    # Turn 13 (12 turns elapsed), but only 15 in-world minutes have passed:
+    # thread stays active and runs normal assessment instead of expiring.
+    state_fast = _state(turn=13, data=data)
+    state_fast["module_data"]["wb_time_tracker"] = {
+        "clock": {"year": 1, "month": 1, "day": 1, "hour": 10, "minute": 15, "total_minutes_elapsed": 115},
+    }
+    res_fast = asyncio.run(backend.on_librarian(state_fast, _make_sdk([_assessment_reply()], {})))
+    update_fast = _updates(res_fast)
+    assert "thread_history" not in update_fast
+    assert update_fast["log"][-1]["turn"] == 13
+
+    # Once 3+ hours (180+ minutes) have elapsed in-world, turn 13 expires the thread.
+    state_3h = _state(turn=13, data=data)
+    state_3h["module_data"]["wb_time_tracker"] = {
+        "clock": {"year": 1, "month": 1, "day": 1, "hour": 13, "minute": 30, "total_minutes_elapsed": 300},
+    }
+    res_3h = asyncio.run(backend.on_librarian(state_3h, _make_sdk([DIRECTION_REPLY], {})))
+    update_3h = _updates(res_3h)
+    assert update_3h["thread"]["status"] == "expired"
+    assert update_3h["thread_history"][-1]["closed_minutes"] == 300
+    assert update_3h["last_closed_minutes"] == 300
+
+    # Hard safety cap (2x thread_max_turns = 24 turns elapsed -> turn 25) expires
+    # even if in-world clock barely moved.
+    state_cap = _state(turn=25, data=data)
+    state_cap["module_data"]["wb_time_tracker"] = {
+        "clock": {"year": 1, "month": 1, "day": 1, "hour": 10, "minute": 20, "total_minutes_elapsed": 120},
+    }
+    res_cap = asyncio.run(backend.on_librarian(state_cap, _make_sdk([DIRECTION_REPLY], {})))
+    assert _updates(res_cap)["thread"]["status"] == "expired"
+
+
+def test_time_tracker_quiet_period_rest_skip_and_rapid_dialogue_guard():
+    """When wb_time_tracker is active, sleeping/traveling (6+ hours in-world)
+    satisfies a between-thread breather early, while rapid 1-minute dialogue
+    turns hold off up to 2 extra turns so a new thread doesn't interrupt the
+    same conversation."""
+    backend = _load_backend()
+    data = _observing_data(backend)
+    data["status"] = "active"
+    data["thread"] = backend._full_thread(status="resolved", created_turn=1, closed_turn=5, closed_minutes=60)
+    data["last_closed_turn"] = 5
+    data["last_closed_minutes"] = 60
+    data["next_thread_turn"] = 8
+    data["thread_history"] = [
+        {"title": "Old Thread", "outcome": "resolved", "created_turn": 1, "closed_turn": 5, "closed_minutes": 60, "note": "", "consequence": "Done."}
+    ]
+
+    # Turn 6 (before next_thread_turn=8), but the player slept for 8 hours (+480m -> 540m):
+    # quiet period ends early and weaves the next thread on turn 6.
+    state_rest = _state(turn=6, data=data)
+    state_rest["module_data"]["wb_time_tracker"] = {
+        "clock": {"year": 1, "month": 1, "day": 2, "hour": 8, "minute": 0, "total_minutes_elapsed": 540},
+    }
+    captured = {}
+    res_rest = asyncio.run(backend.on_librarian(
+        state_rest, _make_sdk([SECOND_THREAD_REPLY, CRITIC_ACCEPT], captured)))
+    update_rest = _updates(res_rest)
+    assert update_rest["thread"]["title"] == "Tremors Below"
+    assert update_rest["thread"]["created_minutes"] == 540
+
+    # Conversely, at turn 8 (next_thread_turn=8) after only 5 minutes of dialogue (65m total):
+    # still in quiet period for up to 2 extra turns.
+    state_rapid = _state(turn=8, data=data)
+    state_rapid["module_data"]["wb_time_tracker"] = {
+        "clock": {"year": 1, "month": 1, "day": 1, "hour": 9, "minute": 5, "total_minutes_elapsed": 65},
+    }
+    captured_rapid = {}
+    assert asyncio.run(backend.on_librarian(state_rapid, _make_sdk([], captured_rapid))) is None
+    assert captured_rapid == {}
+
+    # By turn 10 (next_thread_turn + 2), it weaves even if clock barely moved.
+    state_cap = _state(turn=10, data=data)
+    state_cap["module_data"]["wb_time_tracker"] = {
+        "clock": {"year": 1, "month": 1, "day": 1, "hour": 9, "minute": 10, "total_minutes_elapsed": 70},
+    }
+    res_cap = asyncio.run(backend.on_librarian(
+        state_cap, _make_sdk([SECOND_THREAD_REPLY, CRITIC_ACCEPT], {})))
+    assert _updates(res_cap)["thread"]["title"] == "Tremors Below"
+
+
+def test_time_tracker_clock_and_elapsed_time_in_prompts():
+    """In-world clock and elapsed time since closed threads appear in prompts
+    when wb_time_tracker is active."""
+    backend = _load_backend()
+    data = _observing_data(backend)
+    data["thread_history"] = [{
+        "title": "The Salt Baron's Ledger",
+        "outcome": "resolved",
+        "created_turn": 1,
+        "closed_turn": 4,
+        "closed_minutes": 60,
+        "note": "",
+        "consequence": "The Baron lost the docks.",
+    }]
+    state = _state(turn=8, data=data)
+    # 60 + 2 days (2880) + 3 hours (180) = 3120 minutes
+    state["module_data"]["wb_time_tracker"] = {
+        "clock": {"year": 1, "month": 1, "day": 3, "hour": 22, "minute": 0, "total_minutes_elapsed": 3120},
+    }
+    captured = {}
+    asyncio.run(backend.on_librarian(state, _make_sdk([THREAD_REPLY, CRITIC_ACCEPT], captured)))
+
+    gen_prompt = captured["prompts"][0]
+    assert "<in_world_time>" in gen_prompt
+    assert "Year 1, Month 1, Day 3 -- 22:00 (night)" in gen_prompt
+    assert "turn 4, 2 days, 3 hours ago in-world" in gen_prompt
+
+
