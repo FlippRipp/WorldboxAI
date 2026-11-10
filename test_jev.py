@@ -504,3 +504,105 @@ def test_evaluation_cases_have_valid_expected_answers():
             else:
                 assert isinstance(actual[key], bool)
         assert matches(actual, case['expected'])
+
+
+def test_openrouter_active_provider_routes_jev_until_typesafe_key_overrides(tmp_path):
+    from backend.engine.provider_manager import ProviderManager
+    from backend.engine.jev import ENDPOINT, OPENROUTER_ENDPOINT
+    seen = []
+    def respond(request):
+        payload = json.loads(request.content)
+        seen.append((str(request.url), request.headers.get('Authorization'), payload['model']))
+        data = response_for(payload, {'ok': 1})
+        data['model'] = 'typesafe/jev-1.14-20261014'
+        data['usage']['cost'] = 0.00001365
+        return httpx.Response(200, json=data)
+
+    pm = ProviderManager(str(tmp_path / 'providers'))
+    pm.decisions.transport = httpx.MockTransport(respond)
+    pm.decisions.save({'enabled': True, 'model': 'typesafe/jev-latest'})
+    pm.save_config('openrouter', {'api_key': 'or-secret-key'})
+
+    # When OpenRouter is not the active provider and no TypeSafe key is saved, no call is made.
+    pm.set_active('gemini')
+    d_inactive = run(pm.decisions.decide('x', {'ok': noul('yes?')}, module=jev_tasks.RPG, step='test'))
+    assert not d_inactive.answers and d_inactive.reason == 'missing API key' and not seen
+
+    # When OpenRouter is the active provider, Jev routes to OpenRouter's SystemOne endpoint.
+    pm.set_active('openrouter')
+    assert pm.decisions.has_credentials()
+    inspector = LLMInspector()
+    d_or = run(pm.decisions.decide('x', {'ok': noul('yes?')}, module=jev_tasks.RPG, step='test', inspector=inspector))
+    assert d_or.yes('ok')
+    run(d_or.finish('accepted'))
+    assert seen[-1] == (OPENROUTER_ENDPOINT, 'Bearer or-secret-key', 'jev-latest')
+    assert inspector.get_calls()[0]['estimated_cost_usd'] == pytest.approx(0.00001365)
+
+    # A saved TypeSafe API key takes precedence and routes directly to TypeSafe.
+    pm.decisions.save({'api_key': 'ts-direct-key', 'model': '~typesafe/jev-latest'})
+    d_ts = run(pm.decisions.decide('x', {'ok': noul('yes?')}, module=jev_tasks.RPG, step='test'))
+    assert d_ts.yes('ok')
+    assert seen[-1] == (ENDPOINT, 'Bearer ts-direct-key', 'jev-latest')
+
+
+def test_realistic_multi_bucket_distributions_succeed_on_rpg_and_npc_tasks(tmp_path):
+    backend = load_rpg()
+    def handler(request, payload):
+        qs = payload['questions']
+        if 'feasibility' in qs:
+            # Character has no curses; 'curse' should not even be asked.
+            assert 'curse' not in qs
+            return httpx.Response(200, json={
+                'model': 'typesafe/jev-1.14-20261014',
+                'usage': {'input_tokens': 350, 'output_tokens': 40, 'cost': 0.0000147},
+                'answers': {
+                    'substantive': {'type': 'noul', 'noul': 0.94},
+                    'feasibility': {
+                        'type': 'choice', 'choice': '7', 'confidence': 0.29,
+                        'probabilities': {'1': 0.0, '2': 0.0, '3': 0.0, '4': 0.02, '5': 0.14,
+                                          '6': 0.33, '7': 0.36, '8': 0.15, '9': 0.0, '10': 0.0},
+                    },
+                    'difficulty': {
+                        'type': 'choice', 'choice': 'moderate', 'confidence': 0.68,
+                        'probabilities': {'trivial': 0.02, 'easy': 0.25, 'moderate': 0.73,
+                                          'hard': 0.0, 'extreme': 0.0, 'impossible': 0.0},
+                    },
+                    'skill': {
+                        'type': 'choice', 'choice': 'option_0', 'confidence': 1.0,
+                        'probabilities': {'option_0': 1.0, 'none': 0.0, 'unsupported': 0.0},
+                    },
+                    'passive_0': {'type': 'noul', 'noul': 0.14},
+                },
+            })
+        if 'amount' in qs:
+            probs = {str(n): 0.0 for n in range(51)}
+            probs.update({'8': 0.35, '10': 0.23, '5': 0.14, '12': 0.08, '4': 0.04, '15': 0.16, 'outside': 0.0})
+            return httpx.Response(200, json={
+                'model': 'typesafe/jev-1.14-20261014',
+                'usage': {'input_tokens': 300, 'output_tokens': 30},
+                'answers': {
+                    'amount': {'type': 'choice', 'choice': '8', 'confidence': 0.34, 'probabilities': probs},
+                    'reason': {
+                        'type': 'choice', 'choice': 'success', 'confidence': 0.89,
+                        'probabilities': {'success': 0.91, 'failure': 0.0, 'ingenuity': 0.07,
+                                          'extraordinary': 0.0, 'routine': 0.02, 'unsupported': 0.0},
+                    },
+                },
+            })
+        return httpx.Response(200, json=response_for(payload))
+
+    _, sdk, requests, generated, _ = setup_jev(tmp_path, handler=handler)
+    char = backend.Character.from_dict(_char(skills={
+        'silver tongue': {'rating': 5, 'type': 'active'},
+        'keen ears': {'rating': 4, 'type': 'passive', 'description': 'Hear whispers.'},
+    }))
+    assessment = run(backend._assess_action('Persuade the guard', char, {}, sdk))
+    assert assessment['feasibility'] == 7
+    assert assessment['difficulty'] == 'moderate'
+    assert assessment['skill_used'] == 'silver tongue'
+    assert assessment['passive_effects'] == ''
+    char.action_assessment = assessment
+    assert run(backend._judge_xp(char, rpg_state(char.to_dict()), {}, sdk))
+    assert char.xp == 8
+    assert len(requests) == 2 and not generated
+

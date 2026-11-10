@@ -34,6 +34,50 @@ def _facts(value, path="context"):
     return facts
 
 
+DIFFICULTIES = ("trivial", "easy", "moderate", "hard", "extreme", "impossible")
+POSITIVE_XP_REASONS = ("success", "failure", "ingenuity", "extraordinary")
+
+
+def _pick_feasibility(d, fail_max):
+    selected, probs, conf = d.choice_distribution("feasibility")
+    val = int(selected)
+    if conf < 0.90:
+        same_side = sum(p for k, p in probs.items() if (int(k) <= fail_max) == (val <= fail_max))
+        nearby = sum(p for k, p in probs.items() if abs(int(k) - val) <= 2)
+        if same_side < 0.90 or nearby < 0.80 or probs.get(selected, 0.0) < 0.25:
+            raise Uncertain(d.reason or "uncertain choice: feasibility")
+    return val
+
+
+def _pick_xp_amount(d):
+    selected, probs, conf = d.choice_distribution("amount")
+    if selected == "outside":
+        raise Uncertain("XP requires existing judge")
+    val = int(selected)
+    if conf < 0.90:
+        if val == 0:
+            if probs.get("0", 0.0) < 0.90:
+                raise Uncertain(d.reason or "uncertain choice: amount")
+        else:
+            positive_mass = sum(probs.get(str(n), 0.0) for n in range(1, 51))
+            if positive_mass < 0.90 or probs.get(selected, 0.0) < 0.20:
+                raise Uncertain(d.reason or "uncertain choice: amount")
+    return val
+
+
+def _pick_xp_reason(d):
+    selected = d.pick_supported("reason", unsupported=("unsupported",))
+    if selected == "unsupported":
+        raise Uncertain("XP requires existing judge")
+    _, probs, conf = d.choice_distribution("reason")
+    if conf < 0.90:
+        if selected == "routine" and probs.get("routine", 0.0) < 0.90:
+            raise Uncertain(d.reason or "uncertain choice: reason")
+        if selected != "routine" and sum(probs.get(k, 0.0) for k in POSITIVE_XP_REASONS) < 0.90:
+            raise Uncertain(d.reason or "uncertain choice: reason")
+    return selected
+
+
 async def grounded_reason(sdk, state, facts, categories, module, step):
     mapping, options = _options(list(facts.items()), lambda fact: {"source": fact[0], "text": fact[1]})
     options.pop("none")
@@ -44,7 +88,7 @@ async def grounded_reason(sdk, state, facts, categories, module, step):
         "evidence": choice("Which supplied fact directly supports the reason for the selected decision? Do not infer an unstated fact.", options),
     }, module, step)
     try:
-        category, evidence = d.pick("category"), d.pick("evidence")
+        category, evidence = d.pick_supported("category"), d.pick_supported("evidence")
         if "unsupported" in (category, evidence):
             raise Uncertain("reason needs a generated explanation")
         source, fact = mapping[evidence]
@@ -68,7 +112,6 @@ async def assess_action(sdk, prompt, character, practice, fail_max, evidence):
     passives = [n for n, s in skills.items() if s.get("type") == "passive"]
     active_map, active_options = _options(active, lambda n: {"name": n, **skills[n]})
     curse_map, curse_options = _options(curses, lambda n: {"name": n, **skills[n]})
-    # Include an unsupported answer even for a character with no such skills.
     active_options["unsupported"] = "The applicable skill cannot be represented by this list."
     curse_options["unsupported"] = "The curse ruling cannot be represented by this list."
     questions = {
@@ -76,10 +119,12 @@ async def assess_action(sdk, prompt, character, practice, fail_max, evidence):
         "feasibility": choice("Choose the exact integer feasibility under the supplied scale, world facts, difficulty and custom judging instructions.",
                               {str(n): f"Feasibility {n}/10 under the supplied task's rubric." for n in range(1, 11)}),
         "difficulty": choice("Choose the difficulty of this action under the supplied instructions.",
-                             {s: s for s in ("trivial", "easy", "moderate", "hard", "extreme", "impossible")}),
-        "skill": choice("Which single active skill is used in the assessed action?", active_options),
-        "curse": choice("Which single curse is triggered? Choose unsupported if several triggered curses cannot be represented by one.", curse_options),
+                             {s: s for s in DIFFICULTIES}),
     }
+    if active:
+        questions["skill"] = choice("Which single active skill is used in the assessed action?", active_options)
+    if curses:
+        questions["curse"] = choice("Which single curse is triggered? Choose unsupported if several triggered curses cannot be represented by one.", curse_options)
     if practice and active:
         questions["practice"] = choice("Which single active skill is most relevant for practice progression on the player's action?", active_options)
     for i, name in enumerate(passives):
@@ -97,13 +142,15 @@ async def assess_action(sdk, prompt, character, practice, fail_max, evidence):
         if not substantive:
             await d.finish("skipped")
             return ({}, practice_name), d
-        feasibility, difficulty = int(d.pick("feasibility")), d.pick("difficulty")
-        selected_skill, selected_curse = d.pick("skill"), d.pick("curse")
+        feasibility = _pick_feasibility(d, fail_max)
+        difficulty = d.pick_ordinal("difficulty", DIFFICULTIES, radius=1)
+        selected_skill = d.pick("skill") if "skill" in questions else "none"
+        selected_curse = d.pick("curse") if "curse" in questions else "none"
         if "unsupported" in (selected_skill, selected_curse):
             raise Uncertain("unsupported skill or curse")
         if difficulty == "impossible" and feasibility > 2:
             raise Uncertain("inconsistent impossible ruling")
-        applied = [name for i, name in enumerate(passives) if d.yes(f"passive_{i}")]
+        applied = [name for i, name in enumerate(passives) if d.yes(f"passive_{i}", high=0.80, low=0.25)]
         assessment = {"feasibility": feasibility, "difficulty": difficulty,
                       "skill_used": active_map.get(selected_skill, ""),
                       "curse_triggered": curse_map.get(selected_curse, ""),
@@ -140,10 +187,7 @@ async def judge_xp(sdk, prompt):
         "reason": choice("Why was XP earned or withheld in the resolved scene?", reasons),
     }, RPG, "rpg:xp")
     try:
-        amount, reason = d.pick("amount"), d.pick("reason")
-        if amount == "outside" or reason == "unsupported":
-            raise Uncertain("XP requires existing judge")
-        amount = int(amount)
+        amount, reason = _pick_xp_amount(d), _pick_xp_reason(d)
         if (amount == 0) != (reason == "routine"):
             raise Uncertain("inconsistent XP amount and reason")
         await d.finish("accepted")

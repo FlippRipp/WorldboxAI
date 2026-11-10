@@ -13,6 +13,7 @@ import httpx
 
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
+OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/systemone"
 PRICE_DATE = "2026-10-01"
 INPUT_USD_PER_MILLION = 0.042
 FALLBACK_CONTEXT = ContextVar("jev_fallback_context", default=None)
@@ -61,20 +62,63 @@ class Decision:
             raise Uncertain(self.reason or f"uncertain choice: {key}")
         return answer["choice"]
 
-    def yes(self, key):
+    def choice_distribution(self, key):
+        answer = self.answers.get(key, {})
+        if answer.get("type") != "choice":
+            raise Uncertain(self.reason or f"uncertain choice: {key}")
+        selected = answer.get("choice")
+        probs = answer.get("probabilities")
+        if not isinstance(selected, str) or not isinstance(probs, dict):
+            raise Uncertain(self.reason or f"uncertain choice: {key}")
+        return selected, probs, answer.get("confidence", 0)
+
+    def pick_supported(self, key, unsupported=("unsupported", "outside"), min_choice_prob=0.50):
+        selected, probs, conf = self.choice_distribution(key)
+        if selected in unsupported:
+            return selected
+        if conf >= 0.90:
+            return selected
+        supported_mass = 1.0 - sum(probs.get(u, 0.0) for u in unsupported)
+        if supported_mass < 0.90 or probs.get(selected, 0.0) < min_choice_prob:
+            raise Uncertain(self.reason or f"uncertain choice: {key}")
+        return selected
+
+    def pick_ordinal(self, key, ordered_keys, radius=1, forbidden=()):
+        selected, probs, conf = self.choice_distribution(key)
+        if selected not in ordered_keys or selected in forbidden:
+            raise Uncertain(self.reason or f"uncertain choice: {key}")
+        if conf >= 0.90:
+            return selected
+        if sum(probs.get(f, 0.0) for f in forbidden) > 0.10:
+            raise Uncertain(self.reason or f"uncertain choice: {key}")
+        idx = ordered_keys.index(selected)
+        band = ordered_keys[max(0, idx - radius):idx + radius + 1]
+        if sum(probs.get(k, 0.0) for k in band) < 0.90 or probs.get(selected, 0.0) < 0.30:
+            raise Uncertain(self.reason or f"uncertain choice: {key}")
+        return selected
+
+    def yes(self, key, high=0.90, low=0.10):
         answer = self.answers.get(key, {})
         if answer.get("type") != "noul":
             raise Uncertain(self.reason or f"missing decision: {key}")
         probability = answer["noul"]
-        if probability >= 0.90:
+        if probability >= high:
             return True
-        if probability <= 0.10:
+        if probability <= low:
             return False
         raise Uncertain(f"uncertain binary decision: {key}")
 
     def no_work(self, key):
         answer = self.answers.get(key, {})
         return answer.get("type") == "noul" and answer["noul"] <= 0.02
+
+    def _estimated_cost_usd(self):
+        cost = self.usage.get("cost")
+        if not isinstance(cost, bool) and isinstance(cost, (int, float)) and math.isfinite(cost) and cost >= 0:
+            return float(cost)
+        if "input_tokens" in self.usage:
+            return self.usage["input_tokens"] * INPUT_USD_PER_MILLION / 1_000_000
+        return None
 
     async def finish(self, outcome, reason=""):
         if self.finished:
@@ -90,10 +134,24 @@ class Decision:
                 cancelled=outcome == "cancelled",
                 metadata={"model": self.model, "decision_outcome": outcome,
                           "fallback_reason": self.reason if outcome == "fallback" else "",
-                          "estimated_cost_usd": (self.usage["input_tokens"] * INPUT_USD_PER_MILLION / 1_000_000
-                                                 if "input_tokens" in self.usage else None),
+                          "estimated_cost_usd": self._estimated_cost_usd(),
                           "pricing_date": PRICE_DATE,
                           **({"duration_ms": self.duration_ms} if self.duration_ms is not None else {})})
+
+
+def _normalize_model(model: str, is_openrouter: bool) -> str:
+    clean = (model or "jev-latest").strip()
+    if clean.startswith("openrouter/"):
+        clean = clean.removeprefix("openrouter/").strip()
+    if is_openrouter:
+        if clean == "typesafe/jev-latest":
+            return "jev-latest"
+        return clean or "jev-latest"
+    if clean.startswith("~typesafe/"):
+        return clean.removeprefix("~typesafe/") or "jev-latest"
+    if clean.startswith("typesafe/"):
+        return clean.removeprefix("typesafe/") or "jev-latest"
+    return clean or "jev-latest"
 
 
 class JevService:
@@ -112,6 +170,42 @@ class JevService:
         except (OSError, ValueError):
             pass
         return config
+
+    def _openrouter_api_key(self) -> str:
+        if self.path.parent.name != "jev":
+            return ""
+        providers_dir = self.path.parent.parent
+        active_path = providers_dir / "active_provider.json"
+        try:
+            active_data = json.loads(active_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        if not isinstance(active_data, dict) or active_data.get("active") != "openrouter":
+            return ""
+        or_cfg_path = providers_dir / "openrouter" / "config.json"
+        try:
+            or_cfg = json.loads(or_cfg_path.read_text(encoding="utf-8"))
+            if isinstance(or_cfg, dict) and isinstance(or_cfg.get("api_key"), str):
+                key = or_cfg["api_key"].strip()
+                if key:
+                    return key
+        except (OSError, ValueError):
+            pass
+        if not or_cfg_path.exists() and providers_dir == Path("data/providers"):
+            return os.getenv("OPENROUTER_API_KEY", "").strip()
+        return ""
+
+    def _connection(self, config=None):
+        config = config if config is not None else self._config()
+        if config.get("api_key"):
+            return ENDPOINT, config["api_key"], False
+        or_key = self._openrouter_api_key()
+        if or_key:
+            return OPENROUTER_ENDPOINT, or_key, True
+        return ENDPOINT, "", False
+
+    def has_credentials(self) -> bool:
+        return bool(self._connection()[1])
 
     def public_config(self):
         config = self._config()
@@ -155,11 +249,13 @@ class JevService:
             if mode == "mock" or not config["enabled"] or not slot or not config[slot]:
                 result.reason = "disabled or unavailable"
                 return result
-        if not config["api_key"]:
+        endpoint, api_key, is_openrouter = self._connection(config)
+        if not api_key:
             result.reason = "missing API key"
             return result
-        result.model = config["model"]
-        request = {"state": state, "questions": questions, "model": config["model"]}
+        request_model = _normalize_model(config["model"], is_openrouter)
+        result.model = request_model
+        request = {"state": state, "questions": questions, "model": request_model}
         if inspector:
             result.call_id = await inspector.start_call(call_type="decision", model=result.model,
                 step=step, module_source=module, input_data=request)
@@ -176,8 +272,8 @@ class JevService:
                     raise Uncertain("unsupported question type")
             async def send():
                 async with httpx.AsyncClient(transport=self.transport, timeout=self.timeout) as client:
-                    response = await client.post(ENDPOINT, json=request,
-                        headers={"Authorization": f"Bearer {config['api_key']}"})
+                    response = await client.post(endpoint, json=request,
+                        headers={"Authorization": f"Bearer {api_key}"})
                     response.raise_for_status()
                     return response.json()
             payload = await asyncio.wait_for(send(), timeout=self.timeout)

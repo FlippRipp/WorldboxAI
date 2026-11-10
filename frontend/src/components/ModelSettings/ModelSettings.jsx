@@ -298,7 +298,7 @@ export default function ModelSettings({ onBack, embedded = false }) {
 
         {!embedded && <h2 className="text-2xl font-bold text-gray-100 mb-6">Model Settings</h2>}
 
-        <JevSettings />
+        <JevSettings activeProvider={activeId} />
         {/* Provider dropdown */}
         <div className="mb-6">
           <label className="text-sm text-gray-300 mb-2 block">Provider</label>
