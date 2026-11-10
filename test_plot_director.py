@@ -932,10 +932,11 @@ def test_opportunity_nudge_respects_toggle_and_cooldown():
         result = asyncio.run(backend.on_librarian(_state(turn=turn, data=data, config=config), sdk))
         return _updates(result).get("pending_nudge", "")
 
-    assert run({}) != ""
+    assert run({}) == ""  # default is False so nudges stay subtle
     assert run({"opportunity_nudges": False}) == ""
-    assert run({}, last_nudge_turn=3) == ""   # within the 3-turn cooldown
-    assert run({}, last_nudge_turn=2) != ""   # cooldown elapsed
+    assert run({"opportunity_nudges": True}) != ""
+    assert run({"opportunity_nudges": True}, last_nudge_turn=3) == ""   # within the 3-turn cooldown
+    assert run({"opportunity_nudges": True}, last_nudge_turn=2) != ""   # cooldown elapsed
 
 
 def test_malformed_assessment_reply_is_noop():
@@ -1532,3 +1533,258 @@ def test_instruction_slots_defaults_and_overrides():
     assert "Direction leans maritime." in prompt
     assert "recurring_elements: up to" not in prompt
     assert "consequence: ONE sentence" in prompt  # fixed scaffolding stays
+
+
+def test_initial_observation_period_waits_then_bootstraps_and_seeds():
+    """A fresh story waits out the initial observation window (default 4 turns)
+    with zero LLM calls, then on turn 4 bootstraps the player profile from the
+    early turns (preserving player-seeded likes/dislikes), seeds story
+    direction, and weaves the first thread."""
+    backend = _load_backend()
+    data = backend._default_data()
+    # Player seeded preferences during story creation.
+    data["profile"]["likes"] = [
+        {"text": "cooking contests", "weight": "high", "evidence": backend.PLAYER_SET_EVIDENCE},
+    ]
+    data["profile"]["dislikes"] = [
+        {"text": "grimdark torture", "weight": "high"},
+    ]
+
+    for turn in (1, 2, 3):
+        captured = {}
+        res = asyncio.run(backend.on_librarian(_state(turn=turn, data=data), _make_sdk([], captured)))
+        assert res is None
+        assert captured == {}
+
+    # On turn 4 (default observation_turns = 4), the director bootstraps the
+    # profile, seeds direction, generates the first thread, and fit-checks it.
+    captured = {}
+    sdk = _make_sdk([
+        json.dumps(_profile_reply()),
+        DIRECTION_REPLY,
+        THREAD_REPLY,
+        CRITIC_ACCEPT,
+    ], captured)
+    res = asyncio.run(backend.on_librarian(_state(turn=4, data=data), sdk))
+    update = _updates(res)
+
+    assert len(captured["prompts"]) == 4
+    assert "already in progress" in captured["prompts"][0]
+    assert "cooking contests (high)" in captured["prompts"][0]
+    assert "grimdark torture (high)" in captured["prompts"][0]
+    # Seeded preferences survive alongside observed ones.
+    assert update["profile"]["dislikes"] == [{"text": "grimdark torture", "weight": "high"}]
+    assert any(e["text"] == "cooking contests" for e in update["profile"]["likes"])
+    assert any(e["text"] == "back-alley deals" for e in update["profile"]["likes"])
+    assert update["direction"]["premise"].startswith("A quiet war")
+    assert update["thread"]["title"] == "The Salt Baron's Ledger"
+    assert update["status"] == "active"
+
+
+def test_elastic_grand_arc_direction_fields_and_prompting():
+    """Direction tracks endgame (North Star), horizon milestones, and
+    planted_seeds with payoffs; seeds appear as light foreshadowing in the
+    storyteller prompt and in /plot direction."""
+    backend = _load_backend()
+    grand_arc_reply = json.dumps({
+        "consequence": "The Salt Baron's harbour monopoly cracked.",
+        "premise": "A quiet war for the harbor's soul.",
+        "endgame": "Reclaim the Sunken Crown and unite the Free Wharves.",
+        "horizon": [
+            "Win the Dockworkers' Guild vote",
+            "Break the blockade at Lantern Reef",
+        ],
+        "planted_seeds": [
+            {"seed": "A brass key stamped with a three-eyed gull", "payoff": "Opens the drowned vault"},
+            {"seed": "The harbor bell rings once at dead low tide", "payoff": "Signals the smuggling fleet"},
+        ],
+        "recurring_elements": ["The Salt Baron", "The Dockworkers' Guild"],
+        "open_questions": ["Who financed the blockade?"],
+        "heading": "The Baron gathers mercenaries outside the seawall.",
+    })
+    data = backend._default_data()
+    closed = {"title": "The Salt Baron's Ledger", "hook": "h", "challenge": "c", "stakes": "s"}
+    direction, consequence, _ = asyncio.run(backend._update_direction(
+        _state(turn=5, data=data), _make_sdk([grand_arc_reply], {}), data,
+        closed_thread=closed, outcome="resolved",
+    ))
+
+    assert consequence == "The Salt Baron's harbour monopoly cracked."
+    assert direction["endgame"] == "Reclaim the Sunken Crown and unite the Free Wharves."
+    assert direction["horizon"] == [
+        "Win the Dockworkers' Guild vote",
+        "Break the blockade at Lantern Reef",
+    ]
+    assert len(direction["planted_seeds"]) == 2
+    assert direction["planted_seeds"][0]["seed"] == "A brass key stamped with a three-eyed gull"
+    assert direction["planted_seeds"][0]["payoff"] == "Opens the drowned vault"
+
+    data["direction"] = direction
+    dir_block = backend._direction_block(data)
+    assert "North Star (Endgame): Reclaim the Sunken Crown" in dir_block
+    assert "Horizon milestones (upcoming phases): Win the Dockworkers' Guild vote" in dir_block
+    assert "Planted seeds (foreshadowing to grow or cash in when ripe): A brass key stamped with a three-eyed gull (payoff: Opens the drowned vault)" in dir_block
+
+    # Active thread prompt includes subtle foreshadowing seeds without forcing them.
+    data["status"] = "active"
+    data["thread"] = backend._full_thread(status="active", title="Wharf Vote", hook="A tense vote.")
+    block = asyncio.run(backend.on_render_prompt_block(
+        {"id": "plot_thread"}, _state(turn=6, data=data), _make_sdk([], {})))
+    assert "Background foreshadowing seeds" in block["content"]
+    assert "A brass key stamped with a three-eyed gull" in block["content"]
+
+    # /plot direction displays the North Star, milestones, and planted seeds.
+    cmd = asyncio.run(backend.on_command_plot(["direction"], _state(turn=6, data=data), _make_sdk([], {})))
+    assert "Reclaim the Sunken Crown" in cmd["message"]
+    assert "Win the Dockworkers' Guild vote" in cmd["message"]
+    assert "A brass key stamped with a three-eyed gull" in cmd["message"]
+    assert "Opens the drowned vault" in cmd["message"]
+
+
+def test_thread_modes_and_storyteller_guidance():
+    """Threads carry a mode (spectacle, intrigue, character, variety) that
+    tailors storyteller guidance and appears in /plot and fit-check prompts."""
+    backend = _load_backend()
+    variety_reply = json.dumps({
+        "action": "thread",
+        "mode": "variety",
+        "title": "The Autumn Lantern Fair",
+        "hook": "Stalls of spiced cider and paper lanterns fill the harbor square.",
+        "challenge": "A friendly lantern-making rivalry between the bakery and the smithy.",
+        "stakes": "Whose lantern floats highest over the bay tonight.",
+        "appeal": "Cozy slice-of-life festival warmth.",
+    })
+    captured = {}
+    sdk = _make_sdk([variety_reply, CRITIC_ACCEPT], captured)
+    data = _observing_data(backend)
+
+    result = asyncio.run(backend.on_librarian(_state(turn=1, data=data), sdk))
+    update = _updates(result)
+    assert update["thread"]["mode"] == "variety"
+    assert '"mode": "variety"' in captured["prompts"][1]  # passed to fit-check
+
+    data.update(update)
+    rendered = asyncio.run(backend.on_render_prompt_block(
+        {"id": "plot_thread"}, _state(turn=2, data=data), _make_sdk([], {})))
+    assert "Mode: Slice-of-Life/Variety" in rendered["content"]
+    assert "without manufacturing crisis" in rendered["content"]
+
+    cmd = asyncio.run(backend.on_command_plot([], _state(turn=2, data=data), _make_sdk([], {})))
+    assert "[variety]" in cmd["message"]
+
+
+def test_proactive_vs_resistant_engagement_and_recent_inputs():
+    """Turn assessment sees recent player inputs for trajectory context and
+    treats player_interest='resistant' as unengaged even if the LLM set
+    thread_engaged=True."""
+    backend = _load_backend()
+    data = _active_data(backend, created_turn=1, ignored_streak=0)
+    state = _state(
+        turn=4,
+        data=data,
+        chat_messages=[
+            {"role": "user", "content": "I leave the ledger alone."},
+            {"role": "user", "content": "I walk out of the harbor."},
+            {"role": "user", "content": "I head to the bakery instead."},
+        ],
+    )
+    reply = json.dumps({
+        "thread_engaged": True,
+        "player_interest": "resistant",
+        "thread_resolved": False,
+        "resolution_note": "",
+        "thread_broken": False,
+        "broken_reason": "",
+        "player_pivot": False,
+        "pivot_intent": "",
+        "opportunity": False,
+        "nudge": "",
+        "profile": _profile_reply(),
+    })
+    captured = {}
+    result = asyncio.run(backend.on_librarian(state, _make_sdk([reply], captured)))
+    update = _updates(result)
+
+    assert "EARLIER PLAYER INPUTS" in captured["prompts"][0]
+    assert "I walk out of the harbor." in captured["prompts"][0]
+    # Resistant engagement increments ignored_streak instead of resetting it.
+    assert update["ignored_streak"] == 1
+    assert update["log"][-1]["interest"] == "resistant"
+
+
+def test_live_turn_defers_librarian_to_background_task():
+    """During a live WebSocket turn (_turn_hooks_armed=True), on_librarian
+    returns immediately with zero LLM calls, and on_turn_stopped(completed)
+    runs the LLM pass asynchronously in the background and broadcasts state_update."""
+    backend = _load_backend()
+
+    class DummyEngine:
+        _turn_hooks_armed = True
+
+        @staticmethod
+        def _deep_merge(base, updates):
+            merged = dict(base)
+            merged.update(updates)
+            return merged
+
+    class DummySaveManager:
+        def __init__(self):
+            self.saved_turns = []
+
+        def save_turn(self, save_id, state, turn):
+            self.saved_turns.append((save_id, turn))
+
+    class DummySessionManager:
+        def __init__(self, state):
+            self.active_save_id = "save1"
+            self.state = state
+            self.save_manager = DummySaveManager()
+
+    class DummyChatHub:
+        def __init__(self):
+            self.messages = []
+
+        @staticmethod
+        def turn_running():
+            return False
+
+        async def send(self, payload):
+            self.messages.append(payload)
+
+    async def run_lifecycle():
+        data = _active_data(backend, created_turn=1, pending_nudge="A rumor spreads.", last_nudge_turn=2)
+        state = _state(turn=4, data=data, active_save_id="save1")
+        sm = DummySessionManager(state)
+        hub = DummyChatHub()
+        backend.set_services({
+            "engine": DummyEngine(),
+            "session_manager": sm,
+            "chat_hub": hub,
+        })
+        try:
+            captured = {}
+            sdk = _make_sdk([_assessment_reply()], captured)
+
+            # 1. During the live turn, on_librarian consumes pending_nudge
+            # immediately without making any LLM calls.
+            lib_res = await backend.on_librarian(state, sdk)
+            assert captured == {}
+            assert _updates(lib_res) == {"pending_nudge": ""}
+
+            # 2. When the turn finishes, on_turn_stopped spawns the background
+            # task that executes the assessment and broadcasts state_update.
+            await backend.on_turn_stopped(state, sdk, "completed")
+            assert backend._current_bg_task is not None
+            await backend._current_bg_task
+
+            assert len(captured["prompts"]) == 1
+            assert sm.save_manager.saved_turns == [("save1", 4)]
+            assert len(hub.messages) == 1
+            assert hub.messages[0]["type"] == "state_update"
+            assert state["module_data"]["wb_plot_director"]["log"][-1]["turn"] == 4
+        finally:
+            backend._cancel_bg_task()
+            backend.set_services({})
+
+    asyncio.run(run_lifecycle())
+

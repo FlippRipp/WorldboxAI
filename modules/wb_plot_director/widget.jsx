@@ -321,7 +321,14 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
               <div className={`text-xs text-gray-500 italic ${resetting ? 'animate-pulse' : ''}`}>{subtitle}</div>
             ) : (
               <div className="bg-gray-900/70 rounded-lg border border-gray-700 p-3 space-y-1.5">
-                <div className="text-gray-100 font-semibold leading-snug">{thread.title}</div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-gray-100 font-semibold leading-snug">{thread.title}</div>
+                  {thread.mode && (
+                    <span className="shrink-0 bg-gray-800 border border-gray-700 rounded-full text-[9px] uppercase tracking-wider text-indigo-300 px-2 py-0.5">
+                      {thread.mode}
+                    </span>
+                  )}
+                </div>
                 {thread.hook && (
                   <div className="text-xs text-gray-400 leading-snug">{thread.hook}</div>
                 )}
@@ -368,27 +375,61 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
                 <div className="text-[10px] text-gray-500 uppercase tracking-wider">Story direction</div>
                 {/* The arc is spoiler territory too: it re-hides whenever it evolves. */}
                 <Spoiler key={direction.updated_turn ?? 0} label="the story direction">
-                  <div className="text-xs text-gray-300 leading-snug">{direction.premise}</div>
-                  {direction.heading && (
-                    <div className="text-[10px] text-gray-500 leading-snug">{direction.heading}</div>
-                  )}
-                  {(direction.open_questions ?? []).length > 0 && (
-                    <div className="flex flex-wrap gap-1 pt-0.5">
-                      {direction.open_questions.map((q, i) => (
-                        <span
-                          key={`${q}-${i}`}
-                          className="bg-gray-900 border border-gray-700 rounded-full text-[10px] text-gray-400 px-2 py-0.5"
-                        >
-                          {q}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  {(direction.recurring_elements ?? []).length > 0 && (
-                    <div className="text-[10px] text-gray-600">
-                      Recurring: {direction.recurring_elements.join(', ')}
-                    </div>
-                  )}
+                  <div className="space-y-1.5">
+                    <div className="text-xs text-gray-300 leading-snug">{direction.premise}</div>
+                    {direction.endgame && (
+                      <div className="text-[11px] text-indigo-300/90 leading-snug">
+                        <span className="text-[9px] uppercase tracking-wider text-indigo-400 mr-1">North Star</span>
+                        {direction.endgame}
+                      </div>
+                    )}
+                    {direction.heading && (
+                      <div className="text-[10px] text-gray-500 leading-snug">{direction.heading}</div>
+                    )}
+                    {(direction.horizon ?? []).length > 0 && (
+                      <div className="space-y-0.5 pt-0.5">
+                        <div className="text-[9px] uppercase tracking-wider text-gray-500">Horizon milestones</div>
+                        {direction.horizon.map((step, i) => (
+                          <div key={`${step}-${i}`} className="text-[10px] text-gray-400 leading-snug pl-2 border-l border-gray-700">
+                            {i + 1}. {step}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {(direction.planted_seeds ?? []).length > 0 && (
+                      <div className="space-y-0.5 pt-0.5">
+                        <div className="text-[9px] uppercase tracking-wider text-gray-500">Planted seeds</div>
+                        {direction.planted_seeds.map((s, i) => {
+                          const seedText = typeof s === 'object' ? s?.seed : String(s ?? '');
+                          const payoffText = typeof s === 'object' ? s?.payoff : '';
+                          if (!seedText) return null;
+                          return (
+                            <div key={`${seedText}-${i}`} className="text-[10px] text-gray-500 leading-snug pl-2 border-l border-gray-800">
+                              <span className="text-gray-400">{seedText}</span>
+                              {payoffText && <span className="text-gray-600"> → {payoffText}</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {(direction.open_questions ?? []).length > 0 && (
+                      <div className="flex flex-wrap gap-1 pt-0.5">
+                        {direction.open_questions.map((q, i) => (
+                          <span
+                            key={`${q}-${i}`}
+                            className="bg-gray-900 border border-gray-700 rounded-full text-[10px] text-gray-400 px-2 py-0.5"
+                          >
+                            {q}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {(direction.recurring_elements ?? []).length > 0 && (
+                      <div className="text-[10px] text-gray-600">
+                        Recurring: {direction.recurring_elements.join(', ')}
+                      </div>
+                    )}
+                  </div>
                 </Spoiler>
               </div>
             )}

@@ -1,9 +1,9 @@
 {
   "id": "wb_plot_director",
   "name": "Plot Director",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "icon": "🎭",
-  "description": "Watches how you play, builds a deep profile of the story's themes and your preferences, and weaves short plot threads that build on each other -- grounded in established characters, guided by an evolving narrative direction, and quality-checked before they go live. The active thread is visible in the sidebar and via /plot.",
+  "description": "Observes how you play before stepping in, learns your tastes from what you actively pursue, maintains an elastic long-term story horizon (North Star, milestones, and foreshadowed seeds), and weaves genre-adaptive plot threads completely in the background. Visible in the sidebar and via /plot.",
   "dependencies": [],
   "consumes": {
     "state": "*",
@@ -23,7 +23,16 @@
       "default": true,
       "label": "Plot Direction",
       "category": "Plot Director",
-      "description": "Track the story's direction and your playstyle, and keep one short plot thread active that plays to them. One background LLM call per assessment."
+      "description": "Track the story's direction and your playstyle, and keep one short plot thread active that plays to them. Runs asynchronously in the background after turns."
+    },
+    "observation_turns": {
+      "type": "slider",
+      "min": 0,
+      "max": 10,
+      "default": 4,
+      "label": "Initial Observation Period (turns)",
+      "category": "Plot Director",
+      "description": "Wait this many turns at the start of a new story before weaving the first plot thread, so the story can establish its footing and the director can learn what you enjoy first (0 starts on turn 1)."
     },
     "assessment_frequency": {
       "type": "slider",
@@ -88,7 +97,7 @@
     },
     "opportunity_nudges": {
       "type": "toggle",
-      "default": true,
+      "default": false,
       "label": "Opportunistic Nudges",
       "category": "Plot Director",
       "description": "Also nudge when a scene presents a natural opening for the thread, even before the stall threshold is reached."

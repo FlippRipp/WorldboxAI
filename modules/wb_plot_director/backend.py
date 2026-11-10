@@ -1,36 +1,34 @@
-"""Plot Director v3 -- observe-then-respond plot threading with a memory.
+"""Plot Director v3 -- observe-then-respond plot threading with an elastic grand arc.
 
-Instead of imposing a hidden long arc, the module watches the story the player
-is actually creating. After each storyteller turn a background LLM pass updates
-a live profile (playstyle weights, tone, themes, evidence-backed likes and
-observed aversions, attachments to named story elements, engagement patterns,
-narrative preferences) and judges the single active short-term plot thread:
-engaged, resolved, or ignored.
+Instead of imposing a rigid outline or jumping in on turn 1, the module first
+observes how the player actually plays during an initial observation window.
+After turns complete, a non-blocking background pass updates a live profile
+(playstyle weights, tone, themes, evidence-backed likes and observed aversions,
+attachments to named story elements, engagement patterns, narrative preferences)
+by distinguishing what the player proactively initiates from what they merely
+react to, and judges the active short-term plot thread.
 
-Cohesion comes from two layers of persistent state. A narrative direction
-(premise, heading, open questions, recurring elements) evolves whenever a
-thread closes, and every closed thread leaves a one-sentence consequence in
-thread_history; new threads are generated to build on both, grounded in the
-NPC system's established characters, and vetted by a fit-check critic before
-they go live. Between threads the story gets a configurable quiet period.
-
-The active thread is visible: a dedicated system prompt block (plot_thread)
-keeps the storyteller aware of it every turn, /plot and the sidebar widget
-show it to the player (with the challenge spoiler-hidden until they opt in),
-and one-turn nudges ride inside that block only when the thread stalls or a
-natural opening appears.
-
-The player can suspend plot direction at any time (/plot suspend or the widget
-button): the context line, assessments, nudges, expiry, and generation all
-freeze until /plot resume, and the thread's lifespan clock shifts by the paused
-duration so it never expires the moment it wakes up.
+Cohesion and long-term purpose come from two layers of persistent state:
+1. An elastic Narrative Direction (premise, a North Star endgame, upcoming
+   horizon milestones, planted foreshadowing seeds with planned payoffs, open
+   questions, and recurring elements) that gives the story an overarching plan
+   while reshaping smoothly whenever the player pulls in a new direction.
+2. Thread History, where every closed thread leaves a lasting consequence.
+New threads are adapted to the story's genre and playstyle via thread modes
+(spectacle, intrigue, character, variety), grounded in established NPCs, and
+vetted by a fit-check critic before going live.
 """
+from copy import deepcopy
+import asyncio
 import json
 import re
 
 MODULE_ID = "wb_plot_director"
 
 SCHEMA_VERSION = 3
+DEFAULT_OBSERVATION_TURNS = 4
+THREAD_MODES = ("spectacle", "intrigue", "character", "variety")
+ENGAGEMENT_KINDS = ("proactive", "reactive", "indifferent", "resistant")
 PLAYSTYLE_KEYS = (
     "combat", "diplomacy", "exploration", "mystery", "social", "intrigue",
     "stealth", "strategy", "romance", "crafting", "roleplay", "humor",
@@ -45,6 +43,9 @@ MAX_LOG_ENTRIES = 20
 GEN_MAX_ATTEMPTS = 3
 OPPORTUNITY_COOLDOWN_TURNS = 3
 DIRECTION_LIST_CAP = 6
+HORIZON_LIST_CAP = 4
+SEEDS_LIST_CAP = 4
+RECENT_INPUTS_COUNT = 6
 FIT_MAX_REJECTS = 2
 DEFER_MAX_STREAK = 2
 ABANDON_COOLDOWN_FACTOR = 2
@@ -53,12 +54,34 @@ PIVOT_COOLDOWN_TURNS = 3  # min turns between pivot-driven thread replacements
 # AI-observed ones; player-set entries survive a /plot reset.
 PLAYER_SET_EVIDENCE = "set directly by the player"
 BOOTSTRAP_SCENES = 15
-BOOTSTRAP_SCENES_MAX_CHARS = 12000
 BOOTSTRAP_INPUTS = 15
-BOOTSTRAP_INPUTS_MAX_CHARS = 2500
 
 MOMENTUM_VALUES = ("observing", "building", "steady", "stalled", "resolving")
 PREF_WEIGHTS = ("low", "medium", "high")  # likes/dislikes strength, weakest first
+
+# Shared engine services injected by the server at startup (set_services).
+# When running inside a live WebSocket turn, on_librarian hands off LLM passes
+# to a non-blocking background task spawned at on_turn_stopped so plot
+# generation never delays turn completion.
+_services: dict = {}
+_bg_tasks: set[asyncio.Task] = set()
+_current_bg_task: asyncio.Task | None = None
+_pending_bg_job: dict | None = None
+_staged_bg_updates: dict | None = None
+
+
+def set_services(services: dict) -> None:
+    global _services
+    _services = services or {}
+
+
+def _cancel_bg_task() -> None:
+    global _current_bg_task, _pending_bg_job, _staged_bg_updates
+    _pending_bg_job = None
+    _staged_bg_updates = None
+    if _current_bg_task is not None and not _current_bg_task.done():
+        _current_bg_task.cancel()
+    _current_bg_task = None
 
 # Legacy (v1, 3-act outline) keys wiped on migration. Writing "" replaces the
 # old dicts/lists outright because _deep_merge only recurses dict-into-dict.
@@ -87,27 +110,36 @@ DIFFICULTY_GUIDANCE = {
 # the verbatim directive text the prompts have always used.
 # --------------------------------------------------------------------------
 
-DIRECTIVE_THREAD_GENERATION = """Design ONE new thread that fits the established genre, tone and current situation, plays to what this player enjoys, and injects challenge at the guided difficulty. GROUND IT: anchor the hook in established characters, places, factions, or unresolved hooks from the material above -- invent at most one new minor element, and only when nothing established fits. Where a past consequence or open question offers a natural seed, grow the thread from it."""
+DIRECTIVE_THREAD_GENERATION = """Design ONE new thread that fits the established genre, tone and current situation, plays to what this player enjoys, and injects challenge or variety at the guided difficulty. Pick the thread `mode` that fits the genre and player profile:
+- spectacle (action, combat, high adventure): worthy rivals, escalating battles, and opportunities for the player to pull off epic feats and flex their skills.
+- intrigue (mystery, stealth, politics, strategy): secrets to uncover, hidden agendas, faction tensions, or investigations.
+- character (romance, social, roleplay, drama): deepening bonds with attached NPCs, personal dilemmas, loyalties, or emotional crossroads.
+- variety (slice-of-life, cozy, humor, crafting, exploration): low-stress invitations, local events, charming oddities, or wonders to explore -- adding texture and variety rather than hostile opposition.
+GROUND IT: anchor the hook in established characters, places, factions, or unresolved hooks from the material above -- invent at most one new minor element, and only when nothing established fits. Where a past consequence, planted seed, horizon milestone, or open question offers a natural seed, grow the thread from it."""
 
 DIRECTIVE_FIT_CHECK = """Reject the candidate if ANY of these fail:
-1. Tone/genre fit: it belongs in this story's genre and prevailing tone.
+1. Tone/genre fit: it belongs in this story's genre, prevailing tone, and chosen mode (e.g. slice-of-life/variety threads should not force grim crisis, and action/spectacle threads should offer exciting conflict).
 2. Grounding: its hook rises from established characters, places, or events -- not a disconnected new invention.
 3. Continuity: it does not contradict anything established in the story.
-4. Arc fit: it advances or complicates the narrative direction (skip this check if no direction is given).
+4. Arc fit: it advances, complicates, or gives a fitting breather within the narrative direction and horizon (skip this check if no direction is given).
 5. It does not touch any player dislike.
-6. Player freedom: the challenge describes opposition in the world, not a course of action -- reject anything that dictates what the player must or should do, or bakes in a specific solution."""
+6. Player freedom: the challenge describes opposition or tension in the world, not a course of action -- reject anything that dictates what the player must or should do, or bakes in a specific solution."""
 
 DIRECTIVE_TURN_ASSESSMENT = f"""- thread_engaged: did the player or the scene meaningfully interact with the active thread this turn?
+- player_interest: proactive | reactive | indifferent | resistant. "proactive" means the player actively initiated, probed deeper, or leaned into this hook; "reactive" means the player only dealt with it because the narrator put it directly in their path; "indifferent" means their focus was elsewhere; "resistant" means the player actively deflected, cut short, or walked away from the hook.
 - thread_resolved: is the thread's challenge definitively over (overcome, defused, or conclusively failed)?
 - player_pivot: has the player clearly COMMITTED to a different pursuit than the active thread -- a stated intention, a new goal, leaving the situation behind for good? A brief detour, a side errand, or a single scene elsewhere is NOT a pivot.
 - pivot_intent: one sentence naming what the player is now pursuing (only when player_pivot is true).
 - opportunity: does the scene end with a natural opening to bring the thread forward next turn?
 - nudge: one subtle piece of story material (a rumor, an arrival, a discovery) that could pull the scene toward the thread without contradicting what the player is doing. Never an instruction to the player.
 - momentum: building | steady | stalled
-- profile: the updated fast-moving profile fields. playstyle values are integers 0-10 for what the player actually does. tone is the story's prevailing tone in a few words. themes are short phrases. likes are what the player demonstrably enjoys; avoids are what they consistently steer away from in practice -- both carry a weight (low, medium, high) for how strongly the player seems to feel and one clause of evidence citing what the player actually did (an entry without real evidence does not belong). At most {PROFILE_LIST_CAP} entries per list -- drop the least relevant to make room. Some entries may have been set directly by the player; preserve those (including their weight) unless the story clearly contradicts them. The profile's dislikes are set by the player themselves and are NOT yours to change -- do not include dislikes in your reply, and never add a like that contradicts one. A character acting averse to something in-story does not mean the player dislikes it. The profile's attachments, engagement, narrative, and notes fields are maintained elsewhere -- do not include them."""
+- profile: the updated fast-moving profile fields. playstyle values are integers 0-10 for what the player actually does. tone is the story's prevailing tone in a few words. themes are short phrases. likes are what the player demonstrably enjoys; avoids are what they consistently steer away from in practice -- both carry a weight (low, medium, high) for how strongly the player seems to feel and one clause of evidence citing what the player actually did (an entry without real evidence does not belong). Learn from PLAYER INITIATIVE, not narrator imposition: add to likes or raise playstyle weights ONLY when the player proactively pursues, initiates, or lingers on something (proactive) -- never merely because the narrator threw an event at them and they reacted (reactive). If the player actively deflects or cuts short a hook type (resistant), record that pattern in avoids with evidence. At most {PROFILE_LIST_CAP} entries per list -- drop the least relevant to make room. Some entries may have been set directly by the player; preserve those (including their weight) unless the story clearly contradicts them. The profile's dislikes are set by the player themselves and are NOT yours to change -- do not include dislikes in your reply, and never add a like that contradicts one. A character acting averse to something in-story does not mean the player dislikes it. You may also include updated attachments or engagement (bites_on / ignores) when this turn reveals a clear signal."""
 
 DIRECTIVE_DIRECTION_UPDATE = f"""- premise: 1-2 sentences: the larger arc the story seems to be telling.
+- endgame: 1-2 sentences: the overarching North Star or long-term destination giving the story purpose and comfort (an epic culmination for action/adventure, or a fulfilling life/bond milestone for slice-of-life/cozy play). Keep it ELASTIC: if the player has pulled the story in a new direction that diverges from the previous endgame, reshape the endgame around what they are actually building toward now.
 - heading: one sentence: where events look to be going next.
+- horizon: up to {HORIZON_LIST_CAP} future milestones or phases bridging the current situation to the endgame (drop completed ones; reshape if the player pivoted). Describe world/narrative phases, never scripted player actions.
+- planted_seeds: up to {SEEDS_LIST_CAP} foreshadowing seeds ({{seed, payoff}}) -- a subtle detail or hook in the world and what truth or event it will eventually blossom into (drop seeds that have already paid off).
 - open_questions: up to {DIRECTION_LIST_CAP} short unresolved questions the story has raised.
 - recurring_elements: up to {DIRECTION_LIST_CAP} named characters, places, factions, or motifs worth returning to.
 - attachments: named story elements the player keeps gravitating to (name, kind, why they matter).
@@ -206,6 +238,7 @@ def _empty_thread() -> dict:
     return {
         "id": "",
         "title": "",
+        "mode": "",        # spectacle | intrigue | character | variety | ""
         "hook": "",
         "challenge": "",
         "stakes": "",
@@ -245,7 +278,10 @@ def _default_profile() -> dict:
 def _default_direction() -> dict:
     return {
         "premise": "",             # 1-2 sentences: the larger arc the story is telling
+        "endgame": "",             # 1-2 sentences: the elastic North Star destination
         "heading": "",             # one sentence: where events look to be going next
+        "horizon": [],             # future milestones/phases bridging current play to the endgame
+        "planted_seeds": [],       # [{seed, payoff}] -- foreshadowing details and their planned payoffs
         "open_questions": [],      # short unresolved questions the story has raised
         "recurring_elements": [],  # named characters/places/factions/motifs worth returning to
         "updated_turn": 0,
@@ -364,6 +400,30 @@ def _clean_narrative(value, previous) -> dict:
     }
 
 
+def _clean_seeds(value, previous: list) -> list:
+    """Planted foreshadowing seeds: [{seed, payoff}]. Plain strings normalize
+    by splitting on '--' or '->' when present."""
+    source = value if isinstance(value, list) else previous
+    cleaned = []
+    for item in (source if isinstance(source, list) else []):
+        if isinstance(item, dict):
+            seed = str(item.get("seed", "")).strip()[:PROFILE_ENTRY_MAX_CHARS]
+            payoff = str(item.get("payoff", "")).strip()[:PROFILE_ENTRY_MAX_CHARS]
+        else:
+            raw = str(item).strip()
+            if "->" in raw:
+                s, p = raw.split("->", 1)
+            elif "--" in raw:
+                s, p = raw.split("--", 1)
+            else:
+                s, p = raw, ""
+            seed = s.strip()[:PROFILE_ENTRY_MAX_CHARS]
+            payoff = p.strip()[:PROFILE_ENTRY_MAX_CHARS]
+        if seed:
+            cleaned.append({"seed": seed, "payoff": payoff})
+    return cleaned[:SEEDS_LIST_CAP]
+
+
 def _clean_direction(parsed, previous: dict) -> dict:
     """Sanitize an LLM narrative-direction reply; fall back to previous values
     on garbage. Always returns the full direction shape -- _deep_merge merges
@@ -373,7 +433,12 @@ def _clean_direction(parsed, previous: dict) -> dict:
         parsed = {}
     return {
         "premise": str(parsed.get("premise") or previous.get("premise") or "").strip(),
+        "endgame": str(parsed.get("endgame") or previous.get("endgame") or "").strip(),
         "heading": str(parsed.get("heading") or previous.get("heading") or "").strip(),
+        "horizon": _clean_str_list(
+            parsed.get("horizon"), previous.get("horizon", []) or [])[:HORIZON_LIST_CAP],
+        "planted_seeds": _clean_seeds(
+            parsed.get("planted_seeds"), previous.get("planted_seeds", []) or []),
         "open_questions": _clean_str_list(
             parsed.get("open_questions"), previous.get("open_questions", []) or [])[:DIRECTION_LIST_CAP],
         "recurring_elements": _clean_str_list(
@@ -612,12 +677,26 @@ def _direction_block(data: dict) -> str:
         return ""
     lines = [
         "NARRATIVE DIRECTION (the story's larger arc -- the new thread should "
-        "advance, complicate, or pay off part of it, not sit beside it):",
+        "advance, complicate, or pay off part of it, or provide a fitting "
+        "breather between milestones):",
         f"Premise: {premise}",
     ]
+    endgame = str(direction.get("endgame", "")).strip()
+    if endgame:
+        lines.append(f"North Star (Endgame): {endgame}")
     heading = str(direction.get("heading", "")).strip()
     if heading:
         lines.append(f"Heading: {heading}")
+    horizon = [str(h).strip() for h in direction.get("horizon", []) if str(h).strip()]
+    if horizon:
+        lines.append("Horizon milestones (upcoming phases): " + " -> ".join(horizon))
+    seeds = _clean_seeds(direction.get("planted_seeds"), [])
+    if seeds:
+        seed_strs = [
+            f"{s['seed']} (payoff: {s['payoff']})" if s.get("payoff") else s["seed"]
+            for s in seeds
+        ]
+        lines.append("Planted seeds (foreshadowing to grow or cash in when ripe): " + "; ".join(seed_strs))
     questions = [str(q).strip() for q in direction.get("open_questions", []) if str(q).strip()]
     if questions:
         lines.append("Open questions: " + "; ".join(questions))
@@ -657,17 +736,32 @@ def _setting_material(state: dict) -> list[str]:
     return parts
 
 
+def _recent_player_inputs(state: dict, limit: int = RECENT_INPUTS_COUNT) -> list[str]:
+    """Recent non-empty player messages (oldest to newest)."""
+    inputs = [
+        str(m.get("content", "")).strip()
+        for m in state.get("chat_messages", [])
+        if m.get("role") == "user" and str(m.get("content", "")).strip()
+    ]
+    return inputs[-limit:] if limit > 0 else inputs
+
+
 def _story_material(state: dict) -> str:
     """Collect the material threads are woven from: scenario, world rules/lore,
-    and the most recent scenes (newest always in full)."""
+    the most recent scenes, and the player's own recent actions."""
     parts = _setting_material(state)
 
     history = state.get("history", [])
     if history:
-        latest = str(history[-1])[-4000:]
-        earlier = "\n".join(str(h) for h in history[-6:-1])[-3000:]
+        latest = str(history[-1])
+        earlier = "\n".join(str(h) for h in history[-6:-1])
         story = (earlier + "\n" if earlier else "") + latest
         parts.append(f"<story_so_far>\n{story}\n</story_so_far>")
+
+    recent_inputs = _recent_player_inputs(state)
+    if recent_inputs:
+        inputs_text = "\n".join(f"- {inp}" for inp in recent_inputs)
+        parts.append(f"<recent_player_actions>\n{inputs_text}\n</recent_player_actions>")
 
     return "\n\n".join(parts)
 
@@ -684,11 +778,51 @@ def _is_profile_empty(profile: dict) -> bool:
     )
 
 
+def _is_profile_unobserved(profile: dict) -> bool:
+    """True while the AI has not yet observed any behavior from the story
+    (ignoring likes/dislikes typed in directly by the player at creation)."""
+    if not isinstance(profile, dict):
+        return True
+    observed_likes = [
+        e for e in (profile.get("likes") or [])
+        if isinstance(e, dict) and e.get("evidence") != PLAYER_SET_EVIDENCE
+    ]
+    return (
+        not any((profile.get("playstyle") or {}).values())
+        and not profile.get("tone")
+        and not profile.get("themes")
+        and not observed_likes
+        and not profile.get("avoids")
+        and not profile.get("attachments")
+    )
+
+
+def _in_initial_observation(state: dict, data: dict) -> bool:
+    """Whether a fresh story is still in its initial observation window before
+    the first direction and plot thread are woven."""
+    if data.get("status") != "observing" or data.get("thread_history"):
+        return False
+    if (data.get("thread") or {}).get("status") == "active":
+        return False
+    config = _config(state)
+    turn = int(state.get("turn", 0) or 0)
+    if "observation_turns" in config:
+        obs_turns = max(0, int(config.get("observation_turns") or 0))
+        return turn < obs_turns
+    # Default observation window applies when neither direction nor observed
+    # profile exists yet (a genuinely fresh story).
+    has_direction = bool(str((data.get("direction") or {}).get("premise", "")).strip())
+    if has_direction or not _is_profile_unobserved(data.get("profile") or {}):
+        return False
+    return turn < DEFAULT_OBSERVATION_TURNS
+
+
 async def _bootstrap_profile(state: dict, sdk, preserved: dict | None = None) -> dict | None:
-    """One-time deep read when the module joins a story already in progress:
-    distill an initial player profile from the whole story so far instead of
-    starting blind. ``preserved`` optionally carries player-stated likes and
-    dislikes that survived a reset -- they anchor the analysis and are merged
+    """One-time deep read when the module joins a story already in progress (or
+    finishes its initial observation window): distill an initial player profile
+    from the whole story so far instead of starting blind. ``preserved``
+    optionally carries player-stated likes and dislikes that survived a reset
+    or were seeded at story creation -- they anchor the analysis and are merged
     back by the caller. Returns the sanitized profile, or None on a bad
     reply."""
     config = _config(state)
@@ -708,16 +842,12 @@ async def _bootstrap_profile(state: dict, sdk, preserved: dict | None = None) ->
             lines.append(f"Dislikes: {_fmt(preserved['dislikes'])}")
         preserved_block = "\n".join(lines) + "\n\n"
 
-    scenes = "\n\n".join(str(h) for h in state.get("history", [])[-BOOTSTRAP_SCENES:])[-BOOTSTRAP_SCENES_MAX_CHARS:]
-    inputs = [
-        str(m.get("content", "")).strip()
-        for m in state.get("chat_messages", [])
-        if m.get("role") == "user" and str(m.get("content", "")).strip()
-    ]
-    inputs_block = "\n".join(f"- {i}" for i in inputs[-BOOTSTRAP_INPUTS:])[-BOOTSTRAP_INPUTS_MAX_CHARS:]
+    scenes = "\n\n".join(str(h) for h in state.get("history", [])[-BOOTSTRAP_SCENES:])
+    inputs = _recent_player_inputs(state, limit=BOOTSTRAP_INPUTS)
+    inputs_block = "\n".join(f"- {i}" for i in inputs)
     setting = "\n\n".join(_setting_material(state))
 
-    prompt = f"""You are joining a text RPG already in progress. Study the story so far and build an initial profile of the player: how they actually play, the story's prevailing tone, its recurring themes, and what the player seems to enjoy or avoid.
+    prompt = f"""You are joining a text RPG already in progress. Study the story so far and build an initial profile of the player: how they actually play, the story's prevailing tone, its recurring themes, and what the player seems to enjoy or avoid. Base your conclusions on what the PLAYER actively initiated, chose, or leaned into in their own inputs -- not merely what the narrator described around them.
 
 {setting}
 
@@ -812,9 +942,9 @@ async def _generate_thread(state: dict, sdk, data: dict, avoid_previous_kind: bo
         if may_defer else ""
     )
 
-    prompt = f"""You design short plot threads for a text RPG storyteller. A thread is a small self-contained arc the storyteller can weave in over roughly the next {thread_max_turns} turns: a hook that enters the story naturally, a challenge that opposes or complicates, and stakes. The player will see the thread openly, so make it enticing, not a spoiler-dependent twist.
+    prompt = f"""You design short plot threads for a text RPG storyteller. A thread is a small self-contained arc the storyteller can weave in over roughly the next {thread_max_turns} turns: a hook that enters the story naturally, a challenge or situational tension that gives the thread shape, and stakes. The player will see the thread openly, so make it enticing, not a spoiler-dependent twist.
 
-A challenge is opposition that exists in the world -- forces, obstacles, and agendas working against the player. It must NEVER prescribe the player's actions, name a required solution, or assume how they will respond: what to do about it, and whether to engage at all, is entirely theirs.
+A challenge is opposition or tension that exists in the world -- forces, obstacles, mysteries, or agendas in play (or in character/variety modes, a personal dilemma, invitation, or lively situation). It must NEVER prescribe the player's actions, name a required solution, or assume how they will respond: what to do about it, and whether to engage at all, is entirely theirs.
 
 PLAYER PROFILE (cater to their demonstrated preferences; weight marks how strongly the player feels -- give high-weight entries the most influence. Dislikes were set directly by the player: steer firmly away from them. Avoids are observed aversions: steer away unless the profile suggests otherwise. Attachments name what the player cares about -- prefer anchoring threads in them. engagement.ignores are hook shapes this player lets pass by -- avoid those shapes):
 {json.dumps(profile, ensure_ascii=False)}
@@ -828,7 +958,7 @@ CHALLENGE DIFFICULTY:
 {_storylines_block(state)}{_character_roster(state)}{_character_sheet_block(state)}{_history_block(data)}{_directive("thread_generation", state.get("module_instructions"))}{different}{critique_block}{pivot_block}{defer_block}
 
 Respond with ONLY valid JSON:
-{{"title": "3-6 words", "hook": "how it surfaces in the story, one sentence", "challenge": "what stands in the way -- the opposition itself, one sentence, never what the player should do about it", "stakes": "what is at risk, one sentence", "appeal": "which player preference this serves, a few words"}}"""
+{{"title": "3-6 words", "mode": "spectacle|intrigue|character|variety", "hook": "how it surfaces in the story, one sentence", "challenge": "what stands in the way -- the opposition or situational tension itself, one sentence, never what the player should do about it", "stakes": "what is at risk or what could be gained, one sentence", "appeal": "which player preference this serves, a few words"}}"""
 
     model_pref = config.get("thread_ai_model", "smartest")
     try:
@@ -851,6 +981,8 @@ Respond with ONLY valid JSON:
     title = str(parsed.get("title", "")).strip() if isinstance(parsed, dict) else ""
     hook = str(parsed.get("hook", "")).strip() if isinstance(parsed, dict) else ""
     challenge = str(parsed.get("challenge", "")).strip() if isinstance(parsed, dict) else ""
+    raw_mode = str(parsed.get("mode", "")).strip().lower() if isinstance(parsed, dict) else ""
+    mode = raw_mode if raw_mode in THREAD_MODES else ""
 
     if not (title and hook and challenge):
         status = "failed" if attempts >= GEN_MAX_ATTEMPTS else data.get("status", "observing")
@@ -868,6 +1000,7 @@ Respond with ONLY valid JSON:
         "thread": _full_thread(
             id=f"t{turn}",
             title=title,
+            mode=mode,
             hook=hook,
             challenge=challenge,
             stakes=str(parsed.get("stakes", "")).strip(),
@@ -885,6 +1018,8 @@ async def _fit_check(state: dict, sdk, data: dict, candidate: dict) -> tuple[boo
     critic can never push the module dormant."""
     profile = data.get("profile") or _default_profile()
     shown = {k: candidate.get(k, "") for k in ("title", "hook", "challenge", "stakes", "appeal")}
+    if candidate.get("mode"):
+        shown["mode"] = candidate["mode"]
 
     prompt = f"""You are a quality gate for plot threads in a text RPG. Judge ONE candidate thread strictly on fit, not on cleverness.
 
@@ -978,10 +1113,10 @@ How it ended: {note or '(it faded without resolution)'}
                        "page; where the story is still young, lean on the scenario and premise.\n\n")
         consequence_rule = ""
 
-    prompt = f"""You maintain the long-term narrative direction of a text RPG -- a short living summary of where the story is heading, used to keep future plot threads coherent with each other and with everything already established. You also keep the slow-moving parts of the player's profile current.
+    prompt = f"""You maintain the long-term narrative direction of a text RPG -- a living plan of where the story is heading (its premise, its elastic North Star endgame, upcoming horizon milestones, and foreshadowed seeds), used to give the story overarching purpose while reshaping smoothly when the player pulls in a new direction. You also keep the slow-moving parts of the player's profile current.
 
 CURRENT NARRATIVE DIRECTION (evolve it, don't rewrite from scratch; empty means the story is young):
-{json.dumps({k: direction[k] for k in ("premise", "heading", "open_questions", "recurring_elements")}, ensure_ascii=False)}
+{json.dumps({k: direction[k] for k in ("premise", "endgame", "heading", "horizon", "planted_seeds", "open_questions", "recurring_elements")}, ensure_ascii=False)}
 
 CURRENT PLAYER PROFILE:
 {json.dumps(profile, ensure_ascii=False)}
@@ -993,7 +1128,7 @@ Update:
 {consequence_rule}{_directive("direction_update", state.get("module_instructions"))}
 
 Respond with ONLY valid JSON:
-{{"consequence": "...", "premise": "...", "heading": "...", "open_questions": [], "recurring_elements": [], "attachments": [{{"name": "...", "kind": "...", "note": "..."}}], "engagement": {{"bites_on": [], "ignores": []}}, "narrative": {{"pacing": "...", "agency": "...", "register": "..."}}, "notes": "..."}}"""
+{{"consequence": "...", "premise": "...", "endgame": "...", "heading": "...", "horizon": [], "planted_seeds": [{{"seed": "...", "payoff": "..."}}], "open_questions": [], "recurring_elements": [], "attachments": [{{"name": "...", "kind": "...", "note": "..."}}], "engagement": {{"bites_on": [], "ignores": []}}, "narrative": {{"pacing": "...", "agency": "...", "register": "..."}}, "notes": "..."}}"""
 
     model_pref = config.get("assessment_ai_model", "balanced")
     try:
@@ -1110,6 +1245,14 @@ async def on_gather_context(state: dict, sdk) -> dict:
     return {}
 
 
+MODE_STORYTELLER_GUIDANCE = {
+    "spectacle": "Mode: Spectacle/Action -- stage cinematic set-pieces, worthy opposition, and openings for the player to pull off impressive feats.",
+    "intrigue": "Mode: Intrigue/Mystery -- weave in subtle clues, hidden agendas, and tension that reward curiosity without forcing a confrontation.",
+    "character": "Mode: Character/Heart -- center interpersonal chemistry, personal stakes, and emotional resonance with the characters involved.",
+    "variety": "Mode: Slice-of-Life/Variety -- treat this as a low-pressure invitation or colorful world event that adds charm and variety without manufacturing crisis.",
+}
+
+
 async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
     """The active thread's standing guidance to the storyteller: its own
     labeled system block, so it is discoverable in the prompt and carries
@@ -1141,6 +1284,16 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
         f"Thread: \"{thread.get('title', '')}\". {thread.get('hook', '')} "
         f"Complication: {thread.get('challenge', '')}",
     ]
+    mode = str(thread.get("mode") or "").strip().lower()
+    if mode in MODE_STORYTELLER_GUIDANCE:
+        lines.append(MODE_STORYTELLER_GUIDANCE[mode])
+    seeds = _clean_seeds((data.get("direction") or {}).get("planted_seeds"), [])
+    if seeds:
+        seed_hints = "; ".join(s["seed"] for s in seeds[:2] if s.get("seed"))
+        if seed_hints:
+            lines.append(
+                f"Background foreshadowing seeds (touch on lightly only when a scene naturally invites it): {seed_hints}"
+            )
     stall_threshold = max(1, int(config.get("stall_threshold", 3) or 3))
     if int(data.get("ignored_streak", 0) or 0) >= stall_threshold:
         lines.append(
@@ -1154,34 +1307,60 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
     return {"content": "\n".join(lines)}
 
 
-async def on_librarian(state: dict, sdk) -> dict | None:
-    config = _config(state)
-    if not config.get("plot_enabled", True):
-        return None
-    if not state.get("history"):
-        return None
+def _is_live_turn_armed() -> bool:
+    """True when running inside a live server turn that will fire on_turn_stopped,
+    so heavy LLM passes can run in a non-blocking background task after the
+    turn completes."""
+    engine = _services.get("engine")
+    sm = _services.get("session_manager")
+    return bool(engine is not None and sm is not None and getattr(engine, "_turn_hooks_armed", False))
 
-    data = _own_data(state) or _default_data()
-    if data.get("status") == "failed":
-        return None
-    # Suspended: freeze everything -- no assessments, no expiry, no generation.
-    # The pending nudge was cleared when the player suspended.
-    if data.get("suspended"):
-        return None
+
+async def _run_librarian_llm_pass(state: dict, sdk, base_updates: dict | None = None) -> dict | None:
+    """The core LLM analysis/generation pass for on_librarian. Runs inline when
+    called directly (e.g. unit tests) and in a non-blocking background task
+    after turn completion during live play."""
+    config = _config(state)
+    data = deepcopy(_own_data(state) or _default_data())
+    updates: dict = dict(base_updates or {})
+    if updates:
+        data.update(updates)
 
     turn = state.get("turn", 0)
-    updates: dict = {}
+    thread = data.get("thread") or _empty_thread()
+    cooldown = max(0, int(config.get("thread_cooldown_turns", 3) or 0))
 
-    # A nudge armed on an earlier turn was rendered into this turn's prompt;
-    # consume it so it fires exactly once. _deep_merge never deletes keys, so
-    # the empty string must be written explicitly.
-    if data.get("pending_nudge") and int(data.get("last_nudge_turn", 0) or 0) < turn:
-        updates["pending_nudge"] = ""
+    # Fresh stories wait out the initial observation window before seeding a
+    # direction or weaving the first thread, so the opening turns can breathe
+    # and establish real player behavior first.
+    if _in_initial_observation(state, data):
+        return {"module_data": {MODULE_ID: updates}} if updates else None
 
-    # The narrative direction should exist from the story's first turns, not
-    # only after the first thread closes: seed it once while it is empty
-    # (covers fresh stories, mid-story adoption, and migrated v2 saves with a
-    # thread already running). Two failed reads stop the retries.
+    # When no thread is active and we are still inside a quiet period, spend
+    # zero LLM calls.
+    if thread.get("status") != "active" and turn < int(data.get("next_thread_turn", 0) or 0):
+        return {"module_data": {MODULE_ID: updates}} if updates else None
+
+    # Joining a story already in progress (or finishing the initial observation
+    # window) with an unobserved profile: read the story so far once, so both
+    # the initial direction and the first thread cater to how the player has
+    # actually been playing. Preserves any player-seeded likes/dislikes.
+    if thread.get("status") != "active" and turn >= 2 and _is_profile_unobserved(data.get("profile") or {}):
+        cur_profile = _clean_profile({}, data.get("profile") or _default_profile())
+        kept_dislikes = cur_profile["dislikes"]
+        kept_likes = [e for e in cur_profile["likes"] if e.get("evidence") == PLAYER_SET_EVIDENCE]
+        preserved = {"likes": kept_likes, "dislikes": kept_dislikes} if (kept_likes or kept_dislikes) else None
+        bootstrapped = await _bootstrap_profile(state, sdk, preserved=preserved)
+        if bootstrapped is not None:
+            if preserved:
+                bootstrapped = _merge_player_prefs(bootstrapped, kept_likes, kept_dislikes)
+            print(f"[Plot Director] Turn {turn}: profile bootstrapped from the story so far.")
+            updates["profile"] = bootstrapped
+            data["profile"] = bootstrapped
+
+    # Seed the initial narrative direction once the observation window has
+    # passed (or for migrated saves with a thread already running). Two failed
+    # reads stop the retries.
     if (
         not str((data.get("direction") or {}).get("premise", "")).strip()
         and int(data.get("direction_seed_attempts", 0) or 0) < 2
@@ -1192,29 +1371,13 @@ async def on_librarian(state: dict, sdk) -> dict | None:
             updates["direction"] = seeded
             if deep_fields:
                 updates["profile"] = _clean_profile(
-                    deep_fields, data.get("profile") or _default_profile())
+                    deep_fields, updates.get("profile") or data.get("profile") or _default_profile())
             print(f"[Plot Director] Turn {turn}: initial narrative direction established.")
         else:
             updates["direction_seed_attempts"] = int(data.get("direction_seed_attempts", 0) or 0) + 1
 
-    thread = data.get("thread") or _empty_thread()
-    cooldown = max(0, int(config.get("thread_cooldown_turns", 3) or 0))
-
-    # No active thread (fresh save or previous thread closed): generate one,
-    # unless the story is still in its quiet period -- those turns cost zero
-    # LLM calls.
+    # No active thread (observation finished or previous thread closed): weave one.
     if thread.get("status") != "active":
-        if turn < int(data.get("next_thread_turn", 0) or 0):
-            return {"module_data": {MODULE_ID: updates}} if updates else None
-        # Joining a story already in progress with no profile yet: read the
-        # story so far once, so the first thread caters to how the player has
-        # actually been playing. Skipped for fresh stories (nothing to read)
-        # and never retried -- a failed bootstrap just means starting blind.
-        if turn >= 2 and _is_profile_empty(data.get("profile") or {}):
-            bootstrapped = await _bootstrap_profile(state, sdk)
-            if bootstrapped is not None:
-                print(f"[Plot Director] Turn {turn}: profile bootstrapped from the story so far.")
-                updates["profile"] = bootstrapped
         last_outcome = (data.get("thread_history") or [{}])[-1].get("outcome", "")
         updates.update(await _generate_checked_thread(
             state, sdk, {**data, **updates},
@@ -1233,15 +1396,18 @@ async def on_librarian(state: dict, sdk) -> dict | None:
         return {"module_data": {MODULE_ID: updates}} if updates else None
 
     history = state.get("history", [])
-    latest = str(history[-1])[-4000:]
-    earlier = "\n".join(str(h) for h in history[-3:-1])[-2000:]
+    latest = str(history[-1])
+    earlier = "\n".join(str(h) for h in history[-3:-1])
     earlier_block = f"EARLIER NARRATION (context only):\n{earlier}\n\n" if earlier else ""
 
-    player_input = ""
-    for message in reversed(state.get("chat_messages", [])):
-        if message.get("role") == "user" and str(message.get("content", "")).strip():
-            player_input = str(message["content"])[-1000:]
-            break
+    recent_inputs = _recent_player_inputs(state)
+    player_input = recent_inputs[-1] if recent_inputs else ""
+    earlier_inputs = recent_inputs[:-1]
+    earlier_inputs_block = (
+        "EARLIER PLAYER INPUTS (trajectory of what the player has been choosing to do):\n"
+        + "\n".join(f"- {inp}" for inp in earlier_inputs) + "\n\n"
+        if earlier_inputs else ""
+    )
 
     # The seed pass above may have just written deep profile fields; build on
     # that version so this turn's assessment doesn't clobber them.
@@ -1261,14 +1427,14 @@ CURRENT PLAYER PROFILE (update it with what this turn reveals; evolve, don't rew
 {_storylines_block(state)}{earlier_block}THIS TURN'S SCENE (judge this):
 {latest}
 
-LAST PLAYER INPUT:
+{earlier_inputs_block}LAST PLAYER INPUT:
 {player_input or '(none)'}
 
 Judge and update:
 {_directive("turn_assessment", state.get("module_instructions"))}
 
 Respond with ONLY valid JSON:
-{{"thread_engaged": false, "thread_resolved": false, "resolution_note": "one sentence, only if resolved", "player_pivot": false, "pivot_intent": "", "opportunity": false, "nudge": "...", "momentum": "steady", "profile": {{"playstyle": {{{", ".join(f'"{k}": 0' for k in PLAYSTYLE_KEYS)}}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high", "evidence": "..."}}], "avoids": [{{"text": "...", "weight": "low|medium|high", "evidence": "..."}}]}}}}"""
+{{"thread_engaged": false, "player_interest": "proactive|reactive|indifferent|resistant", "thread_resolved": false, "resolution_note": "one sentence, only if resolved", "player_pivot": false, "pivot_intent": "", "opportunity": false, "nudge": "...", "momentum": "steady", "profile": {{"playstyle": {{{", ".join(f'"{k}": 0' for k in PLAYSTYLE_KEYS)}}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high", "evidence": "..."}}], "avoids": [{{"text": "...", "weight": "low|medium|high", "evidence": "..."}}]}}}}"""
 
     model_pref = config.get("assessment_ai_model", "balanced")
     try:
@@ -1281,7 +1447,10 @@ Respond with ONLY valid JSON:
     if not isinstance(parsed, dict):
         return {"module_data": {MODULE_ID: updates}} if updates else None
 
-    engaged = bool(parsed.get("thread_engaged"))
+    interest = str(parsed.get("player_interest") or "").strip().lower()
+    # Active resistance (deflecting or walking away from the hook) counts as
+    # not engaging, even if the scene briefly touched the thread.
+    engaged = bool(parsed.get("thread_engaged")) and interest != "resistant"
     resolved = bool(parsed.get("thread_resolved"))
     pivot = bool(parsed.get("player_pivot"))
     pivot_intent = str(parsed.get("pivot_intent") or "").strip()
@@ -1298,7 +1467,10 @@ Respond with ONLY valid JSON:
     updates["momentum"] = momentum
 
     log = list(data.get("log", []))
-    log.append({"turn": turn, "engaged": engaged, "note": resolution_note})
+    log_entry = {"turn": turn, "engaged": engaged, "note": resolution_note}
+    if interest in ENGAGEMENT_KINDS:
+        log_entry["interest"] = interest
+    log.append(log_entry)
     updates["log"] = log[-MAX_LOG_ENTRIES:]
 
     if resolved:
@@ -1343,7 +1515,7 @@ Respond with ONLY valid JSON:
         stalled = ignored_streak == stall_threshold
         opportune = (
             opportunity
-            and config.get("opportunity_nudges", True)
+            and config.get("opportunity_nudges", False)
             and turn - int(data.get("last_nudge_turn", 0) or 0) >= OPPORTUNITY_COOLDOWN_TURNS
         )
         if stalled or opportune:
@@ -1352,6 +1524,120 @@ Respond with ONLY valid JSON:
             updates["last_nudge_turn"] = turn
 
     return {"module_data": {MODULE_ID: updates}}
+
+
+async def _execute_bg_job(job: dict) -> None:
+    """Run the deferred librarian pass in the background after the turn has
+    already completed and unlocked the UI, then persist and broadcast the
+    updated module_data."""
+    global _staged_bg_updates
+    try:
+        result = await _run_librarian_llm_pass(job["state"], job["sdk"], job.get("base_updates"))
+        own_updates = (result or {}).get("module_data", {}).get(MODULE_ID)
+        if not isinstance(own_updates, dict) or not own_updates:
+            return
+
+        sm = _services.get("session_manager")
+        engine = _services.get("engine")
+        chat_hub = _services.get("chat_hub")
+        if sm is None or engine is None:
+            return
+        if sm.active_save_id != job.get("save_id"):
+            return
+
+        live_state = sm.state
+        live_plot = (live_state.get("module_data") or {}).get(MODULE_ID) or {}
+        if live_plot.get("suspended"):
+            return
+
+        merged = engine._deep_merge(live_plot, own_updates)
+        live_state.setdefault("module_data", {})[MODULE_ID] = merged
+
+        if chat_hub is not None and chat_hub.turn_running():
+            # Another turn started while this background pass was in flight:
+            # stage the updates so the running turn's librarian merges them too.
+            _staged_bg_updates = {
+                "save_id": job.get("save_id"),
+                "updates": deepcopy(own_updates),
+            }
+            return
+
+        if live_state.get("turn", 0) == job.get("turn", 0) and getattr(sm, "save_manager", None) is not None:
+            sm.save_manager.save_turn(sm.active_save_id, live_state, live_state.get("turn", 0))
+        if chat_hub is not None:
+            await chat_hub.send({"type": "state_update", "state": dict(live_state)})
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"[Plot Director] Background pass failed: {exc}")
+
+
+async def on_librarian(state: dict, sdk) -> dict | None:
+    global _pending_bg_job, _staged_bg_updates
+    config = _config(state)
+    if not config.get("plot_enabled", True):
+        return None
+    if not state.get("history"):
+        return None
+
+    data = deepcopy(_own_data(state) or _default_data())
+    if data.get("status") == "failed":
+        return None
+    # Suspended: freeze everything -- no assessments, no expiry, no generation.
+    # The pending nudge was cleared when the player suspended.
+    if data.get("suspended"):
+        return None
+
+    turn = state.get("turn", 0)
+    updates: dict = {}
+
+    # Pick up any updates completed by a previous turn's background task while
+    # this turn was already streaming.
+    if _staged_bg_updates is not None:
+        staged = _staged_bg_updates
+        _staged_bg_updates = None
+        if staged.get("save_id") == state.get("active_save_id") and isinstance(staged.get("updates"), dict):
+            updates.update(staged["updates"])
+            data.update(staged["updates"])
+
+    # A nudge armed on an earlier turn was rendered into this turn's prompt;
+    # consume it so it fires exactly once. _deep_merge never deletes keys, so
+    # the empty string must be written explicitly.
+    if data.get("pending_nudge") and int(data.get("last_nudge_turn", 0) or 0) < turn:
+        updates["pending_nudge"] = ""
+
+    # In a live WebSocket turn, defer all LLM calls to the post-turn background
+    # task spawned at on_turn_stopped so the turn finishes with zero added delay.
+    if _is_live_turn_armed():
+        snap = deepcopy(state)
+        if updates:
+            snap.setdefault("module_data", {}).setdefault(MODULE_ID, {}).update(updates)
+        _pending_bg_job = {
+            "save_id": state.get("active_save_id"),
+            "turn": turn,
+            "state": snap,
+            "sdk": sdk,
+            "base_updates": {},
+        }
+        return {"module_data": {MODULE_ID: updates}} if updates else None
+
+    return await _run_librarian_llm_pass(state, sdk, base_updates=updates)
+
+
+async def on_turn_stopped(state: dict, sdk, reason: str) -> None:
+    """Spawn the queued background Plot Director pass once the turn has been
+    saved (reason == 'completed'), or discard it if the turn was cancelled."""
+    global _pending_bg_job, _current_bg_task
+    job = _pending_bg_job
+    _pending_bg_job = None
+    if reason != "completed" or job is None:
+        return
+    if _current_bg_task is not None and not _current_bg_task.done():
+        _current_bg_task.cancel()
+    task = asyncio.get_running_loop().create_task(_execute_bg_job(job))
+    _current_bg_task = task
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
 
 
 def _profile_line(profile: dict) -> str:
@@ -1388,6 +1674,7 @@ async def _command_regen(state: dict, sdk, data: dict) -> dict:
     if not data or data.get("schema") != SCHEMA_VERSION:
         return {"message": "[Plot] The story is still settling in -- try again next turn.", "signal": "end_turn", "error": True}
 
+    _cancel_bg_task()
     turn = state.get("turn", 0)
     updates: dict = {}
     thread = data.get("thread") or {}
@@ -1418,6 +1705,7 @@ async def _command_reset(state: dict, sdk) -> dict:
     and anchor the new analysis. Any step that fails is retried by the normal
     librarian machinery on the following turns. The widget empties itself
     optimistically while this runs."""
+    _cancel_bg_task()
     turn = state.get("turn", 0)
     fresh = _default_data()
     notes = []
@@ -1478,6 +1766,7 @@ def _command_suspend(state: dict, data: dict) -> dict:
         return {"message": "[Plot] The story is still settling in -- try again next turn.", "signal": "end_turn", "error": True}
     if data.get("suspended"):
         return {"message": "[Plot] Plot direction is already suspended.", "signal": "end_turn", "error": True}
+    _cancel_bg_task()
     return {
         "message": "[Plot] Plot direction suspended -- the thread is frozen until /plot resume.",
         "signal": "end_turn",
@@ -1688,9 +1977,21 @@ async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
         if not premise:
             return {"message": "[Plot] No story direction yet -- it takes shape within the first turns.", "signal": "end_turn"}
         lines = [f"[Plot] Story direction (spoiler): {premise}"]
+        endgame = str(direction.get("endgame", "")).strip()
+        if endgame:
+            lines.append(f"North Star: {endgame}")
         heading = str(direction.get("heading", "")).strip()
         if heading:
             lines.append(f"Heading: {heading}")
+        horizon = [str(h).strip() for h in direction.get("horizon", []) if str(h).strip()]
+        if horizon:
+            lines.append("Horizon: " + " -> ".join(horizon))
+        seeds = _clean_seeds(direction.get("planted_seeds"), [])
+        if seeds:
+            lines.append("Planted seeds: " + "; ".join(
+                f"{s['seed']} -> {s['payoff']}" if s.get("payoff") else s["seed"]
+                for s in seeds
+            ))
         questions = [str(q).strip() for q in direction.get("open_questions", []) if str(q).strip()]
         if questions:
             lines.append("Open questions: " + "; ".join(questions))
@@ -1719,7 +2020,8 @@ async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
             }
         return {"message": "[Plot] Between threads -- a new one is being woven.", "signal": "end_turn"}
 
-    lines = [f"[Plot] Active thread: {thread.get('title', '')} (since turn {thread.get('created_turn', 0)})"]
+    mode_tag = f" [{thread['mode']}]" if thread.get("mode") else ""
+    lines = [f"[Plot] Active thread: {thread.get('title', '')}{mode_tag} (since turn {thread.get('created_turn', 0)})"]
     if thread.get("hook"):
         lines.append(f"Hook: {thread['hook']}")
     if thread.get("challenge"):

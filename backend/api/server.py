@@ -313,6 +313,7 @@ _module_services = {
     "engine": engine,
     "registry": registry,
     "session_manager": session_manager,
+    "chat_hub": chat_hub,
     "settings": backend_settings,
     "character_builder": character_builder,
     "data_dir": data_dir,
