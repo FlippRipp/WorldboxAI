@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import logging
@@ -113,7 +114,9 @@ class ProviderManager:
 
     def get_effective_config(self, provider_id: str) -> dict:
         config = dict(self.get_config(provider_id))
-        if provider_id == "openrouter":
+        if provider_id in ("openrouter", "nanogpt"):
+            prefix = PROVIDERS[provider_id]["litellm_prefix"]
+            alt_prefixes = (f"{prefix}/", f"{provider_id}/")
             model_fields = [
                 "storyteller_model",
                 "reader_model",
@@ -121,23 +124,37 @@ class ProviderManager:
                 "module_fast_model",
                 "storyteller_fallback_models",
             ]
-            print("[DEBUG] get_effective_config: provider=openrouter")
+            print(f"[DEBUG] get_effective_config: provider={provider_id}")
             for field in model_fields:
                 val = config.get(field, "")
                 if not val:
                     if field != "storyteller_fallback_models":
                         print(f"[DEBUG] get_effective_config: {field} is empty, skipping")
                     continue
-                if val.startswith("openrouter/"):
-                    print(f"[DEBUG] get_effective_config: {field} already has openrouter/ prefix: '{val}'")
-                    continue
                 if field == "storyteller_fallback_models":
-                    models = [m.strip() for m in val.split(",") if m.strip()]
-                    new_val = ",".join(f"openrouter/{m}" for m in models)
+                    models = []
+                    for raw_m in val.split(","):
+                        m = raw_m.strip()
+                        if not m:
+                            continue
+                        if m.startswith(f"{prefix}/"):
+                            models.append(m)
+                        elif m.startswith(f"{provider_id}/"):
+                            models.append(f"{prefix}/{m.removeprefix(f'{provider_id}/')}")
+                        else:
+                            models.append(f"{prefix}/{m}")
+                    new_val = ",".join(models)
+                    print(f"[DEBUG] get_effective_config: {field} raw='{val}' -> effective='{new_val}'")
+                    config[field] = new_val
+                elif val.startswith(f"{prefix}/"):
+                    print(f"[DEBUG] get_effective_config: {field} already has {prefix}/ prefix: '{val}'")
+                elif any(val.startswith(ap) for ap in alt_prefixes):
+                    stripped = val.split("/", 1)[1]
+                    new_val = f"{prefix}/{stripped}"
                     print(f"[DEBUG] get_effective_config: {field} raw='{val}' -> effective='{new_val}'")
                     config[field] = new_val
                 else:
-                    new_val = f"openrouter/{val}"
+                    new_val = f"{prefix}/{val}"
                     print(f"[DEBUG] get_effective_config: {field} raw='{val}' -> effective='{new_val}'")
                     config[field] = new_val
         return config
@@ -170,10 +187,16 @@ class ProviderManager:
             if not test_model:
                 return {"success": False, "error": "No model configured"}
 
+            conn_kwargs = {}
+            base_url = PROVIDERS[provider_id].get("base_url")
+            if provider_id == "nanogpt" and base_url:
+                conn_kwargs["api_base"] = base_url
+
             response = await litellm.acompletion(
                 model=test_model,
                 messages=[{"role": "user", "content": "Say 'ok' and nothing else."}],
                 max_tokens=5,
+                **conn_kwargs,
             )
             return {"success": True, "model": test_model}
         except Exception as e:
@@ -223,6 +246,38 @@ class ProviderManager:
                         # Model ID prefixes identify authors, not hosting providers.
                         raw_models.append({"id": mid, "is_embedding": is_emb, "provider": None})
                     models = sorted(raw_models, key=lambda x: x["id"].lower())
+            elif method == "nanogpt":
+                import httpx
+                headers = {"Authorization": f"Bearer {api_key}"}
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    text_resp, emb_resp = await asyncio.gather(
+                        client.get("https://api.nano-gpt.com/api/v1/models", headers=headers),
+                        client.get("https://api.nano-gpt.com/api/v1/embedding-models", headers=headers),
+                        return_exceptions=True,
+                    )
+                    if isinstance(text_resp, Exception):
+                        raise text_resp
+                    text_resp.raise_for_status()
+                    text_data = text_resp.json()
+                    seen = {}
+                    for m in (text_data.get("data", []) if isinstance(text_data, dict) else []):
+                        mid = m.get("id", "") if isinstance(m, dict) else ""
+                        if mid:
+                            is_emb = "embed" in mid.lower()
+                            # Model ID prefixes identify authors, not hosting providers.
+                            seen[mid] = {"id": mid, "is_embedding": is_emb, "provider": None}
+                    if not isinstance(emb_resp, Exception) and emb_resp.is_success:
+                        emb_data = emb_resp.json()
+                        emb_items = (
+                            emb_data.get("data")
+                            or emb_data.get("models")
+                            or (emb_data if isinstance(emb_data, list) else [])
+                        ) if isinstance(emb_data, (dict, list)) else []
+                        for m in emb_items:
+                            mid = (m.get("id") or m.get("model") or "") if isinstance(m, dict) else ""
+                            if mid:
+                                seen[mid] = {"id": mid, "is_embedding": True, "provider": None}
+                    models = sorted(seen.values(), key=lambda x: x["id"].lower())
             elif method == "gemini":
                 litellm.api_key = api_key
                 litellm_resp = litellm.model_list()
@@ -289,6 +344,70 @@ class ProviderManager:
         except Exception as exc:
             detail = str(exc) or type(exc).__name__
             return {"providers": [], "error": f"Unable to load OpenRouter providers: {detail}"}
+
+    async def fetch_nanogpt_endpoints(self, model: str) -> dict:
+        """Return the selected model's upstream NanoGPT routing providers."""
+        try:
+            if not isinstance(model, str):
+                raise ValueError("A NanoGPT model ID is required.")
+            model = model.strip()
+            for prefix in ("nano-gpt/", "nanogpt/"):
+                if model.startswith(prefix):
+                    model = model.removeprefix(prefix).strip()
+                    break
+            parts = model.split("/")
+            if not (1 <= len(parts) <= 2) or any(not part.strip() or part in (".", "..") for part in parts):
+                raise ValueError("A NanoGPT model ID is required.")
+            encoded_model = quote(model, safe="")
+
+            headers = {}
+            api_key = self.get_config("nanogpt").get("api_key", "") or os.getenv("NANOGPT_API_KEY", "")
+            if api_key.strip():
+                headers["Authorization"] = f"Bearer {api_key.strip()}"
+
+            import httpx
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(
+                    f"https://api.nano-gpt.com/api/models/{encoded_model}/providers",
+                    headers=headers,
+                )
+                response.raise_for_status()
+                payload = response.json()
+
+            if not isinstance(payload, dict):
+                raise ValueError("NanoGPT returned an invalid provider response.")
+            raw_providers = payload.get("providers")
+            if raw_providers is None and payload.get("supportsProviderSelection") is False:
+                raw_providers = []
+            if not isinstance(raw_providers, list):
+                raise ValueError("NanoGPT returned an invalid provider list.")
+
+            providers = {}
+            for entry in raw_providers:
+                if not isinstance(entry, dict):
+                    raise ValueError("NanoGPT returned an invalid provider entry.")
+                pid = entry.get("provider") or entry.get("id") or entry.get("tag")
+                name = entry.get("name") or entry.get("provider_name") or pid
+                if not isinstance(pid, str) or not pid.strip() or not isinstance(name, str) or not name.strip():
+                    raise ValueError("NanoGPT returned a provider without an id or name.")
+                pid = pid.strip()
+                name = name.strip()
+                providers.setdefault(pid, {"id": pid, "label": name})
+
+            return {
+                "providers": sorted(providers.values(), key=lambda provider: (provider["label"].casefold(), provider["id"])),
+                "error": None,
+            }
+        except Exception as exc:
+            detail = str(exc) or type(exc).__name__
+            return {"providers": [], "error": f"Unable to load NanoGPT providers: {detail}"}
+
+    async def fetch_provider_endpoints(self, provider_id: str, model: str) -> dict:
+        if provider_id == "openrouter":
+            return await self.fetch_openrouter_endpoints(model)
+        if provider_id == "nanogpt":
+            return await self.fetch_nanogpt_endpoints(model)
+        raise ValueError(f"Provider '{provider_id}' does not support endpoint discovery")
 
     def _apply_api_keys(self, provider_id: str, config: dict):
         api_key = config.get("api_key", "")

@@ -545,6 +545,35 @@ def test_openrouter_active_provider_routes_jev_until_typesafe_key_overrides(tmp_
     assert seen[-1] == (ENDPOINT, 'Bearer ts-direct-key', 'jev-latest')
 
 
+def test_nanogpt_active_provider_routes_jev_until_typesafe_key_overrides(tmp_path):
+    from backend.engine.provider_manager import ProviderManager
+    from backend.engine.jev import ENDPOINT, NANOGPT_ENDPOINT
+    seen = []
+    def respond(request):
+        payload = json.loads(request.content)
+        seen.append((str(request.url), request.headers.get('Authorization'), payload['model']))
+        data = response_for(payload, {'ok': 1})
+        data['model'] = 'typesafe/jev-1.14-20261014'
+        data['usage']['cost'] = 0.00001365
+        return httpx.Response(200, json=data)
+
+    pm = ProviderManager(str(tmp_path / 'providers'))
+    pm.decisions.transport = httpx.MockTransport(respond)
+    pm.decisions.save({'enabled': True, 'model': 'nano-gpt/typesafe/jev-latest'})
+    pm.save_config('nanogpt', {'api_key': 'ng-secret-key'})
+
+    pm.set_active('nanogpt')
+    assert pm.decisions.has_credentials()
+    d_ng = run(pm.decisions.decide('x', {'ok': noul('yes?')}, module=jev_tasks.RPG, step='test'))
+    assert d_ng.yes('ok')
+    assert seen[-1] == (NANOGPT_ENDPOINT, 'Bearer ng-secret-key', 'jev-latest')
+
+    pm.decisions.save({'api_key': 'ts-direct-key', 'model': '~typesafe/jev-latest'})
+    d_ts = run(pm.decisions.decide('x', {'ok': noul('yes?')}, module=jev_tasks.RPG, step='test'))
+    assert d_ts.yes('ok')
+    assert seen[-1] == (ENDPOINT, 'Bearer ts-direct-key', 'jev-latest')
+
+
 def test_realistic_multi_bucket_distributions_succeed_on_rpg_and_npc_tasks(tmp_path):
     backend = load_rpg()
     def handler(request, payload):

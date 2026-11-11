@@ -81,12 +81,14 @@ function ConfirmationDialog({ message, onConfirm, onCancel }) {
 }
 
 const MODEL_SLOTS = [
-  { key: 'storyteller_model', label: 'Storyteller Model', orProviderKey: 'openrouter_storyteller_provider', fallback: false },
-  { key: 'storyteller_fallback_models', label: 'Fallback Models', orProviderKey: 'openrouter_fallback_provider', fallback: true },
-  { key: 'reader_model', label: 'Reader Model', orProviderKey: 'openrouter_reader_provider', fallback: false },
-  { key: 'embedding_model', label: 'Embedding Model', orProviderKey: 'openrouter_embedding_provider', fallback: false, embedding: true },
-  { key: 'module_fast_model', label: 'Module Fast Model', orProviderKey: 'openrouter_fast_provider', fallback: false },
+  { key: 'storyteller_model', label: 'Storyteller Model', providerSuffix: 'storyteller_provider', fallback: false },
+  { key: 'storyteller_fallback_models', label: 'Fallback Models', providerSuffix: 'fallback_provider', fallback: true },
+  { key: 'reader_model', label: 'Reader Model', providerSuffix: 'reader_provider', fallback: false },
+  { key: 'embedding_model', label: 'Embedding Model', providerSuffix: 'embedding_provider', fallback: false, embedding: true },
+  { key: 'module_fast_model', label: 'Module Fast Model', providerSuffix: 'fast_provider', fallback: false },
 ];
+
+const ROUTER_PROVIDERS = new Set(['openrouter', 'nanogpt']);
 
 const LLM_KEYS = ['temperature', 'top_p', 'max_output_tokens', 'retry_attempts', 'retry_delay_seconds'];
 
@@ -105,19 +107,20 @@ export default function ModelSettings({ onBack, embedded = false }) {
   const [connecting, setConnecting] = useState(false);
   const endpointRequests = useRef(new Map());
 
-  const fetchOpenRouterProviders = useCallback((model, refresh = false) => {
+  const fetchUpstreamProviders = useCallback((model, refresh = false) => {
     const cache = endpointRequests.current;
-    if (!refresh && cache.has(model)) return cache.get(model);
-    const request = api.fetchOpenRouterProviders(model).then((result) => {
+    const cacheKey = `${selectedId}:${model}`;
+    if (!refresh && cache.has(cacheKey)) return cache.get(cacheKey);
+    const request = api.fetchProviderEndpoints(selectedId, model).then((result) => {
       if (result.error) throw new Error(result.error);
       return result.providers || [];
     }).catch((error) => {
-      if (cache.get(model) === request) cache.delete(model);
+      if (cache.get(cacheKey) === request) cache.delete(cacheKey);
       throw error;
     });
-    cache.set(model, request);
+    cache.set(cacheKey, request);
     return request;
-  }, []);
+  }, [selectedId]);
 
   const loadProviders = useCallback(async () => {
     try {
@@ -185,6 +188,7 @@ export default function ModelSettings({ onBack, embedded = false }) {
       await api.updateProviderConfig(selectedId, { api_key: keyValue });
       const result = await api.testProvider(selectedId);
       if (result.success) {
+        endpointRequests.current.clear();
         setConfig(newConfig);
         setKeyLocked(true);
         setTestResult(result);
@@ -275,7 +279,8 @@ export default function ModelSettings({ onBack, embedded = false }) {
   const pdef = providers.find(p => p.id === selectedId) || {};
   const fields = pdef.fields || {};
   const presets = pdef.presets || [];
-  const isOpenRouter = selectedId === 'openrouter';
+  const supportsUpstreamRouting = ROUTER_PROVIDERS.has(selectedId);
+  const routerLabel = pdef.label || (selectedId === 'nanogpt' ? 'NanoGPT' : 'OpenRouter');
 
   const getModelsForSlot = useCallback((slot) => {
     if (slot.embedding) {
@@ -405,19 +410,21 @@ export default function ModelSettings({ onBack, embedded = false }) {
                   if (!fdef) return null;
                   const slotModels = getModelsForSlot(slot);
                   const curVal = config[slot.key] || '';
+                  const slotProviderKey = `${selectedId}_${slot.providerSuffix}`;
                   if (slot.fallback) {
                     return (
                       <div key={slot.key}>
                         <label className="text-sm text-gray-300">{slot.label}</label>
                         {fdef.description && <p className="text-xs text-gray-500 mb-1">{fdef.description}</p>}
-                        {isOpenRouter && (
+                        {supportsUpstreamRouting && (
                           <OpenRouterProviderSelect
                             label={`${slot.label} provider`}
                             modelValue={curVal}
                             fallback
-                            value={config[slot.orProviderKey] || ''}
-                            onChange={(provider) => handleOrProviderChange(slot.orProviderKey, provider)}
-                            fetchProviders={fetchOpenRouterProviders}
+                            routerLabel={routerLabel}
+                            value={config[slotProviderKey] || ''}
+                            onChange={(provider) => handleOrProviderChange(slotProviderKey, provider)}
+                            fetchProviders={fetchUpstreamProviders}
                             className="mb-2"
                           />
                         )}
@@ -450,13 +457,14 @@ export default function ModelSettings({ onBack, embedded = false }) {
                             </option>
                           ))}
                         </select>
-                        {isOpenRouter && (
+                        {supportsUpstreamRouting && (
                           <OpenRouterProviderSelect
                             label={`${slot.label} provider`}
                             modelValue={curVal}
-                            value={config[slot.orProviderKey] || ''}
-                            onChange={(provider) => handleOrProviderChange(slot.orProviderKey, provider)}
-                            fetchProviders={fetchOpenRouterProviders}
+                            routerLabel={routerLabel}
+                            value={config[slotProviderKey] || ''}
+                            onChange={(provider) => handleOrProviderChange(slotProviderKey, provider)}
+                            fetchProviders={fetchUpstreamProviders}
                             className="w-full sm:flex-1 min-w-0"
                           />
                         )}

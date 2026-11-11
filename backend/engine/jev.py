@@ -14,6 +14,7 @@ import httpx
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/systemone"
+NANOGPT_ENDPOINT = "https://api.nano-gpt.com/api/v1/systemone"
 PRICE_DATE = "2026-10-01"
 INPUT_USD_PER_MILLION = 0.042
 FALLBACK_CONTEXT = ContextVar("jev_fallback_context", default=None)
@@ -141,8 +142,10 @@ class Decision:
 
 def _normalize_model(model: str, is_openrouter: bool) -> str:
     clean = (model or "jev-latest").strip()
-    if clean.startswith("openrouter/"):
-        clean = clean.removeprefix("openrouter/").strip()
+    for prefix in ("openrouter/", "nano-gpt/", "nanogpt/"):
+        if clean.startswith(prefix):
+            clean = clean.removeprefix(prefix).strip()
+            break
     if is_openrouter:
         if clean == "typesafe/jev-latest":
             return "jev-latest"
@@ -171,37 +174,47 @@ class JevService:
             pass
         return config
 
-    def _openrouter_api_key(self) -> str:
+    def _router_connection(self) -> tuple[str, str]:
         if self.path.parent.name != "jev":
-            return ""
+            return "", ""
         providers_dir = self.path.parent.parent
         active_path = providers_dir / "active_provider.json"
         try:
             active_data = json.loads(active_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return ""
-        if not isinstance(active_data, dict) or active_data.get("active") != "openrouter":
-            return ""
-        or_cfg_path = providers_dir / "openrouter" / "config.json"
+            return "", ""
+        if not isinstance(active_data, dict):
+            return "", ""
+        active = active_data.get("active")
+        routes = {
+            "openrouter": (OPENROUTER_ENDPOINT, "OPENROUTER_API_KEY"),
+            "nanogpt": (NANOGPT_ENDPOINT, "NANOGPT_API_KEY"),
+        }
+        if active not in routes:
+            return "", ""
+        endpoint, env_var = routes[active]
+        cfg_path = providers_dir / active / "config.json"
         try:
-            or_cfg = json.loads(or_cfg_path.read_text(encoding="utf-8"))
-            if isinstance(or_cfg, dict) and isinstance(or_cfg.get("api_key"), str):
-                key = or_cfg["api_key"].strip()
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            if isinstance(cfg, dict) and isinstance(cfg.get("api_key"), str):
+                key = cfg["api_key"].strip()
                 if key:
-                    return key
+                    return endpoint, key
         except (OSError, ValueError):
             pass
-        if not or_cfg_path.exists() and providers_dir == Path("data/providers"):
-            return os.getenv("OPENROUTER_API_KEY", "").strip()
-        return ""
+        if not cfg_path.exists() and providers_dir == Path("data/providers"):
+            key = os.getenv(env_var, "").strip()
+            if key:
+                return endpoint, key
+        return "", ""
 
     def _connection(self, config=None):
         config = config if config is not None else self._config()
         if config.get("api_key"):
             return ENDPOINT, config["api_key"], False
-        or_key = self._openrouter_api_key()
-        if or_key:
-            return OPENROUTER_ENDPOINT, or_key, True
+        router_endpoint, router_key = self._router_connection()
+        if router_key:
+            return router_endpoint, router_key, True
         return ENDPOINT, "", False
 
     def has_credentials(self) -> bool:

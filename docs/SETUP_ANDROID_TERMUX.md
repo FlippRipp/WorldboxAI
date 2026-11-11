@@ -97,10 +97,11 @@ cd ..
 The repo does not ship keys. Either:
 
 - **Gemini:** `cp backend/.env.example backend/.env` and set `GEMINI_API_KEY`, or
-- **OpenRouter:** copy the example config and add your key:
+- **OpenRouter / NanoGPT:** copy the example config and add your key:
 
   ```bash
-  cp data/providers/openrouter/config.example.json data/providers/openrouter/config.json
+  cp data/providers/nanogpt/config.example.json data/providers/nanogpt/config.json
+  # or: cp data/providers/openrouter/config.example.json data/providers/openrouter/config.json
   ```
 
   Then edit `api_key` in that file (or set it later from the in-app Model

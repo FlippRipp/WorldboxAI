@@ -23,6 +23,7 @@ def test_every_provider_declares_search_support():
         assert isinstance(pdef.get("supports_search"), bool), (
             f"provider '{pid}' must declare supports_search explicitly")
     assert PROVIDERS["openrouter"]["supports_search"] is True
+    assert PROVIDERS["nanogpt"]["supports_search"] is True
 
 
 def test_search_toggle_field_only_on_supporting_providers():
@@ -197,3 +198,129 @@ def test_web_search_propagates_provider_errors(monkeypatch):
     service.reconfigure("openrouter", _openrouter_config())
     with pytest.raises(RuntimeError, match="429"):
         asyncio.run(service.web_search("anything"))
+
+
+def _nanogpt_config(**overrides):
+    config = {
+        "api_key": "ng-test-key",
+        "storyteller_model": "nano-gpt/google/gemini-4-argon",
+        "reader_model": "nano-gpt/google/gemini-4-argon",
+        "embedding_model": "nano-gpt/text-embedding-3-small",
+        "module_fast_model": "nano-gpt/google/gemini-4-argon",
+    }
+    config.update(overrides)
+    return config
+
+
+def test_web_search_nanogpt_call_and_result(monkeypatch):
+    import json as _json
+    import httpx
+
+    web_requests = []
+
+    def handle_web(request):
+        web_requests.append((str(request.url), request.headers.get("Authorization"), _json.loads(request.content)))
+        return httpx.Response(200, json={
+            "success": True,
+            "provider": "linkup",
+            "data": [
+                {"title": "Dune Wiki", "url": "https://dune.fandom.com/wiki/Fremen", "snippet": "Desert dwellers of Arrakis."},
+                {"title": "", "url": "https://dune.fandom.com/wiki/Sietch", "content": "Hidden cavern communities."},
+                {"title": "Missing URL", "snippet": "ignored"},
+            ],
+        })
+
+    async_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: async_client(transport=httpx.MockTransport(handle_web), **kw))
+    calls = _capture_acompletion(monkeypatch, _fake_response(content="Fremen live in sietches across Arrakis."))
+
+    service = LLMService(mode="live")
+    service.reconfigure("nanogpt", _nanogpt_config(nanogpt_fast_provider="google-vertex"))
+    result = asyncio.run(service.web_search(
+        "  Fremen settlements  ",
+        max_results=1,
+        include_domains=["dune.fandom.com", ""],
+    ))
+
+    assert len(web_requests) == 1
+    url, auth, body = web_requests[0]
+    assert url == "https://api.nano-gpt.com/api/web"
+    assert auth == "Bearer ng-test-key"
+    assert body == {
+        "query": "Fremen settlements",
+        "provider": "linkup",
+        "depth": "standard",
+        "outputType": "searchResults",
+        "includeDomains": ["dune.fandom.com"],
+    }
+
+    assert len(calls) == 1
+    kwargs = calls[0]
+    assert kwargs["model"] == "nano-gpt/google/gemini-4-argon"
+    assert kwargs["api_base"] == "https://api.nano-gpt.com/api/v1"
+    assert kwargs["api_key"] == "ng-test-key"
+    assert kwargs["temperature"] == 0.3
+    assert kwargs["extra_body"] == {"provider": {"order": ["google-vertex"]}}
+    assert "Desert dwellers of Arrakis." in kwargs["messages"][1]["content"]
+    assert "Hidden cavern communities." not in kwargs["messages"][1]["content"]  # max_results=1 respected
+
+    assert result == {
+        "answer": "Fremen live in sietches across Arrakis.",
+        "sources": [
+            {"title": "Dune Wiki", "url": "https://dune.fandom.com/wiki/Fremen", "excerpt": "Desert dwellers of Arrakis."},
+        ],
+        "provider": "nanogpt",
+        "model": "nano-gpt/google/gemini-4-argon",
+    }
+
+
+def test_web_search_nanogpt_empty_results_skips_completion(monkeypatch):
+    import httpx
+
+    async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kw: async_client(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"data": []})), **kw),
+    )
+    calls = _capture_acompletion(monkeypatch, _fake_response())
+
+    service = LLMService(mode="live")
+    service.reconfigure("nanogpt", _nanogpt_config())
+    result = asyncio.run(service.web_search("obscure query"))
+
+    assert calls == []
+    assert result == {
+        "answer": "",
+        "sources": [],
+        "provider": "nanogpt",
+        "model": "nano-gpt/google/gemini-4-argon",
+    }
+
+
+def test_nanogpt_embeddings_route_via_openai_compatible_handler(monkeypatch):
+    emb_calls = []
+
+    async def fake_aembedding(**kwargs):
+        emb_calls.append(kwargs)
+        inp = kwargs["input"]
+        items = inp if isinstance(inp, list) else [inp]
+        return types.SimpleNamespace(data=[{"index": i, "embedding": [0.1, 0.2]} for i, _ in enumerate(items)])
+
+    monkeypatch.setattr(llm_mod, "aembedding", fake_aembedding)
+
+    service = LLMService(mode="live")
+    service.reconfigure("nanogpt", _nanogpt_config(nanogpt_embedding_provider="openai"))
+
+    vec = asyncio.run(service.get_embedding("hello"))
+    batch = asyncio.run(service.get_embeddings(["a", "b"]))
+
+    assert vec == [0.1, 0.2]
+    assert batch == [[0.1, 0.2], [0.1, 0.2]]
+    assert len(emb_calls) == 2
+    for call in emb_calls:
+        assert call["model"] == "text-embedding-3-small"
+        assert call["custom_llm_provider"] == "openai"
+        assert call["api_base"] == "https://api.nano-gpt.com/api/v1"
+        assert call["api_key"] == "ng-test-key"
+        assert call["extra_body"] == {"provider": {"order": ["openai"]}}

@@ -3092,9 +3092,12 @@ async def fetch_provider_models(provider_id: str):
         raise HTTPException(status_code=404, detail=str(exc))
 
 
-@app.get("/api/providers/openrouter/endpoints")
-async def fetch_openrouter_endpoints(model: str):
-    return await provider_manager.fetch_openrouter_endpoints(model)
+@app.get("/api/providers/{provider_id}/endpoints")
+async def fetch_provider_endpoints(provider_id: str, model: str):
+    try:
+        return await provider_manager.fetch_provider_endpoints(provider_id, model)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @app.post("/api/providers/{provider_id}/preset")

@@ -10,12 +10,14 @@ async function request(path, method = 'GET', body) {
   return data;
 }
 
+const ROUTER_LABELS = { openrouter: 'OpenRouter', nanogpt: 'NanoGPT' };
+
 export default function JevSettings({ activeProvider = '' }) {
   const [config, setConfig] = useState(null);
   const [key, setKey] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
-  const openRouterActive = activeProvider === 'openrouter';
+  const activeRouterLabel = ROUTER_LABELS[activeProvider] || '';
   useEffect(() => {
     request('config').then(setConfig).catch(e => setMessage(e.message));
   }, []);
@@ -43,15 +45,15 @@ export default function JevSettings({ activeProvider = '' }) {
     finally { setBusy(false); }
   }
 
-  const canTest = config && (config.api_key_set || openRouterActive) && !key;
+  const canTest = config && (config.api_key_set || Boolean(activeRouterLabel)) && !key;
 
   return <section className="mb-6 p-4 rounded-xl bg-gray-800/50 border border-gray-700 space-y-3" aria-label="Jev decisions">
     <h3 className="text-lg font-semibold text-gray-100">Jev decisions</h3>
     <p className="text-sm text-gray-400">Speed up RPG rulings and NPC decisions. Uncertain answers use your existing models. Storytelling keeps its current model.</p>
     <p className="text-xs text-gray-500">
-      {openRouterActive && !config?.api_key_set
-        ? 'Using your active OpenRouter connection automatically (or save a TypeSafe API key below to connect directly).'
-        : 'Uses OpenRouter automatically when OpenRouter is the active provider, or a direct TypeSafe API key below.'}
+      {activeRouterLabel && !config?.api_key_set
+        ? `Using your active ${activeRouterLabel} connection automatically (or save a TypeSafe API key below to connect directly).`
+        : 'Uses OpenRouter or NanoGPT automatically when active, or a direct TypeSafe API key below.'}
     </p>
     {config && <>
       <div className="flex flex-wrap gap-5 text-sm text-gray-200">
@@ -59,9 +61,9 @@ export default function JevSettings({ activeProvider = '' }) {
           <label key={field} className="flex items-center gap-2"><input type="checkbox" checked={config[field]} disabled={busy}
             onChange={e => setConfig({ ...config, [field]: e.target.checked })} />{label}</label>)}
       </div>
-      <label className="block text-sm text-gray-300">TypeSafe API key {openRouterActive && !config.api_key_set ? '(optional override)' : ''}
+      <label className="block text-sm text-gray-300">TypeSafe API key {activeRouterLabel && !config.api_key_set ? '(optional override)' : ''}
         <input type="password" autoComplete="new-password" value={key} disabled={busy} onChange={e => setKey(e.target.value)}
-          placeholder={config.api_key_set ? 'Key saved — enter a replacement' : (openRouterActive ? 'Using OpenRouter — enter TypeSafe key only to override' : 'Enter your TypeSafe API key')}
+          placeholder={config.api_key_set ? 'Key saved — enter a replacement' : (activeRouterLabel ? `Using ${activeRouterLabel} — enter TypeSafe key only to override` : 'Enter your TypeSafe API key')}
           className="block mt-1 w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-gray-200" />
       </label>
       <div className="flex flex-wrap gap-2">

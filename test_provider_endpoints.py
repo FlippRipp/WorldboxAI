@@ -151,3 +151,129 @@ def test_api_returns_endpoints_for_the_requested_model(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.json() == {"providers": [{"id": "google-ai-studio", "label": "Google AI Studio"}], "error": None}
     assert requests[0].url.path == "/api/v1/models/google/gemini-2.5-pro/endpoints"
+
+
+def test_nanogpt_effective_config_prefixes_models(tmp_path):
+    manager = ProviderManager(str(tmp_path))
+    manager.save_config("nanogpt", {
+        "storyteller_model": "google/gemini-4-argon",
+        "reader_model": "nano-gpt/google/gemini-4-argon",
+        "embedding_model": "text-embedding-3-small",
+        "module_fast_model": "nanogpt/openai/gpt-4o-mini",
+        "storyteller_fallback_models": "anthropic/claude-sonnet-4-20250514, nano-gpt/openai/gpt-4o, nanogpt/deepseek/deepseek-chat",
+    })
+
+    effective = manager.get_effective_config("nanogpt")
+
+    assert effective["storyteller_model"] == "nano-gpt/google/gemini-4-argon"
+    assert effective["reader_model"] == "nano-gpt/google/gemini-4-argon"
+    assert effective["embedding_model"] == "nano-gpt/text-embedding-3-small"
+    assert effective["module_fast_model"] == "nano-gpt/openai/gpt-4o-mini"
+    assert effective["storyteller_fallback_models"] == (
+        "nano-gpt/anthropic/claude-sonnet-4-20250514,"
+        "nano-gpt/openai/gpt-4o,"
+        "nano-gpt/deepseek/deepseek-chat"
+    )
+
+
+def test_nanogpt_fetch_models_merges_text_and_embedding_catalogs(tmp_path, monkeypatch):
+    def handler(request):
+        assert request.headers.get("Authorization") == "Bearer ng-key"
+        if request.url.path == "/api/v1/models":
+            return httpx.Response(200, json={"data": [
+                {"id": "google/gemini-4-argon"},
+                {"id": "anthropic/claude-sonnet-4-20250514"},
+            ]})
+        if request.url.path == "/api/v1/embedding-models":
+            return httpx.Response(200, json={"data": [
+                {"id": "text-embedding-3-small"},
+                {"id": "BAAI/bge-m3"},
+            ]})
+        return httpx.Response(404)
+
+    mock_openrouter(monkeypatch, handler)
+    manager = ProviderManager(str(tmp_path))
+    manager.save_config("nanogpt", {"api_key": "ng-key"})
+
+    result = asyncio.run(manager.fetch_models("nanogpt"))
+
+    assert result == {
+        "models": [
+            {"id": "anthropic/claude-sonnet-4-20250514", "is_embedding": False, "provider": None},
+            {"id": "BAAI/bge-m3", "is_embedding": True, "provider": None},
+            {"id": "google/gemini-4-argon", "is_embedding": False, "provider": None},
+            {"id": "text-embedding-3-small", "is_embedding": True, "provider": None},
+        ],
+        "error": None,
+    }
+
+
+def test_nanogpt_endpoints_encode_canonical_id_and_sort_providers(tmp_path, monkeypatch):
+    requests = mock_openrouter(monkeypatch, lambda _: httpx.Response(200, json={
+        "object": "list",
+        "model": "google/gemini-4-argon",
+        "supportsProviderSelection": True,
+        "providers": [
+            {"provider": "togetherai", "name": "Together AI"},
+            {"provider": "novita", "name": "Novita AI"},
+            {"provider": "novita", "name": "Novita AI"},
+        ],
+    }))
+    manager = ProviderManager(str(tmp_path))
+    manager.save_config("nanogpt", {"api_key": "ng-secret"})
+
+    result = asyncio.run(manager.fetch_nanogpt_endpoints("  nano-gpt/google/gemini-4-argon  "))
+
+    assert result == {
+        "providers": [
+            {"id": "novita", "label": "Novita AI"},
+            {"id": "togetherai", "label": "Together AI"},
+        ],
+        "error": None,
+    }
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://api.nano-gpt.com/api/models/google%2Fgemini-4-argon/providers"
+    assert requests[0].headers.get("Authorization") == "Bearer ng-secret"
+
+
+def test_nanogpt_endpoints_support_single_segment_and_non_selectable_models(tmp_path, monkeypatch):
+    requests = mock_openrouter(monkeypatch, lambda _: httpx.Response(200, json={
+        "model": "text-embedding-3-small",
+        "supportsProviderSelection": False,
+    }))
+    manager = ProviderManager(str(tmp_path))
+
+    result = asyncio.run(manager.fetch_nanogpt_endpoints("text-embedding-3-small"))
+
+    assert result == {"providers": [], "error": None}
+    assert str(requests[0].url) == "https://api.nano-gpt.com/api/models/text-embedding-3-small/providers"
+
+
+@pytest.mark.parametrize("model", ["", "google/", "/gemini", "a/b/c", "..", "../model", "google/..", None])
+def test_nanogpt_invalid_model_ids_do_not_make_requests(tmp_path, monkeypatch, model):
+    requests = mock_openrouter(monkeypatch, lambda _: pytest.fail("Invalid model must not be requested"))
+
+    result = asyncio.run(ProviderManager(str(tmp_path)).fetch_nanogpt_endpoints(model))
+
+    assert result["providers"] == []
+    assert result["error"]
+    assert requests == []
+
+
+def test_api_returns_nanogpt_endpoints_and_rejects_unsupported_provider(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    import backend.api.server as server
+
+    requests = mock_openrouter(monkeypatch, lambda _: httpx.Response(200, json={
+        "providers": [{"provider": "google-vertex", "name": "Google Vertex"}],
+    }))
+    monkeypatch.setattr(server, "provider_manager", ProviderManager(str(tmp_path)))
+    client = TestClient(server.app)
+
+    response = client.get("/api/providers/nanogpt/endpoints", params={"model": "nano-gpt/google/gemini-4-argon"})
+    assert response.status_code == 200
+    assert response.json() == {"providers": [{"id": "google-vertex", "label": "Google Vertex"}], "error": None}
+    assert str(requests[0].url) == "https://api.nano-gpt.com/api/models/google%2Fgemini-4-argon/providers"
+
+    unsupported = client.get("/api/providers/gemini/endpoints", params={"model": "gemini/gemini-2.5-flash"})
+    assert unsupported.status_code == 404

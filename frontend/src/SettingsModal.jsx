@@ -21,6 +21,15 @@ const PROVIDER_PRESETS = {
       'llm.module_fast_model': 'openrouter/meta-llama/llama-4-maverick',
     }
   },
+  nanogpt: {
+    label: 'NanoGPT',
+    models: {
+      'llm.storyteller_model': 'nano-gpt/google/gemini-4-argon',
+      'llm.reader_model': 'nano-gpt/google/gemini-4-argon',
+      'llm.embedding_model': 'nano-gpt/text-embedding-3-small',
+      'llm.module_fast_model': 'nano-gpt/google/gemini-4-argon',
+    }
+  },
   openai: {
     label: 'OpenAI',
     models: {

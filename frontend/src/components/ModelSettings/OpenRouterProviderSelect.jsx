@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 const SELECT_CLASS = 'w-full min-w-0 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-gray-200 text-sm focus:border-purple-500 focus:outline-none disabled:opacity-50';
 
-export default function OpenRouterProviderSelect({ label, modelValue, value, onChange, fetchProviders, fallback = false, className = '' }) {
+export default function OpenRouterProviderSelect({ label, modelValue, value, onChange, fetchProviders, routerLabel = 'OpenRouter', fallback = false, className = '' }) {
   const modelIds = [...new Set((fallback ? modelValue.split(',') : [modelValue])
     .map((model) => model.trim()).filter(Boolean))];
   const requestKey = JSON.stringify(modelIds);
@@ -66,7 +66,7 @@ export default function OpenRouterProviderSelect({ label, modelValue, value, onC
           disabled={!hasModels || loading}
           className={SELECT_CLASS}
         >
-          <option value="">Any provider (let OpenRouter decide)</option>
+          <option value="">Any provider (let {routerLabel} decide)</option>
           {missingSelection && <option value={value}>Saved provider: {value}</option>}
           {providers.map((provider) => (
             <option key={provider.id} value={provider.id}>{provider.label}</option>

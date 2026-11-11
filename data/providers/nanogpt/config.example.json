@@ -1,0 +1,19 @@
+{
+  "api_key": "",
+  "nanogpt_provider": "",
+  "nanogpt_storyteller_provider": "",
+  "nanogpt_fallback_provider": "",
+  "nanogpt_reader_provider": "",
+  "nanogpt_embedding_provider": "",
+  "nanogpt_fast_provider": "",
+  "storyteller_model": "google/gemini-4-argon",
+  "storyteller_fallback_models": "",
+  "reader_model": "google/gemini-4-argon",
+  "embedding_model": "text-embedding-3-small",
+  "module_fast_model": "google/gemini-4-argon",
+  "retry_attempts": 3,
+  "retry_delay_seconds": 1,
+  "temperature": 0.9,
+  "top_p": 1,
+  "max_output_tokens": 32768
+}

@@ -5,6 +5,7 @@ import { api } from '../../lib/api';
 const KEY_URLS = {
   gemini: { label: 'Google AI Studio (free tier available)', url: 'https://aistudio.google.com/apikey' },
   openrouter: { label: 'openrouter.ai/keys', url: 'https://openrouter.ai/keys' },
+  nanogpt: { label: 'nano-gpt.com/api', url: 'https://nano-gpt.com/api' },
   openai: { label: 'platform.openai.com/api-keys', url: 'https://platform.openai.com/api-keys' },
   deepseek: { label: 'platform.deepseek.com', url: 'https://platform.deepseek.com/api_keys' },
   anthropic: { label: 'console.anthropic.com', url: 'https://console.anthropic.com/settings/keys' },

@@ -59,7 +59,7 @@ async def evaluate(providers_dir):
     manager = ProviderManager(providers_dir)
     service = manager.decisions
     if not service.has_credentials():
-        raise SystemExit("Configure a TypeSafe key or an active OpenRouter key in Model Settings before running live evaluation.")
+        raise SystemExit("Configure a TypeSafe key or an active OpenRouter / NanoGPT key in Model Settings before running live evaluation.")
     llm = LLMService(mode="live")
     manager.set_llm_service(llm)
     rows = []

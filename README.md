@@ -5,8 +5,8 @@
 🌐 **[Project page](https://flippripp.github.io/WorldboxAI/)** · 📚 [Documentation](docs/index.md) · 🚀 [Quick Start](#quick-start)
 
 **Optional Jev decisions:** In Settings → Model, enable **Jev decisions** for RPG and/or NPC
-workflows. When OpenRouter is your active provider, Jev automatically routes through OpenRouter's
-SystemOne endpoint using your OpenRouter API key; you can also save a direct TypeSafe API key to
+workflows. When OpenRouter or NanoGPT is your active provider, Jev automatically routes through its
+SystemOne endpoint using your active provider's API key; you can also save a direct TypeSafe API key to
 use TypeSafe directly alongside any provider. Uncertain decisions and errors use the existing models.
 No save conversion is needed.
 

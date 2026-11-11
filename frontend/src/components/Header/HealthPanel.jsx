@@ -35,10 +35,11 @@ export default function HealthPanel({ isOpen, onClose }) {
             <>
               <Section title="Providers">
                 <StatusRow label="LLM Mode" value={health.llm?.LLM_MODE || 'unknown'} status={health.llm?.LLM_MODE === 'mock' ? 'warn' : 'ok'} />
-                <StatusRow label="Gemini Key" value={health.llm?.GEMINI_API_KEY ? 'Found' : 'Missing'} status={health.llm?.GEMINI_API_KEY ? 'ok' : 'error'} />
-                <StatusRow label="OpenRouter Key" value={health.llm?.OPENROUTER_API_KEY ? 'Found' : 'Missing'} status={health.llm?.OPENROUTER_API_KEY ? 'ok' : 'error'} />
-                <StatusRow label="OpenAI Key" value={health.llm?.OPENAI_API_KEY ? 'Found' : 'Missing'} status={health.llm?.OPENAI_API_KEY ? 'ok' : 'error'} />
-                <StatusRow label="Anthropic Key" value={health.llm?.ANTHROPIC_API_KEY ? 'Found' : 'Missing'} status={health.llm?.ANTHROPIC_API_KEY ? 'ok' : 'error'} />
+                <StatusRow label="Gemini Key" value={(health.providers?.gemini?.api_key_set || health.llm?.GEMINI_API_KEY) ? 'Found' : 'Missing'} status={(health.providers?.gemini?.api_key_set || health.llm?.GEMINI_API_KEY) ? 'ok' : 'error'} />
+                <StatusRow label="OpenRouter Key" value={(health.providers?.openrouter?.api_key_set || health.llm?.OPENROUTER_API_KEY) ? 'Found' : 'Missing'} status={(health.providers?.openrouter?.api_key_set || health.llm?.OPENROUTER_API_KEY) ? 'ok' : 'error'} />
+                <StatusRow label="NanoGPT Key" value={(health.providers?.nanogpt?.api_key_set || health.llm?.NANOGPT_API_KEY) ? 'Found' : 'Missing'} status={(health.providers?.nanogpt?.api_key_set || health.llm?.NANOGPT_API_KEY) ? 'ok' : 'error'} />
+                <StatusRow label="OpenAI Key" value={(health.providers?.openai?.api_key_set || health.llm?.OPENAI_API_KEY) ? 'Found' : 'Missing'} status={(health.providers?.openai?.api_key_set || health.llm?.OPENAI_API_KEY) ? 'ok' : 'error'} />
+                <StatusRow label="Anthropic Key" value={(health.providers?.anthropic?.api_key_set || health.llm?.ANTHROPIC_API_KEY) ? 'Found' : 'Missing'} status={(health.providers?.anthropic?.api_key_set || health.llm?.ANTHROPIC_API_KEY) ? 'ok' : 'error'} />
               </Section>
 
               <Section title="Models">
