@@ -28,6 +28,23 @@ export function ThemeProvider({ children }) {
       return 'comfortable';
     }
   });
+  // Story display mode ('feed' = classic scrolling log, 'stage' = centered
+  // automatic sentence-by-sentence reader) and reading speed in chars/sec.
+  const [displayMode, setDisplayModeState] = useState(() => {
+    try {
+      return storage.getItem('wb_display_mode') === 'stage' ? 'stage' : 'feed';
+    } catch {
+      return 'feed';
+    }
+  });
+  const [readerSpeed, setReaderSpeedState] = useState(() => {
+    try {
+      const raw = Number(storage.getItem('wb_reader_speed'));
+      return Number.isFinite(raw) && raw >= 15 && raw <= 95 ? raw : 38;
+    } catch {
+      return 38;
+    }
+  });
   const saveTimer = useRef(null);
 
   const setDensity = useCallback((value) => {
@@ -35,6 +52,41 @@ export function ThemeProvider({ children }) {
     setDensityState(next);
     try { storage.setItem('wb_chat_density', next); } catch { /* private mode */ }
   }, []);
+
+  const setDisplayMode = useCallback((value) => {
+    const next = value === 'stage' ? 'stage' : 'feed';
+    setDisplayModeState(next);
+    try { storage.setItem('wb_display_mode', next); } catch { /* private mode */ }
+  }, []);
+
+  const setReaderSpeed = useCallback((value) => {
+    const num = Math.round(Math.min(95, Math.max(15, Number(value) || 38)));
+    setReaderSpeedState(num);
+    try { storage.setItem('wb_reader_speed', String(num)); } catch { /* private mode */ }
+  }, []);
+
+  // Broadcast current reader mode generically so optional modules can stay aware,
+  // and accept generic `wb:set-display-mode` requests.
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    window.__wbReaderMode = displayMode;
+    window.__wbReaderSpeed = readerSpeed;
+    window.dispatchEvent(
+      new CustomEvent('wb:reader-mode', { detail: { mode: displayMode, speed: readerSpeed } })
+    );
+    return undefined;
+  }, [displayMode, readerSpeed]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const onSetMode = (e) => {
+      const d = e?.detail || {};
+      if (d.mode === 'stage' || d.mode === 'feed') setDisplayMode(d.mode);
+      if (d.speed != null) setReaderSpeed(d.speed);
+    };
+    window.addEventListener('wb:set-display-mode', onSetMode);
+    return () => window.removeEventListener('wb:set-display-mode', onSetMode);
+  }, [setDisplayMode, setReaderSpeed]);
 
   // Persist to the backend, debounced so dragging a color picker doesn't spam.
   const persist = useCallback((preset, nextColors) => {
@@ -83,7 +135,7 @@ export function ThemeProvider({ children }) {
   const resetToDefault = useCallback(() => applyPreset('default'), [applyPreset]);
 
   return (
-    <ThemeContext.Provider value={{ colors, activePreset, fields: COLOR_FIELDS, setColor, applyPreset, resetToDefault, density, setDensity }}>
+    <ThemeContext.Provider value={{ colors, activePreset, fields: COLOR_FIELDS, setColor, applyPreset, resetToDefault, density, setDensity, displayMode, setDisplayMode, readerSpeed, setReaderSpeed }}>
       {children}
     </ThemeContext.Provider>
   );

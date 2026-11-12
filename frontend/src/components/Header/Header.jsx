@@ -4,7 +4,7 @@ import SlotRenderer from '../Slots/SlotRenderer';
 export default function Header({
   modules, gameState, ws, session,
   onOpenSettings, onOpenHealth, onOpenMemories, onOpenCharacter,
-  onToggleMap, onBack, onOpenDrawer, hidden = false,
+  onToggleMap, displayMode = 'feed', onToggleDisplayMode, onBack, onOpenDrawer, hidden = false,
 }) {
   const storyTitle =
     session?.sessionState?.active_display_name
@@ -94,6 +94,22 @@ export default function Header({
 
           {/* Mobile 1-tap quick actions (full nav + module widgets live in the drawer) */}
           <div className="flex lg:hidden items-center gap-0.5">
+            {onToggleDisplayMode && (
+              <button
+                onClick={onToggleDisplayMode}
+                className={`min-h-11 min-w-11 flex items-center justify-center rounded-lg transition-colors ${
+                  displayMode === 'stage'
+                    ? 'text-purple-300 bg-purple-600/20'
+                    : 'text-gray-400 hover:text-white hover:bg-gray-700'
+                }`}
+                aria-label={displayMode === 'stage' ? 'Switch to story log' : 'Switch to paced stage mode'}
+                title={displayMode === 'stage' ? 'Paced Stage active — tap for Story Log' : 'Switch to Paced Stage'}
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M4 6h16M4 12h10m-10 6h16" />
+                </svg>
+              </button>
+            )}
             {onToggleMap && (
               <button
                 onClick={onToggleMap}
@@ -131,6 +147,20 @@ export default function Header({
 
           {/* Desktop text buttons */}
           <div className="hidden lg:flex items-center gap-2">
+            {onToggleDisplayMode && (
+              <button
+                className={`px-3 py-2 text-sm border rounded transition-colors ${
+                  displayMode === 'stage'
+                    ? 'text-purple-200 bg-purple-600/20 border-purple-500/70 hover:border-purple-400'
+                    : 'text-gray-400 hover:text-white border-gray-700 hover:border-purple-500'
+                }`}
+                onClick={onToggleDisplayMode}
+                aria-label={displayMode === 'stage' ? 'Switch to Story Log' : 'Switch to Paced Stage'}
+                title={displayMode === 'stage' ? 'Paced Stage mode active — click for classic Story Log' : 'Switch to centered Paced Stage reader'}
+              >
+                {displayMode === 'stage' ? 'Stage: On' : 'Stage'}
+              </button>
+            )}
             <button
               className="text-gray-400 hover:text-white px-3 py-2 text-sm border border-gray-700 rounded hover:border-purple-500 transition-colors"
               onClick={onOpenCharacter}

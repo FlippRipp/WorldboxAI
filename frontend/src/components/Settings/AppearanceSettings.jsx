@@ -3,10 +3,55 @@ import { THEME_PRESETS } from '../../lib/themePresets';
 import ColorField from './ColorField';
 
 export default function AppearanceSettings() {
-  const { colors, activePreset, fields, setColor, applyPreset, resetToDefault, density, setDensity } = useTheme();
+  const { colors, activePreset, fields, setColor, applyPreset, resetToDefault, density, setDensity, displayMode, setDisplayMode, readerSpeed, setReaderSpeed } = useTheme();
+  const approxWpm = Math.round((readerSpeed * 60) / 5.2);
 
   return (
     <div className="space-y-6">
+      {/* Story display mode */}
+      <div className="p-4 bg-gray-800/60 rounded-lg space-y-3">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-300 mb-1">Story display mode</h3>
+          <p className="text-xs text-gray-500">Choose between the classic scrolling transcript or a centered, paced reading stage. You can also switch anytime from the story header.</p>
+        </div>
+        <div className="flex gap-3 flex-wrap">
+          {[
+            { id: 'feed', label: 'Story Log', hint: 'Classic scrolling transcript as tokens stream in' },
+            { id: 'stage', label: 'Paced Stage', hint: 'Centered sentence-by-sentence reveal with History overlay' },
+          ].map((opt) => (
+            <button
+              key={opt.id}
+              onClick={() => setDisplayMode(opt.id)}
+              className={`px-3 py-2 rounded-lg border text-sm text-left transition-colors ${
+                displayMode === opt.id
+                  ? 'border-purple-500 bg-purple-600/20 text-gray-100'
+                  : 'border-gray-700 bg-gray-900/40 text-gray-300 hover:border-gray-600'
+              }`}
+            >
+              <span className="font-medium">{opt.label}</span>
+              <p className="text-xs text-gray-500 mt-0.5">{opt.hint}</p>
+            </button>
+          ))}
+        </div>
+        {displayMode === 'stage' && (
+          <div className="pt-2 border-t border-gray-700/60">
+            <div className="flex items-center justify-between text-xs text-gray-400 mb-1.5">
+              <span>Stage reading speed</span>
+              <span className="font-mono text-purple-300">~{approxWpm} WPM</span>
+            </div>
+            <input
+              type="range"
+              min="15"
+              max="95"
+              step="1"
+              value={readerSpeed}
+              onChange={(e) => setReaderSpeed(Number(e.target.value))}
+              className="w-full accent-purple-500"
+            />
+          </div>
+        )}
+      </div>
+
       {/* Message density */}
       <div className="p-4 bg-gray-800/60 rounded-lg">
         <h3 className="text-sm font-semibold text-gray-300 mb-1">Message density</h3>

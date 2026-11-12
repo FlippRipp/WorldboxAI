@@ -7,6 +7,7 @@ import { useModules } from './hooks/useModules';
 import Header from './components/Header/Header';
 import Sidebar from './components/Sidebar/Sidebar';
 import { ChatFeed } from './components/Chat/ChatFeed';
+import StageReader from './components/Chat/StageReader';
 import ChatInput from './components/Chat/ChatInput';
 import CommandResultModal from './components/Chat/CommandResultModal';
 import SlotRenderer from './components/Slots/SlotRenderer';
@@ -151,13 +152,14 @@ function AppContent() {
   const session = useSession();
   const { modules, setModules } = useModules();
   const { toasts, showToast, dismissToast } = useToasts();
-  const { density } = useTheme();
+  const { density, displayMode, setDisplayMode, readerSpeed, setReaderSpeed } = useTheme();
   const [editRequest, setEditRequest] = useState(null);
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHealthOpen, setIsHealthOpen] = useState(false);
   const [isMemoryOpen, setIsMemoryOpen] = useState(false);
   const [isCharacterOpen, setIsCharacterOpen] = useState(false);
+  const [isStageHistoryOpen, setIsStageHistoryOpen] = useState(false);
   const sentIntroRef = useRef(false);
   // The full engine state returned by the load/branch REST call, stashed so the
   // intro effect can paint the transcript instantly instead of waiting for the
@@ -448,9 +450,15 @@ function AppContent() {
     window.dispatchEvent(new CustomEvent('wb:toggle-map'));
   }, []);
 
+  const handleToggleDisplayMode = useCallback(() => {
+    setIsStageHistoryOpen(false);
+    setDisplayMode(displayMode === 'stage' ? 'feed' : 'stage');
+  }, [displayMode, setDisplayMode]);
+
   // Sync Android Back / browser Back with screen hierarchy and open overlays.
   useRootBackNavigation(currentMode !== null, handleExitMode);
   useBackTrap(drawerOpen, () => setDrawerOpen(false));
+  useBackTrap(isStageHistoryOpen, () => setIsStageHistoryOpen(false));
   useBackTrap(isCharacterOpen, () => setIsCharacterOpen(false));
   useBackTrap(isMemoryOpen, () => setIsMemoryOpen(false));
   useBackTrap(isHealthOpen, () => setIsHealthOpen(false));
@@ -683,33 +691,65 @@ function AppContent() {
             onOpenMemories={() => setIsMemoryOpen(true)}
             onOpenCharacter={() => setIsCharacterOpen(true)}
             onToggleMap={hasWorldMap ? handleToggleMap : null}
+            displayMode={displayMode}
+            onToggleDisplayMode={handleToggleDisplayMode}
             onBack={handleExitMode}
             onOpenDrawer={handleOpenDrawer}
             hidden={headerHidden}
           />
 
-          <ChatFeed
-            messages={ws.messages}
-            currentStream={ws.currentStream}
-            currentReasoning={ws.currentReasoning}
-            swipes={ws.swipes}
-            busy={ws.currentStream != null || ws.postProcessing}
-            postProcessing={ws.postProcessing}
-            pipelineStatus={ws.pipelineStatus}
-            editRequest={editRequest}
-            currentTurn={gameState.turn ?? null}
-            density={density}
-            scrollControlRef={feedScrollRef}
-            onUserScroll={handleFeedUserScroll}
-            onBranchMessage={handleBranchMessage}
-            onRegenerate={handleRegenerate}
-            onSwipe={handleSwipe}
-            onEditMessage={handleEditMessage}
-            onDeleteMessage={handleDeleteMessage}
-            modules={gameModules}
-            slotState={gameState}
-            moduleConfigs={gameState?.module_configs}
-          />
+          {displayMode === 'stage' ? (
+            <StageReader
+              messages={ws.messages}
+              currentStream={ws.currentStream}
+              currentReasoning={ws.currentReasoning}
+              swipes={ws.swipes}
+              busy={ws.currentStream != null || ws.postProcessing}
+              postProcessing={ws.postProcessing}
+              pipelineStatus={ws.pipelineStatus}
+              editRequest={editRequest}
+              currentTurn={gameState.turn ?? null}
+              density={density}
+              scrollControlRef={feedScrollRef}
+              onUserScroll={handleFeedUserScroll}
+              onBranchMessage={handleBranchMessage}
+              onRegenerate={handleRegenerate}
+              onSwipe={handleSwipe}
+              onEditMessage={handleEditMessage}
+              onDeleteMessage={handleDeleteMessage}
+              modules={gameModules}
+              slotState={gameState}
+              moduleConfigs={gameState?.module_configs}
+              readerSpeed={readerSpeed}
+              onChangeReaderSpeed={setReaderSpeed}
+              historyOpen={isStageHistoryOpen}
+              onOpenHistory={() => setIsStageHistoryOpen(true)}
+              onCloseHistory={() => setIsStageHistoryOpen(false)}
+            />
+          ) : (
+            <ChatFeed
+              messages={ws.messages}
+              currentStream={ws.currentStream}
+              currentReasoning={ws.currentReasoning}
+              swipes={ws.swipes}
+              busy={ws.currentStream != null || ws.postProcessing}
+              postProcessing={ws.postProcessing}
+              pipelineStatus={ws.pipelineStatus}
+              editRequest={editRequest}
+              currentTurn={gameState.turn ?? null}
+              density={density}
+              scrollControlRef={feedScrollRef}
+              onUserScroll={handleFeedUserScroll}
+              onBranchMessage={handleBranchMessage}
+              onRegenerate={handleRegenerate}
+              onSwipe={handleSwipe}
+              onEditMessage={handleEditMessage}
+              onDeleteMessage={handleDeleteMessage}
+              modules={gameModules}
+              slotState={gameState}
+              moduleConfigs={gameState?.module_configs}
+            />
+          )}
 
           {(!ws.isConnected || ws.isReconnecting) && (
             <div className="flex items-center justify-center gap-2 px-4 py-1.5 bg-red-950/60 border-t border-red-900/60 text-xs text-red-200">
