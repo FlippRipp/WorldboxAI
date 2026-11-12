@@ -21,7 +21,9 @@ vetted by a fit-check critic before going live.
 from copy import deepcopy
 import asyncio
 import json
+from pathlib import Path
 import re
+import zipfile
 
 try:
     from backend.engine import jev_tasks
@@ -86,8 +88,10 @@ PREF_WEIGHTS = ("low", "medium", "high")  # likes/dislikes strength, weakest fir
 _services: dict = {}
 _bg_tasks: set[asyncio.Task] = set()
 _current_bg_task: asyncio.Task | None = None
+_current_bg_job_meta: dict | None = None
 _pending_bg_job: dict | None = None
 _staged_bg_updates: dict | None = None
+_bg_epoch: int = 0
 
 
 def set_services(services: dict) -> None:
@@ -96,12 +100,120 @@ def set_services(services: dict) -> None:
 
 
 def _cancel_bg_task() -> None:
-    global _current_bg_task, _pending_bg_job, _staged_bg_updates
+    global _current_bg_task, _current_bg_job_meta, _pending_bg_job, _staged_bg_updates, _bg_epoch
+    _bg_epoch += 1
     _pending_bg_job = None
     _staged_bg_updates = None
+    _current_bg_job_meta = None
+    for task in list(_bg_tasks):
+        if not task.done():
+            task.cancel()
     if _current_bg_task is not None and not _current_bg_task.done():
         _current_bg_task.cancel()
     _current_bg_task = None
+
+
+def _job_matches_state(meta: dict | None, state: dict, allow_later_turn: bool = True) -> bool:
+    """True when a background job or staged update still belongs to the timeline
+    of `state` (same save, same epoch, not rolled back past the job's turn, and
+    the scene at the job's history index has not been deleted or replaced)."""
+    if not isinstance(meta, dict):
+        return False
+    if meta.get("epoch") is not None and meta.get("epoch") != _bg_epoch:
+        return False
+    if meta.get("save_id") != state.get("active_save_id"):
+        return False
+    state_turn = int(state.get("turn", 0) or 0)
+    job_turn = int(meta.get("turn", 0) or 0)
+    if state_turn < job_turn:
+        return False
+    if not allow_later_turn and state_turn != job_turn:
+        return False
+    hist_len = int(meta.get("hist_len", 0) or 0)
+    if hist_len > 0:
+        history = state.get("history") or []
+        if len(history) < hist_len or str(history[hist_len - 1]) != str(meta.get("scene", "")):
+            return False
+    return True
+
+
+def _patch_zip_plot_state(zip_path: Path, engine, own_updates: dict, fallback_base: dict | None = None) -> bool:
+    """Merge `own_updates` into `Module_States/wb_plot_director.json` inside an
+    existing turn snapshot or swipe variant zip archive on disk."""
+    if not zip_path.exists():
+        return False
+    target_arc = f"Module_States/{MODULE_ID}.json"
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            members = {}
+            existing_plot = None
+            for name in zf.namelist():
+                raw_bytes = zf.read(name)
+                if name.replace("\\", "/") == target_arc:
+                    try:
+                        existing_plot = json.loads(raw_bytes.decode("utf-8"))
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        existing_plot = None
+                else:
+                    members[name] = raw_bytes
+        base_plot = existing_plot if isinstance(existing_plot, dict) else deepcopy(fallback_base or _default_data())
+        merged_plot = engine._deep_merge(base_plot, own_updates)
+        tmp_path = zip_path.with_suffix(".zip.tmp")
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, raw_bytes in members.items():
+                zf.writestr(name, raw_bytes)
+            zf.writestr(target_arc, json.dumps(merged_plot, indent=2).encode("utf-8"))
+        tmp_path.replace(zip_path)
+        return True
+    except OSError:
+        return False
+
+
+def _patch_saved_turn_archives(
+    sm,
+    engine,
+    save_id: str | None,
+    turn_number: int,
+    own_updates: dict,
+    fallback_base: dict | None = None,
+    patch_snapshot: bool = True,
+    patch_swipe: bool = True,
+    repack: bool = False,
+) -> None:
+    """Keep `Snapshots/turn_{N}.zip` and `Swipes/v{active}.zip` in sync when a
+    background Plot Director pass finishes after the turn was already saved."""
+    save_manager = getattr(sm, "save_manager", None)
+    saves_dir = getattr(save_manager, "saves_dir", None)
+    if not save_id or saves_dir is None:
+        return
+    save_path = Path(saves_dir) / str(save_id)
+    if not save_path.exists():
+        return
+
+    changed = False
+    if patch_snapshot:
+        snap_path = save_path / "Snapshots" / f"turn_{turn_number}.zip"
+        if _patch_zip_plot_state(snap_path, engine, own_updates, fallback_base=fallback_base):
+            changed = True
+
+    if patch_swipe:
+        manifest_path = save_path / "Swipes" / "manifest.json"
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                manifest = None
+            if isinstance(manifest, dict) and int(manifest.get("turn", -1)) == turn_number:
+                active_idx = int(manifest.get("active", 0) or 0)
+                swipe_zip = save_path / "Swipes" / f"v{active_idx}.zip"
+                if _patch_zip_plot_state(swipe_zip, engine, own_updates, fallback_base=fallback_base):
+                    changed = True
+
+    if changed and repack and hasattr(save_manager, "_pack_save"):
+        try:
+            save_manager._pack_save(save_id)
+        except OSError:
+            pass
 
 # Legacy (v1, 3-act outline) keys wiped on migration. Writing "" replaces the
 # old dicts/lists outright because _deep_merge only recurses dict-into-dict.
@@ -1464,9 +1576,27 @@ async def _close_thread(state: dict, sdk, data: dict, updates: dict, thread: dic
 
 
 async def on_gather_context(state: dict, sdk) -> dict:
+    global _staged_bg_updates
+    if _current_bg_job_meta is not None and not _job_matches_state(_current_bg_job_meta, state):
+        _cancel_bg_task()
+    if _staged_bg_updates is not None and not _job_matches_state(_staged_bg_updates, state):
+        _staged_bg_updates = None
+
     data = _own_data(state)
     if not data:
-        return {"module_data": {MODULE_ID: _seeded_default_data(state)}}
+        seeded = _seeded_default_data(state)
+        sm = _services.get("session_manager")
+        engine = _services.get("engine")
+        if sm is not None and engine is not None:
+            _patch_saved_turn_archives(
+                sm,
+                engine,
+                state.get("active_save_id") or getattr(sm, "active_save_id", None),
+                int(state.get("turn", 0) or 0),
+                seeded,
+                fallback_base=seeded,
+            )
+        return {"module_data": {MODULE_ID: seeded}}
 
     if data.get("schema") == 2:
         # v2 -> v3: additive, in place. _deep_merge adds the new keys; the
@@ -1518,15 +1648,11 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
     config = _config(state)
     data = _own_data(state)
     if _staged_bg_updates is not None and isinstance(data, dict):
-        staged = _staged_bg_updates
-        staged_turn = int(staged.get("turn", 0) or 0)
-        if (
-            staged.get("save_id") == state.get("active_save_id")
-            and staged_turn <= int(state.get("turn", 0) or 0)
-            and isinstance(staged.get("updates"), dict)
-        ):
+        if _job_matches_state(_staged_bg_updates, state) and isinstance(_staged_bg_updates.get("updates"), dict):
+            data = deepcopy(data)
+            data.update(_staged_bg_updates["updates"])
+        else:
             _staged_bg_updates = None
-            data.update(staged["updates"])
 
     thread = (data.get("thread") or {}) if data else {}
     if (
@@ -1881,9 +2007,30 @@ async def _execute_bg_job(job: dict) -> None:
     updated module_data."""
     global _staged_bg_updates
     try:
+        prev_task = job.get("prev_task")
+        if prev_task is not None and not prev_task.done():
+            try:
+                await prev_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if job.get("epoch") != _bg_epoch:
+            return
+        if _staged_bg_updates is not None:
+            staged = _staged_bg_updates
+            if (
+                _job_matches_state(staged, job["state"])
+                and int(staged.get("turn", 0) or 0) < int(job.get("turn", 0) or 0)
+                and isinstance(staged.get("updates"), dict)
+            ):
+                _staged_bg_updates = None
+                job["state"].setdefault("module_data", {}).setdefault(MODULE_ID, {}).update(staged["updates"])
+                job.setdefault("base_updates", {}).update(staged["updates"])
+
         result = await _run_librarian_llm_pass(job["state"], job["sdk"], job.get("base_updates"))
         own_updates = (result or {}).get("module_data", {}).get(MODULE_ID)
         if not isinstance(own_updates, dict) or not own_updates:
+            return
+        if job.get("epoch") != _bg_epoch:
             return
 
         sm = _services.get("session_manager")
@@ -1891,35 +2038,57 @@ async def _execute_bg_job(job: dict) -> None:
         chat_hub = _services.get("chat_hub")
         if sm is None or engine is None:
             return
-        if sm.active_save_id != job.get("save_id"):
-            return
 
         live_state = sm.state
-        job_turn = int(job.get("turn", 0) or 0)
-        if int(live_state.get("turn", 0) or 0) < job_turn:
-            # The turn this job analyzed was deleted, undone, or regenerated.
+        if not _job_matches_state(job, live_state):
+            # The turn this job analyzed was deleted, undone, regenerated, or branched away from.
             return
         live_plot = (live_state.get("module_data") or {}).get(MODULE_ID) or {}
         if live_plot.get("suspended"):
             return
 
-        merged = engine._deep_merge(live_plot, own_updates)
-        live_state.setdefault("module_data", {})[MODULE_ID] = merged
+        job_turn = int(job.get("turn", 0) or 0)
+        live_turn = int(live_state.get("turn", 0) or 0)
+        fallback_base = (job["state"].get("module_data") or {}).get(MODULE_ID)
 
         if chat_hub is not None and chat_hub.turn_running():
             # Another turn started while this background pass was in flight:
-            # stage the updates so the running turn's librarian merges them too.
+            # patch this turn's snapshot/swipe archives on disk right away so
+            # rolling back or branching to `job_turn` has the completed plot
+            # state, and stage the updates for the running turn's librarian.
+            _patch_saved_turn_archives(
+                sm, engine, sm.active_save_id, job_turn, own_updates,
+                fallback_base=fallback_base, repack=False,
+            )
+            if live_turn == job_turn:
+                merged = engine._deep_merge(live_plot, own_updates)
+                live_state.setdefault("module_data", {})[MODULE_ID] = merged
             _staged_bg_updates = {
                 "save_id": job.get("save_id"),
                 "turn": job_turn,
+                "hist_len": job.get("hist_len", 0),
+                "scene": job.get("scene", ""),
+                "epoch": job.get("epoch"),
                 "updates": deepcopy(own_updates),
             }
             return
 
-        if live_state.get("turn", 0) == job.get("turn", 0) and getattr(sm, "save_manager", None) is not None:
-            sm.save_manager.save_turn(sm.active_save_id, live_state, live_state.get("turn", 0))
-        if chat_hub is not None:
-            await chat_hub.send({"type": "state_update", "state": dict(live_state)})
+        if live_turn == job_turn:
+            merged = engine._deep_merge(live_plot, own_updates)
+            live_state.setdefault("module_data", {})[MODULE_ID] = merged
+            if getattr(sm, "save_manager", None) is not None:
+                sm.save_manager.save_turn(sm.active_save_id, live_state, job_turn)
+                _patch_saved_turn_archives(
+                    sm, engine, sm.active_save_id, job_turn, own_updates,
+                    fallback_base=merged, patch_snapshot=False, patch_swipe=True, repack=True,
+                )
+            if chat_hub is not None:
+                await chat_hub.send({"type": "state_update", "state": dict(live_state)})
+        elif live_turn > job_turn:
+            _patch_saved_turn_archives(
+                sm, engine, sm.active_save_id, job_turn, own_updates,
+                fallback_base=fallback_base, repack=True,
+            )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -1952,7 +2121,7 @@ async def on_librarian(state: dict, sdk) -> dict | None:
         _staged_bg_updates = None
         staged_turn = int(staged.get("turn", 0) or 0)
         if (
-            staged.get("save_id") == state.get("active_save_id")
+            _job_matches_state(staged, state)
             and staged_turn < turn
             and isinstance(staged.get("updates"), dict)
         ):
@@ -1971,9 +2140,13 @@ async def on_librarian(state: dict, sdk) -> dict | None:
         snap = deepcopy(state)
         if updates:
             snap.setdefault("module_data", {}).setdefault(MODULE_ID, {}).update(updates)
+        history = state.get("history") or []
         _pending_bg_job = {
             "save_id": state.get("active_save_id"),
             "turn": turn,
+            "hist_len": len(history),
+            "scene": str(history[-1]) if history else "",
+            "epoch": _bg_epoch,
             "state": snap,
             "sdk": sdk,
             "base_updates": {},
@@ -1986,13 +2159,29 @@ async def on_librarian(state: dict, sdk) -> dict | None:
 async def on_turn_stopped(state: dict, sdk, reason: str) -> None:
     """Spawn the queued background Plot Director pass once the turn has been
     saved (reason == 'completed'), or discard it if the turn was cancelled."""
-    global _pending_bg_job, _current_bg_task
+    global _pending_bg_job, _current_bg_task, _current_bg_job_meta
     job = _pending_bg_job
     _pending_bg_job = None
     if reason != "completed" or job is None:
         return
-    if _current_bg_task is not None and not _current_bg_task.done():
-        _current_bg_task.cancel()
+    prev_task = _current_bg_task
+    if prev_task is not None and not prev_task.done():
+        if (
+            isinstance(_current_bg_job_meta, dict)
+            and _current_bg_job_meta.get("save_id") == job.get("save_id")
+            and int(_current_bg_job_meta.get("turn", 0) or 0) < int(job.get("turn", 0) or 0)
+            and _current_bg_job_meta.get("epoch") == job.get("epoch")
+        ):
+            job["prev_task"] = prev_task
+        else:
+            prev_task.cancel()
+    _current_bg_job_meta = {
+        "save_id": job.get("save_id"),
+        "turn": job.get("turn"),
+        "hist_len": job.get("hist_len"),
+        "scene": job.get("scene"),
+        "epoch": job.get("epoch"),
+    }
     task = asyncio.get_running_loop().create_task(_execute_bg_job(job))
     _current_bg_task = task
     _bg_tasks.add(task)

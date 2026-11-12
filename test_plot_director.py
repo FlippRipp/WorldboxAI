@@ -2223,6 +2223,117 @@ def test_profile_regen_command_reanalyzes_without_wiping_thread():
     assert "Player profile re-analyzed" in res["message"]
 
 
+def test_bg_job_patches_snapshots_for_delete_and_branch_and_rejects_deleted_turns(tmp_path):
+    """Background plot passes patch Snapshots/turn_N.zip and Swipes/v0.zip even when
+    turn N+1 has already started, so deleting turn N+1 or branching from turn N
+    restores turn N's finished plot state; and a deleted turn's in-flight job
+    cannot overwrite a replacement turn with the same turn number."""
+    from copy import deepcopy
+    from backend.engine.session import GameSessionManager
+
+    backend = _load_backend()
+    session = GameSessionManager(str(tmp_path / "data"))
+    session.create_save("story")
+    sid = session.active_save_id
+
+    # Seed turn 0 through turn 3 snapshots.
+    data_t2 = _observing_data(backend)
+    data_t2["profile"] = _profile_reply()
+    session.state["chat_messages"] = [{"role": "ai", "content": "Intro."}]
+    session.state["history"] = ["Intro."]
+    session.state["turn"] = 0
+    session.state["module_data"]["wb_plot_director"] = deepcopy(data_t2)
+    session.save_manager.save_turn(sid, session.state, 0)
+
+    for t in (1, 2, 3):
+        session.state["chat_messages"] += [
+            {"role": "user", "content": f"Action {t}"},
+            {"role": "ai", "content": f"Scene {t}"},
+        ]
+        session.state["history"] += [f"Scene {t}"]
+        session.state["turn"] = t
+        session.save_manager.save_turn(sid, session.state, t)
+        session.begin_turn_swipes()
+
+    class _EngineStub:
+        _turn_hooks_armed = True
+
+        def _deep_merge(self, base, extra):
+            out = deepcopy(base)
+            for k, v in extra.items():
+                if isinstance(v, dict) and isinstance(out.get(k), dict):
+                    out[k] = self._deep_merge(out[k], v)
+                else:
+                    out[k] = deepcopy(v)
+            return out
+
+    # Simulate turn 3 completing while turn 4 starts streaming right away (turn_running=True).
+    chat_hub = SimpleNamespace(
+        turn_running=lambda: True,
+        send=lambda msg: asyncio.sleep(0),
+    )
+    backend.set_services({
+        "session_manager": session,
+        "engine": _EngineStub(),
+        "chat_hub": chat_hub,
+    })
+
+    captured = {}
+    sdk_t3 = _make_sdk([
+        json.dumps({"gm_notes": "Turn 3 GM plan."}),
+        THREAD_REPLY,
+        CRITIC_ACCEPT,
+    ], captured)
+    st_t3 = deepcopy(session.state)
+    st_t3["active_save_id"] = sid
+
+    async def _run_t3_bg():
+        await backend.on_librarian(st_t3, sdk_t3)
+        await backend.on_turn_stopped(st_t3, sdk_t3, "completed")
+        await asyncio.gather(*list(backend._bg_tasks))
+
+    asyncio.run(_run_t3_bg())
+
+    # Even though turn_running() was True when turn 3's background pass finished,
+    # Snapshots/turn_3.zip and Swipes/v0.zip were patched on disk.
+    # Now add turn 4 (which modifies the plot to a different title), then delete turn 4's reply:
+    session.state["chat_messages"] += [
+        {"role": "user", "content": "Action 4"},
+        {"role": "ai", "content": "Scene 4"},
+    ]
+    session.state["history"] += ["Scene 4"]
+    session.state["turn"] = 4
+    session.state["module_data"]["wb_plot_director"]["thread"]["title"] = "Turn 4 Mutated Thread"
+    session.save_manager.save_turn(sid, session.state, 4)
+
+    # Branching from turn 3 restores turn 3's woven thread ("The Salt Baron's Ledger").
+    branch_info = session.branch_save(sid, target_turn=3)
+    branch_loaded = session.save_manager.load_save(branch_info["id"])
+    assert branch_loaded["module_data"]["wb_plot_director"]["thread"]["title"] == "The Salt Baron's Ledger"
+
+    # Deleting turn 4's reply rolls the active save back to turn 3 with turn 3's woven thread.
+    rolled_back = session.delete_message(len(session.state["chat_messages"]) - 1)
+    assert rolled_back["turn"] == 3
+    assert rolled_back["module_data"]["wb_plot_director"]["thread"]["title"] == "The Salt Baron's Ledger"
+
+    # Now verify that if a turn is deleted and replaced with a new scene at the same turn index,
+    # an in-flight background job from the deleted turn is rejected by its scene fingerprint.
+    chat_hub.turn_running = lambda: False
+    stale_job = {
+        "save_id": sid,
+        "turn": 3,
+        "hist_len": len(session.state["history"]),
+        "scene": "Deleted Scene 3 Variant",
+        "epoch": backend._bg_epoch,
+        "state": deepcopy(session.state),
+        "sdk": _make_sdk([_assessment_reply(gm_notes="Stale deleted turn notes")], {}),
+        "base_updates": {},
+    }
+    asyncio.run(backend._execute_bg_job(stale_job))
+    assert session.state["module_data"]["wb_plot_director"].get("gm_notes") != "Stale deleted turn notes"
+
+
+
 
 
 
