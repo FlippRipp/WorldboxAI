@@ -17,10 +17,15 @@ ALLOWED_GENERATION_TYPES = {"storytelling", "world_building", "character_creatio
 DEFAULT_INJECTION_ORDER = 100
 
 # Injected as the final user turn when the player sends an empty message ("continue"):
-# the normal context is compiled, minus any player input, plus this instruction.
+# the normal context is compiled, minus any player input, plus this in-world grounded
+# scene-beat directive (avoiding bare meta "Continue" commands that trip upstream
+# input classifiers after dark prose or cause reasoning models to repeat prior lines).
 DEFAULT_CONTINUE_PROMPT = (
-    "Continue the story from where it left off. Advance the scene naturally, moving "
-    "events, NPCs, and the world forward without waiting for the player to act."
+    "[Narrative continuation: Pick up the scene around ${player_name} from the exact "
+    "moment the previous passage ended, without repeating or summarizing prior narration. "
+    "Focus on the immediate atmosphere, unfolding events, and nearby characters' reactions "
+    "and dialogue, advancing the next beat of the story naturally while leaving "
+    "${player_name}'s own deliberate choices open.]"
 )
 
 # The editable story-style fields ({state key, prompt label}) and how they are
@@ -223,23 +228,24 @@ class PromptCompiler:
             return text
 
         world_data = state.get("world_data") or {}
-        rules = world_data.get("rules", {})
-        lore = world_data.get("lore", {})
+        rules = world_data.get("rules") or {}
+        lore = world_data.get("lore") or {}
 
         characters = state.get("characters") or {}
-        player_char = characters.get("default_player", {})
+        player_char = characters.get("default_player") or {}
+        lethality = rules.get("lethality")
         substitutions = {
-            "${player_name}": player_char.get("name", "Adventurer"),
-            "${world_name}": lore.get("world_name", "Unknown World"),
-            "${world_genre}": rules.get("genre", "Fantasy"),
-            "${world_tone}": rules.get("tone", "Neutral"),
-            "${world_magic_level}": str(rules.get("magic_level", "Medium")),
-            "${world_tech_era}": str(rules.get("tech_era", "Medieval")),
-            "${world_lethality}": str(rules.get("lethality", "5")),
-            "${world_premise}": lore.get("premise", ""),
-            "${world_conflict}": lore.get("central_conflict", ""),
-            "${player_location}": state.get("player_location_node_id", "Unknown"),
-            "${player_region}": state.get("player_location_region", "Unknown"),
+            "${player_name}": (player_char.get("name") or "").strip() or "Adventurer",
+            "${world_name}": (lore.get("world_name") or "").strip() or "Unknown World",
+            "${world_genre}": (rules.get("genre") or "").strip() or "Fantasy",
+            "${world_tone}": (rules.get("tone") or "").strip() or "Neutral",
+            "${world_magic_level}": str(rules.get("magic_level") or "Medium"),
+            "${world_tech_era}": str(rules.get("tech_era") or "Medieval"),
+            "${world_lethality}": str(lethality if lethality is not None and lethality != "" else "5"),
+            "${world_premise}": str(lore.get("premise") or ""),
+            "${world_conflict}": str(lore.get("central_conflict") or ""),
+            "${player_location}": str(state.get("player_location_node_id") or "Unknown"),
+            "${player_region}": str(state.get("player_location_region") or "Unknown"),
             "${player_layer}": self._get_layer_name(state),
             "${player_layer_desc}": self._get_layer_desc(state),
             "${turn_number}": str(state.get("turn", 0)),
@@ -374,7 +380,13 @@ class PromptCompiler:
         module_blocks: list[dict[str, Any]] | None = None,
         validation_veto: str | None = None,
         generation_type: str | None = None,
+        strict_post_processing: bool | None = None,
     ) -> dict[str, Any]:
+        strict = (
+            bool(state.get("strict_post_processing", False))
+            if strict_post_processing is None
+            else bool(strict_post_processing)
+        )
         blocks = self.normalize_pipeline(pipeline if pipeline is not None else state.get("prompt_pipeline"))
         generation_type = generation_type or "storytelling"
         action = state.get("prompt_generation_action") or ("normal" if (state.get("input_text") or "").strip() else "continue")
@@ -468,6 +480,16 @@ class PromptCompiler:
                 trace.append(self._trace(block, skipped=True, reason="module inactive or block not provided"))
                 continue
 
+            if strict and not is_history and block.get("role_type") == "assistant":
+                trace.append(
+                    self._trace(
+                        block,
+                        skipped=True,
+                        reason="assistant prefill skipped (strict post-processing)",
+                    )
+                )
+                continue
+
             if is_history:
                 history_block = block
                 entry = self._trace(block)
@@ -532,7 +554,7 @@ class PromptCompiler:
         if chat_start is None:
             chat_start = len(messages)
 
-        messages.append(self._current_input_message(state))
+        messages.append(self._current_input_message(state, macro_context=macro_context, macro_warnings=macro_warnings))
 
         # Chat injections land `depth` messages from the bottom of the chat
         # (0 = after the current input). Slots are computed against the
@@ -566,11 +588,17 @@ class PromptCompiler:
                     entry["message_index"] = final_index_by_base[entry["message_index"]]
             trace.extend(injection_trace)
 
+        if strict:
+            fallback_user = self.resolve_macros(DEFAULT_CONTINUE_PROMPT, state)
+            messages = self._apply_strict_post_processing(messages, trace, fallback_user)
+
         warnings = []
         for entry in trace:
             if entry["id"] in macro_warnings:
                 entry["warnings"] = macro_warnings[entry["id"]]
                 warnings.extend({"block_id": entry["id"], "message": message} for message in entry["warnings"])
+        if "continue_prompt" in macro_warnings:
+            warnings.extend({"block_id": "continue_prompt", "message": message} for message in macro_warnings["continue_prompt"])
         return {
             "messages": messages,
             "trace": trace,
@@ -713,14 +741,85 @@ class PromptCompiler:
             messages = messages[user_indices[-max_turns]:]
         return messages
 
-    def _current_input_message(self, state: dict[str, Any]) -> dict[str, str]:
+    def _current_input_message(
+        self,
+        state: dict[str, Any],
+        macro_context: STMacroContext | None = None,
+        macro_warnings: dict[str, list[str]] | None = None,
+    ) -> dict[str, str]:
         input_text = (state.get("input_text") or "").strip()
         if input_text:
             return {"role": "user", "content": input_text}
         # Empty input = a "continue" turn: no player message, just an
         # editable instruction to advance the story on its own.
-        continue_prompt = (state.get("continue_prompt") or "").strip() or DEFAULT_CONTINUE_PROMPT
-        return {"role": "user", "content": self.resolve_macros(continue_prompt, state)}
+        raw_continue = (state.get("continue_prompt") or "").strip() or DEFAULT_CONTINUE_PROMPT
+        ctx = macro_context if macro_context is not None else STMacroContext()
+        ctx.rng = random.Random(
+            f"st:{state.get('active_save_id', '')}:{state.get('turn', 0)}:continue_prompt"
+        )
+        warning_start = len(ctx.warnings)
+        # Resolve ST syntax before native world/player substitutions so player
+        # text containing {{...}} is never parsed as an ST command.
+        rendered = self.resolve_macros(ctx.render(raw_continue), state)
+        if macro_warnings is not None and len(ctx.warnings) > warning_start:
+            macro_warnings["continue_prompt"] = ctx.warnings[warning_start:]
+        if not rendered.strip():
+            rendered = self.resolve_macros(DEFAULT_CONTINUE_PROMPT, state)
+        return {"role": "user", "content": rendered}
+
+    def _apply_strict_post_processing(
+        self,
+        messages: list[dict[str, str]],
+        trace: list[dict[str, Any]],
+        fallback_user_content: str,
+    ) -> list[dict[str, str]]:
+        """Normalize compiled messages for strict providers (Gemini Argon, Claude Opus 5.5):
+        - Consolidate leading system blocks into a single top system message.
+        - Convert any system block appearing after the first user/assistant turn into user.
+        - Ensure the first non-system turn is user (inserting a minimal opener before an
+          opening assistant turn such as Turn 0's intro narration).
+        - Merge consecutive same-role messages with '\\n\\n' and remap trace indices.
+        - Guarantee the final message has role 'user' and non-empty content.
+        """
+        normalized: list[dict[str, str]] = []
+        index_map: dict[int, int] = {}
+        seen_non_system = False
+
+        def append_or_merge(role: str, content: str) -> int:
+            if normalized and normalized[-1]["role"] == role:
+                normalized[-1]["content"] = f"{normalized[-1]['content']}\n\n{content}"
+                return len(normalized) - 1
+            normalized.append({"role": role, "content": content})
+            return len(normalized) - 1
+
+        for orig_idx, msg in enumerate(messages):
+            content = msg.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            role = msg.get("role", "user")
+            if role == "system":
+                if seen_non_system:
+                    role = "user"
+            else:
+                if not seen_non_system and role == "assistant":
+                    append_or_merge("user", "Begin the story.")
+                seen_non_system = True
+            index_map[orig_idx] = append_or_merge(role, content)
+
+        if not normalized or normalized[-1]["role"] != "user":
+            append_or_merge("user", fallback_user_content)
+
+        for entry in trace:
+            msg_idx = entry.get("message_index")
+            if msg_idx is not None:
+                if msg_idx in index_map:
+                    entry["message_index"] = index_map[msg_idx]
+                else:
+                    entry.pop("message_index", None)
+                    entry["skipped"] = True
+                    entry["reason"] = entry.get("reason") or "empty"
+
+        return normalized
 
     def _engine_directive_block(self, block_id: str, display_name: str, text: str,
                                 depth: int = 0, order: int = DEFAULT_INJECTION_ORDER) -> dict[str, Any]:

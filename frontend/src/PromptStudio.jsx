@@ -450,6 +450,8 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
   const [continueDefault, setContinueDefault] = useState('');
   const [continueSaving, setContinueSaving] = useState(false);
   const [continueDirty, setContinueDirty] = useState(false);
+  const [strictPostProcessing, setStrictPostProcessing] = useState(false);
+  const [strictSaving, setStrictSaving] = useState(false);
   const importFileRef = useRef(null);
   const stImportRef = useRef(null);
   const addMenuRef = useRef(null);
@@ -484,6 +486,38 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
       setContinueDefault(data.default || '');
       setContinueDirty(false);
     } catch { /* leave as-is */ }
+  };
+
+  const loadPromptSettings = async () => {
+    try {
+      const data = await api.getSettings('global');
+      for (const items of Object.values(data?.settings || {})) {
+        const hit = (items || []).find((s) => s.key === 'prompt.strict_post_processing');
+        if (hit) {
+          setStrictPostProcessing(Boolean(hit.value ?? hit.default));
+          return;
+        }
+      }
+    } catch { /* leave as-is */ }
+  };
+
+  const handleToggleStrictPostProcessing = async (nextVal) => {
+    const prev = strictPostProcessing;
+    setStrictPostProcessing(nextVal);
+    setStrictSaving(true);
+    setError('');
+    try {
+      await api.updateSettings({ 'prompt.strict_post_processing': nextVal }, 'global');
+      if (!standalone && preview && onPreview) {
+        const updatedPreview = await onPreview(draft);
+        setPreview(updatedPreview);
+      }
+    } catch (err) {
+      setStrictPostProcessing(prev);
+      setError(err.message || 'Failed to update Strict Prompt Post-Processing.');
+    } finally {
+      setStrictSaving(false);
+    }
   };
 
   const handleSaveContinue = async () => {
@@ -526,6 +560,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
       loadMacros();
       loadDefaults();
       loadContinuePrompt();
+      loadPromptSettings();
     }
   }, [isOpen]);
 
@@ -892,6 +927,28 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
                 </button>
               ))}
             </div>
+
+            {(activeTab === 'pipeline' || activeTab === 'continue') && (
+              <div className="flex items-center justify-between gap-4 rounded-lg border border-gray-700 bg-gray-900/70 p-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-gray-200">Strict Prompt Post-Processing</div>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    Normalize compiled prompts for strict models (Gemini Argon, Claude Opus 5.5): merge leading system blocks, convert inline/trailing system directives to user, skip assistant prefills, merge consecutive same-role turns, and guarantee the final message is user.
+                  </p>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                  <input
+                    type="checkbox"
+                    checked={strictPostProcessing}
+                    disabled={strictSaving}
+                    onChange={(e) => handleToggleStrictPostProcessing(e.target.checked)}
+                    className="sr-only peer"
+                    aria-label="Strict Prompt Post-Processing"
+                  />
+                  <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none rounded-full peer peer-disabled:opacity-50 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600" />
+                </label>
+              </div>
+            )}
 
             {activeTab === 'pipeline' && (
               <>

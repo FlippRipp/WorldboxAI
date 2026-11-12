@@ -3,7 +3,13 @@ import os
 import tempfile
 
 from backend.engine.graph import EngineGraph
-from backend.engine.prompt_pipeline import PromptCompiler, PromptPipelineValidationError, build_auto_player_action_prompt, render_story_style
+from backend.engine.prompt_pipeline import (
+    DEFAULT_CONTINUE_PROMPT,
+    PromptCompiler,
+    PromptPipelineValidationError,
+    build_auto_player_action_prompt,
+    render_story_style,
+)
 from backend.engine.registry import ModuleRegistry
 
 
@@ -808,3 +814,252 @@ def test_module_block_anchoring_in_pipeline():
     compiled = compiler.compile(state, [legacy, rules])
     assert any("Baked-in module text." in m["content"] for m in compiled["messages"])
     print("Module block anchoring test passed.")
+
+
+def test_continue_prompt_in_world_grounding_st_macros_and_nonempty_fallback():
+    compiler = PromptCompiler()
+
+    # Default continue prompt resolves ${player_name} (and handles explicit None/empty names).
+    state = {
+        "input_text": "   ",
+        "characters": {"default_player": {"name": "Seraphina"}},
+        "chat_messages": [{"role": "ai", "content": "Rain lashes the cobblestones."}],
+    }
+    compiled = compiler.compile(state)
+    user_msg = compiled["messages"][-1]
+    assert user_msg["role"] == "user"
+    assert "Seraphina" in user_msg["content"]
+    assert "${player_name}" not in user_msg["content"]
+
+    null_name_state = {
+        "input_text": "",
+        "characters": {"default_player": {"name": None}},
+        "chat_messages": [],
+    }
+    assert "Adventurer" in compiler.compile(null_name_state)["messages"][-1]["content"]
+
+    # Continue prompt supports SillyTavern macros ({{user}}, {{getvar::...}}, {{trim}})
+    # without re-parsing literal {{...}} inside player data.
+    preset_pipeline = [
+        {
+            "id": "st_vars",
+            "type": "static_text",
+            "source": "user",
+            "enabled": True,
+            "role_type": "system",
+            "placement": "system_relative",
+            "depth": None,
+            "config": {"text": "Rules.{{setvar::beat::next scene beat}}", "st_macros": True},
+        },
+        {
+            "id": "chat_history",
+            "type": "chat_history",
+            "source": "engine",
+            "enabled": True,
+            "role_type": "system",
+            "placement": "system_relative",
+            "depth": None,
+            "config": {"max_turns": None},
+        },
+    ]
+    st_state = {
+        "input_text": "",
+        "characters": {"default_player": {"name": "Nyx {{roll:1d20}}"}},
+        "continue_prompt": "Advance the {{getvar::beat}} around {{user}}.{{trim}}",
+        "chat_messages": [{"role": "ai", "content": "The torch flickers."}],
+    }
+    st_compiled = compiler.compile(st_state, preset_pipeline)
+    assert st_compiled["messages"][-1] == {
+        "role": "user",
+        "content": "Advance the next scene beat around Nyx {{roll:1d20}}.",
+    }
+
+    # Custom continue prompts that resolve to whitespace/empty (e.g. {{noop}} or comments)
+    # fall back to the grounded default rather than emitting an empty user message.
+    empty_macro_state = {
+        "input_text": "",
+        "characters": {"default_player": {"name": "Kael"}},
+        "continue_prompt": "{{noop}}   {{// empty comment }}",
+        "chat_messages": [{"role": "ai", "content": "Silence settles over the crypt."}],
+    }
+    fallback_msg = compiler.compile(empty_macro_state)["messages"][-1]
+    assert fallback_msg["role"] == "user"
+    assert fallback_msg["content"] == compiler.resolve_macros(DEFAULT_CONTINUE_PROMPT, empty_macro_state)
+    assert fallback_msg["content"].strip() != ""
+
+
+def test_strict_post_processing_normalizes_roles_prefills_and_trace():
+    compiler = PromptCompiler()
+
+    pipeline = [
+        {
+            "id": "sys_1",
+            "type": "static_text",
+            "source": "user",
+            "enabled": True,
+            "role_type": "system",
+            "placement": "system_relative",
+            "depth": None,
+            "config": {"text": "System rule A."},
+        },
+        {
+            "id": "sys_2",
+            "type": "static_text",
+            "source": "user",
+            "enabled": True,
+            "role_type": "system",
+            "placement": "system_relative",
+            "depth": None,
+            "config": {"text": "System rule B."},
+        },
+        {
+            "id": "chat_history",
+            "type": "chat_history",
+            "source": "engine",
+            "enabled": True,
+            "role_type": "system",
+            "placement": "system_relative",
+            "depth": None,
+            "config": {"max_turns": None},
+        },
+        {
+            "id": "post_history_sys",
+            "type": "static_text",
+            "source": "user",
+            "enabled": True,
+            "role_type": "system",
+            "placement": "system_relative",
+            "depth": None,
+            "config": {"text": "Post-history writer directive."},
+        },
+        {
+            "id": "assistant_prefill",
+            "type": "static_text",
+            "source": "user",
+            "enabled": True,
+            "role_type": "assistant",
+            "placement": "chat_injection",
+            "depth": 0,
+            "order": 999,
+            "config": {"text": "Understood, continuing dark narration:"},
+        },
+    ]
+
+    # Turn 0 opening AI intro + consecutive AI continue turns + story_style + lore @ depth 0 + veto.
+    state = {
+        "input_text": "",
+        "characters": {"default_player": {"name": "Vesper"}},
+        "story_style": {"themes": "Gothic horror", "pacing": "Slow burn"},
+        "lore_depth_injections": [{"depth": 0, "text": "<lorebook>\n- Blood moon rises.\n</lorebook>"}],
+        "chat_messages": [
+            {"role": "ai", "content": "Opening scene in the cathedral."},
+            {"role": "ai", "content": "A bell tolls in the fog."},
+        ],
+    }
+
+    # Legacy default (strict_post_processing=False) stays unchanged: trailing depth-0 blocks
+    # and assistant prefill remain separate messages after the continue prompt.
+    legacy = compiler.compile(state, pipeline, validation_veto="Do not invent stats.")
+    assert legacy["messages"][-1]["role"] == "assistant"
+    assert [m["role"] for m in legacy["messages"]].count("system") > 1
+
+    # Strict post-processing normalizes the entire message array for Argon / Opus 5.5.
+    strict = compiler.compile(
+        state,
+        pipeline,
+        validation_veto="Do not invent stats.",
+        strict_post_processing=True,
+    )
+    msgs = strict["messages"]
+    roles = [m["role"] for m in msgs]
+
+    # Exactly one leading system message, then strict user <-> assistant alternation ending on user.
+    assert roles == ["system", "user", "assistant", "user"]
+    assert msgs[0]["content"] == "System rule A.\n\nSystem rule B."
+    assert msgs[1]["content"] == "Begin the story."
+    # Consecutive assistant turns from intro + prior continue are merged cleanly.
+    assert msgs[2]["content"] == "Opening scene in the cathedral.\n\nA bell tolls in the fog."
+    # Post-history system block, continue prompt, lore @ depth 0, story_style, and validation veto
+    # all merge into the final non-empty user message, while assistant prefill is skipped.
+    final_user = msgs[3]["content"]
+    assert "Post-history writer directive." in final_user
+    assert "Vesper" in final_user
+    assert "Blood moon rises." in final_user
+    assert "<story_style>" in final_user
+    assert "Do not invent stats." in final_user
+    assert all("Understood, continuing dark narration:" not in m["content"] for m in msgs)
+
+    trace_by_id = {entry["id"]: entry for entry in strict["trace"]}
+    assert trace_by_id["assistant_prefill"]["skipped"] is True
+    assert "strict post-processing" in trace_by_id["assistant_prefill"]["reason"]
+    assert trace_by_id["sys_1"]["message_index"] == 0
+    assert trace_by_id["sys_2"]["message_index"] == 0
+    assert trace_by_id["chat_history"]["message_index"] == 2
+    assert trace_by_id["post_history_sys"]["message_index"] == 3
+    assert trace_by_id["engine_story_style"]["message_index"] == 3
+    assert trace_by_id["engine_validation_veto"]["message_index"] == 3
+
+
+def test_engine_graph_strict_post_processing_setting_applies_to_preview_and_storyteller():
+    async def run():
+        previous_mode = os.environ.get("LLM_MODE")
+        os.environ["LLM_MODE"] = "mock"
+        try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            registry = ModuleRegistry(os.path.join(base_dir, "modules"))
+            registry.load_all_modules()
+            engine = EngineGraph(registry)
+            assert engine.settings.get("prompt.strict_post_processing") is False
+
+            state = {
+                "active_save_id": "strict_test",
+                "input_text": "",
+                "story_style": {"themes": "Dark fantasy"},
+                "module_data": {"wb_core_rpg": {"hp": 20, "action_assessment": {
+                    "feasibility": 8,
+                    "skill_used": "stealth",
+                    "difficulty": "easy",
+                    "failure_reason": "",
+                }}},
+                "module_configs": {"wb_core_rpg": {"progression_system": "xp"}},
+                "characters": {"default_player": {"name": "Corvus"}},
+                "current_context": ["<scene>Crypt entrance.</scene>"],
+                "history": ["The iron gate groans."],
+                "chat_messages": [{"role": "ai", "content": "The iron gate groans."}],
+                "turn": 1,
+            }
+
+            # Off by default: trailing depth-0 system blocks (<story_style>, feasibility) end as system.
+            preview_off = await engine.compile_prompt_preview(state, state.get("prompt_pipeline"))
+            assert preview_off["messages"][-1]["role"] == "system"
+
+            # Turned on globally: preview and storyteller both normalize to strict alternation ending on user.
+            await engine.settings.update({"prompt.strict_post_processing": True}, scope="global")
+            assert engine.settings.get("prompt.strict_post_processing") is True
+            preview_on = await engine.compile_prompt_preview(state, state.get("prompt_pipeline"))
+            roles = [m["role"] for m in preview_on["messages"]]
+            assert roles[0] == "system"
+            assert roles[-1] == "user"
+            assert "system" not in roles[1:]
+            for a, b in zip(roles[1:], roles[2:]):
+                assert a != b
+
+            captured = {}
+
+            async def fake_generate(messages, **kwargs):
+                captured["messages"] = messages
+                return {"content": "Shadows stir beyond the gate.", "reasoning": "", "model": "mock", "usage": {}}
+
+            engine.llm.generate_story_from_messages = fake_generate
+            out = await engine.storyteller_node(state)
+            sent_roles = [m["role"] for m in captured["messages"]]
+            assert sent_roles == roles
+            assert sent_roles[-1] == "user"
+            assert out["last_prompt_trace"][-1]["message_index"] == len(captured["messages"]) - 1
+        finally:
+            if previous_mode is None:
+                os.environ.pop("LLM_MODE", None)
+            else:
+                os.environ["LLM_MODE"] = previous_mode
+
+    asyncio.run(run())

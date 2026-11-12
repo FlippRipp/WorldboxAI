@@ -105,6 +105,8 @@ export default function ModelSettings({ onBack, embedded = false }) {
   const [keyLocked, setKeyLocked] = useState(false);
   const [keyValue, setKeyValue] = useState('');
   const [connecting, setConnecting] = useState(false);
+  const [strictPostProcessing, setStrictPostProcessing] = useState(false);
+  const [strictSaving, setStrictSaving] = useState(false);
   const endpointRequests = useRef(new Map());
 
   const fetchUpstreamProviders = useCallback((model, refresh = false) => {
@@ -141,6 +143,36 @@ export default function ModelSettings({ onBack, embedded = false }) {
   }, []);
 
   useEffect(() => { loadProviders(); }, [loadProviders]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getSettings('global')
+      .then((data) => {
+        if (cancelled) return;
+        for (const items of Object.values(data?.settings || {})) {
+          const hit = (items || []).find((s) => s.key === 'prompt.strict_post_processing');
+          if (hit) {
+            setStrictPostProcessing(Boolean(hit.value ?? hit.default));
+            return;
+          }
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleToggleStrictPostProcessing = useCallback(async (_key, nextVal) => {
+    setStrictPostProcessing((prev) => {
+      setStrictSaving(true);
+      api.updateSettings({ 'prompt.strict_post_processing': nextVal }, 'global')
+        .catch((e) => {
+          console.error('Failed to update Strict Prompt Post-Processing:', e);
+          setStrictPostProcessing(prev);
+        })
+        .finally(() => setStrictSaving(false));
+      return nextVal;
+    });
+  }, []);
 
   const fetchModelsFor = useCallback(async (pid) => {
     setLoadingModels(true);
@@ -304,6 +336,23 @@ export default function ModelSettings({ onBack, embedded = false }) {
         {!embedded && <h2 className="text-2xl font-bold text-gray-100 mb-6">Model Settings</h2>}
 
         <JevSettings activeProvider={activeId} />
+
+        {/* Prompt Compatibility (applies globally across providers) */}
+        <div className="mb-6 p-4 rounded-xl bg-gray-800/50 border border-gray-700 space-y-3">
+          <h3 className="text-sm font-semibold text-gray-200">Prompt Compatibility</h3>
+          <FieldInput
+            fieldKey="strict_post_processing"
+            fdef={{
+              type: 'toggle',
+              label: 'Strict Prompt Post-Processing',
+              description: 'Normalize compiled prompts for strict models (Gemini Argon, Claude Opus 5.5): merge top system blocks, convert inline/trailing system directives to user, skip assistant prefills, merge consecutive same-role turns, and guarantee the final message is user.',
+            }}
+            value={strictPostProcessing}
+            onChange={handleToggleStrictPostProcessing}
+            disabled={strictSaving}
+          />
+        </div>
+
         {/* Provider dropdown */}
         <div className="mb-6">
           <label className="text-sm text-gray-300 mb-2 block">Provider</label>

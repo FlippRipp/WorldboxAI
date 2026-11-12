@@ -142,6 +142,17 @@ class EngineGraph:
             description="Unlock cheat controls across all stories, e.g. choosing the rarity a new skill rolls instead of leaving it to fate.",
             is_global=True,
         )
+        self.settings.register(
+            "prompt.strict_post_processing", "toggle", False,
+            label="Strict Prompt Post-Processing",
+            category="Prompt",
+            description="Normalize compiled prompts for strict models (Gemini Argon, Claude Opus 5.5): merge top system blocks, convert inline/trailing system directives to user, skip assistant prefills, merge consecutive same-role turns, and guarantee the final message is user.",
+            is_global=True,
+        )
+
+    def _strict_post_processing_enabled(self) -> bool:
+        settings = getattr(self, "settings", None)
+        return bool(settings and settings.get("prompt.strict_post_processing"))
 
     def register_story_source(self, source_type: str, provider):
         """Register a story-source provider (e.g. the world module's world source).
@@ -927,16 +938,22 @@ class EngineGraph:
             "Rewriting the response…" if needs_rewrite else "Writing the story…",
         )
 
+        strict_pp = self._strict_post_processing_enabled()
         if needs_rewrite and veto_retries < VETO_MAX_RETRIES:
             veto_reason = state.get("veto_reason", "Unknown validation failure")
             print(f"[Node: Storyteller] REWRITE attempt {veto_retries + 1}/{VETO_MAX_RETRIES}: {veto_reason[:100]}")
             compiled_prompt = self.prompt_compiler.compile(
                 state,
                 module_blocks=module_prompt_blocks,
-                validation_veto=f"PREVIOUS RESPONSE REJECTED by module validation. REASON: {veto_reason}\n\nRewrite your narration. The rejected action must not appear in the new response."
+                validation_veto=f"PREVIOUS RESPONSE REJECTED by module validation. REASON: {veto_reason}\n\nRewrite your narration. The rejected action must not appear in the new response.",
+                strict_post_processing=strict_pp,
             )
         else:
-            compiled_prompt = self.prompt_compiler.compile(state, module_blocks=module_prompt_blocks)
+            compiled_prompt = self.prompt_compiler.compile(
+                state,
+                module_blocks=module_prompt_blocks,
+                strict_post_processing=strict_pp,
+            )
 
         # Don't stream on veto rewrites — the first attempt already sent tokens to
         # the client, so streaming again would produce a second visible response.
@@ -1029,6 +1046,7 @@ class EngineGraph:
             state,
             pipeline=prompt_pipeline,
             module_blocks=module_prompt_blocks,
+            strict_post_processing=self._strict_post_processing_enabled(),
         )
 
     async def _module_prompt_blocks(self, state: WorldState) -> list[dict]:

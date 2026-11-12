@@ -2719,8 +2719,11 @@ async def websocket_endpoint(websocket: WebSocket):
             })
 
     async def handle_turn(data):
-        # Update state with user input
+        # Update state with user input; normalize whitespace-only sends to ""
+        # so they run cleanly as Continue turns without saving a blank user bubble.
         text = data.get("text", "")
+        if not isinstance(text, str) or not text.strip():
+            text = ""
         if engine.settings.get("storyteller.auto_mode"):
             # Storyteller auto mode: the AI plays the player. Whatever was
             # typed stays out of the story and only steers the generated action,

@@ -205,7 +205,7 @@ def test_empty_input_uses_continue_prompt_as_user_turn(tmp_path):
 
 def test_empty_input_without_configured_prompt_falls_back_to_default(tmp_path):
     state = {"chat_messages": [{"role": "ai", "content": "Intro."}], "input_text": ""}
-    assert _compile_last_user(state) == DEFAULT_CONTINUE_PROMPT
+    assert _compile_last_user(state) == PromptCompiler().resolve_macros(DEFAULT_CONTINUE_PROMPT, state)
 
 
 def test_continue_prompt_store_roundtrip_and_state(tmp_path):
