@@ -1,6 +1,8 @@
 import io
 import os
+import sys
 import json
+import importlib
 import importlib.util
 import logging
 import re
@@ -287,11 +289,49 @@ class ModuleRegistry:
 
         return ordered
 
+    @staticmethod
+    def _evict_module_submodules(mod_path: str) -> None:
+        """Evict any `sys.modules` entries loaded from inside `mod_path` so a
+        hot-update or rollback imports fresh subpackages instead of stale cached
+        module objects."""
+        prefixes = {
+            os.path.normcase(os.path.abspath(mod_path)) + os.sep,
+            os.path.normcase(os.path.realpath(mod_path)) + os.sep,
+        }
+
+        def _under_mod(p: str | None) -> bool:
+            if not isinstance(p, str) or not p:
+                return False
+            for norm_p in (
+                os.path.normcase(os.path.abspath(p)),
+                os.path.normcase(os.path.realpath(p)),
+            ):
+                if any(norm_p.startswith(pref) for pref in prefixes):
+                    return True
+            return False
+
+        for name, mod in list(sys.modules.items()):
+            if mod is None:
+                continue
+            if _under_mod(getattr(mod, "__file__", None)):
+                sys.modules.pop(name, None)
+                continue
+            mod_paths = getattr(mod, "__path__", None)
+            if mod_paths is not None:
+                try:
+                    if any(_under_mod(p) for p in list(mod_paths)):
+                        sys.modules.pop(name, None)
+                except TypeError:
+                    pass
+        importlib.invalidate_caches()
+
     def _load_module_backend(self, candidate: dict) -> bool:
         mod_name = candidate["mod_name"]
         mod_path = candidate["path"]
         manifest = candidate["manifest"]
         backend_path = os.path.join(mod_path, "backend.py")
+
+        self._evict_module_submodules(mod_path)
 
         # Dynamically load backend.py
         spec = importlib.util.spec_from_file_location(f"wb_module_{mod_name}", backend_path)
@@ -667,6 +707,7 @@ class ModuleRegistry:
         self.loaded_modules.pop(mod_id, None)
         self.load_errors.pop(mod_id, None)
         self.discovered.pop(mod_id, None)
+        self._evict_module_submodules(candidate["path"])
         shutil.rmtree(candidate["path"], ignore_errors=True)
 
         changed = False

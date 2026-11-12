@@ -407,6 +407,62 @@ def test_update_source_bookkeeping(tmp_path):
     assert saved["sources"] == {}
 
 
+def test_update_module_reloads_nested_subpackages(tmp_path):
+    """Updating a multi-file module whose backend imports a local subpackage must
+    evict v1's cached `sys.modules` entries so v2 can import newly added symbols."""
+    import sys
+
+    registry, modules_dir = make_registry(tmp_path)
+    registry.load_all_modules()
+
+    v1_backend = (
+        "import os, sys\n"
+        "_D = os.path.dirname(__file__)\n"
+        "if _D not in sys.path:\n"
+        "    sys.path.insert(0, _D)\n"
+        "from wb_subpkg_test.helpers import old_symbol\n"
+        "marker = old_symbol()\n"
+    )
+    v2_backend = (
+        "import os, sys\n"
+        "_D = os.path.dirname(__file__)\n"
+        "if _D not in sys.path:\n"
+        "    sys.path.insert(0, _D)\n"
+        "from wb_subpkg_test.helpers import normalize_pattern\n"
+        "marker = normalize_pattern('WAVE')\n"
+    )
+
+    v1_entries = {
+        **module_zip_entries("wb_multi", backend=v1_backend, version="1.0.0"),
+        "wb_subpkg_test/__init__.py": "",
+        "wb_subpkg_test/helpers.py": "def old_symbol():\n    return 'v1'\n",
+    }
+    v2_entries = {
+        **module_zip_entries("wb_multi", backend=v2_backend, version="2.0.0"),
+        "wb_subpkg_test/__init__.py": "",
+        "wb_subpkg_test/helpers.py": "def normalize_pattern(x):\n    return x.lower()\n",
+    }
+
+    mod_dir_str = str(modules_dir / "wb_multi")
+    try:
+        registry.install_module_from_zip(build_zip(v1_entries))
+        assert registry.get_modules()["wb_multi"]["backend"].marker == "v1"
+        assert "wb_subpkg_test.helpers" in sys.modules
+
+        previous = registry.update_module_from_zip("wb_multi", build_zip(v2_entries))
+        assert previous == "1.0.0"
+        assert registry.get_modules()["wb_multi"]["backend"].marker == "wave"
+
+        registry.remove_module("wb_multi")
+        assert "wb_subpkg_test" not in sys.modules
+        assert "wb_subpkg_test.helpers" not in sys.modules
+    finally:
+        sys.path[:] = [p for p in sys.path if p != mod_dir_str]
+        for k in list(sys.modules):
+            if k == "wb_subpkg_test" or k.startswith("wb_subpkg_test."):
+                sys.modules.pop(k, None)
+
+
 # ---------------------------------------------------------------------------
 # GitHub URL parsing
 
