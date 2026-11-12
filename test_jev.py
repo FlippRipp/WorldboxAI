@@ -64,7 +64,7 @@ def test_configuration_is_separate_masked_and_persistent(tmp_path):
     service.save({'enabled': True})
     reloaded = JevService(path)
     assert reloaded.public_config() == {'enabled': True, 'rpg_enabled': False,
-        'npc_enabled': True, 'model': 'jev-latest', 'api_key_set': True}
+        'npc_enabled': True, 'plot_enabled': True, 'model': 'jev-latest', 'api_key_set': True}
     assert 'secret' not in json.dumps(reloaded.public_config())
     reloaded.save({'remove_api_key': True})
     assert not reloaded.public_config()['api_key_set']
@@ -634,4 +634,39 @@ def test_realistic_multi_bucket_distributions_succeed_on_rpg_and_npc_tasks(tmp_p
     assert run(backend._judge_xp(char, rpg_state(char.to_dict()), {}, sdk))
     assert char.xp == 8
     assert len(requests) == 2 and not generated
+
+
+def test_plot_injection_classifier(tmp_path):
+    service, sdk, requests, _, _ = setup_jev(tmp_path, {'inject': 'withhold'})
+    thread = {
+        'title': 'The Salt Baron',
+        'mode': 'intrigue',
+        'hook': 'Rumors spread across the docks.',
+        'challenge': 'Enforcers corner you in the alley.',
+        'stakes': 'The harbor district.',
+    }
+    state = {
+        'turn': 4,
+        'history': ['You sit quietly with Lyra by the fireplace, sharing old memories.'],
+        'input_text': 'I hold her hand and tell her how much she means to me.',
+    }
+    mode = run(jev_tasks.plot_injection(sdk, state, thread, last_assessment=None))
+    assert mode == 'withhold'
+    assert len(requests) == 1
+    ctx = requests[0]['state']
+    assert 'last_turn_assessment' not in ctx
+    assert 'determine readiness directly' in requests[0]['questions']['inject']['instructions']
+
+    # When a fresh assessment is provided, it is included in context.
+    fresh = {'turn': 4, 'scene_mode': 'hook_only', 'thread_engaged': False, 'player_interest': 'indifferent', 'momentum': 'steady'}
+    mode2 = run(jev_tasks.plot_injection(sdk, state, thread, last_assessment=fresh))
+    assert mode2 == 'withhold'
+    assert requests[1]['state']['last_turn_assessment']['scene_mode'] == 'hook_only'
+
+    # Disabling plot_enabled skips the JEV network call and returns None.
+    service.save({'plot_enabled': False})
+    mode3 = run(jev_tasks.plot_injection(sdk, state, thread, last_assessment=fresh))
+    assert mode3 is None
+    assert len(requests) == 2
+
 

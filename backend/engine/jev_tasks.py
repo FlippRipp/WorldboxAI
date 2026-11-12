@@ -7,6 +7,7 @@ from backend.engine.jev import ask, choice, noul, Decision, Uncertain
 
 RPG = "wb_core_rpg"
 NPC = "wb_npc_system"
+PLOT = "wb_plot_director"
 
 
 def _options(records, describe):
@@ -275,3 +276,59 @@ async def introduce(sdk, state, candidates, prompt):
     except Uncertain as exc:
         d.reason = str(exc)
         return None, d
+
+
+async def plot_injection(sdk, state, thread, last_assessment=None):
+    """Judge whether and how the active plot thread should be injected into the
+    Storyteller prompt for the current turn ('withhold' | 'hook_only' | 'active').
+    Only receives last_assessment when it is fresh from the end of the previous
+    turn; otherwise determines readiness directly from recent_story and player_action."""
+    options = {
+        "withhold": (
+            "Withhold the plot thread this turn: the player is in or initiating an "
+            "intimate, emotional, heart-to-heart, or private conversation/moment "
+            "(or a focused scene) where injecting plot material would interrupt or intrude."
+        ),
+        "hook_only": (
+            "Inject only the subtle hook/breadcrumb: the scene has room for a light "
+            "background hook or invitation without bringing in the adversary or complication."
+        ),
+        "active": (
+            "Inject the full thread (hook and challenge/complication): the player is "
+            "actively engaging with the plot thread or the current scene naturally calls "
+            "for its complication."
+        ),
+    }
+    context = {
+        "recent_story": list(state.get("history", []))[-5:],
+        "player_action": state.get("input_text", ""),
+        "turn": state.get("turn", 0),
+        "thread": {k: thread.get(k, "") for k in ("title", "mode", "hook", "challenge", "stakes")},
+    }
+    if last_assessment is not None:
+        context["last_turn_assessment"] = last_assessment
+        instruction = (
+            "Given the recent story, the player's current action, and the background "
+            "assessment from the end of the last turn, how should this plot thread be "
+            "injected into the Storyteller prompt for this turn? Choose withhold unless "
+            "there is a clear, non-intrusive fit."
+        )
+    else:
+        instruction = (
+            "The background assessment from the end of the last turn is not available yet; "
+            "determine readiness directly for yourself from the recent story and the player's "
+            "current action how this plot thread should be injected into the Storyteller prompt "
+            "for this turn. Choose withhold unless there is a clear, non-intrusive fit."
+        )
+    d = await ask(sdk, context, {"inject": choice(instruction, options)}, PLOT, "plot:inject")
+    try:
+        selected = d.pick("inject")
+        await d.finish("accepted")
+        return selected
+    except asyncio.CancelledError:
+        await d.finish("cancelled")
+        raise
+    except Uncertain as exc:
+        d.reason = str(exc)
+        await d.finish("fallback", d.reason)
+        return None

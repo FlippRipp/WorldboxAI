@@ -26,7 +26,7 @@ export default function JevSettings({ activeProvider = '' }) {
     setBusy(true); setMessage('');
     try {
       const settings = { enabled: config.enabled, rpg_enabled: config.rpg_enabled,
-        npc_enabled: config.npc_enabled, model: config.model };
+        npc_enabled: config.npc_enabled, plot_enabled: config.plot_enabled, model: config.model };
       const next = await request('config', 'PUT', {
         ...settings, ...(key ? { api_key: key } : {}),
         ...(remove ? { remove_api_key: true } : {}),
@@ -57,7 +57,7 @@ export default function JevSettings({ activeProvider = '' }) {
     </p>
     {config && <>
       <div className="flex flex-wrap gap-5 text-sm text-gray-200">
-        {[['enabled', 'Enable Jev'], ['rpg_enabled', 'RPG decisions'], ['npc_enabled', 'NPC decisions']].map(([field, label]) =>
+        {[['enabled', 'Enable Jev'], ['rpg_enabled', 'RPG decisions'], ['npc_enabled', 'NPC decisions'], ['plot_enabled', 'Plot decisions']].map(([field, label]) =>
           <label key={field} className="flex items-center gap-2"><input type="checkbox" checked={config[field]} disabled={busy}
             onChange={e => setConfig({ ...config, [field]: e.target.checked })} />{label}</label>)}
       </div>

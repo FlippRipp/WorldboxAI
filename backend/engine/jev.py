@@ -19,7 +19,7 @@ PRICE_DATE = "2026-10-01"
 INPUT_USD_PER_MILLION = 0.042
 FALLBACK_CONTEXT = ContextVar("jev_fallback_context", default=None)
 DEFAULTS = {"enabled": False, "rpg_enabled": True, "npc_enabled": True,
-            "model": "jev-latest", "api_key": ""}
+            "plot_enabled": True, "model": "jev-latest", "api_key": ""}
 
 
 class Uncertain(ValueError):
@@ -231,7 +231,7 @@ class JevService:
             raise ValueError("Unknown Jev setting")
         config = self._config()
         for key, value in updates.items():
-            if key in ("enabled", "rpg_enabled", "npc_enabled", "remove_api_key"):
+            if key in ("enabled", "rpg_enabled", "npc_enabled", "plot_enabled", "remove_api_key"):
                 if not isinstance(value, bool):
                     raise ValueError(f"{key} must be a boolean")
             elif not isinstance(value, str):
@@ -257,7 +257,11 @@ class JevService:
     async def decide(self, state, questions, *, module, step, mode="live", inspector=None, test=False):
         result = Decision(module=module, step=step, inspector=inspector)
         config = self._config()
-        slot = {"wb_core_rpg": "rpg_enabled", "wb_npc_system": "npc_enabled"}.get(module)
+        slot = {
+            "wb_core_rpg": "rpg_enabled",
+            "wb_npc_system": "npc_enabled",
+            "wb_plot_director": "plot_enabled",
+        }.get(module)
         if not test:
             if mode == "mock" or not config["enabled"] or not slot or not config[slot]:
                 result.reason = "disabled or unavailable"

@@ -1906,3 +1906,213 @@ def test_time_tracker_clock_and_elapsed_time_in_prompts():
     assert "turn 4, 2 days, 3 hours ago in-world" in gen_prompt
 
 
+def test_background_job_discards_updates_when_turn_was_deleted():
+    """If the player deletes/undoes a turn while its deferred Plot Director pass
+    is still running, the background pass must not write or stage updates from
+    the deleted turn onto the rolled-back session."""
+    backend = _load_backend()
+
+    class DummyEngine:
+        _turn_hooks_armed = True
+
+        @staticmethod
+        def _deep_merge(base, updates):
+            merged = dict(base)
+            merged.update(updates)
+            return merged
+
+    class DummySaveManager:
+        def __init__(self):
+            self.saved_turns = []
+
+        def save_turn(self, save_id, state, turn):
+            self.saved_turns.append((save_id, turn))
+
+    class DummySessionManager:
+        def __init__(self, state):
+            self.active_save_id = "save1"
+            self.state = state
+            self.save_manager = DummySaveManager()
+
+    class DummyChatHub:
+        def __init__(self, running=False):
+            self.messages = []
+            self.running = running
+
+        def turn_running(self):
+            return self.running
+
+        async def send(self, payload):
+            self.messages.append(payload)
+
+    async def run_deleted_turn():
+        data = _active_data(backend, created_turn=1)
+        turn3_state = _state(turn=3, data=data, active_save_id="save1")
+        sm = DummySessionManager(turn3_state)
+        hub = DummyChatHub(running=True)
+        backend.set_services({
+            "engine": DummyEngine(),
+            "session_manager": sm,
+            "chat_hub": hub,
+        })
+        try:
+            sdk = _make_sdk([_assessment_reply()], {})
+            await backend.on_librarian(turn3_state, sdk)
+
+            # Player deletes turn 3 (rolling live state back to turn 2) while a
+            # rewritten turn 3 begins streaming.
+            rolled_back_data = _active_data(backend, created_turn=1)
+            sm.state = _state(turn=2, data=rolled_back_data, active_save_id="save1")
+
+            await backend.on_turn_stopped(turn3_state, sdk, "completed")
+            assert backend._current_bg_task is not None
+            await backend._current_bg_task
+
+            assert sm.save_manager.saved_turns == []
+            assert hub.messages == []
+            assert sm.state["module_data"]["wb_plot_director"]["log"] == []
+            assert backend._staged_bg_updates is None
+        finally:
+            backend._cancel_bg_task()
+            backend.set_services({})
+
+    asyncio.run(run_deleted_turn())
+
+
+def test_plot_injection_scene_mode_withhold_hook_only_and_missing_assessment_fallback():
+    """on_render_prompt_block gates plot injection via JEV + fresh background
+    assessment:
+    - 'withhold' injects nothing (protects heart-to-heart / intimate moments).
+    - 'hook_only' injects the hook breadcrumb without 'Complication:'.
+    - Stale or in-flight background assessments are NOT passed to JEV (JEV
+      determines readiness for itself), and if JEV is unavailable/uncertain,
+      missing/stale assessment defaults cautiously to 'withhold'."""
+    backend = _load_backend()
+    block = {"id": "plot_thread"}
+
+    # 1. Without JEV: fresh assessment at current turn (turn=4) controls injection.
+    sdk_no_jev = _make_sdk([], {})
+    data_withhold = _active_data(
+        backend,
+        created_turn=1,
+        scene_mode="withhold",
+        last_assessment={"turn": 4, "scene_mode": "withhold", "thread_engaged": False, "player_interest": "indifferent", "momentum": "steady"},
+    )
+    assert asyncio.run(backend.on_render_prompt_block(block, _state(turn=4, data=data_withhold), sdk_no_jev))["content"] == ""
+
+    data_hook_only = _active_data(
+        backend,
+        created_turn=1,
+        scene_mode="hook_only",
+        last_assessment={"turn": 4, "scene_mode": "hook_only", "thread_engaged": False, "player_interest": "indifferent", "momentum": "steady"},
+    )
+    hook_only_content = asyncio.run(backend.on_render_prompt_block(block, _state(turn=4, data=data_hook_only), sdk_no_jev))["content"]
+    assert "A dockworker presses a stolen ledger into your hands." in hook_only_content
+    assert "Complication:" not in hook_only_content
+    assert "hold back active complications or adversaries" in hook_only_content
+
+    # 2. Without JEV (or when JEV is uncertain): stale assessment from an earlier
+    # turn (turn=3 < state turn=4) has no clear affirmative -> waits ('withhold').
+    data_stale = _active_data(
+        backend,
+        created_turn=1,
+        scene_mode="active",
+        last_assessment={"turn": 3, "scene_mode": "active", "thread_engaged": True, "player_interest": "proactive", "momentum": "building"},
+    )
+    assert asyncio.run(backend.on_render_prompt_block(block, _state(turn=4, data=data_stale), sdk_no_jev))["content"] == ""
+
+    # 3. With JEV: fresh assessment is passed to JEV; stale assessment passes None
+    # so JEV determines readiness for itself.
+    jev_calls = []
+
+    async def fake_plot_injection(sdk, state, thread, last_assessment=None):
+        jev_calls.append(last_assessment)
+        return state.get("_jev_return")
+
+    orig_jev_tasks = backend.jev_tasks
+    backend.jev_tasks = SimpleNamespace(plot_injection=fake_plot_injection)
+    sdk_with_jev = SimpleNamespace(llm=SimpleNamespace(decide=lambda *a, **kw: None, generate=lambda *a, **kw: "{}"))
+    try:
+        # Stale assessment (turn 3 vs state turn 4) -> JEV receives None, returns 'hook_only'.
+        st_stale = _state(turn=4, data=data_stale, _jev_return="hook_only")
+        out_stale = asyncio.run(backend.on_render_prompt_block(block, st_stale, sdk_with_jev))["content"]
+        assert jev_calls[-1] is None
+        assert "stolen ledger" in out_stale
+        assert "Complication:" not in out_stale
+
+        # Fresh assessment (turn 4 == state turn 4) -> JEV receives the fresh dict;
+        # JEV overrides 'active' to 'withhold' when the player's new input initiates a heart-to-heart.
+        data_fresh_active = _active_data(
+            backend,
+            created_turn=1,
+            scene_mode="active",
+            last_assessment={"turn": 4, "scene_mode": "active", "thread_engaged": True, "player_interest": "proactive", "momentum": "steady"},
+        )
+        st_fresh = _state(turn=4, data=data_fresh_active, _jev_return="withhold")
+        out_fresh = asyncio.run(backend.on_render_prompt_block(block, st_fresh, sdk_with_jev))["content"]
+        assert jev_calls[-1] == data_fresh_active["last_assessment"]
+        assert out_fresh == ""
+    finally:
+        backend.jev_tasks = orig_jev_tasks
+
+
+def test_role_explicit_likes_dislikes_and_prompts():
+    """Likes, dislikes, and avoids support role ('actor' | 'target' | 'mutual' | 'world'),
+    and generation/critic/assessment prompts forbid inverting the player's role."""
+    backend = _load_backend()
+    data = _active_data(backend, created_turn=1)
+
+    # Assessment pass preserves role on likes and avoids and records scene_mode + last_assessment.
+    reply = _assessment_reply(
+        scene_mode="hook_only",
+        profile=_profile_reply(
+            likes=[{
+                "text": "initiating playful transformation on willing NPCs",
+                "weight": "high",
+                "role": "actor",
+                "evidence": "cast the glamour charm on the rival mage",
+            }],
+            avoids=[{
+                "text": "being targeted by transformation magic",
+                "weight": "high",
+                "role": "target",
+                "evidence": "deflected the hex immediately",
+            }],
+        ),
+    )
+    captured = {}
+    res = asyncio.run(backend.on_librarian(_state(turn=3, data=data), _make_sdk([reply], captured)))
+    update = _updates(res)
+    assert update["scene_mode"] == "hook_only"
+    assert update["last_assessment"]["turn"] == 3
+    assert update["last_assessment"]["scene_mode"] == "hook_only"
+    assert update["profile"]["likes"][0] == {
+        "text": "initiating playful transformation on willing NPCs",
+        "weight": "high",
+        "role": "actor",
+        "evidence": "cast the glamour charm on the rival mage",
+    }
+    assert update["profile"]["avoids"][0]["role"] == "target"
+
+    # /plot profile likes add supports optional weight and role tokens.
+    merged_data = {**data, **update}
+    cmd_res = asyncio.run(backend.on_command_plot(
+        ["profile", "likes", "add", "high", "actor", "teasing rival nobles"],
+        _state(turn=3, data=merged_data),
+        _make_sdk([], {}),
+    ))
+    new_likes = _updates(cmd_res)["profile"]["likes"]
+    added = next(e for e in new_likes if e["text"] == "teasing rival nobles")
+    assert added["weight"] == "high"
+    assert added["role"] == "actor"
+    assert "[actor]" in backend._profile_line(_updates(cmd_res)["profile"])
+
+    # Prompts explicitly guard against bare ambiguous tags and role inversion.
+    assert "NEVER invert the player's role" in backend.DIRECTIVE_THREAD_GENERATION
+    assert "NEVER inverts the player's role" in backend.DIRECTIVE_FIT_CHECK
+    assert "who is the actor and who is the target" in backend.DIRECTIVE_TURN_ASSESSMENT
+    assert "who is the actor and who is the target" in backend.DIRECTIVE_PROFILE_BOOTSTRAP
+
+
+
+

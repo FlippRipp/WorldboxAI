@@ -23,12 +23,19 @@ import asyncio
 import json
 import re
 
+try:
+    from backend.engine import jev_tasks
+except ImportError:
+    jev_tasks = None
+
 MODULE_ID = "wb_plot_director"
 
 SCHEMA_VERSION = 3
 DEFAULT_OBSERVATION_TURNS = 4
 THREAD_MODES = ("spectacle", "intrigue", "character", "variety")
 ENGAGEMENT_KINDS = ("proactive", "reactive", "indifferent", "resistant")
+INJECT_MODES = ("withhold", "hook_only", "active")
+PREF_ROLES = ("actor", "target", "mutual", "world")
 PLAYSTYLE_KEYS = (
     "combat", "diplomacy", "exploration", "mystery", "social", "intrigue",
     "stealth", "strategy", "romance", "crafting", "roleplay", "humor",
@@ -128,25 +135,27 @@ DIRECTIVE_THREAD_GENERATION = """Design ONE new thread that fits the established
 - intrigue (mystery, stealth, politics, strategy): secrets to uncover, hidden agendas, faction tensions, or investigations.
 - character (romance, social, roleplay, drama): deepening bonds with attached NPCs, personal dilemmas, loyalties, or emotional crossroads.
 - variety (slice-of-life, cozy, humor, crafting, exploration): low-stress invitations, local events, charming oddities, or wonders to explore -- adding texture and variety rather than hostile opposition.
-GROUND IT: anchor the hook in established characters, places, factions, or unresolved hooks from the material above -- invent at most one new minor element, and only when nothing established fits. Where a past consequence, planted seed, horizon milestone, or open question offers a natural seed, grow the thread from it."""
+GROUND IT: anchor the hook in established characters, places, factions, or unresolved hooks from the material above -- invent at most one new minor element, and only when nothing established fits. Where a past consequence, planted seed, horizon milestone, or open question offers a natural seed, grow the thread from it.
+RESPECT ROLE & DIRECTION IN LIKES/AVOIDS: Each like or avoid may specify a player role (actor = the player doing it to NPCs; target = having it done to the player; mutual = shared two-way dynamic; world = general theme/setting element) and relational phrasing. NEVER invert the player's role (e.g. if the player likes initiating a trope or transformation as the actor on NPCs, create opportunities where the player is the actor targeting a fitting NPC -- never make the player the victim or target of that trope unless their profile explicitly says role: target)."""
 
 DIRECTIVE_FIT_CHECK = """Reject the candidate if ANY of these fail:
 1. Tone/genre fit: it belongs in this story's genre, prevailing tone, and chosen mode (e.g. slice-of-life/variety threads should not force grim crisis, and action/spectacle threads should offer exciting conflict).
 2. Grounding: its hook rises from established characters, places, or events -- not a disconnected new invention.
 3. Continuity: it does not contradict anything established in the story.
 4. Arc fit: it advances, complicates, or gives a fitting breather within the narrative direction and horizon (skip this check if no direction is given).
-5. It does not touch any player dislike.
+5. It does not touch any player dislike, and it NEVER inverts the player's role in a liked trope or dynamic (e.g. targeting the player with something they only enjoy doing as the actor to NPCs, or vice versa).
 6. Player freedom: the challenge describes opposition or tension in the world, not a course of action -- reject anything that dictates what the player must or should do, or bakes in a specific solution."""
 
 DIRECTIVE_TURN_ASSESSMENT = f"""- thread_engaged: did the player or the scene meaningfully interact with the active thread this turn?
 - player_interest: proactive | reactive | indifferent | resistant. "proactive" means the player actively initiated, probed deeper, or leaned into this hook; "reactive" means the player only dealt with it because the narrator put it directly in their path; "indifferent" means their focus was elsewhere; "resistant" means the player actively deflected, cut short, or walked away from the hook.
+- scene_mode: withhold | hook_only | active. How the active plot thread should be injected into the storyteller prompt for the NEXT turn. Choose "withhold" when the scene is in or entering an intimate, emotional, heart-to-heart, romantic, or private conversation/moment where plot injection would intrude. Choose "hook_only" when the scene has room for a subtle background rumor or atmosphere from the hook without pushing the thread's complication/adversary. Choose "active" when the scene is open for both the hook and complication.
 - thread_resolved: is the thread's challenge definitively over (overcome, defused, or conclusively failed)?
 - player_pivot: has the player clearly COMMITTED to a different pursuit than the active thread -- a stated intention, a new goal, leaving the situation behind for good? A brief detour, a side errand, or a single scene elsewhere is NOT a pivot.
 - pivot_intent: one sentence naming what the player is now pursuing (only when player_pivot is true).
 - opportunity: does the scene end with a natural opening to bring the thread forward next turn?
 - nudge: one subtle piece of story material (a rumor, an arrival, a discovery) that could pull the scene toward the thread without contradicting what the player is doing. Never an instruction to the player.
 - momentum: building | steady | stalled
-- profile: the updated fast-moving profile fields. playstyle values are integers 0-10 for what the player actually does. tone is the story's prevailing tone in a few words. themes are short phrases. likes are what the player demonstrably enjoys; avoids are what they consistently steer away from in practice -- both carry a weight (low, medium, high) for how strongly the player seems to feel and one clause of evidence citing what the player actually did (an entry without real evidence does not belong). Learn from PLAYER INITIATIVE, not narrator imposition: add to likes or raise playstyle weights ONLY when the player proactively pursues, initiates, or lingers on something (proactive) -- never merely because the narrator threw an event at them and they reacted (reactive). If the player actively deflects or cuts short a hook type (resistant), record that pattern in avoids with evidence. At most {PROFILE_LIST_CAP} entries per list -- drop the least relevant to make room. Some entries may have been set directly by the player; preserve those (including their weight) unless the story clearly contradicts them. The profile's dislikes are set by the player themselves and are NOT yours to change -- do not include dislikes in your reply, and never add a like that contradicts one. A character acting averse to something in-story does not mean the player dislikes it. You may also include updated attachments or engagement (bites_on / ignores) when this turn reveals a clear signal."""
+- profile: the updated fast-moving profile fields. playstyle values are integers 0-10 for what the player actually does. tone is the story's prevailing tone in a few words. themes are short phrases. likes are what the player demonstrably enjoys; avoids are what they consistently steer away from in practice -- both carry a weight (low, medium, high) for how strongly the player seems to feel, a role (actor = the player doing it to others/NPCs, target = having it done to the player, mutual = shared two-way dynamic, world = general theme/setting), and one clause of evidence citing what the player actually did (an entry without real evidence does not belong). Always phrase likes and avoids relationally, stating who is the actor and who is the target -- NEVER use bare ambiguous tags (e.g. write "initiating playful transformation on willing NPCs" with role "actor", never a bare tag like "bimbofication" that leaves actor vs target unclear). Learn from PLAYER INITIATIVE, not narrator imposition: add to likes or raise playstyle weights ONLY when the player proactively pursues, initiates, or lingers on something (proactive) -- never merely because the narrator threw an event at them and they reacted (reactive). If the player actively deflects or cuts short a hook type (resistant), record that pattern in avoids with evidence. At most {PROFILE_LIST_CAP} entries per list -- drop the least relevant to make room. Some entries may have been set directly by the player; preserve those (including their weight and role) unless the story clearly contradicts them. The profile's dislikes are set by the player themselves and are NOT yours to change -- do not include dislikes in your reply, and never add a like that contradicts one. A character acting averse to something in-story does not mean the player dislikes it. You may also include updated attachments or engagement (bites_on / ignores) when this turn reveals a clear signal."""
 
 DIRECTIVE_DIRECTION_UPDATE = f"""- premise: 1-2 sentences: the larger arc the story seems to be telling.
 - endgame: 1-2 sentences: the overarching North Star or long-term destination giving the story purpose and comfort (an epic culmination for action/adventure, or a fulfilling life/bond milestone for slice-of-life/cozy play). Keep it ELASTIC: if the player has pulled the story in a new direction that diverges from the previous endgame, reshape the endgame around what they are actually building toward now.
@@ -165,8 +174,8 @@ DIRECTIVE_PROFILE_BOOTSTRAP = f"""Base the profile on demonstrated behavior, not
 - playstyle: integers 0-10 for how much the player actually does each thing.
 - tone: the story's prevailing tone in a few words.
 - themes: short phrases for the story's recurring themes.
-- likes: what the player demonstrably enjoys -- each with a weight (low, medium, high) for how strongly they seem to feel and one clause of evidence citing what they actually did.
-- avoids: what the player consistently steers away from in practice -- observed behavior only, each with weight and evidence. These are soft observations, not vetoes.
+- likes: what the player demonstrably enjoys -- each with a weight (low, medium, high) for how strongly they seem to feel, a role (actor = the player doing it to others/NPCs, target = having it done to the player, mutual = shared two-way dynamic, world = general theme/setting), and one clause of evidence citing what they actually did. Always phrase relationally, stating who is the actor and who is the target -- NEVER use bare ambiguous 1-word tags that leave actor vs target unclear.
+- avoids: what the player consistently steers away from in practice -- observed behavior only, each with weight, role (actor|target|mutual|world), and evidence, phrased relationally (who is actor vs target). These are soft observations, not vetoes.
 - attachments: named characters, places, factions, or objects the player keeps returning to -- name, kind, and a short note on why they seem to matter.
 - engagement: bites_on lists the shapes of hooks this player pursues ("a mystery with a personal stake"); ignores lists shapes they let pass by.
 - narrative: pacing (slow-burn vs action-forward), agency (drives the story vs reacts to it), register (the emotional payoffs that visibly land).
@@ -313,6 +322,8 @@ def _default_data() -> dict:
         "thread_history": [],
         "direction": _default_direction(),
         "momentum": "observing",
+        "scene_mode": "active",
+        "last_assessment": None,
         "ignored_streak": 0,
         "pending_nudge": "",
         "last_nudge_turn": 0,
@@ -350,19 +361,22 @@ def _cap_prefs(entries: list) -> list:
 
 
 def _clean_pref_list(value, previous: list, with_evidence: bool = False) -> list:
-    """Likes/dislikes/avoids: [{text, weight}] entries, plus an evidence clause
-    on observed lists. Plain strings (legacy saves, LLM shortcuts) normalize to
-    medium weight; bad weights become medium."""
+    """Likes/dislikes/avoids: [{text, weight}] entries (plus optional role:
+    actor|target|mutual|world), plus an evidence clause on observed lists. Plain
+    strings (legacy saves, LLM shortcuts) normalize to medium weight; bad
+    weights become medium."""
     source = value if isinstance(value, list) else previous
     cleaned = []
     for item in (source if isinstance(source, list) else []):
         if isinstance(item, dict):
             text = item.get("text", "")
             weight = item.get("weight")
+            role = str(item.get("role", "") or "").strip().lower()
             evidence = item.get("evidence", "")
         else:
             text = item
             weight = "medium"
+            role = ""
             evidence = ""
         text = str(text).strip()[:PROFILE_ENTRY_MAX_CHARS]
         if not text:
@@ -370,6 +384,8 @@ def _clean_pref_list(value, previous: list, with_evidence: bool = False) -> list
         if weight not in PREF_WEIGHTS:
             weight = "medium"
         entry = {"text": text, "weight": weight}
+        if role in PREF_ROLES:
+            entry["role"] = role
         if with_evidence:
             entry["evidence"] = str(evidence or "").strip()[:PROFILE_ENTRY_MAX_CHARS]
         cleaned.append(entry)
@@ -964,7 +980,12 @@ async def _bootstrap_profile(state: dict, sdk, preserved: dict | None = None) ->
     preserved_block = ""
     if preserved and (preserved.get("likes") or preserved.get("dislikes")):
         def _fmt(entries):
-            return "; ".join(f"{e.get('text', '')} ({e.get('weight', 'medium')})" for e in entries)
+            return "; ".join(
+                f"{e.get('text', '')} ({e.get('weight', 'medium')}"
+                + (f", role: {e['role']}" if e.get("role") else "")
+                + ")"
+                for e in entries
+            )
         lines = [
             "PLAYER-STATED PREFERENCES (set directly by the player; they are kept "
             "verbatim, so do not restate them -- build the rest of the profile "
@@ -994,7 +1015,7 @@ THE PLAYER'S OWN ACTIONS (their typed inputs, oldest to newest):
 {preserved_block}{_directive("profile_bootstrap", state.get("module_instructions"))}
 
 Respond with ONLY valid JSON:
-{{"playstyle": {{{", ".join(f'"{k}": 0' for k in PLAYSTYLE_KEYS)}}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high", "evidence": "..."}}], "avoids": [{{"text": "...", "weight": "low|medium|high", "evidence": "..."}}], "attachments": [{{"name": "...", "kind": "...", "note": "..."}}], "engagement": {{"bites_on": [], "ignores": []}}, "narrative": {{"pacing": "...", "agency": "...", "register": "..."}}, "notes": "..."}}"""
+{{"playstyle": {{{", ".join(f'"{k}": 0' for k in PLAYSTYLE_KEYS)}}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high", "role": "actor|target|mutual|world", "evidence": "..."}}], "avoids": [{{"text": "...", "weight": "low|medium|high", "role": "actor|target|mutual|world", "evidence": "..."}}], "attachments": [{{"name": "...", "kind": "...", "note": "..."}}], "engagement": {{"bites_on": [], "ignores": []}}, "narrative": {{"pacing": "...", "agency": "...", "register": "..."}}, "notes": "..."}}"""
 
     model_pref = config.get("thread_ai_model", "smartest")
     try:
@@ -1076,9 +1097,10 @@ async def _generate_thread(state: dict, sdk, data: dict, avoid_previous_kind: bo
     defer_streak = int(data.get("defer_streak", 0) or 0)
     may_defer = allow_defer and defer_streak < DEFER_MAX_STREAK
     defer_block = (
-        "\n\nIf the current scene is mid-climax or mid-crisis -- a moment where "
-        "introducing new plot material would intrude rather than enrich -- respond "
-        'instead with ONLY: {"defer": true}'
+        "\n\nIf the current scene is mid-climax, mid-crisis, or in an intimate / "
+        "emotional / heart-to-heart conversation -- a moment where introducing new "
+        "plot material would intrude rather than enrich -- respond instead with "
+        'ONLY: {"defer": true}'
         if may_defer else ""
     )
 
@@ -1098,7 +1120,7 @@ CHALLENGE DIFFICULTY:
 {_storylines_block(state)}{_character_roster(state)}{_character_sheet_block(state)}{_history_block(data, state)}{_directive("thread_generation", state.get("module_instructions"))}{different}{critique_block}{pivot_block}{defer_block}
 
 Respond with ONLY valid JSON:
-{{"title": "3-6 words", "mode": "spectacle|intrigue|character|variety", "hook": "how it surfaces in the story, one sentence", "challenge": "what stands in the way -- the opposition or situational tension itself, one sentence, never what the player should do about it", "stakes": "what is at risk or what could be gained, one sentence", "appeal": "which player preference this serves, a few words"}}"""
+{{"title": "3-6 words", "mode": "spectacle|intrigue|character|variety", "hook": "how it surfaces in the story, one sentence", "challenge": "what stands in the way -- the opposition or situational tension itself, one sentence, never what the player should do about it", "stakes": "what is at risk or what could be gained, one sentence", "appeal": "which player preference this serves, a few words", "scene_mode": "withhold|hook_only|active"}}"""
 
     model_pref = config.get("thread_ai_model", "smartest")
     try:
@@ -1123,6 +1145,8 @@ Respond with ONLY valid JSON:
     challenge = str(parsed.get("challenge", "")).strip() if isinstance(parsed, dict) else ""
     raw_mode = str(parsed.get("mode", "")).strip().lower() if isinstance(parsed, dict) else ""
     mode = raw_mode if raw_mode in THREAD_MODES else ""
+    raw_scene_mode = str(parsed.get("scene_mode", "")).strip().lower() if isinstance(parsed, dict) else ""
+    scene_mode = raw_scene_mode if raw_scene_mode in INJECT_MODES else "active"
 
     if not (title and hook and challenge):
         status = "failed" if attempts >= GEN_MAX_ATTEMPTS else data.get("status", "observing")
@@ -1136,6 +1160,8 @@ Respond with ONLY valid JSON:
         "gen_attempts": 0,
         "status": "active",
         "momentum": "building",
+        "scene_mode": scene_mode,
+        "last_assessment": None,
         "ignored_streak": 0,
         "defer_streak": 0,
         "thread": _full_thread(
@@ -1322,6 +1348,8 @@ def _finalize_thread(updates: dict, data: dict, thread: dict, outcome: str, turn
     history.append(entry)
     updates["thread_history"] = history[-THREAD_HISTORY_CAP:]
     updates["pending_nudge"] = ""
+    updates["scene_mode"] = "active"
+    updates["last_assessment"] = None
     updates["last_closed_turn"] = turn
     if closed_minutes is not None:
         updates["last_closed_minutes"] = closed_minutes
@@ -1409,10 +1437,22 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
     real weight -- advance the thread when the scene gives it room, follow
     the player's lead, never railroad. An armed nudge rides along for
     exactly one turn (consumed by the librarian)."""
+    global _staged_bg_updates
     if block.get("id") != "plot_thread":
         return {"content": ""}
     config = _config(state)
     data = _own_data(state)
+    if _staged_bg_updates is not None and isinstance(data, dict):
+        staged = _staged_bg_updates
+        staged_turn = int(staged.get("turn", 0) or 0)
+        if (
+            staged.get("save_id") == state.get("active_save_id")
+            and staged_turn <= int(state.get("turn", 0) or 0)
+            and isinstance(staged.get("updates"), dict)
+        ):
+            _staged_bg_updates = None
+            data.update(staged["updates"])
+
     thread = (data.get("thread") or {}) if data else {}
     if (
         not data
@@ -1423,6 +1463,53 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
     ):
         return {"content": ""}
 
+    turn = int(state.get("turn", 0) or 0)
+    bg_in_flight = (
+        (_current_bg_task is not None and not _current_bg_task.done())
+        or (_pending_bg_job is not None)
+    )
+    raw_assessment = data.get("last_assessment")
+    fresh_assessment = (
+        raw_assessment
+        if (
+            isinstance(raw_assessment, dict)
+            and not bg_in_flight
+            and int(raw_assessment.get("turn", -1)) == turn
+        )
+        else None
+    )
+    assessment_missing = bg_in_flight or (
+        isinstance(raw_assessment, dict) and int(raw_assessment.get("turn", -1)) < turn
+    )
+
+    jev_mode = None
+    if jev_tasks is not None and getattr(getattr(sdk, "llm", None), "decide", None) is not None:
+        jev_mode = await jev_tasks.plot_injection(
+            sdk, state, thread, last_assessment=fresh_assessment
+        )
+
+    if jev_mode in INJECT_MODES:
+        inject_mode = jev_mode
+    elif assessment_missing:
+        inject_mode = "withhold"
+    elif fresh_assessment is not None:
+        raw_mode = str(fresh_assessment.get("scene_mode") or "").strip().lower()
+        inject_mode = raw_mode if raw_mode in INJECT_MODES else "withhold"
+    else:
+        raw_mode = str(data.get("scene_mode", "active") or "").strip().lower()
+        inject_mode = raw_mode if raw_mode in INJECT_MODES else "active"
+
+    if inject_mode == "withhold":
+        return {"content": ""}
+
+    if inject_mode == "hook_only":
+        thread_line = f"Thread: \"{thread.get('title', '')}\". {thread.get('hook', '')}"
+    else:
+        thread_line = (
+            f"Thread: \"{thread.get('title', '')}\". {thread.get('hook', '')} "
+            f"Complication: {thread.get('challenge', '')}"
+        )
+
     lines = [
         "An ongoing plot thread runs through this story -- living story "
         "material, not a script. Advance it whenever the scene gives it room "
@@ -1431,9 +1518,14 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
         "Follow the player's lead first: never override their current action, "
         "never force the thread into a scene it doesn't fit, and never mention "
         "that a thread exists.",
-        f"Thread: \"{thread.get('title', '')}\". {thread.get('hook', '')} "
-        f"Complication: {thread.get('challenge', '')}",
+        thread_line,
     ]
+    if inject_mode == "hook_only":
+        lines.append(
+            "Scene pacing: Keep this thread to a light background hook or rumor "
+            "only if it fits naturally -- hold back active complications or "
+            "adversaries this turn."
+        )
     mode = str(thread.get("mode") or "").strip().lower()
     if mode in MODE_STORYTELLER_GUIDANCE:
         lines.append(MODE_STORYTELLER_GUIDANCE[mode])
@@ -1589,7 +1681,7 @@ Judge and update:
 {_directive("turn_assessment", state.get("module_instructions"))}
 
 Respond with ONLY valid JSON:
-{{"thread_engaged": false, "player_interest": "proactive|reactive|indifferent|resistant", "thread_resolved": false, "resolution_note": "one sentence, only if resolved", "player_pivot": false, "pivot_intent": "", "opportunity": false, "nudge": "...", "momentum": "steady", "profile": {{"playstyle": {{{", ".join(f'"{k}": 0' for k in PLAYSTYLE_KEYS)}}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high", "evidence": "..."}}], "avoids": [{{"text": "...", "weight": "low|medium|high", "evidence": "..."}}]}}}}"""
+{{"thread_engaged": false, "player_interest": "proactive|reactive|indifferent|resistant", "scene_mode": "withhold|hook_only|active", "thread_resolved": false, "resolution_note": "one sentence, only if resolved", "player_pivot": false, "pivot_intent": "", "opportunity": false, "nudge": "...", "momentum": "steady", "profile": {{"playstyle": {{{", ".join(f'"{k}": 0' for k in PLAYSTYLE_KEYS)}}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high", "role": "actor|target|mutual|world", "evidence": "..."}}], "avoids": [{{"text": "...", "weight": "low|medium|high", "role": "actor|target|mutual|world", "evidence": "..."}}]}}}}"""
 
     model_pref = config.get("assessment_ai_model", "balanced")
     try:
@@ -1615,11 +1707,21 @@ Respond with ONLY valid JSON:
     momentum = parsed.get("momentum")
     if momentum not in MOMENTUM_VALUES:
         momentum = "steady" if engaged else "stalled"
+    raw_scene_mode = str(parsed.get("scene_mode") or "").strip().lower()
+    scene_mode = raw_scene_mode if raw_scene_mode in INJECT_MODES else "active"
 
     updates["profile"] = _clean_profile(parsed.get("profile"), profile)
     ignored_streak = 0 if engaged else int(data.get("ignored_streak", 0) or 0) + 1
     updates["ignored_streak"] = ignored_streak
     updates["momentum"] = momentum
+    updates["scene_mode"] = scene_mode
+    updates["last_assessment"] = {
+        "turn": turn,
+        "scene_mode": scene_mode,
+        "thread_engaged": engaged,
+        "player_interest": interest if interest in ENGAGEMENT_KINDS else "",
+        "momentum": momentum,
+    }
 
     log = list(data.get("log", []))
     log_entry = {"turn": turn, "engaged": engaged, "note": resolution_note}
@@ -1701,6 +1803,10 @@ async def _execute_bg_job(job: dict) -> None:
             return
 
         live_state = sm.state
+        job_turn = int(job.get("turn", 0) or 0)
+        if int(live_state.get("turn", 0) or 0) < job_turn:
+            # The turn this job analyzed was deleted, undone, or regenerated.
+            return
         live_plot = (live_state.get("module_data") or {}).get(MODULE_ID) or {}
         if live_plot.get("suspended"):
             return
@@ -1713,6 +1819,7 @@ async def _execute_bg_job(job: dict) -> None:
             # stage the updates so the running turn's librarian merges them too.
             _staged_bg_updates = {
                 "save_id": job.get("save_id"),
+                "turn": job_turn,
                 "updates": deepcopy(own_updates),
             }
             return
@@ -1747,11 +1854,16 @@ async def on_librarian(state: dict, sdk) -> dict | None:
     updates: dict = {}
 
     # Pick up any updates completed by a previous turn's background task while
-    # this turn was already streaming.
+    # this turn was already streaming (discarding anything from a rolled-back turn).
     if _staged_bg_updates is not None:
         staged = _staged_bg_updates
         _staged_bg_updates = None
-        if staged.get("save_id") == state.get("active_save_id") and isinstance(staged.get("updates"), dict):
+        staged_turn = int(staged.get("turn", 0) or 0)
+        if (
+            staged.get("save_id") == state.get("active_save_id")
+            and staged_turn < turn
+            and isinstance(staged.get("updates"), dict)
+        ):
             updates.update(staged["updates"])
             data.update(staged["updates"])
 
@@ -1810,7 +1922,10 @@ def _profile_line(profile: dict) -> str:
     likes = _clean_pref_list(profile.get("likes", []), [])
     likes.sort(key=lambda e: PREF_WEIGHTS.index(e["weight"]), reverse=True)
     if likes:
-        parts.append("likes: " + ", ".join(e["text"] for e in likes[:2]))
+        parts.append("likes: " + ", ".join(
+            f"{e['text']} [{e['role']}]" if e.get("role") else e["text"]
+            for e in likes[:2]
+        ))
     attachments = _clean_attachments(profile.get("attachments", []), [])
     if attachments:
         parts.append("drawn to: " + ", ".join(a["name"] for a in attachments[:2]))
@@ -2032,9 +2147,15 @@ def _command_profile_edit(data: dict, args: list[str]) -> dict:
         op = args[1].lower()
         rest = args[2:]
         weight = "medium"
-        if op == "add" and len(rest) >= 2 and rest[0].lower() in PREF_WEIGHTS:
-            weight = rest[0].lower()
-            rest = rest[1:]
+        role = ""
+        if op == "add":
+            while len(rest) >= 2 and rest[0].lower() in (*PREF_WEIGHTS, *PREF_ROLES):
+                token = rest[0].lower()
+                if token in PREF_WEIGHTS:
+                    weight = token
+                elif token in PREF_ROLES:
+                    role = token
+                rest = rest[1:]
         text = " ".join(rest).strip()[:PROFILE_ENTRY_MAX_CHARS]
         if not text:
             return {"message": PROFILE_USAGE, "signal": "end_turn", "error": True}
@@ -2042,10 +2163,14 @@ def _command_profile_edit(data: dict, args: list[str]) -> dict:
         if op == "add":
             existing = next((e for e in entries if _norm_entry(e["text"]) == _norm_entry(text)), None)
             if existing is not None:
-                if existing["weight"] == weight:
+                same_weight = existing["weight"] == weight
+                same_role = (existing.get("role", "") == role) if role else True
+                if same_weight and same_role:
                     return {"message": f'[Plot] "{existing["text"]}" is already in {field} ({weight}).', "signal": "end_turn", "error": True}
                 existing["weight"] = weight
-                message = f'[Plot] "{existing["text"]}" set to {weight}.'
+                if role:
+                    existing["role"] = role
+                message = f'[Plot] "{existing["text"]}" set to {weight}' + (f" [{role}]." if role else ".")
             else:
                 # A like and a dislike can't coexist: adding to one side moves
                 # the entry out of the other.
@@ -2057,6 +2182,8 @@ def _command_profile_edit(data: dict, args: list[str]) -> dict:
                 else:
                     message = f'[Plot] Added "{text}" to {field} ({weight}).'
                 entry = {"text": text, "weight": weight}
+                if role:
+                    entry["role"] = role
                 if field == "likes":
                     entry["evidence"] = PLAYER_SET_EVIDENCE
                 entries.append(entry)

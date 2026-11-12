@@ -11,6 +11,7 @@ const MOMENTUM_STYLES = {
 const OUTCOME_ICONS = { resolved: '✓', abandoned: '✕', expired: '⌛', rerolled: '↻', superseded: '↷' };
 
 const PREF_WEIGHTS = ['low', 'medium', 'high'];
+const PREF_ROLES = ['actor', 'target', 'mutual', 'world'];
 const WEIGHT_CHIP_STYLES = {
   high: 'border-indigo-500/70 text-gray-100',
   medium: 'border-gray-700 text-gray-300',
@@ -19,17 +20,18 @@ const WEIGHT_CHIP_STYLES = {
 const WEIGHT_BADGE = { low: 'L', medium: 'M', high: 'H' };
 
 // Weighted lists (likes/dislikes/avoids) store {text, weight} objects (plus
-// an evidence clause on observed lists); themes are plain strings. Tolerate
-// both shapes -- old saves normalize server-side on the next write.
+// optional role and evidence clause on observed lists); themes are plain strings.
+// Tolerate both shapes -- old saves normalize server-side on the next write.
 function normalizeEntry(entry) {
   if (entry && typeof entry === 'object') {
     return {
       text: entry.text ?? '',
       weight: PREF_WEIGHTS.includes(entry.weight) ? entry.weight : 'medium',
+      role: PREF_ROLES.includes(entry.role) ? entry.role : '',
       evidence: entry.evidence ?? '',
     };
   }
-  return { text: String(entry ?? ''), weight: 'medium', evidence: '' };
+  return { text: String(entry ?? ''), weight: 'medium', role: '', evidence: '' };
 }
 
 // Whether the global cheats.enabled engine setting is on. The reset button is
@@ -153,6 +155,9 @@ function ProfileList({ label, field, entries, weighted, editing, onCommand, hint
             )}
             {weighted && !editing && item.weight === 'high' && <span className="text-indigo-400">★</span>}
             {item.text}
+            {item.role && (
+              <span className="text-[9px] text-indigo-300/80 uppercase tracking-wider">[{item.role}]</span>
+            )}
             {editing && (
               <button
                 onClick={() => onCommand?.(`/plot profile ${field} remove ${item.text}`)}
