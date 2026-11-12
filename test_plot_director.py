@@ -2114,5 +2114,115 @@ def test_role_explicit_likes_dislikes_and_prompts():
     assert "who is the actor and who is the target" in backend.DIRECTIVE_PROFILE_BOOTSTRAP
 
 
+def test_iterative_gm_notes_and_evolving_thread_hooks():
+    """planning_iterations runs pre-thread GM notebook passes and post-assessment refinement,
+    and assessment can advance active thread hook/challenge via next_hook/next_challenge."""
+    backend = _load_backend()
+    data = _observing_data(backend)
+    data["profile"] = _profile_reply()
+
+    # 1. Thread generation with planning_iterations=2 runs 1 _iterate_gm_notes pass before weaving + critic.
+    gm_pass_reply = json.dumps({
+        "gm_notes": (
+            "Player enjoys unravelling political schemes [actor]. Core idea: Lord Varn wants "
+            "the PC to discredit his rival first; to earn trust, Varn starts by offering a "
+            "seemingly friendly tip about a missing courier."
+        ),
+    })
+    thread_reply = json.dumps({
+        "mode": "event",
+        "title": "The Friendly Tip",
+        "gm_notes": (
+            "Phase 1: Varn's tip leads to the courier's ledger. "
+            "Later if the player bites: the ledger implicates Varn's rival, setting up Varn's trap."
+        ),
+        "hook": "Lord Varn privately slips the player a sealed route-map for the vanished courier.",
+        "challenge": "The courier's trail is being scrubbed by hired fixers.",
+        "stakes": "Control of the harbor courier network.",
+        "appeal": "intrigue and mystery",
+    })
+    captured = {}
+    st_gen = _state(turn=3, data=data, config={"planning_iterations": 2})
+    res_gen = asyncio.run(
+        backend.on_librarian(st_gen, _make_sdk([gm_pass_reply, thread_reply, CRITIC_ACCEPT], captured))
+    )
+    gen_update = _updates(res_gen)
+
+    # 1st LLM call: GM notebook pass; 2nd LLM call: thread generation with GM NOTEBOOK; 3rd: fit-check critic.
+    assert len(captured["prompts"]) == 3
+    assert "Lord Varn wants the PC to discredit his rival" in captured["prompts"][1]
+    assert "Phase 1: Varn's tip leads to the courier's ledger." in gen_update["gm_notes"]
+    assert gen_update["thread"]["hook"] == "Lord Varn privately slips the player a sealed route-map for the vanished courier."
+
+    # /plot notes displays the current GM notebook.
+    merged_after_gen = {**data, **gen_update}
+    notes_cmd = asyncio.run(backend.on_command_plot(["notes"], _state(turn=3, data=merged_after_gen), _make_sdk([], {})))
+    assert "Phase 1: Varn's tip leads to the courier's ledger." in notes_cmd["message"]
+
+    # 2. Assessment with planning_iterations=3 updates hook/challenge in place and runs an extra GM note refinement pass.
+    assess_reply = _assessment_reply(
+        scene_mode="active",
+        player_interest="engaged",
+        gm_notes="Player found the ledger and suspects a setup; move to Phase 2.",
+        next_hook="A cipher inside the courier's ledger points to the rival's private dock at midnight.",
+        next_challenge="Armed lookouts are already sweeping the rival's dock for intruders.",
+    )
+    refined_notes_reply = json.dumps({
+        "gm_notes": (
+            "Phase 2 active: cipher points to the dock. Because the player already suspects a setup, "
+            "leave clues at the dock showing Varn's own signet on the crate manifest."
+        ),
+    })
+    captured_assess = {}
+    st_assess = _state(turn=4, data=merged_after_gen, config={"planning_iterations": 3})
+    res_assess = asyncio.run(
+        backend.on_librarian(st_assess, _make_sdk([assess_reply, refined_notes_reply], captured_assess))
+    )
+    assess_update = _updates(res_assess)
+    assert len(captured_assess["prompts"]) == 2
+    assert assess_update["thread"]["hook"] == "A cipher inside the courier's ledger points to the rival's private dock at midnight."
+    assert assess_update["thread"]["challenge"] == "Armed lookouts are already sweeping the rival's dock for intruders."
+    assert "Varn's own signet" in assess_update["gm_notes"]
+
+
+def test_profile_regen_command_reanalyzes_without_wiping_thread():
+    """/plot profile regen re-runs profile bootstrap with role-explicit rules while keeping
+    player-set dislikes and the active thread intact."""
+    backend = _load_backend()
+    data = _active_data(backend, created_turn=2)
+    data["profile"]["likes"] = [{"text": "transformation", "weight": "high", "role": "", "evidence": "old"}]
+    data["profile"]["dislikes"] = [{"text": "non-con", "weight": "high", "role": "target"}]
+    data["gm_notes"] = "Existing GM plan stays intact."
+
+    regen_reply = json.dumps(_profile_reply(
+        likes=[{
+            "text": "transforming willing companions with playful magic",
+            "weight": "high",
+            "role": "actor",
+            "evidence": "turned Mira's cloak into feathers",
+        }],
+        avoids=[{
+            "text": "losing bodily autonomy to hostile curses",
+            "weight": "high",
+            "role": "target",
+            "evidence": "warded off the hex immediately",
+        }],
+        notes="Playful shapeshifter who likes being the caster, never the victim.",
+    ))
+    captured = {}
+    st = _state(turn=5, data=data)
+    res = asyncio.run(backend.on_command_plot(["profile", "regen"], st, _make_sdk([regen_reply], captured)))
+    update = _updates(res)
+
+    # Active thread and GM notes are untouched; profile likes/avoids/notes are refreshed and player dislikes kept.
+    assert "thread" not in update
+    assert update["profile"]["likes"][0]["role"] == "actor"
+    assert update["profile"]["likes"][0]["text"] == "transforming willing companions with playful magic"
+    assert update["profile"]["avoids"][0]["role"] == "target"
+    assert update["profile"]["dislikes"] == [{"text": "non-con", "weight": "high", "role": "target"}]
+    assert "Player profile re-analyzed" in res["message"]
+
+
+
 
 

@@ -77,6 +77,15 @@
       "category": "Plot Director",
       "description": "Check each generated thread against the story's tone, established facts, and narrative direction before accepting it. One extra cheap LLM call per new thread."
     },
+    "planning_iterations": {
+      "type": "slider",
+      "min": 1,
+      "max": 3,
+      "default": 2,
+      "label": "GM Planning Iterations",
+      "category": "Plot Director",
+      "description": "How many background passes the Director spends thinking in its GM Notebook when planning or evolving plotlines (1 = single-pass, 2 = brainstorm GM notes then weave thread, 3 = extra GM refinement pass). Runs in the background without slowing down turns."
+    },
     "stall_threshold": {
       "type": "slider",
       "min": 1,
@@ -135,7 +144,7 @@
     "/plot": "on_command_plot"
   },
   "command_help": {
-    "/plot": "Show the active plot thread, momentum, and your profile. The challenge and the story direction stay spoiler-hidden: '/plot challenge' and '/plot direction' reveal them. '/plot regen' weaves a new thread; '/plot reset confirm' (cheat) wipes the plot data (keeping likes/dislikes you added yourself) and rebuilds the profile, direction, and first thread from the story so far; '/plot suspend' freezes plot direction and '/plot resume' picks it back up; '/plot profile ...' edits your tone/themes/likes/dislikes/avoids/pacing/agency/register/notes."
+    "/plot": "Show the active plot thread, momentum, and your profile. The challenge, story direction, and GM notes stay spoiler-hidden: '/plot challenge', '/plot direction', and '/plot notes' reveal them. '/plot regen' weaves a new thread; '/plot profile regen' re-analyzes your player profile from the story so far; '/plot reset confirm' (cheat) wipes the plot data (keeping likes/dislikes you added yourself) and rebuilds the profile, direction, and first thread from the story so far; '/plot suspend' freezes plot direction and '/plot resume' picks it back up; '/plot profile ...' edits your tone/themes/likes/dislikes/avoids/pacing/agency/register/notes."
   },
   "prompt_blocks": [
     {

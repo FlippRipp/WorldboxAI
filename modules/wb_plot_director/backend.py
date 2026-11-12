@@ -136,6 +136,7 @@ DIRECTIVE_THREAD_GENERATION = """Design ONE new thread that fits the established
 - character (romance, social, roleplay, drama): deepening bonds with attached NPCs, personal dilemmas, loyalties, or emotional crossroads.
 - variety (slice-of-life, cozy, humor, crafting, exploration): low-stress invitations, local events, charming oddities, or wonders to explore -- adding texture and variety rather than hostile opposition.
 GROUND IT: anchor the hook in established characters, places, factions, or unresolved hooks from the material above -- invent at most one new minor element, and only when nothing established fits. Where a past consequence, planted seed, horizon milestone, or open question offers a natural seed, grow the thread from it.
+THINK LIKE A TABLETOP RPG GM: Look at what drives this player (their demonstrated tastes, roles, and what their character is pursuing) and use gm_notes to think through a plot driver or situation that gives the player opportunities to play the game the way they want to play it (e.g. a shadowy organization for mystery lovers, compelling rivals with personal chemistry for enemies-to-lovers, or fitting NPCs when the player wants to be the actor in a dynamic). If an idea has a longer-term goal or twist (like a patron secretly using the player against a rival), feel free to work backwards to what would naturally happen first right now and put ONLY that current opening into hook and challenge -- or keep it simple if a direct situation fits best.
 RESPECT ROLE & DIRECTION IN LIKES/AVOIDS: Each like or avoid may specify a player role (actor = the player doing it to NPCs; target = having it done to the player; mutual = shared two-way dynamic; world = general theme/setting element) and relational phrasing. NEVER invert the player's role (e.g. if the player likes initiating a trope or transformation as the actor on NPCs, create opportunities where the player is the actor targeting a fitting NPC -- never make the player the victim or target of that trope unless their profile explicitly says role: target)."""
 
 DIRECTIVE_FIT_CHECK = """Reject the candidate if ANY of these fail:
@@ -155,6 +156,8 @@ DIRECTIVE_TURN_ASSESSMENT = f"""- thread_engaged: did the player or the scene me
 - opportunity: does the scene end with a natural opening to bring the thread forward next turn?
 - nudge: one subtle piece of story material (a rumor, an arrival, a discovery) that could pull the scene toward the thread without contradicting what the player is doing. Never an instruction to the player.
 - momentum: building | steady | stalled
+- gm_notes: your working tabletop GM scratchpad. Jot down or refine whatever notes help you steer the story (character motives behind the scenes, how the current plot driver is developing, what the player latched onto, or ideas for what comes next).
+- next_hook / next_challenge (optional): if the active thread's initial hook has already played out and the plotline is moving to its next natural phase (or adapting to how the player approached it), provide an updated one-sentence hook and/or challenge for what is in play now; leave them empty when the current hook and challenge still apply.
 - profile: the updated fast-moving profile fields. playstyle values are integers 0-10 for what the player actually does. tone is the story's prevailing tone in a few words. themes are short phrases. likes are what the player demonstrably enjoys; avoids are what they consistently steer away from in practice -- both carry a weight (low, medium, high) for how strongly the player seems to feel, a role (actor = the player doing it to others/NPCs, target = having it done to the player, mutual = shared two-way dynamic, world = general theme/setting), and one clause of evidence citing what the player actually did (an entry without real evidence does not belong). Always phrase likes and avoids relationally, stating who is the actor and who is the target -- NEVER use bare ambiguous tags (e.g. write "initiating playful transformation on willing NPCs" with role "actor", never a bare tag like "bimbofication" that leaves actor vs target unclear). Learn from PLAYER INITIATIVE, not narrator imposition: add to likes or raise playstyle weights ONLY when the player proactively pursues, initiates, or lingers on something (proactive) -- never merely because the narrator threw an event at them and they reacted (reactive). If the player actively deflects or cuts short a hook type (resistant), record that pattern in avoids with evidence. At most {PROFILE_LIST_CAP} entries per list -- drop the least relevant to make room. Some entries may have been set directly by the player; preserve those (including their weight and role) unless the story clearly contradicts them. The profile's dislikes are set by the player themselves and are NOT yours to change -- do not include dislikes in your reply, and never add a like that contradicts one. A character acting averse to something in-story does not mean the player dislikes it. You may also include updated attachments or engagement (bites_on / ignores) when this turn reveals a clear signal."""
 
 DIRECTIVE_DIRECTION_UPDATE = f"""- premise: 1-2 sentences: the larger arc the story seems to be telling.
@@ -321,6 +324,7 @@ def _default_data() -> dict:
         "thread": _empty_thread(),
         "thread_history": [],
         "direction": _default_direction(),
+        "gm_notes": "",
         "momentum": "observing",
         "scene_mode": "active",
         "last_assessment": None,
@@ -1061,6 +1065,61 @@ def _history_block(data: dict, state: dict | None = None) -> str:
     )
 
 
+def _gm_notes_block(data: dict) -> str:
+    """The Game Master's persistent backstage working notes and plot plans."""
+    notes = str((data or {}).get("gm_notes") or "").strip()
+    if not notes:
+        return ""
+    return f"GM NOTEBOOK (your backstage working notes and plot plans):\n{notes}\n\n"
+
+
+def _planning_iterations(config: dict) -> int:
+    """Number of GM planning passes configured (1-3). Defaults to 2 in live
+    server sessions (matching manifest.json) and 1 when unset in unit tests."""
+    if "planning_iterations" in (config or {}):
+        try:
+            return max(1, min(3, int(config.get("planning_iterations") or 1)))
+        except (TypeError, ValueError):
+            return 1
+    return 2 if _services.get("engine") is not None else 1
+
+
+async def _iterate_gm_notes(state: dict, sdk, data: dict, passes: int = 1) -> str:
+    """Run 1-2 lightweight GM Notebook passes to brainstorm or refine plot
+    drivers, character motives, and player-tailored opportunities."""
+    config = _config(state)
+    profile = data.get("profile") or _default_profile()
+    notes = str(data.get("gm_notes") or "").strip()
+    model_pref = config.get("thread_ai_model", "smartest")
+
+    for _ in range(max(0, int(passes))):
+        cur_data = {**data, "gm_notes": notes}
+        prompt = f"""You maintain the working Game Master notebook for a tabletop-style text RPG.
+Your goal is not to script a novel, but to think like a tabletop RPG GM: understand what drives this player (their demonstrated tastes, roles, and what their character is pursuing) and sketch or refine plot drivers, character motives, and situations that give the player opportunities to play the game the way they want to play it.
+
+If an idea has a longer-term goal or hidden motive (like a patron hoping to use the player against a rival, a mysterious organization, or a slow-burn dynamic), feel free to work backwards from that core idea to what would naturally surface first right now -- or keep it simple if a direct, immediate situation fits best. Do not force a multi-step plan when a simple one is more natural.
+
+PLAYER PROFILE:
+{json.dumps(profile, ensure_ascii=False)}
+
+{_direction_block(cur_data)}{_gm_notes_block(cur_data)}STORY MATERIAL:
+{_story_material(state)}
+
+{_storylines_block(state)}{_character_roster(state)}{_character_sheet_block(state)}{_history_block(cur_data, state)}Write or refine your working GM notes based on the latest story state.
+
+Respond with ONLY valid JSON:
+{{"gm_notes": "your freeform GM working notes and thoughts"}}"""
+        try:
+            sdk.llm._current_module = MODULE_ID
+            raw = await sdk.llm.generate(prompt, model_preference=model_pref)
+        finally:
+            sdk.llm._current_module = ""
+        parsed = _parse_json_block(raw)
+        if isinstance(parsed, dict) and str(parsed.get("gm_notes") or "").strip():
+            notes = str(parsed.get("gm_notes")).strip()
+    return notes
+
+
 async def _generate_thread(state: dict, sdk, data: dict, avoid_previous_kind: bool = False,
                            allow_defer: bool = False, critique: str = "",
                            pivot_intent: str = "") -> dict:
@@ -1072,6 +1131,14 @@ async def _generate_thread(state: dict, sdk, data: dict, avoid_previous_kind: bo
     turn = state.get("turn", 0)
     attempts = int(data.get("gen_attempts", 0) or 0) + 1
     profile = data.get("profile") or _default_profile()
+
+    iterations = _planning_iterations(config)
+    gm_notes = str(data.get("gm_notes") or "").strip()
+    if iterations > 1 and not critique:
+        gm_notes = await _iterate_gm_notes(
+            state, sdk, {**data, "gm_notes": gm_notes}, passes=iterations - 1
+        )
+    data_with_notes = {**data, "gm_notes": gm_notes}
 
     level = int(config.get("difficulty", 3) or 3)
     level = max(1, min(5, level))
@@ -1114,13 +1181,13 @@ PLAYER PROFILE (cater to their demonstrated preferences; weight marks how strong
 CHALLENGE DIFFICULTY:
 {DIFFICULTY_GUIDANCE[level]}
 
-{_direction_block(data)}STORY MATERIAL:
+{_direction_block(data_with_notes)}{_gm_notes_block(data_with_notes)}STORY MATERIAL:
 {_story_material(state)}
 
-{_storylines_block(state)}{_character_roster(state)}{_character_sheet_block(state)}{_history_block(data, state)}{_directive("thread_generation", state.get("module_instructions"))}{different}{critique_block}{pivot_block}{defer_block}
+{_storylines_block(state)}{_character_roster(state)}{_character_sheet_block(state)}{_history_block(data_with_notes, state)}{_directive("thread_generation", state.get("module_instructions"))}{different}{critique_block}{pivot_block}{defer_block}
 
 Respond with ONLY valid JSON:
-{{"title": "3-6 words", "mode": "spectacle|intrigue|character|variety", "hook": "how it surfaces in the story, one sentence", "challenge": "what stands in the way -- the opposition or situational tension itself, one sentence, never what the player should do about it", "stakes": "what is at risk or what could be gained, one sentence", "appeal": "which player preference this serves, a few words", "scene_mode": "withhold|hook_only|active"}}"""
+{{"title": "3-6 words", "mode": "spectacle|intrigue|character|variety", "hook": "how it surfaces in the story right now, one sentence", "challenge": "what stands in the way right now -- the opposition or situational tension itself, one sentence, never what the player should do about it", "stakes": "what is at risk or what could be gained, one sentence", "appeal": "which player preference this serves, a few words", "scene_mode": "withhold|hook_only|active", "gm_notes": "your updated working GM notes and backstage thoughts (optional)"}}"""
 
     model_pref = config.get("thread_ai_model", "smartest")
     try:
@@ -1130,15 +1197,20 @@ Respond with ONLY valid JSON:
         sdk.llm._current_module = ""
 
     parsed = _parse_json_block(raw)
+    if isinstance(parsed, dict) and str(parsed.get("gm_notes") or "").strip():
+        gm_notes = str(parsed.get("gm_notes")).strip()
 
     if may_defer and isinstance(parsed, dict) and parsed.get("defer") is True:
         print(f"[Plot Director] Turn {turn}: generation deferred -- story mid-climax.")
-        return {
+        ret = {
             "gen_attempts": 0,
             "defer_streak": defer_streak + 1,
             "next_thread_turn": turn + 2,
             "momentum": "observing",
         }
+        if gm_notes:
+            ret["gm_notes"] = gm_notes
+        return ret
 
     title = str(parsed.get("title", "")).strip() if isinstance(parsed, dict) else ""
     hook = str(parsed.get("hook", "")).strip() if isinstance(parsed, dict) else ""
@@ -1156,7 +1228,7 @@ Respond with ONLY valid JSON:
 
     cur_minutes = _current_minutes(state)
     print(f"[Plot Director] Turn {turn}: new thread ready -- {title}")
-    return {
+    ret = {
         "gen_attempts": 0,
         "status": "active",
         "momentum": "building",
@@ -1177,6 +1249,9 @@ Respond with ONLY valid JSON:
             created_minutes=cur_minutes if cur_minutes is not None else 0,
         ),
     }
+    if gm_notes:
+        ret["gm_notes"] = gm_notes
+    return ret
 
 
 async def _fit_check(state: dict, sdk, data: dict, candidate: dict) -> tuple[bool, str]:
@@ -1668,7 +1743,7 @@ Hook: {thread.get('hook', '')}
 Challenge: {thread.get('challenge', '')}
 Stakes: {thread.get('stakes', '')}
 
-CURRENT PLAYER PROFILE (update it with what this turn reveals; evolve, don't rewrite from scratch):
+{_gm_notes_block(data)}CURRENT PLAYER PROFILE (update it with what this turn reveals; evolve, don't rewrite from scratch):
 {json.dumps(profile, ensure_ascii=False)}
 
 {_storylines_block(state)}{earlier_block}THIS TURN'S SCENE (judge this):
@@ -1681,7 +1756,7 @@ Judge and update:
 {_directive("turn_assessment", state.get("module_instructions"))}
 
 Respond with ONLY valid JSON:
-{{"thread_engaged": false, "player_interest": "proactive|reactive|indifferent|resistant", "scene_mode": "withhold|hook_only|active", "thread_resolved": false, "resolution_note": "one sentence, only if resolved", "player_pivot": false, "pivot_intent": "", "opportunity": false, "nudge": "...", "momentum": "steady", "profile": {{"playstyle": {{{", ".join(f'"{k}": 0' for k in PLAYSTYLE_KEYS)}}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high", "role": "actor|target|mutual|world", "evidence": "..."}}], "avoids": [{{"text": "...", "weight": "low|medium|high", "role": "actor|target|mutual|world", "evidence": "..."}}]}}}}"""
+{{"thread_engaged": false, "player_interest": "proactive|reactive|indifferent|resistant", "scene_mode": "withhold|hook_only|active", "thread_resolved": false, "resolution_note": "one sentence, only if resolved", "player_pivot": false, "pivot_intent": "", "opportunity": false, "nudge": "...", "momentum": "steady", "gm_notes": "...", "next_hook": "", "next_challenge": "", "profile": {{"playstyle": {{{", ".join(f'"{k}": 0' for k in PLAYSTYLE_KEYS)}}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high", "role": "actor|target|mutual|world", "evidence": "..."}}], "avoids": [{{"text": "...", "weight": "low|medium|high", "role": "actor|target|mutual|world", "evidence": "..."}}]}}}}"""
 
     model_pref = config.get("assessment_ai_model", "balanced")
     try:
@@ -1709,6 +1784,9 @@ Respond with ONLY valid JSON:
         momentum = "steady" if engaged else "stalled"
     raw_scene_mode = str(parsed.get("scene_mode") or "").strip().lower()
     scene_mode = raw_scene_mode if raw_scene_mode in INJECT_MODES else "active"
+    gm_notes = str(parsed.get("gm_notes") or "").strip()
+    if gm_notes:
+        updates["gm_notes"] = gm_notes
 
     updates["profile"] = _clean_profile(parsed.get("profile"), profile)
     ignored_streak = 0 if engaged else int(data.get("ignored_streak", 0) or 0) + 1
@@ -1764,6 +1842,20 @@ Respond with ONLY valid JSON:
                             cooldown=cooldown * ABANDON_COOLDOWN_FACTOR,
                             avoid_previous_kind=True)
         return {"module_data": {MODULE_ID: updates}}
+
+    next_hook = str(parsed.get("next_hook") or "").strip()
+    next_challenge = str(parsed.get("next_challenge") or "").strip()
+    if next_hook or next_challenge:
+        updates["thread"] = _full_thread(**{
+            **{k: thread.get(k, v) for k, v in _empty_thread().items()},
+            "hook": next_hook or thread.get("hook", ""),
+            "challenge": next_challenge or thread.get("challenge", ""),
+        })
+
+    if _planning_iterations(config) >= 3:
+        refined_notes = await _iterate_gm_notes(state, sdk, {**data, **updates}, passes=1)
+        if refined_notes:
+            updates["gm_notes"] = refined_notes
 
     if nudge_text:
         stall_threshold = max(1, int(config.get("stall_threshold", 3) or 3))
@@ -2080,12 +2172,39 @@ def _command_resume(state: dict, data: dict) -> dict:
 
 
 PROFILE_USAGE = (
-    "[Plot] Usage: /plot profile tone <text> | "
+    "[Plot] Usage: /plot profile regen | "
+    "/plot profile tone <text> | "
     "/plot profile themes <add|remove> <text> | "
-    "/plot profile <likes|dislikes> <add|remove> [low|medium|high] <text> | "
+    "/plot profile <likes|dislikes> <add|remove> [low|medium|high] [actor|target|mutual|world] <text> | "
     "/plot profile avoids remove <text> | "
     "/plot profile <pacing|agency|register|notes> <text>"
 )
+
+
+async def _command_profile_regen(state: dict, sdk, data: dict) -> dict:
+    """Re-analyze the player profile from the story so far using the current
+    role-explicit rules, without wiping the active plot thread, GM notes,
+    direction, or thread history. Preserves player-set dislikes."""
+    if not data or data.get("schema") != SCHEMA_VERSION:
+        return {"message": "[Plot] The story is still settling in -- try again next turn.", "signal": "end_turn", "error": True}
+    if not state.get("history"):
+        return {"message": "[Plot] Not enough story history to analyze yet.", "signal": "end_turn", "error": True}
+
+    _cancel_bg_task()
+    old_profile = _clean_profile({}, data.get("profile") or _default_profile())
+    kept_dislikes = old_profile["dislikes"]
+    preserved = {"dislikes": kept_dislikes} if kept_dislikes else None
+    bootstrapped = await _bootstrap_profile(state, sdk, preserved=preserved)
+    if bootstrapped is None:
+        return {"message": "[Plot] Couldn't re-analyze the profile -- nothing changed. Try again.", "signal": "end_turn", "error": True}
+
+    if kept_dislikes:
+        bootstrapped = _merge_player_prefs(bootstrapped, [], kept_dislikes)
+    return {
+        "message": "[Plot] Player profile re-analyzed from the story so far.",
+        "signal": "end_turn",
+        "module_data": {MODULE_ID: {"profile": bootstrapped}},
+    }
 
 
 def _command_profile_edit(data: dict, args: list[str]) -> dict:
@@ -2242,7 +2361,18 @@ async def on_command_plot(args: list[str], state: dict, sdk) -> dict:
         return await _command_reset(state, sdk)
 
     if args and args[0].lower() == "profile":
+        if len(args) == 2 and args[1].lower() in ("regen", "reanalyze", "rebuild"):
+            return await _command_profile_regen(state, sdk, data)
         return _command_profile_edit(data, args[1:])
+
+    if args and args[0].lower() == "notes":
+        gm_notes = str((data or {}).get("gm_notes") or "").strip()
+        if not gm_notes:
+            return {"message": "[Plot] No GM notes recorded yet.", "signal": "end_turn"}
+        return {
+            "message": f"[Plot] GM notes (spoiler):\n{gm_notes}",
+            "signal": "end_turn",
+        }
 
     if args and args[0].lower() == "challenge":
         thread = data.get("thread") or {}

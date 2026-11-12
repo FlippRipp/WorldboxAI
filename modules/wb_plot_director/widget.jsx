@@ -218,10 +218,11 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
   // button shows a busy state until the command's state_update lands (the
   // server sends one after every command, success or failure).
   const [regenning, setRegenning] = useState(false);
+  const [reanalyzing, setReanalyzing] = useState(false);
   const cheatMode = useCheatMode();
 
   const liveData = state?.module_data?.wb_plot_director;
-  useEffect(() => { setResetting(false); setRegenning(false); }, [liveData]);
+  useEffect(() => { setResetting(false); setRegenning(false); setReanalyzing(false); }, [liveData]);
   if (!liveData) return null;
   if (config?.plot_enabled === false) return null;
 
@@ -439,21 +440,42 @@ export default function PlotDirectorWidget({ state, config, onCommand }) {
               </div>
             )}
 
+            {!legacy && (data.gm_notes ?? '').trim() !== '' && (
+              <div className="space-y-1.5 border-t border-gray-700 pt-3">
+                <div className="text-[10px] text-gray-500 uppercase tracking-wider">GM notebook</div>
+                <Spoiler key={state?.turn ?? 0} label="the GM notebook">
+                  <div className="text-xs text-gray-400 leading-snug whitespace-pre-wrap">{data.gm_notes}</div>
+                </Spoiler>
+              </div>
+            )}
+
             {!legacy && (hasProfile || onCommand) && (
               <div className="space-y-2.5 border-t border-gray-700 pt-3">
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] text-gray-500 uppercase tracking-wider">Your story profile</span>
                   {onCommand && (
-                    <button
-                      onClick={() => { setEditing(!editing); setToneDraft(null); }}
-                      className={`text-[10px] px-2 py-0.5 rounded transition-colors ${
-                        editing
-                          ? 'bg-indigo-600/80 text-gray-100 hover:bg-indigo-500'
-                          : 'text-gray-500 hover:text-gray-300 hover:bg-gray-700'
-                      }`}
-                    >
-                      {editing ? 'Done' : 'Edit'}
-                    </button>
+                    <div className="flex items-center gap-1.5">
+                      {editing && (
+                        <button
+                          onClick={() => { setReanalyzing(true); onCommand?.('/plot profile regen'); }}
+                          disabled={reanalyzing}
+                          className="text-[10px] px-2 py-0.5 rounded text-indigo-300 hover:text-indigo-200 hover:bg-gray-700 disabled:opacity-40 transition-colors"
+                          title="Re-analyze likes, avoids, and playstyle from the story so far"
+                        >
+                          {reanalyzing ? '⏳ Re-analyzing…' : '↻ Re-analyze'}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => { setEditing(!editing); setToneDraft(null); }}
+                        className={`text-[10px] px-2 py-0.5 rounded transition-colors ${
+                          editing
+                            ? 'bg-indigo-600/80 text-gray-100 hover:bg-indigo-500'
+                            : 'text-gray-500 hover:text-gray-300 hover:bg-gray-700'
+                        }`}
+                      >
+                        {editing ? 'Done' : 'Edit'}
+                      </button>
+                    </div>
                   )}
                 </div>
 
