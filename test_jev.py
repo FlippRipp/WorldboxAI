@@ -670,3 +670,20 @@ def test_plot_injection_classifier(tmp_path):
     assert len(requests) == 2
 
 
+def test_plugin_modules_can_decide_when_jev_enabled(tmp_path):
+    service, sdk, requests, _, inspector = setup_jev(tmp_path, {'active': 1.0})
+    d = run(sdk.llm.decide({'prose': 'A gentle kiss.'}, {'active': noul('Is physical touch active?')},
+                           module='wb_toy_link', step='toy:steer'))
+    assert d.yes('active') is True
+    run(d.finish('accepted'))
+    assert len(requests) == 1
+    assert inspector.get_calls()[0]['module_source'] == 'wb_toy_link'
+
+    # Global Jev off or empty module id blocks plugin decisions too.
+    service.save({'enabled': False})
+    d_off = run(sdk.llm.decide({'prose': 'A gentle kiss.'}, {'active': noul('Is physical touch active?')},
+                               module='wb_toy_link', step='toy:steer'))
+    assert not d_off.answers and len(requests) == 1
+
+
+

@@ -274,7 +274,7 @@ class JevService:
             "wb_plot_director": "plot_enabled",
         }.get(module)
         if not test:
-            if mode == "mock" or not config["enabled"] or not slot or not config[slot]:
+            if mode == "mock" or not config["enabled"] or not module or (slot and not config[slot]):
                 result.reason = "disabled or unavailable"
                 return result
         endpoint, api_key, is_openrouter = self._connection(config)
