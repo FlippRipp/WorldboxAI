@@ -2890,6 +2890,11 @@ export default function ImageStudio({ onBack }) {
   const [records, setRecords] = useState([]);
   const [pendingCount, setPendingCount] = useState(0);
   const [lightbox, setLightbox] = useState(null);
+
+  useEffect(() => {
+    if (lightbox == null || typeof window === 'undefined' || !window.__wbRegisterBackHandler) return undefined;
+    return window.__wbRegisterBackHandler(() => setLightbox(null));
+  }, [lightbox]);
   // Filenames the user has revealed this visit, so a concealed image stays
   // open once clicked without uncovering its batch siblings (mirrors the
   // in-chat widget's per-session reveal behavior).
@@ -3312,7 +3317,7 @@ export default function ImageStudio({ onBack }) {
 
   if (!config) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex items-center justify-center">
+      <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex items-center justify-center">
         {saveError ? (
           <p className="text-red-400">{saveError}</p>
         ) : (
@@ -3323,12 +3328,12 @@ export default function ImageStudio({ onBack }) {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 text-gray-100">
+    <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 text-gray-100">
       <div className="sticky top-0 z-20 bg-gray-950/90 backdrop-blur border-b border-gray-800">
-        <div className="max-w-3xl mx-auto px-6 py-3 flex items-center justify-between">
+        <div className="max-w-3xl mx-auto px-4 sm:px-6 py-2 flex items-center justify-between gap-2">
           <button
             onClick={onBack}
-            className="flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors"
+            className="min-h-11 flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -3338,7 +3343,7 @@ export default function ImageStudio({ onBack }) {
           <button
             onClick={save}
             disabled={!dirty || saving}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+            className={`min-h-10 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
               savedFlash
                 ? 'bg-green-700 text-white'
                 : 'bg-purple-600 hover:bg-purple-500 text-white disabled:opacity-40 disabled:cursor-not-allowed'
@@ -3348,9 +3353,9 @@ export default function ImageStudio({ onBack }) {
           </button>
         </div>
       </div>
-      <div className="max-w-3xl mx-auto px-6 py-6 space-y-6">
+      <div className="max-w-3xl mx-auto px-4 sm:px-6 py-5 sm:py-6 space-y-6">
         <div>
-          <h1 className="text-3xl font-bold flex items-center gap-3">🎨 Image Studio</h1>
+          <h1 className="text-2xl sm:text-3xl font-bold flex items-center gap-3">🎨 Image Studio</h1>
           <p className="text-gray-500 mt-1 text-sm">
             Story illustrations via {isLocal ? 'your local Stable Diffusion WebUI' : 'the Novita AI API'}.
             Auto-generates every N turns; use /image in-game for on-demand shots.
@@ -3359,7 +3364,7 @@ export default function ImageStudio({ onBack }) {
 
         <ProfileBar config={config} dirty={dirty} onApply={applyConfig} onError={setSaveError} />
 
-        <div className="flex gap-1 overflow-x-auto pb-1">
+        <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-1">
           {TABS.map((t) => {
             const badge =
               t.id === 'loras' && activeLoraCount > 0 ? activeLoraCount

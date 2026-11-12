@@ -89,11 +89,11 @@ export default function ServerLogScreen({ onBack }) {
     }`;
 
   return (
-    <div className="h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center p-6">
+    <div className="h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center p-4 sm:p-6">
       <div className="w-full max-w-5xl flex flex-col flex-1 min-h-0">
         <button
           onClick={onBack}
-          className="self-start flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-8"
+          className="min-h-11 self-start flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-3 sm:mb-6"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -102,7 +102,7 @@ export default function ServerLogScreen({ onBack }) {
         </button>
 
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-          <h1 className="text-3xl font-bold text-gray-100">Server Log</h1>
+          <h1 className="text-2xl sm:text-3xl font-bold text-gray-100">Server Log</h1>
           <div className="flex items-center gap-2">
             <button onClick={() => setErrorsOnly(false)} className={filterBtn(!errorsOnly)}>
               All

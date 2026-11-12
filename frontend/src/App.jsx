@@ -34,6 +34,7 @@ import { useToasts, ToastStack } from './components/shared/Toasts';
 import { LLMInspectorProvider, useLLMInspectorActions } from './hooks/useLLMInspector';
 import { ThemeProvider, useTheme } from './hooks/useTheme';
 import { useMediaQuery } from './hooks/useMediaQuery';
+import { useRootBackNavigation, useBackTrap } from './hooks/useBackNavigation';
 import LLMInspectorButton from './components/LLMInspector/LLMInspectorButton';
 import LLMInspectorPanel from './components/LLMInspector/LLMInspectorPanel';
 import { api } from './lib/api';
@@ -41,11 +42,11 @@ import './index.css';
 
 function PlaceholderMode({ title, onBack }) {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center justify-center p-6">
+    <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center justify-center p-6">
       <div className="w-full max-w-md">
         <button
           onClick={onBack}
-          className="flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-8"
+          className="min-h-11 inline-flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-8"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -134,8 +135,8 @@ function AppContent() {
       module_configs: state.module_configs || prev.module_configs || {},
       characters: state.characters || prev.characters || {},
       active_save_id: state.active_save_id ?? prev.active_save_id,
-      turn: state.turn,
-      world_data: state.world_data,
+      turn: state.turn ?? prev.turn,
+      world_data: state.world_data !== undefined ? state.world_data : prev.world_data,
       player_location_node_id: state.player_location_node_id ?? prev.player_location_node_id,
       player_location_map_id: state.player_location_map_id ?? prev.player_location_map_id,
       player_location_layer_id: state.player_location_layer_id ?? prev.player_location_layer_id,
@@ -330,12 +331,17 @@ function AppContent() {
     setGameState(prev => ({ ...prev, module_configs: nextConfigs }));
   }, [session]);
 
-  const handleEnterGame = useCallback(async (saveId, seedState = null) => {
+  const handleEnterGame = useCallback(async (saveId, seedState = null, fullLoadData = null) => {
     pendingSeedRef.current = seedState;
-    await session.refreshSession();
+    if (seedState) handleStateFromServer(seedState);
+    if (fullLoadData?.session) {
+      session.hydrateFromLoad(fullLoadData);
+    } else {
+      await session.refreshSession();
+    }
     setHeaderHidden(false);
     setCurrentMode('storyteller-game');
-  }, [session]);
+  }, [session, handleStateFromServer]);
 
   // Keep the persisted UI state in sync: which screen is open, plus the save
   // (following the active save across branches) or character it points at.
@@ -371,9 +377,9 @@ function AppContent() {
     (async () => {
       try {
         if (asyncRestore.mode === 'storyteller-game') {
-          const data = await api.loadSave(asyncRestore.saveId);
+          const data = await api.loadSave(asyncRestore.saveId, { ifNeeded: true });
           if (!alive) return;
-          await handleEnterGame(asyncRestore.saveId, data?.state);
+          await handleEnterGame(asyncRestore.saveId, data?.state, data);
         } else {
           const data = await api.loadCharacter(asyncRestore.editCharacterId);
           if (!alive) return;
@@ -415,10 +421,16 @@ function AppContent() {
   );
 
   const handleExitMode = useCallback(() => {
-    if (currentMode === 'storyteller-game' && generating) {
-      setShowExitWarning(true);
+    if (currentMode === 'storyteller-game') {
+      if (generating) {
+        setShowExitWarning(true);
+      } else {
+        sentIntroRef.current = false;
+        setCurrentMode('storyteller-select');
+      }
+    } else if (currentMode === 'character-create') {
+      setCurrentMode('character-creator');
     } else {
-      sentIntroRef.current = false;
       setCurrentMode(null);
     }
   }, [currentMode, generating]);
@@ -429,8 +441,23 @@ function AppContent() {
     ws.sendStop();
     setShowExitWarning(false);
     sentIntroRef.current = false;
-    setCurrentMode(null);
+    setCurrentMode('storyteller-select');
   }, [ws]);
+
+  const handleToggleMap = useCallback(() => {
+    window.dispatchEvent(new CustomEvent('wb:toggle-map'));
+  }, []);
+
+  // Sync Android Back / browser Back with screen hierarchy and open overlays.
+  useRootBackNavigation(currentMode !== null, handleExitMode);
+  useBackTrap(drawerOpen, () => setDrawerOpen(false));
+  useBackTrap(isCharacterOpen, () => setIsCharacterOpen(false));
+  useBackTrap(isMemoryOpen, () => setIsMemoryOpen(false));
+  useBackTrap(isHealthOpen, () => setIsHealthOpen(false));
+  useBackTrap(isSettingsOpen, () => setIsSettingsOpen(false));
+  useBackTrap(ws.commandResult != null, ws.clearCommandResult);
+  useBackTrap(branchPrompt != null, () => { if (!branching) setBranchPrompt(null); });
+  useBackTrap(showExitWarning, () => setShowExitWarning(false));
 
   // If the turn finishes while the warning is up, the risk is gone: close it.
   // The next exit tap leaves silently since everything is saved.
@@ -493,7 +520,7 @@ function AppContent() {
     // so a fresh install doesn't flash the menu before the wizard — and while
     // auto-resuming a story after a reload, so the menu never flashes by.
     if (showOnboarding === null || resuming) {
-      return <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950" />;
+      return <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950" />;
     }
     if (showOnboarding) {
       return <OnboardingWizard onFinish={handleFinishOnboarding} />;
@@ -501,6 +528,7 @@ function AppContent() {
     return (
       <MainMenu
         onSelectMode={setCurrentMode}
+        onContinueSave={handleEnterGame}
         modules={modules}
         onModulesLoaded={setModules}
       />
@@ -513,7 +541,7 @@ function AppContent() {
     // Restoring straight into a module screen races the module-list fetch;
     // hold the blank frame instead of flashing the placeholder.
     if ((modules || []).length === 0) {
-      return <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950" />;
+      return <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950" />;
     }
     const mod = (modules || []).find((m) => m.id === modId);
     const mode = (mod?.modes || []).find((md) => md.id === modeId);
@@ -535,6 +563,7 @@ function AppContent() {
         onLoad={handleEnterGame}
         onCreate={handleEnterGame}
         onBack={() => setCurrentMode(null)}
+        initialModules={modules}
       />
     );
   }
@@ -622,6 +651,9 @@ function AppContent() {
         }))
       )
       .sort((a, b) => a.module.localeCompare(b.module) || a.command.localeCompare(b.command));
+    const hasWorldMap = Boolean(gameState?.world_data)
+      && (gameModules || []).some((m) => m.id === 'wb_worldgen');
+
     return (
     <ModuleEventProvider>
       <div className="flex h-dvh bg-gray-900 text-gray-100 font-sans overflow-hidden">
@@ -631,6 +663,7 @@ function AppContent() {
           gameState={gameState}
           onCommand={handleButtonCommand}
           generating={generating}
+          isMobile={isMobile}
           drawerOpen={drawerOpen}
           onCloseDrawer={() => setDrawerOpen(false)}
           onOpenSettings={() => setIsSettingsOpen(true)}
@@ -649,6 +682,7 @@ function AppContent() {
             onOpenHealth={() => setIsHealthOpen(true)}
             onOpenMemories={() => setIsMemoryOpen(true)}
             onOpenCharacter={() => setIsCharacterOpen(true)}
+            onToggleMap={hasWorldMap ? handleToggleMap : null}
             onBack={handleExitMode}
             onOpenDrawer={handleOpenDrawer}
             hidden={headerHidden}
@@ -793,7 +827,7 @@ function PromptStudioStandalone({ onBack }) {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex items-center justify-center">
+      <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex items-center justify-center">
         <p className="text-gray-400">Loading Prompt Studio...</p>
       </div>
     );

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../../lib/api';
 import { storage } from '../../lib/storage';
+import { useBackTrap } from '../../hooks/useBackNavigation';
 import CharacterModuleForm from './CharacterModuleForm';
 import ModuleTogglePanel from '../shared/ModuleTogglePanel';
 import ModuleInline from '../shared/ModuleInline';
@@ -116,6 +117,8 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
     clearDraft();
     onBack?.();
   };
+
+  useBackTrap(true, handleBack);
 
   const toggleModule = (modId, on) => {
     // Note: moduleData is intentionally retained when a module is disabled, so
@@ -281,26 +284,26 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
   const characterModules = modules.filter(m => m.has_character_creation && enabledModules.has(m.id));
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col p-6">
-      <div className="w-full max-w-2xl mx-auto space-y-6">
-        <div className="flex items-center justify-between">
+    <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col p-4 sm:p-6">
+      <div className="w-full max-w-2xl mx-auto space-y-5 sm:space-y-6">
+        <div className="flex items-center justify-between gap-2">
           <button
             onClick={handleBack}
-            className="flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors"
+            className="min-h-11 flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
             Back
           </button>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <ModuleTogglePanel
               modules={modules.filter(m => m.has_character_creation || m.character_context)}
               enabled={enabledModules}
               onToggle={toggleModule}
               label="Modules"
             />
-            <h2 className="text-xl font-bold text-gray-100">
+            <h2 className="text-lg sm:text-xl font-bold text-gray-100 truncate">
               {editCharacterId ? 'Edit Character' : 'New Character'}
             </h2>
           </div>
@@ -321,10 +324,10 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
             />
           ))}
 
-        <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-6 space-y-4">
+        <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-4 sm:p-6 space-y-4">
           <h3 className="text-lg font-semibold text-gray-200">Basic Info</h3>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-400 mb-1">
                 Gender <span className="text-gray-600 text-xs">(optional)</span>
@@ -334,7 +337,7 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
                 value={gender}
                 onChange={(e) => setGender(e.target.value)}
                 placeholder="e.g. female, male, non-binary..."
-                className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-gray-200 focus:border-purple-500 focus:outline-none"
+                className="w-full min-w-0 bg-gray-900 border border-gray-700 rounded-lg px-4 py-2.5 text-gray-200 focus:border-purple-500 focus:outline-none"
               />
             </div>
             <div>
@@ -347,12 +350,12 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
                   value={race}
                   onChange={(e) => setRace(e.target.value)}
                   placeholder="e.g. elf, dwarf, human..."
-                  className="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-gray-200 focus:border-purple-500 focus:outline-none"
+                  className="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded-lg px-4 py-2.5 text-gray-200 focus:border-purple-500 focus:outline-none"
                 />
                 <button
                   onClick={handleGenerateRace}
                   disabled={generatingRace}
-                  className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap"
+                  className="min-h-11 px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
                 >
                   {generatingRace && (
                     <span className="inline-block w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -371,12 +374,12 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="Enter a name or generate one..."
-                className="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-gray-200 focus:border-purple-500 focus:outline-none"
+                className="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded-lg px-4 py-2.5 text-gray-200 focus:border-purple-500 focus:outline-none"
               />
               <button
                 onClick={handleGenerateName}
                 disabled={generatingName}
-                className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap"
+                className="min-h-11 px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
               >
                 {generatingName && (
                   <span className="inline-block w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -387,7 +390,7 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
           </div>
         </div>
 
-        <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-6 space-y-4">
+        <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-4 sm:p-6 space-y-4">
           <h3 className="text-lg font-semibold text-gray-200">Appearance</h3>
 
           <div>
@@ -428,7 +431,7 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
 
         {characterModules.length > 0 && (
           <>
-            <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-6 space-y-4">
+            <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-4 sm:p-6 space-y-4">
               <h3 className="text-lg font-semibold text-gray-200">Character Concept</h3>
               <p className="text-xs text-gray-500">Describe who your character is and what they are capable of. The AI will generate stats, skills, and a polished backstory.</p>
 
@@ -470,7 +473,7 @@ export default function CharacterCreator({ onBack, onSaved, editCharacterId, ini
               )}
             </div>
 
-            <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-6 space-y-4">
+            <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-4 sm:p-6 space-y-4">
               <h3 className="text-lg font-semibold text-gray-200">Modules</h3>
               {characterModules.map(mod => (
                 <CharacterModuleForm

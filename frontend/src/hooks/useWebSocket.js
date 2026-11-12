@@ -355,7 +355,7 @@ export function useWebSocket(onStateChange, onLLMCall) {
       } else {
         resetStream();
       }
-      wsRef.current.send(JSON.stringify({ action: 'intro' }));
+      wsRef.current.send(JSON.stringify({ action: 'intro', ...(quiet ? { quiet: true } : {}) }));
     }
   }, [resetStream, cancelFlush]);
 

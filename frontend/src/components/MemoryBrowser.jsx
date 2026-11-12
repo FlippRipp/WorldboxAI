@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { api } from '../lib/api';
+import { useBackTrap } from '../hooks/useBackNavigation';
 import EditEntryModal, {
   LOREBOOK_ENTRY_FIELDS,
   lorebookEntryInitialValues,
@@ -45,6 +46,9 @@ export default function MemoryBrowser({ isOpen, onClose, saveId }) {
   const [error, setError] = useState('');
   const [deleteId, setDeleteId] = useState(null);
   const [editing, setEditing] = useState(null); // {title, fields, initialValues, onSave}
+
+  useBackTrap(editing != null, () => setEditing(null));
+  useBackTrap(deleteId != null, () => setDeleteId(null));
 
   const fetchAll = () => {
     setLoading(true);
@@ -132,46 +136,48 @@ export default function MemoryBrowser({ isOpen, onClose, saveId }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" role="dialog" aria-modal="true" aria-label="Memory browser">
-      <div className="bg-gray-800 w-full max-w-3xl rounded-lg shadow-2xl border border-gray-700 flex flex-col max-h-[90vh]">
-        <div className="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900 rounded-t-lg">
-          <div>
-            <h2 className="text-xl font-bold text-gray-100">Memory Browser</h2>
-            <p className="text-xs text-gray-500 mt-1">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 sm:p-4" role="dialog" aria-modal="true" aria-label="Memory browser">
+      <div className="bg-gray-800 w-full max-w-3xl sm:rounded-lg shadow-2xl border border-gray-700 flex flex-col h-dvh sm:h-auto sm:max-h-[90vh]">
+        <div className="px-4 py-3 border-b border-gray-700 flex justify-between items-center bg-gray-900 sm:rounded-t-lg gap-3">
+          <div className="min-w-0">
+            <h2 className="text-lg sm:text-xl font-bold text-gray-100">Memory Browser</h2>
+            <p className="text-xs text-gray-500 mt-0.5 truncate">
               {counts.memories} memories · {counts.world} world entries · {counts.lorebooks} lorebook entries
             </p>
           </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-white text-2xl leading-none" aria-label="Close">&times;</button>
+          <button onClick={onClose} className="min-h-11 min-w-11 flex items-center justify-center text-gray-400 hover:text-white text-2xl leading-none shrink-0" aria-label="Close">&times;</button>
         </div>
 
-        <div className="px-4 pt-3 border-b border-gray-700 bg-gray-850 flex items-center gap-1">
-          {TABS.map(t => (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              className={`px-4 py-2 text-sm font-medium rounded-t border-b-2 transition-colors ${
-                tab === t.id
-                  ? 'text-purple-300 border-purple-500 bg-gray-800'
-                  : 'text-gray-400 border-transparent hover:text-gray-200'
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
-          <div className="ml-auto flex items-center gap-2 pb-2">
+        <div className="border-b border-gray-700 bg-gray-850 flex flex-col sm:flex-row sm:items-center">
+          <div className="px-3 sm:px-4 pt-2 flex items-center gap-1 overflow-x-auto no-scrollbar">
+            {TABS.map(t => (
+              <button
+                key={t.id}
+                onClick={() => setTab(t.id)}
+                className={`shrink-0 whitespace-nowrap px-3 sm:px-4 py-2 text-sm font-medium rounded-t border-b-2 transition-colors ${
+                  tab === t.id
+                    ? 'text-purple-300 border-purple-500 bg-gray-800'
+                    : 'text-gray-400 border-transparent hover:text-gray-200'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+          <div className="px-3 py-2 sm:px-4 sm:py-0 sm:ml-auto flex items-center gap-2 border-t border-gray-700/60 sm:border-t-0">
             {tab !== 'rag_debug' && (
               <input
                 type="text"
                 value={search}
                 onChange={e => setSearch(e.target.value)}
                 placeholder="Search..."
-                className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200 w-40"
+                className="bg-gray-700 border border-gray-600 rounded px-2.5 py-1.5 sm:py-1 text-sm text-gray-200 flex-1 sm:flex-none sm:w-40 min-w-0"
                 aria-label="Search entries"
               />
             )}
             <button
               onClick={fetchAll}
-              className="text-sm text-purple-400 hover:text-purple-300 px-2 py-1"
+              className="min-h-9 text-sm text-purple-400 hover:text-purple-300 px-2.5 py-1 shrink-0 ml-auto sm:ml-0"
               aria-label="Refresh entries"
             >
               Refresh
@@ -226,8 +232,8 @@ export default function MemoryBrowser({ isOpen, onClose, saveId }) {
           )}
         </div>
 
-        <div className="p-3 border-t border-gray-700 bg-gray-900 rounded-b-lg flex justify-end">
-          <button onClick={onClose} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded font-medium transition-colors text-sm">
+        <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-gray-700 bg-gray-900 sm:rounded-b-lg flex justify-end">
+          <button onClick={onClose} className="min-h-11 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded font-medium transition-colors text-sm">
             Close
           </button>
         </div>

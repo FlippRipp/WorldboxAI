@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { api } from 'api';
-import MapRenderer from './WorldBuilder/MapRenderer';
 import { normalizeWorldData, breadcrumb } from './lib/mapspace';
+
+let CachedMapRenderer = null;
 
 // Rendered generically by the host's in-game overlay slot, which passes the
 // whole game `state`. We derive the world props from it and render nothing when
@@ -48,10 +49,33 @@ export default function GameMapOverlay({ state = {} }) {
   }, [travel]);
 
   const [open, setOpen] = useState(false);
+  const [MapRendererComp, setMapRendererComp] = useState(() => CachedMapRenderer);
   const [activeMapId, setActiveMapId] = useState(null);
   const [focusNodeId, setFocusNodeId] = useState(null);
   const [expanding, setExpanding] = useState(false);
   const [localSite, setLocalSite] = useState(null); // freshly expanded, pre-refresh
+
+  // Lazy-load the heavy 1,500-line MapRenderer only when the map overlay is opened.
+  useEffect(() => {
+    if (!open || MapRendererComp) return;
+    let cancelled = false;
+    const loader = typeof window !== 'undefined' ? window.__wbLoadModuleComponent : null;
+    if (loader) {
+      loader('wb_worldgen', 'ui/WorldBuilder/MapRenderer.jsx')
+        .then((Comp) => {
+          CachedMapRenderer = Comp;
+          if (!cancelled) setMapRendererComp(() => Comp);
+        })
+        .catch((err) => console.error('Failed to lazy-load MapRenderer:', err));
+    }
+    return () => { cancelled = true; };
+  }, [open, MapRendererComp]);
+
+  // Trap Android Back while the map overlay is open.
+  useEffect(() => {
+    if (!open || typeof window === 'undefined' || !window.__wbRegisterBackHandler) return undefined;
+    return window.__wbRegisterBackHandler(() => setOpen(false));
+  }, [open]);
 
   // One shared normalizer handles both world_format 2 (`maps`/`connections`)
   // and legacy (`map_layers`/`map`) payloads. Hidden (undiscovered) passages
@@ -126,6 +150,20 @@ export default function GameMapOverlay({ state = {} }) {
     setTimeout(() => setFocusNodeId(null), 4000);
   };
 
+  // Allow the mobile Header 1-tap Map icon to toggle this overlay.
+  useEffect(() => {
+    if (!worldData || typeof window === 'undefined') return undefined;
+    const onToggle = () => {
+      setOpen((prev) => {
+        const next = !prev;
+        if (next && playerNodeId) focusOn(playerNodeId);
+        return next;
+      });
+    };
+    window.addEventListener('wb:toggle-map', onToggle);
+    return () => window.removeEventListener('wb:toggle-map', onToggle);
+  }, [worldData, playerNodeId]);
+
   // Follow the player across maps: a server-driven move to another map —
   // story travel crossing a boundary, /teleport, an undo rolling the player
   // back outside — switches the displayed map to where the player now is.
@@ -155,27 +193,26 @@ export default function GameMapOverlay({ state = {} }) {
   if (!worldData) return null;
 
   return (
-    // On mobile the bottom-right corner is occupied by the chat composer's
-    // send button, which hides this control; anchor it under the header
-    // (top-right) on small screens and restore the desktop bottom-right corner
-    // from `sm` up, where the centered composer leaves that gutter empty.
-    <div className="fixed right-4 z-50 top-16 sm:top-auto sm:bottom-4">
+    // On < 1024px the mobile Header provides a 1-tap Map button, so hide the
+    // floating trigger pill there. When opened, display a responsive card on
+    // phones and a 360px bottom-right panel on larger screens.
+    <>
       {!open ? (
-        <button
-          onClick={() => {
-            setOpen(true);
-            // Open centered + zoomed on the player's current position instead
-            // of the default whole-map view.
-            if (playerNodeId) focusOn(playerNodeId);
-          }}
-          className="bg-gray-800/90 border border-gray-600 hover:border-purple-500 rounded-lg px-3 py-2 text-sm text-gray-300 hover:text-purple-300 transition-colors shadow-lg"
-        >
-          Map
-        </button>
+        <div className="hidden lg:block fixed right-4 bottom-4 z-50">
+          <button
+            onClick={() => {
+              setOpen(true);
+              if (playerNodeId) focusOn(playerNodeId);
+            }}
+            className="min-h-10 bg-gray-800/90 border border-gray-600 hover:border-purple-500 rounded-lg px-3 py-2 text-sm text-gray-300 hover:text-purple-300 transition-colors shadow-lg"
+          >
+            Map
+          </button>
+        </div>
       ) : (
-        <div className="bg-gray-900/95 border border-gray-700 rounded-xl shadow-2xl overflow-hidden" style={{ width: 360 }}>
-          <div className="flex items-center justify-between px-3 py-2 bg-gray-800/80 border-b border-gray-700">
-            <span className="text-xs text-gray-400 font-medium">
+        <div className="fixed inset-x-3 top-14 sm:inset-auto sm:right-4 sm:bottom-4 sm:w-[360px] z-50 bg-gray-900/95 border border-gray-700 rounded-xl shadow-2xl overflow-hidden">
+          <div className="flex items-center justify-between pl-3 pr-1 py-1 bg-gray-800/80 border-b border-gray-700 gap-2">
+            <span className="text-xs text-gray-400 font-medium min-w-0 truncate">
               World Map
               {crumbs.length > 1 && (
                 <span className="text-gray-500 font-normal ml-2">
@@ -185,14 +222,15 @@ export default function GameMapOverlay({ state = {} }) {
             </span>
             <button
               onClick={() => setOpen(false)}
-              className="text-gray-500 hover:text-gray-300 text-sm"
+              className="min-h-10 min-w-10 flex items-center justify-center text-gray-400 hover:text-gray-200 text-lg leading-none shrink-0"
+              aria-label="Close map"
             >
-              x
+              &times;
             </button>
           </div>
           <div className="h-[268px] w-full">
-            {hasMaps && (
-              <MapRenderer
+            {hasMaps && MapRendererComp ? (
+              <MapRendererComp
                 mapsById={mapsById}
                 connections={connections}
                 rootMapId={rootMapId}
@@ -207,7 +245,11 @@ export default function GameMapOverlay({ state = {} }) {
                   revealedNodeIds: revealedNodeIds || [],
                 }}
               />
-            )}
+            ) : hasMaps ? (
+              <div className="h-full w-full flex items-center justify-center text-xs text-gray-500">
+                Loading map...
+              </div>
+            ) : null}
           </div>
           {site && (
             <div className="border-t border-gray-700 px-3 py-2 max-h-40 overflow-y-auto">
@@ -253,6 +295,6 @@ export default function GameMapOverlay({ state = {} }) {
           )}
         </div>
       )}
-    </div>
+    </>
   );
 }

@@ -31,16 +31,16 @@ function StatAllocation({ stats, onChange }) {
         const value = stats[stat] || 10;
         const diff = value - 10;
         return (
-          <div key={stat} className="flex items-center gap-3">
-            <span className="w-28 text-sm text-gray-300 capitalize">{stat}</span>
+          <div key={stat} className="flex items-center gap-2.5 sm:gap-3">
+            <span className="w-24 sm:w-28 text-sm text-gray-300 capitalize">{stat}</span>
             <button
               onClick={() => handleStatChange(stat, -1)}
               disabled={value <= 1}
-              className="w-7 h-7 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-30 disabled:cursor-not-allowed text-gray-200 text-sm font-bold transition-colors flex items-center justify-center"
+              className="w-9 h-9 sm:w-7 sm:h-7 rounded-lg sm:rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-30 disabled:cursor-not-allowed text-gray-200 text-sm font-bold transition-colors flex items-center justify-center shrink-0"
             >
               -
             </button>
-            <div className="flex-1">
+            <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
                 <div className="flex-1 h-2 bg-gray-700 rounded-full overflow-hidden">
                   <div
@@ -50,7 +50,7 @@ function StatAllocation({ stats, onChange }) {
                 </div>
                 <span className="w-7 text-right font-mono text-sm text-gray-200">{value}</span>
                 {diff !== 0 && (
-                  <span className={`text-xs w-4 text-right ${diff > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  <span className={`text-xs w-5 text-right ${diff > 0 ? 'text-green-400' : 'text-red-400'}`}>
                     {diff > 0 ? `+${diff}` : diff}
                   </span>
                 )}
@@ -59,7 +59,7 @@ function StatAllocation({ stats, onChange }) {
             <button
               onClick={() => handleStatChange(stat, 1)}
               disabled={value >= 30 || remaining <= 0}
-              className="w-7 h-7 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-30 disabled:cursor-not-allowed text-gray-200 text-sm font-bold transition-colors flex items-center justify-center"
+              className="w-9 h-9 sm:w-7 sm:h-7 rounded-lg sm:rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-30 disabled:cursor-not-allowed text-gray-200 text-sm font-bold transition-colors flex items-center justify-center shrink-0"
             >
               +
             </button>
@@ -241,41 +241,43 @@ function SkillInput({ skills, onChange }) {
         </div>
       )}
 
-      <div className="flex gap-2 items-end">
-        <div className="flex-1">
+      <div className="flex flex-wrap sm:flex-nowrap gap-2 items-center">
+        <div className="w-full sm:w-auto sm:flex-1 min-w-0">
           <input
             type="text"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             placeholder="Skill name"
-            className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-200 focus:border-purple-500 focus:outline-none"
+            className="w-full min-h-10 sm:min-h-0 bg-gray-900 border border-gray-700 rounded-lg sm:rounded px-3 py-2 sm:py-1.5 text-sm text-gray-200 focus:border-purple-500 focus:outline-none"
           />
         </div>
-        <div className="w-14">
+        <div className="flex-1 sm:flex-none sm:w-24 min-w-[92px]">
           <select
             value={newType}
             onChange={(e) => setNewType(e.target.value)}
-            className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1.5 text-xs text-gray-200 focus:border-purple-500 focus:outline-none"
+            aria-label="Skill type"
+            className="w-full min-h-10 sm:min-h-0 bg-gray-900 border border-gray-700 rounded-lg sm:rounded px-2.5 py-2 sm:py-1.5 text-xs text-gray-200 focus:border-purple-500 focus:outline-none"
           >
-            <option value="active">Act</option>
-            <option value="passive">Pas</option>
-            <option value="curse">Cur</option>
+            <option value="active">Active</option>
+            <option value="passive">Passive</option>
+            <option value="curse">Curse</option>
           </select>
         </div>
-        <div className="w-14">
+        <div className="w-16 shrink-0">
           <input
             type="number"
             value={newRating}
             onChange={(e) => setNewRating(Math.max(1, Math.min(10, parseInt(e.target.value) || 3)))}
             min={1}
             max={10}
-            className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200 focus:border-purple-500 focus:outline-none text-center"
+            aria-label="Skill rating"
+            className="w-full min-h-10 sm:min-h-0 bg-gray-900 border border-gray-700 rounded-lg sm:rounded px-2 py-2 sm:py-1.5 text-sm text-gray-200 focus:border-purple-500 focus:outline-none text-center"
           />
         </div>
         <button
           onClick={addSkill}
           disabled={!newName.trim()}
-          className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded text-xs font-medium transition-colors whitespace-nowrap"
+          className="min-h-10 sm:min-h-0 px-4 sm:px-3 py-2 sm:py-1.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg sm:rounded text-xs font-medium transition-colors whitespace-nowrap shrink-0"
         >
           Add
         </button>

@@ -62,6 +62,22 @@ export default function WorldExplorerScreen({ worldId, onBack, onIterate }) {
   const [rightOpen, setRightOpen] = useState(isDesktop);
   const focusTimer = useRef(null);
 
+  // Register Android Back traps for mobile slide-over drawers and the Iterate modal.
+  useEffect(() => {
+    if (!leftOpen || isDesktop() || typeof window === 'undefined' || !window.__wbRegisterBackHandler) return undefined;
+    return window.__wbRegisterBackHandler(() => setLeftOpen(false));
+  }, [leftOpen]);
+
+  useEffect(() => {
+    if (!rightOpen || isDesktop() || typeof window === 'undefined' || !window.__wbRegisterBackHandler) return undefined;
+    return window.__wbRegisterBackHandler(() => setRightOpen(false));
+  }, [rightOpen]);
+
+  useEffect(() => {
+    if (!iterateOpen || typeof window === 'undefined' || !window.__wbRegisterBackHandler) return undefined;
+    return window.__wbRegisterBackHandler(() => { if (!iterateBusy) setIterateOpen(false); });
+  }, [iterateOpen, iterateBusy]);
+
   const refresh = useCallback(async () => {
     const [compiledRes, stateRes] = await Promise.all([
       api.getCompiledWorld(worldId),
@@ -130,6 +146,7 @@ export default function WorldExplorerScreen({ worldId, onBack, onIterate }) {
   const handleSelectFromList = (node) => {
     setSelectedNodeId(node.id);
     focusOn(node.id);
+    if (!isDesktop()) setLeftOpen(false);
   };
 
   const worldName = compiled?.lore?.world_name
@@ -155,16 +172,16 @@ export default function WorldExplorerScreen({ worldId, onBack, onIterate }) {
 
   if (error) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center justify-center p-6">
+      <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center justify-center p-6">
         <p className="text-red-400 mb-4">Failed to load world: {error}</p>
-        <button onClick={onBack} className="text-purple-400 hover:text-purple-300">Go back</button>
+        <button onClick={onBack} className="min-h-11 px-4 text-purple-400 hover:text-purple-300">Go back</button>
       </div>
     );
   }
 
   if (!compiled) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex items-center justify-center">
+      <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex items-center justify-center">
         <span className="inline-block w-8 h-8 border-2 border-purple-400/30 border-t-purple-400 rounded-full animate-spin" />
       </div>
     );
@@ -174,7 +191,7 @@ export default function WorldExplorerScreen({ worldId, onBack, onIterate }) {
     <button
       onClick={() => setOpen((v) => !v)}
       title={`${open ? 'Hide' : 'Show'} ${label}`}
-      className={`px-2 py-1 rounded text-xs border transition-colors ${
+      className={`min-h-9 px-2.5 py-1 rounded text-xs border transition-colors whitespace-nowrap ${
         open
           ? 'border-purple-500/60 text-purple-300 bg-purple-900/30'
           : 'border-gray-700 text-gray-400 hover:bg-gray-700'
@@ -185,11 +202,11 @@ export default function WorldExplorerScreen({ worldId, onBack, onIterate }) {
   );
 
   return (
-    <div className="h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col overflow-hidden">
-      <header className="shrink-0 flex items-center gap-3 px-4 py-2.5 border-b border-gray-800 bg-gray-900/70">
+    <div className="h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col overflow-hidden">
+      <header className="shrink-0 flex flex-wrap items-center gap-2 sm:gap-3 px-3 sm:px-4 py-1.5 sm:py-2 border-b border-gray-800 bg-gray-900/70">
         <button
           onClick={onBack}
-          className="flex items-center gap-1.5 text-gray-400 hover:text-gray-200 transition-colors text-sm"
+          className="min-h-11 flex items-center gap-1.5 text-gray-400 hover:text-gray-200 transition-colors text-sm shrink-0"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -197,9 +214,9 @@ export default function WorldExplorerScreen({ worldId, onBack, onIterate }) {
           Worlds
         </button>
         <div className="flex-1 min-w-0 flex items-baseline gap-2">
-          <h1 className="text-base font-bold text-gray-100 truncate">{worldName}</h1>
+          <h1 className="text-sm sm:text-base font-bold text-gray-100 truncate">{worldName}</h1>
           {crumbs.length > 1 && (
-            <span className="text-xs text-gray-500 truncate hidden sm:inline">
+            <span className="text-xs text-gray-500 truncate">
               {crumbs.map((m, i) => (
                 <span key={m.map_id}>
                   {i > 0 && ' › '}
@@ -219,12 +236,12 @@ export default function WorldExplorerScreen({ worldId, onBack, onIterate }) {
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2 ml-auto">
           {!inProgress && onIterate && (
             <button
               onClick={() => { setIterateError(null); setIterateOpen(true); }}
               title="Ask the agent to change or improve this world"
-              className="px-2 py-1 rounded text-xs border border-purple-500/60 text-purple-300 hover:bg-purple-900/30 transition-colors"
+              className="min-h-9 px-2.5 py-1 rounded text-xs border border-purple-500/60 text-purple-300 hover:bg-purple-900/30 transition-colors whitespace-nowrap"
             >
               ✨ Iterate
             </button>

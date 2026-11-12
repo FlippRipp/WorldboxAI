@@ -1,15 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
-import * as Babel from '@babel/standalone';
+import { useState, useEffect, useRef } from 'react';
 import WidgetErrorBoundary from '../shared/WidgetErrorBoundary';
 import SkeletonLoader from '../shared/SkeletonLoader';
-import { api } from '../../lib/api';
+import { loadModuleComponent } from '../shared/moduleLoader';
 
 const widgetCache = new Map();
-
-function requireMock(moduleName) {
-  if (moduleName === 'react') return React;
-  throw new Error(`Module "${moduleName}" not available to widgets`);
-}
 
 function WidgetRenderer({ componentRef, value, onChange, context, modId }) {
   const Comp = componentRef.current;
@@ -38,43 +32,17 @@ export default function CharacterModuleForm({ modId, value, onChange, context })
 
     let cancelled = false;
 
-    api.getWidgetFile(modId, 'character_widget.jsx')
-      .then(res => {
-        if (!res.ok) {
-          if (res.status === 404) return null;
-          throw new Error(`HTTP ${res.status}`);
-        }
-        return res.text();
-      })
-      .then(source => {
+    loadModuleComponent(modId, 'character_widget.jsx')
+      .then(Comp => {
         if (cancelled || !mountedRef.current) return;
-        if (!source) {
-          if (mountedRef.current) setLoaded(true);
-          return;
-        }
-
-        const result = Babel.transform(source, {
-          presets: [
-            ['env', { modules: 'commonjs' }],
-            ['react', { runtime: 'classic' }]
-          ]
-        });
-
-        const factory = new Function('require', 'module', 'exports', 'React', result.code);
-        const mod = { exports: {} };
-        factory(requireMock, mod, mod.exports, React);
-
-        const Comp = mod.exports.default || mod.exports;
-        if (typeof Comp !== 'function') {
-          throw new Error('Widget must export a React component as default');
-        }
-
         widgetCache.set(cacheKey, Comp);
         componentRef.current = Comp;
-        if (mountedRef.current) setLoaded(true);
+        setLoaded(true);
       })
       .catch(err => {
-        console.error(`Error loading character widget for ${modId}:`, err);
+        if (err?.status !== 404) {
+          console.error(`Error loading character widget for ${modId}:`, err);
+        }
         if (!cancelled && mountedRef.current) setLoaded(true);
       });
 

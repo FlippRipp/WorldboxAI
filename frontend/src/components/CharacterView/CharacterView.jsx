@@ -44,29 +44,29 @@ export default function CharacterView({ isOpen, onClose, modules, gameState, onC
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center sm:p-4"
       style={{ backgroundColor: 'rgba(0,0,0,0.7)' }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div
-        className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-3xl max-h-[88vh] overflow-y-auto shadow-2xl"
+        className="bg-gray-900 border border-gray-700 sm:rounded-xl w-full max-w-3xl h-dvh sm:h-auto sm:max-h-[88vh] overflow-y-auto shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="sticky top-0 z-10 bg-gray-900/95 backdrop-blur border-b border-gray-700 px-5 pt-3 rounded-t-xl">
-          <div className="flex items-center justify-between pb-3">
-            <div className="flex items-center gap-3 min-w-0">
+        <div className="sticky top-0 z-10 bg-gray-900/95 backdrop-blur border-b border-gray-700 px-4 sm:px-5 pt-2.5 sm:rounded-t-xl">
+          <div className="flex items-center justify-between pb-2 gap-2">
+            <div className="flex items-center gap-2.5 min-w-0">
               <h2 className="text-gray-100 font-bold text-lg truncate">
                 {activeTab === 'player' ? name : (activeTabModule?.character_tab_label || activeTabModule?.name)}
               </h2>
               {activeTab === 'player' && identity && (
-                <span className="text-xs px-2 py-0.5 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 rounded-full capitalize whitespace-nowrap">
+                <span className="text-xs px-2 py-0.5 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 rounded-full capitalize whitespace-nowrap shrink-0">
                   {identity}
                 </span>
               )}
             </div>
             <button
               onClick={onClose}
-              className="text-gray-500 hover:text-gray-200 text-lg leading-none p-1 transition-colors"
+              className="min-h-11 min-w-11 flex items-center justify-center text-gray-400 hover:text-gray-200 text-lg leading-none transition-colors shrink-0"
               aria-label="Close character view"
             >
               {'✕'}
@@ -74,12 +74,12 @@ export default function CharacterView({ isOpen, onClose, modules, gameState, onC
           </div>
 
           {tabModules.length > 0 && (
-            <div className="flex gap-1 -mb-px">
+            <div className="flex gap-1 -mb-px overflow-x-auto no-scrollbar">
               {[{ id: 'player', label: 'Player' }, ...tabModules.map((m) => ({ id: m.id, label: m.character_tab_label || m.name }))].map((t) => (
                 <button
                   key={t.id}
                   onClick={() => setTab(t.id)}
-                  className={`px-3 py-1.5 text-sm rounded-t-lg border-b-2 transition-colors ${
+                  className={`shrink-0 whitespace-nowrap px-3 py-2 text-sm rounded-t-lg border-b-2 transition-colors ${
                     activeTab === t.id
                       ? 'border-indigo-400 text-indigo-300'
                       : 'border-transparent text-gray-500 hover:text-gray-300'

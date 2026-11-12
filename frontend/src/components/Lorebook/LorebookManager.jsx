@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../../lib/api';
+import { useBackTrap } from '../../hooks/useBackNavigation';
 import EditEntryModal, {
   LOREBOOK_ENTRY_FIELDS,
   lorebookEntryInitialValues,
@@ -26,6 +27,9 @@ export default function LorebookManager({ onBack }) {
   const [fullBooks, setFullBooks] = useState({}); // id -> record, for deep search in the list view
   const [editing, setEditing] = useState(null); // {title, fields, initialValues, onSave}
   const fileInputRef = useRef(null);
+
+  useBackTrap(selected != null, () => setSelected(null));
+  useBackTrap(editing != null, () => setEditing(null));
 
   const refresh = () => {
     setLoading(true);
@@ -150,11 +154,11 @@ export default function LorebookManager({ onBack }) {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center p-6">
+    <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center p-4 sm:p-6">
       <div className="w-full max-w-3xl">
         <button
           onClick={selected ? () => setSelected(null) : onBack}
-          className="flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-8"
+          className="min-h-11 flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-4 sm:mb-8"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -164,9 +168,9 @@ export default function LorebookManager({ onBack }) {
 
         {!selected ? (
           <>
-            <div className="flex items-center justify-between mb-6">
-              <div>
-                <h2 className="text-3xl font-bold text-gray-100 mb-2">Lorebooks</h2>
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+              <div className="min-w-0 flex-1">
+                <h2 className="text-2xl sm:text-3xl font-bold text-gray-100 mb-1 sm:mb-2">Lorebooks</h2>
                 <p className="text-gray-500 text-sm">
                   Import SillyTavern World Info. Linked entries are retrieved by relevance during play; constant entries are always in context.
                 </p>
@@ -174,7 +178,7 @@ export default function LorebookManager({ onBack }) {
               <button
                 onClick={() => fileInputRef.current?.click()}
                 disabled={importing}
-                className="px-4 py-2 rounded-lg bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-sm font-medium transition-colors whitespace-nowrap"
+                className="min-h-11 px-4 py-2 rounded-lg bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-sm font-medium transition-colors whitespace-nowrap shrink-0"
               >
                 {importing ? 'Importing...' : '+ Import JSON'}
               </button>

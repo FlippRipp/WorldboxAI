@@ -1,15 +1,5 @@
 import { useState, useEffect } from 'react';
-import React from 'react';
-import { api } from '../lib/api';
-
-let babelPromise = null;
-
-function ensureBabel() {
-  if (!babelPromise) {
-    babelPromise = import('@babel/standalone').then(m => m.default || m);
-  }
-  return babelPromise;
-}
+import { loadModuleComponent } from './shared/moduleLoader';
 
 const CACHE = {};
 
@@ -30,40 +20,25 @@ export default function ModuleSettingsModal({ isOpen, onClose, mod, gameState, m
       return;
     }
 
-    api.getWidgetFile(mod.id, 'widget_settings.jsx').then(async res => {
-      if (!res.ok) {
-        setError('This module has no advanced settings.');
-        setLoading(false);
-        return;
-      }
-      try {
-        const source = await res.text();
-        const Babel = await ensureBabel();
-        const compiled = Babel.transform(source, {
-          presets: [
-            ['env', { modules: 'commonjs' }],
-            ['react', { runtime: 'classic' }]
-          ]
-        }).code;
-
-        const factory = new Function('require', 'module', 'exports', 'React', compiled);
-        const m = { exports: {} };
-        const requireMock = (name) => {
-          if (name === 'react') return React;
-          throw new Error(`Module ${name} not found`);
-        };
-        factory(requireMock, m, m.exports, React);
-        const Component = m.exports?.default || m.exports;
+    let cancelled = false;
+    loadModuleComponent(mod.id, 'widget_settings.jsx')
+      .then(Component => {
+        if (cancelled) return;
         CACHE[cacheKey] = Component;
         setWidget(() => Component);
-      } catch (e) {
-        setError(`Failed to compile settings widget: ${e.message}`);
-      }
-      setLoading(false);
-    }).catch(e => {
-      setError(e.message || 'Failed to load settings widget');
-      setLoading(false);
-    });
+        setLoading(false);
+      })
+      .catch(e => {
+        if (cancelled) return;
+        if (e?.status === 404 || String(e?.message || '').includes('404')) {
+          setError('This module has no advanced settings.');
+        } else {
+          setError(`Failed to compile settings widget: ${e.message || 'Unknown error'}`);
+        }
+        setLoading(false);
+      });
+
+    return () => { cancelled = true; };
   }, [isOpen, mod]);
 
   if (!isOpen || !mod) return null;
@@ -76,11 +51,11 @@ export default function ModuleSettingsModal({ isOpen, onClose, mod, gameState, m
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" role="dialog" aria-modal="true">
-      <div className="bg-gray-800 w-full max-w-xl rounded-lg shadow-2xl border border-gray-700 flex flex-col max-h-[85vh]">
-        <div className="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900 rounded-t-lg">
-          <h2 className="text-lg font-bold text-gray-100">{mod?.name} — Settings</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-white text-2xl leading-none" aria-label="Close">&times;</button>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 sm:p-4" role="dialog" aria-modal="true">
+      <div className="bg-gray-800 w-full max-w-xl rounded-lg shadow-2xl border border-gray-700 flex flex-col max-h-[88dvh]">
+        <div className="px-4 py-3 border-b border-gray-700 flex justify-between items-center bg-gray-900 rounded-t-lg gap-2">
+          <h2 className="text-lg font-bold text-gray-100 truncate">{mod?.name} — Settings</h2>
+          <button onClick={onClose} className="min-h-11 min-w-11 flex items-center justify-center text-gray-400 hover:text-white text-2xl leading-none shrink-0" aria-label="Close">&times;</button>
         </div>
 
         <div className="flex-1 overflow-y-auto">

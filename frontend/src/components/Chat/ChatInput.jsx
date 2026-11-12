@@ -112,19 +112,35 @@ export default function ChatInput({ commands = [], onSend, onContinue, onStop, o
     }
   }, [menuOpen, suggestions, activeIndex, applyCommand, handleSend, isEmpty, blocked, onEditLast, onSwipePrev, onSwipeNext]);
 
+  const toggleCommands = useCallback(() => {
+    if (blocked) return;
+    if (inputValue === '/') {
+      setInputValue('');
+      setDismissed(false);
+    } else if (!inputValue.trim()) {
+      setInputValue('/');
+      setDismissed(false);
+      taRef.current?.focus();
+    } else {
+      // Already typing text — reveal menu if starting with /, else focus.
+      if (inputValue.startsWith('/')) setDismissed((d) => !d);
+      taRef.current?.focus();
+    }
+  }, [blocked, inputValue]);
+
   return (
-    <div className="p-4 border-t border-gray-700 bg-gray-800">
+    <div className="px-3 py-2.5 sm:p-4 pb-[max(0.625rem,env(safe-area-inset-bottom))] border-t border-gray-700 bg-gray-800">
       <div className="max-w-[720px] mx-auto relative">
         {menuOpen && (
-          <ul className="absolute bottom-full mb-2 left-0 right-0 z-10 max-h-64 overflow-y-auto bg-gray-900 border border-gray-600 rounded-xl shadow-lg py-1">
+          <ul className="absolute bottom-full mb-2 left-0 right-0 z-10 max-h-64 overflow-y-auto book-scroll bg-gray-900 border border-gray-600 rounded-xl shadow-lg py-1">
             {suggestions.map((s, i) => (
               <li key={s.command}>
                 <button
                   type="button"
-                  // Keep textarea focus so typing continues after a click.
-                  onMouseDown={(e) => { e.preventDefault(); applyCommand(s.command); }}
+                  // Keep textarea focus so typing continues after a tap/click.
+                  onPointerDown={(e) => { e.preventDefault(); applyCommand(s.command); }}
                   onMouseEnter={() => setActiveIndex(i)}
-                  className={`w-full flex items-center gap-3 px-4 py-2 text-left ${i === activeIndex ? 'bg-purple-600/30' : ''}`}
+                  className={`w-full min-h-11 sm:min-h-0 flex items-center gap-3 px-4 py-2.5 sm:py-2 text-left ${i === activeIndex ? 'bg-purple-600/30' : ''}`}
                 >
                   <span className="w-5 text-center shrink-0">{s.icon || '/'}</span>
                   <span className="font-mono text-purple-300 shrink-0">{s.command}</span>
@@ -135,9 +151,25 @@ export default function ChatInput({ commands = [], onSend, onContinue, onStop, o
           </ul>
         )}
         <div className="relative flex items-end bg-gray-900 rounded-xl border border-gray-600 focus-within:border-purple-500 overflow-hidden">
+          {commands.length > 0 && (
+            <button
+              type="button"
+              onPointerDown={(e) => { e.preventDefault(); toggleCommands(); }}
+              disabled={blocked}
+              className={`m-1.5 mr-0 min-h-10 min-w-10 flex items-center justify-center rounded-lg font-mono text-sm font-semibold transition-colors shrink-0 disabled:opacity-40 ${
+                menuOpen
+                  ? 'bg-purple-600/30 text-purple-300 border border-purple-500/40'
+                  : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800'
+              }`}
+              aria-label="Slash commands"
+              title="Slash commands (/)"
+            >
+              /
+            </button>
+          )}
           <textarea
             ref={taRef}
-            className="w-full bg-transparent text-white p-4 max-h-32 focus:outline-none resize-none overflow-y-auto"
+            className="w-full bg-transparent text-white px-3 py-3 sm:p-4 max-h-32 focus:outline-none resize-none overflow-y-auto"
             rows={1}
             placeholder="What do you do?"
             value={inputValue}
@@ -151,7 +183,7 @@ export default function ChatInput({ commands = [], onSend, onContinue, onStop, o
             <button
               onClick={() => onStop?.()}
               disabled={disabled}
-              className="m-2 p-2 rounded-lg bg-gray-700 hover:bg-red-900/70 text-gray-200 hover:text-red-200 disabled:opacity-50 transition-colors"
+              className="m-1.5 min-h-10 min-w-10 p-2 flex items-center justify-center rounded-lg bg-gray-700 hover:bg-red-900/70 text-gray-200 hover:text-red-200 disabled:opacity-50 transition-colors shrink-0"
               aria-label="Stop generating"
               title="Stop generating"
             >
@@ -163,7 +195,7 @@ export default function ChatInput({ commands = [], onSend, onContinue, onStop, o
             <button
               onClick={handleSend}
               disabled={blocked}
-              className="m-2 p-2 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 transition-colors"
+              className="m-1.5 min-h-10 min-w-10 p-2 flex items-center justify-center rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 transition-colors shrink-0"
               aria-label={isEmpty ? 'Continue the story' : 'Send message'}
               title={isEmpty ? 'Continue the story (no input)' : 'Send message'}
             >
@@ -181,9 +213,9 @@ export default function ChatInput({ commands = [], onSend, onContinue, onStop, o
           )}
         </div>
       </div>
-      <div className="text-center mt-2 text-xs text-gray-500">
+      <div className={`${busy ? 'block' : 'hidden sm:block'} text-center mt-1.5 sm:mt-2 text-xs text-gray-500`}>
         {busy
-          ? 'Generating… press the stop button to interrupt.'
+          ? 'Generating… tap stop to interrupt.'
           : isEmpty
             ? 'Enter alone continues the story · ↑ edit last message · ←/→ switch variants · / for commands.'
             : 'Press Enter to send, Shift+Enter for new line.'}

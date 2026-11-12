@@ -24,6 +24,7 @@
    This :root is unlayered and after @import, so it wins over Tailwind's theme
    defaults; inline vars on <html> in turn win over these defaults. */
 :root {
+  color-scheme: dark;
   --app-primary: #9333ea;
   --app-bg: #111827;
   --app-text: #e5e7eb;
@@ -116,6 +117,15 @@
 
 .book-scroll::-webkit-scrollbar-thumb:active {
   background-color: var(--color-purple-500);
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }
 
 .text-quote {

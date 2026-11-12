@@ -177,11 +177,11 @@ export default function ModuleManagerScreen({ onBack }) {
   const anyBusy = busy !== null || installing || updatingAll;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center p-6">
+    <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center p-4 sm:p-6">
       <div className="w-full max-w-3xl">
         <button
           onClick={onBack}
-          className="flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-8"
+          className="min-h-11 flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-4 sm:mb-8"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -190,7 +190,7 @@ export default function ModuleManagerScreen({ onBack }) {
         </button>
 
         <div className="mb-6">
-          <h2 className="text-3xl font-bold text-gray-100 mb-2">Modules</h2>
+          <h2 className="text-2xl sm:text-3xl font-bold text-gray-100 mb-2">Modules</h2>
           <p className="text-gray-500 text-sm">
             Enable and disable modules app-wide, or install new ones. A disabled module disappears
             everywhere — menus, story toggles, and the engine — until re-enabled. Per-story choices
@@ -203,13 +203,13 @@ export default function ModuleManagerScreen({ onBack }) {
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={installing}
-              className="px-4 py-2 rounded-lg bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-sm font-medium transition-colors whitespace-nowrap"
+              className="min-h-11 px-4 py-2 rounded-lg bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-sm font-medium transition-colors whitespace-nowrap"
             >
               {installing ? 'Installing…' : '+ Install from zip'}
             </button>
             <input ref={fileInputRef} type="file" accept=".zip,application/zip" onChange={handleZipFile} className="hidden" />
             <input ref={updateFileRef} type="file" accept=".zip,application/zip" onChange={handleUpdateZipFile} className="hidden" />
-            <div className="flex flex-1 gap-2">
+            <div className="flex flex-1 gap-2 min-w-0">
               <input
                 type="text"
                 value={githubUrl}
@@ -217,7 +217,7 @@ export default function ModuleManagerScreen({ onBack }) {
                 onKeyDown={(e) => { if (e.key === 'Enter') handleGithubInstall(); }}
                 placeholder="https://github.com/user/repo (or /tree/branch/path link)"
                 disabled={installing}
-                className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 disabled:opacity-50"
+                className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 disabled:opacity-50"
                 aria-label="GitHub repository URL"
               />
               <button

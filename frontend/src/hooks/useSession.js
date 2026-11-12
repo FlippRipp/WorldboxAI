@@ -96,11 +96,28 @@ export function useSession() {
     };
   }, []);
 
+  // Hydrate session state directly from a POST /api/saves/{id}/load (or create)
+  // response ({ session, state }) so entering a story doesn't block on 4 extra
+  // GET round-trips via refreshSession(). Refreshes the saves list quietly in
+  // the background without holding back the screen transition.
+  const hydrateFromLoad = useCallback((data) => {
+    if (!data) return;
+    if (data.session) setSessionState(data.session);
+    if (data.state) {
+      setModuleConfigs(data.state.module_configs || {});
+      setPromptPipeline(data.state.prompt_pipeline || []);
+      setPromptTrace(data.state.last_prompt_trace || []);
+    }
+    api.getSaves()
+      .then((res) => setSaves(res.saves || []))
+      .catch(() => {});
+  }, []);
+
   return {
     sessionState, saves, moduleConfigs, promptPipeline, promptTrace, loading,
     refreshSession, createSave, loadSave, undoTurn,
     updateModuleConfigs, updatePromptPipeline, previewPromptPipeline,
-    applyLoadedState, setSessionState, setPromptTrace, setSaves
+    applyLoadedState, hydrateFromLoad, setSessionState, setPromptTrace, setSaves
   };
 }
 

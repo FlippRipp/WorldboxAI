@@ -484,20 +484,20 @@ export default function TerrainLab({ onBack }) {
     : null;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 text-gray-100 p-6">
+    <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 text-gray-100 p-4 sm:p-6">
       <div className="max-w-6xl mx-auto">
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h1 className="text-2xl font-bold flex items-center gap-2">
+        <div className="flex items-start sm:items-center justify-between gap-3 mb-6">
+          <div className="min-w-0">
+            <h1 className="text-xl sm:text-2xl font-bold flex items-center gap-2">
               🗺️ Experimental World Visualization
             </h1>
-            <p className="text-sm text-gray-500">
+            <p className="text-sm text-gray-500 mt-0.5">
               Heightmap → tectonics → erosion. Not wired into world generation yet.
             </p>
           </div>
           <button
             onClick={onBack}
-            className="text-gray-400 hover:text-gray-200 text-sm border border-gray-700 rounded px-3 py-1.5"
+            className="min-h-11 shrink-0 whitespace-nowrap text-gray-400 hover:text-gray-200 text-sm border border-gray-700 rounded px-3 py-1.5"
           >
             ← Back
           </button>
@@ -870,8 +870,8 @@ export default function TerrainLab({ onBack }) {
           </div>
 
           {/* Preview */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2">
+          <div className="space-y-3 min-w-0">
+            <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
               {[
                 ['elevation', 'Elevation'],
                 ['hillshade', 'Hillshade'],
@@ -882,7 +882,7 @@ export default function TerrainLab({ onBack }) {
                 <button
                   key={key}
                   onClick={() => setView(key)}
-                  className={`text-xs px-3 py-1.5 rounded border ${
+                  className={`shrink-0 whitespace-nowrap text-xs px-3 py-2 rounded border ${
                     view === key
                       ? 'bg-purple-600/40 border-purple-500/50 text-purple-200'
                       : 'border-gray-700 text-gray-400 hover:border-gray-600'

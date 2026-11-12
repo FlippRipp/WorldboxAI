@@ -20,14 +20,14 @@ export default function HealthPanel({ isOpen, onClose }) {
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" role="dialog" aria-modal="true">
-      <div className="bg-gray-800 w-full max-w-lg rounded-lg shadow-2xl border border-gray-700 flex flex-col max-h-[80vh]">
-        <div className="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900 rounded-t-lg">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 sm:p-4" role="dialog" aria-modal="true">
+      <div className="bg-gray-800 w-full max-w-lg rounded-lg shadow-2xl border border-gray-700 flex flex-col max-h-[88dvh]">
+        <div className="px-4 py-3 border-b border-gray-700 flex justify-between items-center bg-gray-900 rounded-t-lg">
           <h2 className="text-xl font-bold text-gray-100">System Health</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-white text-2xl leading-none">&times;</button>
+          <button onClick={onClose} className="min-h-11 min-w-11 flex items-center justify-center text-gray-400 hover:text-white text-2xl leading-none" aria-label="Close system health">&times;</button>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5">
           {loading && <div className="text-center text-gray-400 py-8">Loading...</div>}
           {error && <div className="bg-red-900/40 border border-red-700/50 rounded p-3 text-red-200 text-sm">{error}</div>}
 
@@ -76,7 +76,7 @@ export default function HealthPanel({ isOpen, onClose }) {
         </div>
 
         <div className="p-4 border-t border-gray-700 bg-gray-900 rounded-b-lg flex justify-end">
-          <button onClick={onClose} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded font-medium transition-colors">
+          <button onClick={onClose} className="min-h-11 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded font-medium transition-colors">
             Close
           </button>
         </div>

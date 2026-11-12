@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { api } from './lib/api';
 import { appendImportedBlocks } from './lib/promptImport';
+import { useBackTrap } from './hooks/useBackNavigation';
 import STImportReport from './components/STImportReport';
 
 const BLOCK_TYPES = ['static_text', 'engine_context', 'world_context', 'character_context', 'module_prompt', 'chat_history'];
@@ -862,6 +863,11 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
     }
   };
 
+  useBackTrap(Boolean(isOpen), handleClose);
+  useBackTrap(editingBlock != null, () => setEditingBlock(null));
+  useBackTrap(Boolean(showImportReport && importReport), () => setShowImportReport(false));
+  useBackTrap(showCloseConfirm, () => setShowCloseConfirm(false));
+
   const activeTrace = preview?.trace || promptTrace || [];
   const orderedTrace = activeTrace
     .filter((entry) => !entry.skipped && entry.message_index !== undefined)
@@ -897,7 +903,9 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
             <button onClick={() => { setShowActions(false); handleReset(); }} className="min-h-11 sm:min-h-0 text-sm sm:text-xs px-3 py-2 sm:py-1.5 bg-red-950/70 hover:bg-red-900 text-red-200 rounded transition-colors" title="Reset to defaults">Reset</button>
               </div>
             </div>
-            <button onClick={handleClose} className="min-h-11 min-w-11 text-gray-400 hover:text-white text-2xl leading-none" aria-label="Close prompt editor">&times;</button>
+            {!standalone && (
+              <button onClick={handleClose} className="min-h-11 min-w-11 flex items-center justify-center text-gray-400 hover:text-white text-2xl leading-none" aria-label="Close prompt editor">&times;</button>
+            )}
           </div>
         </div>
 
@@ -1283,7 +1291,7 @@ export default function PromptStudio({ isOpen, onClose, modules, promptPipeline,
         <div className="shrink-0 px-3 py-2 sm:p-4 pb-[max(0.5rem,env(safe-area-inset-bottom))] border-t border-gray-700 bg-gray-900 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div className={`${error ? 'block' : 'hidden sm:block'} text-sm text-red-300 min-w-0 break-words`} role="status">{error || (hasUnsavedChanges ? 'Unsaved changes' : '')}</div>
           <div className="flex justify-end gap-2 sm:ml-auto">
-            <button onClick={handleClose} className="min-h-11 flex-1 sm:flex-none px-3 sm:px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded text-sm font-medium transition-colors">Close</button>
+            {!standalone && <button onClick={handleClose} className="min-h-11 flex-1 sm:flex-none px-3 sm:px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded text-sm font-medium transition-colors">Close</button>}
             {!standalone && <button onClick={handlePreview} disabled={isPreviewing} className="min-h-11 flex-1 sm:flex-none px-3 sm:px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white rounded text-sm font-medium transition-colors">{isPreviewing ? '...' : 'Preview'}</button>}
             <button onClick={handleSave} disabled={isSaving} className="min-h-11 flex-[2] sm:flex-none px-3 sm:px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded text-sm font-medium transition-colors">{isSaving ? 'Saving...' : hasUnsavedChanges ? 'Save Changes' : 'Save Pipeline'}</button>
           </div>

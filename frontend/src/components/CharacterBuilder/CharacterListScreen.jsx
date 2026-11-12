@@ -1,10 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../../lib/api';
+import { useBackTrap } from '../../hooks/useBackNavigation';
 
 export default function CharacterListScreen({ onOpenCharacter, onBack }) {
   const [characters, setCharacters] = useState([]);
   const [loading, setLoading] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState(null);
+
+  useBackTrap(confirmDelete != null, () => setConfirmDelete(null));
 
   const fetchCharacters = useCallback(async () => {
     setLoading(true);
@@ -31,11 +34,11 @@ export default function CharacterListScreen({ onOpenCharacter, onBack }) {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col p-6">
+    <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col p-4 sm:p-6">
       <div className="w-full max-w-4xl mx-auto">
         <button
           onClick={onBack}
-          className="flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-8"
+          className="min-h-11 flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-4 sm:mb-8"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -43,11 +46,11 @@ export default function CharacterListScreen({ onOpenCharacter, onBack }) {
           Back to Menu
         </button>
 
-        <div className="flex items-center justify-between mb-6">
-          <h2 className="text-3xl font-bold text-gray-100">Your Characters</h2>
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+          <h2 className="text-2xl sm:text-3xl font-bold text-gray-100">Your Characters</h2>
           <button
             onClick={() => onOpenCharacter(null)}
-            className="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg font-medium transition-colors flex items-center gap-2"
+            className="min-h-11 px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg text-sm sm:text-base font-medium transition-colors flex items-center gap-2 shrink-0"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { api } from 'api';
 import WorldListScreen from './WorldBuilder/WorldListScreen';
 import WorldCreateScreen, { readSavedForm, pinAgentBuild } from './WorldBuilder/WorldCreateScreen';
@@ -14,6 +14,11 @@ export default function WorldGenScreen({ onBack }) {
   const [view, setView] = useState(() => (readSavedForm().agentWorldId ? 'create' : 'list')); // 'list' | 'create' | 'explore'
   const [exploreWorldId, setExploreWorldId] = useState(null);
   const [createKey, setCreateKey] = useState(0);
+
+  useEffect(() => {
+    if (view === 'list' || typeof window === 'undefined' || !window.__wbRegisterBackHandler) return undefined;
+    return window.__wbRegisterBackHandler(() => setView('list'));
+  }, [view]);
 
   const openObserver = (worldId) => {
     pinAgentBuild(worldId);

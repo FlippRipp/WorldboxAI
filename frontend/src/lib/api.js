@@ -36,7 +36,7 @@ export const api = {
                             plot_likes: opts.plotLikes ?? null,
                             plot_dislikes: opts.plotDislikes ?? null,
                           }) }),
-  loadSave:               (saveId) => request(`/api/saves/${saveId}/load`, { method: 'POST' }),
+  loadSave:               (saveId, { ifNeeded = false } = {}) => request(`/api/saves/${saveId}/load${ifNeeded ? '?if_needed=true' : ''}`, { method: 'POST' }),
   undoSave:               (saveId, targetTurn) => request(`/api/saves/${saveId}/undo`, { method: 'POST', body: JSON.stringify({ target_turn: targetTurn }) }),
   selectSwipe:            (index) => request('/api/session/swipe', { method: 'POST', body: JSON.stringify({ index }) }),
   editMessage:            (index, content) => request(`/api/session/messages/${index}`, { method: 'PUT', body: JSON.stringify({ content }) }),
@@ -148,6 +148,7 @@ export const api = {
   getWidget:              (modId) => fetch(`${API}/widgets/${modId}/widget.jsx?_ts=${Date.now()}`),
 
   getWidgetFile:          (modId, filename) => fetch(`${API}/widgets/${modId}/${filename}?_ts=${Date.now()}`),
+  getWidgetBundle:        (modId, entry = 'widget.jsx') => fetch(`${API}/api/widgets/${encodeURIComponent(modId)}/bundle?entry=${encodeURIComponent(entry)}`),
   // Provider management
   getProviders:           () => request('/api/providers'),
   getActiveProvider:      () => request('/api/providers/active'),

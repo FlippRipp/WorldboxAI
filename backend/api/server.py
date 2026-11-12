@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from backend.engine.registry import ModuleRegistry, ModuleManagerError, parse_github_url, github_archive_url
@@ -455,6 +455,29 @@ async def get_module_jsx(mod_id: str, filename: str):
             if resp is not None:
                 return resp
     raise HTTPException(status_code=404, detail=f"File {filename} not found for module {mod_id}.")
+
+
+@app.get("/api/widgets/{mod_id}/bundle")
+async def get_module_widget_bundle(mod_id: str, request: Request, entry: str = "widget.jsx"):
+    """Return `entry` and all of its relative `.jsx`/`.js` imports pre-compiled
+    to CommonJS in a single ETag-cached response so mobile clients avoid both
+    multi-file network waterfalls and loading `@babel/standalone`."""
+    from fastapi.responses import JSONResponse
+    from backend.engine.jsx_compiler import build_widget_bundle
+    try:
+        etag, payload = await asyncio.to_thread(
+            build_widget_bundle, modules_dir, base_dir, mod_id, entry
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "private, max-age=0, must-revalidate",
+    }
+    inm = request.headers.get("if-none-match")
+    if inm and inm.strip() == etag:
+        return Response(status_code=304, headers=headers)
+    return JSONResponse(payload, headers=headers)
 
 @app.get("/api/modules")
 async def get_modules():
@@ -1631,7 +1654,7 @@ async def create_save(request: CreateSaveRequest):
         raise HTTPException(status_code=404, detail=str(exc))
 
 @app.post("/api/saves/{save_id}/load")
-async def load_save(save_id: str):
+async def load_save(save_id: str, if_needed: bool = False):
     if chat_hub.turn_running():
         if save_id == session_manager.active_save_id:
             # Reopening the story whose turn is still generating (the client
@@ -1643,13 +1666,18 @@ async def load_save(save_id: str):
             return {"session": session_manager.get_status(), "state": session_manager.state}
         _refuse_session_switch_mid_turn()
     try:
-        state = session_manager.load_save(save_id)
-        engine.set_memory_path(session_manager.get_memory_path())
-        _init_world_index_for_save(save_id)
-        # Pick up lorebook link/entry changes made while the save was unloaded
-        # (fingerprint short-circuits to a no-op when nothing changed).
-        await _sync_lorebooks_for_save(save_id)
-        return {"session": session_manager.get_status(), "state": state}
+        if if_needed and save_id == session_manager.active_save_id:
+            state = session_manager.state
+            await _sync_lorebooks_for_save(save_id)
+        else:
+            state = session_manager.load_save(save_id)
+            engine.set_memory_path(session_manager.get_memory_path())
+            _init_world_index_for_save(save_id)
+            # Pick up lorebook link/entry changes made while the save was unloaded
+            # (fingerprint short-circuits to a no-op when nothing changed).
+            await _sync_lorebooks_for_save(save_id)
+        out_state = {**state, "swipes": session_manager.swipes_meta()}
+        return {"session": session_manager.get_status(), "state": out_state}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except FileNotFoundError as exc:
@@ -2573,7 +2601,7 @@ async def websocket_endpoint(websocket: WebSocket):
     print("WebSocket client connected.")
     chat_hub.attach(websocket)
 
-    async def handle_intro():
+    async def handle_intro(quiet: bool = False):
         state = session_manager.state
         if len(state.get("history", [])) == 0:
             # New story: seed module_data by running each module's
@@ -2653,6 +2681,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
                 return
         else:
+            if quiet:
+                # Client already painted the transcript and session state from
+                # the REST load response; flush any queued terminal events and
+                # reconcile turn + swipes without re-sending megabytes of state.
+                await chat_hub.flush_undelivered()
+                await chat_hub.send({
+                    "type": "done",
+                    "state": {
+                        "active_save_id": state.get("active_save_id"),
+                        "turn": state.get("turn"),
+                        "swipes": session_manager.swipes_meta(),
+                    },
+                })
+                return
             await chat_hub.send({
                 "type": "state_load",
                 "chat_messages": state.get("chat_messages", []),
@@ -2927,7 +2969,7 @@ async def websocket_endpoint(websocket: WebSocket):
             return
         try:
             if action == "intro":
-                await handle_intro()
+                await handle_intro(quiet=bool(data.get("quiet")))
             elif action == "regenerate":
                 await handle_regenerate()
             else:

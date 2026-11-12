@@ -51,7 +51,7 @@ function ThoughtProcess({ reasoning, live }) {
 }
 
 const ACTION_BTN =
-  'p-1.5 rounded text-gray-500 hover:text-gray-200 hover:bg-white/10 disabled:opacity-30 transition-colors';
+  'p-2 sm:p-1.5 rounded text-gray-500 hover:text-gray-200 hover:bg-white/10 disabled:opacity-30 transition-colors';
 
 // Per-message icon action bar: Copy / Branch / Edit / Delete (with inline
 // confirm). Hidden until hover on desktop; always visible on touch
@@ -157,7 +157,7 @@ function SwipeControls({ swipes, busy, onPrev, onNext, onRegenerate }) {
       <button
         onClick={onPrev}
         disabled={busy || atStart}
-        className="p-1 rounded hover:text-gray-100 hover:bg-white/10 disabled:opacity-30 transition-colors"
+        className="p-2 sm:p-1 -ml-1 sm:ml-0 rounded hover:text-gray-100 hover:bg-white/10 disabled:opacity-30 transition-colors"
         aria-label="Previous generation"
       >
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -168,7 +168,7 @@ function SwipeControls({ swipes, busy, onPrev, onNext, onRegenerate }) {
       <button
         onClick={onNext}
         disabled={busy}
-        className="p-1 rounded hover:text-gray-100 hover:bg-white/10 disabled:opacity-30 transition-colors"
+        className="p-2 sm:p-1 rounded hover:text-gray-100 hover:bg-white/10 disabled:opacity-30 transition-colors"
         aria-label="Next generation"
       >
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -178,7 +178,7 @@ function SwipeControls({ swipes, busy, onPrev, onNext, onRegenerate }) {
       <button
         onClick={onRegenerate}
         disabled={busy}
-        className="p-1 ml-1 rounded hover:text-gray-100 hover:bg-white/10 disabled:opacity-30 transition-colors"
+        className="p-2 sm:p-1 ml-0.5 sm:ml-1 rounded hover:text-gray-100 hover:bg-white/10 disabled:opacity-30 transition-colors"
         aria-label="Regenerate"
         title="Regenerate"
       >
@@ -245,7 +245,7 @@ const MessageBlock = memo(function MessageBlock({ message, index, isLastAssistan
       onTouchStart={showSwipes ? (e) => { touchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY }; } : undefined}
       onTouchEnd={showSwipes ? onTouchEnd : undefined}
     >
-      <div className="max-w-[720px] mx-auto px-8 py-6 relative">
+      <div className="max-w-[720px] mx-auto px-4 py-4 sm:px-8 sm:py-6 relative">
         {/* Action bar — hidden until hover on desktop, always visible on touch */}
         {!isSystem && (
           <div className="msg-actions absolute top-3 right-3 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
@@ -328,7 +328,7 @@ function StreamingBlock({ content, reasoning, status }) {
 
   return (
     <div className="bg-gray-850/80 text-gray-200">
-      <div className="max-w-[720px] mx-auto px-8 py-6">
+      <div className="max-w-[720px] mx-auto px-4 py-4 sm:px-8 sm:py-6">
         {reasoning && <ThoughtProcess reasoning={reasoning} live />}
         <div className="flex items-center gap-2 mb-3">
           <span className="relative flex h-2 w-2">

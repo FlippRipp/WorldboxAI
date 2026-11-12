@@ -51,8 +51,8 @@ export default function SettingsScreen({ onBack }) {
   return (
     <div className="h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col">
       {/* Header */}
-      <div className="shrink-0 px-4 sm:px-6 pt-6 pb-4 max-w-5xl mx-auto w-full">
-        <button onClick={onBack} className="flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-4">
+      <div className="shrink-0 px-4 sm:px-6 pt-4 sm:pt-6 pb-3 sm:pb-4 max-w-5xl mx-auto w-full">
+        <button onClick={onBack} className="min-h-11 flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-2">
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
@@ -66,12 +66,12 @@ export default function SettingsScreen({ onBack }) {
           narrow screens. */}
       <div className="flex-1 min-h-0 max-w-5xl mx-auto w-full flex flex-col sm:flex-row gap-3 sm:gap-6 px-4 sm:px-6 pb-6">
         {/* Category rail */}
-        <nav className="shrink-0 flex sm:flex-col sm:w-48 gap-2 sm:gap-1 overflow-x-auto">
+        <nav className="shrink-0 flex sm:flex-col sm:w-48 gap-2 sm:gap-1 overflow-x-auto no-scrollbar">
           {CATEGORIES.map((cat) => (
             <button
               key={cat.id}
               onClick={() => scrollTo(cat.id)}
-              className={`shrink-0 sm:w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-sm whitespace-nowrap transition-colors ${
+              className={`min-h-10 shrink-0 sm:w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-sm whitespace-nowrap transition-colors ${
                 active === cat.id
                   ? 'bg-purple-600/20 border border-purple-500 text-gray-100'
                   : 'border border-transparent text-gray-400 hover:bg-gray-800 hover:text-gray-200'

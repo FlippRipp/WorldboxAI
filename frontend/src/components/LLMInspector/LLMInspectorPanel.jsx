@@ -1,21 +1,25 @@
 import { useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useLLMInspector } from '../../hooks/useLLMInspector';
+import { useBackTrap } from '../../hooks/useBackNavigation';
 import LLMCallCard from './LLMCallCard';
 
 export default function LLMInspectorPanel() {
   const { calls, isOpen, expandedIds, toggleExpand, clearCalls, setIsOpen } = useLLMInspector();
   const panelRef = useRef(null);
 
+  useBackTrap(isOpen, () => setIsOpen(false));
+
   useEffect(() => {
     if (!isOpen) return;
-    function handleClick(e) {
+    function handleOutside(e) {
+      if (e.target?.closest?.('[data-llm-inspector-btn]')) return;
       if (panelRef.current && !panelRef.current.contains(e.target)) {
         setIsOpen(false);
       }
     }
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
+    document.addEventListener('pointerdown', handleOutside);
+    return () => document.removeEventListener('pointerdown', handleOutside);
   }, [isOpen, setIsOpen]);
 
   if (!isOpen) return null;
@@ -42,11 +46,11 @@ export default function LLMInspectorPanel() {
       />
       <div
         ref={panelRef}
-        className="absolute top-0 right-0 h-full w-full sm:w-1/2 sm:min-w-[480px] bg-gray-950 border-l border-gray-800 shadow-2xl flex flex-col"
+        className="absolute top-0 right-0 h-dvh w-full sm:w-1/2 sm:min-w-[480px] bg-gray-950 border-l border-gray-800 shadow-2xl flex flex-col"
       >
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800 shrink-0">
-          <h2 className="text-sm font-semibold text-gray-200 flex items-center gap-2">
-            <span>LLM Call Inspector</span>
+        <div className="flex items-center justify-between px-4 py-2 border-b border-gray-800 shrink-0">
+          <h2 className="text-sm font-semibold text-gray-200 flex items-center gap-2 min-w-0">
+            <span className="truncate">LLM Call Inspector</span>
             <span className="text-xs text-gray-500">({uniqueCalls.length})</span>
             {sessionCostUsd > 0 && (
               <span className="text-xs font-mono text-emerald-400 bg-emerald-950/50 border border-emerald-800/50 px-1.5 py-0.5 rounded">
@@ -54,19 +58,20 @@ export default function LLMInspectorPanel() {
               </span>
             )}
           </h2>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1 shrink-0">
             <button
               onClick={clearCalls}
-              className="text-[10px] px-2 py-1 rounded bg-red-900/40 text-red-300 hover:bg-red-900/60 transition-colors"
+              className="min-h-9 text-xs px-2.5 py-1 rounded-lg bg-red-900/40 text-red-300 hover:bg-red-900/60 transition-colors"
               title="Clear all calls"
             >
               Clear
             </button>
             <button
               onClick={() => setIsOpen(false)}
-              className="text-gray-500 hover:text-gray-300 transition-colors"
+              className="min-h-11 min-w-11 -mr-2 flex items-center justify-center rounded-lg text-gray-400 hover:text-gray-200 hover:bg-gray-800 transition-colors"
+              aria-label="Close LLM inspector"
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
               </svg>
             </button>

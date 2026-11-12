@@ -1,19 +1,14 @@
 // Runtime loader for module-supplied JSX (widgets and full-screen views).
 //
-// Modules ship plain .jsx served from /widgets/{modId}/<file>. This loader
-// fetches, Babel-transforms, and executes that code in the browser. Unlike a
-// bare `new Function` eval, it supports:
-//   - a curated set of shared dependencies (react, react-dom, the api client)
-//     exposed to module code via require/import, and
-//   - multi-file modules: a module file may import sibling files (e.g.
-//     `import StepCard from './StepCard'`), which are resolved, fetched, and
-//     compiled recursively.
-//
-// To grow what modules can import, add to BUILTINS below.
+// Fast path: `/api/widgets/{modId}/bundle?entry=<file>` returns the entry file
+// and all of its relative imports pre-compiled to CommonJS in a single
+// ETag-validated HTTP response, so mobile clients never download or execute the
+// ~2.8 MB `@babel/standalone` bundle. If a response ever lacks pre-compiled
+// `code` (e.g. Node unavailable on the host) or the bundle endpoint isn't
+// present, `@babel/standalone` is dynamically imported on demand as a fallback.
 
 import React from 'react';
 import ReactDOM from 'react-dom';
-import * as Babel from '@babel/standalone';
 import * as d3Delaunay from 'd3-delaunay';
 import { api } from '../../lib/api';
 import { storage } from '../../lib/storage';
@@ -29,15 +24,31 @@ const BUILTINS = {
   'd3-delaunay': d3Delaunay,
 };
 
-// modId -> entryFile -> Promise<Component>
+// modId::entryFile -> Promise<Component>
 const componentCache = new Map();
+
+let babelPromise = null;
+function loadBabel() {
+  if (!babelPromise) {
+    babelPromise = import('@babel/standalone');
+  }
+  return babelPromise;
+}
+
+async function transformFallback(source) {
+  const Babel = await loadBabel();
+  return Babel.transform(source, {
+    presets: [
+      ['env', { modules: 'commonjs' }],
+      ['react', { runtime: 'classic' }],
+    ],
+  }).code;
+}
 
 function cacheKey(modId, entryFile) {
   return `${modId}::${entryFile}`;
 }
 
-// Resolve a relative specifier (./x, ../y/z) against the importing file's
-// directory, returning a normalized module path (no extension).
 function resolvePath(fromPath, spec) {
   const fromDir = fromPath.includes('/') ? fromPath.slice(0, fromPath.lastIndexOf('/')) : '';
   const segments = (fromDir ? fromDir.split('/') : []).filter(Boolean);
@@ -49,7 +60,6 @@ function resolvePath(fromPath, spec) {
   return segments.join('/').replace(/\.jsx?$/, '');
 }
 
-// Pull import/require specifiers out of raw source (before transform).
 function findSpecifiers(source) {
   const specs = new Set();
   const re = /(?:import[^'"]*?from\s*|import\s*|require\s*\(\s*|export[^'"]*?from\s*)['"]([^'"]+)['"]/g;
@@ -65,21 +75,11 @@ async function fetchSource(modId, modulePath) {
   return res.text();
 }
 
-function transform(source) {
-  return Babel.transform(source, {
-    presets: [
-      ['env', { modules: 'commonjs' }],
-      ['react', { runtime: 'classic' }],
-    ],
-  }).code;
-}
-
-// Recursively fetch + compile a module file and all of its sibling imports,
-// populating `registry` (normalized path -> { code, deps }).
-async function collectModule(modId, modulePath, registry) {
+// Fallback recursive collector (parallelized with Promise.all).
+async function collectModuleFallback(modId, modulePath, registry) {
   const normalized = modulePath.replace(/\.jsx?$/, '');
   if (registry.has(normalized)) return;
-  registry.set(normalized, null); // mark visiting to break cycles
+  registry.set(normalized, null);
 
   const source = await fetchSource(modId, normalized);
   const relativeDeps = {};
@@ -88,15 +88,47 @@ async function collectModule(modId, modulePath, registry) {
       relativeDeps[spec] = resolvePath(normalized, spec);
     }
   }
-  registry.set(normalized, { code: transform(source), deps: relativeDeps });
-
-  for (const depPath of Object.values(relativeDeps)) {
-    await collectModule(modId, depPath, registry);
-  }
+  const [code] = await Promise.all([
+    transformFallback(source),
+    ...Object.values(relativeDeps).map((depPath) => collectModuleFallback(modId, depPath, registry)),
+  ]);
+  registry.set(normalized, { code, deps: relativeDeps });
 }
 
-// Build a require() that resolves builtins by name and sibling files from the
-// compiled registry, executing each file lazily and caching its exports.
+async function loadRegistry(modId, entryPath) {
+  let bundleNotFound = false;
+  try {
+    const res = await api.getWidgetBundle(modId, `${entryPath}.jsx`);
+    if (res.status === 404) {
+      bundleNotFound = true;
+    } else if (res.ok) {
+      const payload = await res.json();
+      const files = payload?.files || {};
+      const registry = new Map();
+      await Promise.all(
+        Object.entries(files).map(async ([normPath, info]) => {
+          const code = info.code ?? (await transformFallback(info.source || ''));
+          registry.set(normPath, { code, deps: info.deps || {} });
+        })
+      );
+      if (registry.has(payload.entry || entryPath)) {
+        return { registry, resolvedEntry: payload.entry || entryPath };
+      }
+    }
+  } catch {
+    // Fall through to per-file loader below.
+  }
+  if (bundleNotFound) {
+    const err = new Error(`Widget file not found: ${modId}/${entryPath}.jsx`);
+    err.status = 404;
+    throw err;
+  }
+
+  const registry = new Map();
+  await collectModuleFallback(modId, entryPath, registry);
+  return { registry, resolvedEntry: entryPath };
+}
+
 function makeRuntime(registry) {
   const evaluated = new Map();
 
@@ -123,18 +155,15 @@ function makeRuntime(registry) {
   return evaluate;
 }
 
-// Load a module's component (default export) from `entryFile`. Cached per
-// (modId, entryFile). Returns a React component function.
 export function loadModuleComponent(modId, entryFile = 'widget.jsx') {
   const key = cacheKey(modId, entryFile);
   if (componentCache.has(key)) return componentCache.get(key);
 
   const promise = (async () => {
-    const registry = new Map();
     const entryPath = entryFile.replace(/\.jsx?$/, '');
-    await collectModule(modId, entryPath, registry);
+    const { registry, resolvedEntry } = await loadRegistry(modId, entryPath);
     const evaluate = makeRuntime(registry);
-    const exports = evaluate(entryPath);
+    const exports = evaluate(resolvedEntry);
     const Comp = exports.default || exports;
     if (typeof Comp !== 'function') {
       throw new Error(`Module ${modId}/${entryFile} must export a React component as default`);
@@ -143,7 +172,10 @@ export function loadModuleComponent(modId, entryFile = 'widget.jsx') {
   })();
 
   componentCache.set(key, promise);
-  // On failure, drop the cache entry so a later mount can retry.
   promise.catch(() => componentCache.delete(key));
   return promise;
+}
+
+if (typeof window !== 'undefined') {
+  window.__wbLoadModuleComponent = loadModuleComponent;
 }

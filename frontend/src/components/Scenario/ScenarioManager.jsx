@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api } from '../../lib/api';
+import { useBackTrap } from '../../hooks/useBackNavigation';
 import ModuleTogglePanel from '../shared/ModuleTogglePanel';
 import ModuleInstructionsEditor from '../shared/ModuleInstructionsEditor';
 
@@ -102,6 +103,8 @@ export default function ScenarioManager({ onBack }) {
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null); // {id?, name, scenario_description, starting_prompt}
   const [saving, setSaving] = useState(false);
+
+  useBackTrap(editing != null, () => setEditing(null));
   const [allLorebooks, setAllLorebooks] = useState([]);
   const [linkedLorebooks, setLinkedLorebooks] = useState([]);
   const [modules, setModules] = useState([]);
@@ -207,11 +210,11 @@ export default function ScenarioManager({ onBack }) {
   );
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center p-6">
+    <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center p-4 sm:p-6">
       <div className="w-full max-w-2xl">
         <button
           onClick={editing ? () => setEditing(null) : onBack}
-          className="flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-8"
+          className="min-h-11 flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-4 sm:mb-8"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -221,14 +224,14 @@ export default function ScenarioManager({ onBack }) {
 
         {!editing ? (
           <>
-            <div className="flex items-center justify-between mb-6">
-              <div>
-                <h2 className="text-3xl font-bold text-gray-100 mb-2">Scenarios</h2>
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+              <div className="min-w-0 flex-1">
+                <h2 className="text-2xl sm:text-3xl font-bold text-gray-100 mb-1 sm:mb-2">Scenarios</h2>
                 <p className="text-gray-500 text-sm">A starting prompt and a scenario description — the simplest way to begin a story.</p>
               </div>
               <button
                 onClick={startNew}
-                className="px-4 py-2 rounded-lg bg-purple-700 hover:bg-purple-600 text-sm font-medium transition-colors"
+                className="min-h-11 px-4 py-2 rounded-lg bg-purple-700 hover:bg-purple-600 text-sm font-medium transition-colors whitespace-nowrap shrink-0"
               >
                 + New Scenario
               </button>

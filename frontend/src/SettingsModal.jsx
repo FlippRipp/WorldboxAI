@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api } from './lib/api';
+import { useBackTrap } from './hooks/useBackNavigation';
 import ModuleSettingsModal from './components/ModuleSettingsModal';
 
 const PROVIDER_PRESETS = {
@@ -170,6 +171,9 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
   const [advSettingsMod, setAdvSettingsMod] = useState(null);
   // Pending lock-toggle confirmation: {modId, modName, key, message} | null.
   const [confirmLock, setConfirmLock] = useState(null);
+
+  useBackTrap(!!advSettingsMod, () => setAdvSettingsMod(null));
+  useBackTrap(!!confirmLock, () => setConfirmLock(null));
   // Global cheat toggle; gates the unlock button on hardcore-locked module
   // settings. The server enforces the same gate, so this is purely cosmetic.
   const [cheatsEnabled, setCheatsEnabled] = useState(false);
@@ -295,10 +299,10 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 sm:p-4" role="dialog" aria-modal="true">
       {/* Full-height sheet on phones, centered card on larger screens. */}
-      <div className="bg-gray-800 w-full max-w-2xl sm:rounded-lg shadow-2xl border border-gray-700 flex flex-col h-full sm:h-auto sm:max-h-[85vh]">
-        <div className="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900 sm:rounded-t-lg">
+      <div className="bg-gray-800 w-full max-w-2xl sm:rounded-lg shadow-2xl border border-gray-700 flex flex-col h-dvh sm:h-auto sm:max-h-[85vh]">
+        <div className="px-4 py-3 border-b border-gray-700 flex justify-between items-center bg-gray-900 sm:rounded-t-lg">
           <h2 className="text-xl font-bold text-gray-100">{isGlobal ? 'Model Settings' : 'Settings'}</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-white text-2xl leading-none" aria-label="Close settings">&times;</button>
+          <button onClick={onClose} className="min-h-11 min-w-11 flex items-center justify-center text-gray-400 hover:text-white text-2xl leading-none" aria-label="Close settings">&times;</button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
@@ -415,11 +419,11 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
           )}
         </div>
 
-        <div className="p-4 border-t border-gray-700 bg-gray-900 sm:rounded-b-lg flex items-center justify-end gap-4">
+        <div className="p-4 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-gray-700 bg-gray-900 sm:rounded-b-lg flex items-center justify-end gap-4">
           {saveError && <div className="text-xs text-red-400 flex-1">{saveError}</div>}
           <button
             onClick={handleSave}
-            className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-medium transition-colors"
+            className="min-h-11 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-medium transition-colors"
           >
             Save & Close
           </button>

@@ -405,14 +405,14 @@ export default function UsageScreen({ onBack }) {
   const maxModelCost = Math.max(...byModel.map((r) => r.cost_usd || 0), 0.000001);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 text-gray-100 p-4 sm:p-6">
+    <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 text-gray-100 p-4 sm:p-6">
       <div className="max-w-6xl mx-auto space-y-6 pb-12">
         {/* Top bar */}
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <button
               onClick={onBack}
-              className="flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-3 text-sm"
+              className="min-h-11 flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-2 text-sm"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />

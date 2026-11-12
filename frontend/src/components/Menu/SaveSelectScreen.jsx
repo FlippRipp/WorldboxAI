@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../../lib/api';
+import { useBackTrap } from '../../hooks/useBackNavigation';
 import ModuleTogglePanel from '../shared/ModuleTogglePanel';
 import ModuleInline from '../shared/ModuleInline';
 import ModuleInstructionsEditor from '../shared/ModuleInstructionsEditor';
@@ -12,11 +13,11 @@ function formatLastPlayed(iso) {
   return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
+export default function SaveSelectScreen({ onLoad, onCreate, onBack, initialModules = [] }) {
   const [saves, setSaves] = useState([]);
   const [scenarios, setScenarios] = useState([]);
-  const [modules, setModules] = useState([]);
-  const [enabledModules, setEnabledModules] = useState(() => new Set());
+  const [modules, setModules] = useState(() => initialModules || []);
+  const [enabledModules, setEnabledModules] = useState(() => new Set((initialModules || []).map((m) => m.id)));
   const [loading, setLoading] = useState(true);
   const [characters, setCharacters] = useState([]);
   const [selectedCharacter, setSelectedCharacter] = useState(null);
@@ -72,24 +73,37 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
   const loadData = () => {
     setLoading(true);
     setLoadError(false);
-    Promise.all([
-      api.getSaves(),
-      api.listCharacters().catch(() => ({ characters: [] })),
-      api.listScenarios().catch(() => ({ scenarios: [] })),
-      api.getModules().catch(() => ({ modules: [] })),
-    ])
-      .then(([savesData, charsData, scenariosData, modulesData]) => {
+    // Unblock the save list as soon as /api/saves resolves; create-story
+    // resources (characters, scenarios, modules) hydrate in the background.
+    api.getSaves()
+      .then((savesData) => {
         setSaves(savesData.saves || []);
-        setCharacters(charsData.characters || []);
-        setScenarios(scenariosData.scenarios || []);
-        const mods = modulesData.modules || [];
-        setModules(mods);
-        setEnabledModules(new Set(mods.map((m) => m.id))); // all active by default
       })
       .catch(() => setLoadError(true))
       .finally(() => setLoading(false));
+
+    api.listCharacters()
+      .then((charsData) => setCharacters(charsData.characters || []))
+      .catch(() => {});
+    api.listScenarios()
+      .then((scenariosData) => setScenarios(scenariosData.scenarios || []))
+      .catch(() => {});
+    if (!initialModules?.length) {
+      api.getModules()
+        .then((modulesData) => {
+          const mods = modulesData.modules || [];
+          setModules(mods);
+          setEnabledModules((prev) => (prev.size ? prev : new Set(mods.map((m) => m.id))));
+        })
+        .catch(() => {});
+    }
   };
   useEffect(loadData, []);
+
+  // Android Back / browser Back: dismiss nested dialogs/views in LIFO order.
+  useBackTrap(view === 'create', () => { if (!creating) setView('list'); });
+  useBackTrap(editingSave != null, () => { if (!savingSettings && !branching) setEditingSave(null); });
+  useBackTrap(branchPrompt != null, () => { if (!branching) setBranchPrompt(null); });
 
   // Escape closes the settings modal (unless a save is in flight).
   useEffect(() => {
@@ -159,14 +173,14 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
   const saveLabel = (saveId) =>
     saves.find((s) => s.id === saveId)?.display_name || saveId;
 
-  const handleLoad = async (saveId) => {
+  const handleLoad = async (saveId, isActive = false) => {
     setLoadingSave(saveId);
     setListError(null);
     try {
-      // Pass the loaded engine state through so the game can paint the
-      // transcript immediately instead of waiting on the intro round-trip.
-      const data = await api.loadSave(saveId);
-      onLoad(saveId, data?.state);
+      // Pass the full load payload ({ session, state }) so App can hydrate
+      // session state and paint the transcript immediately with zero extra GETs.
+      const data = await api.loadSave(saveId, { ifNeeded: isActive });
+      onLoad(saveId, data?.state, data);
     } catch (e) {
       setListError(`Failed to load "${saveLabel(saveId)}": ${e.message}`);
     }
@@ -286,7 +300,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
       const pref = isWorld && !scenarioChosen && !pickedNodeId
         ? (storySource.startPreference?.trim() || null)
         : null;
-      await api.createSave(name, {
+      const created = await api.createSave(name, {
         worldId: isWorld ? storySource.id : null,
         scenarioId: selectedScenario?.id || null,
         startPreference: pref,
@@ -301,7 +315,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
       });
       // The backend turns spaces into underscores for the save id; mirror
       // that here so the id we hand over matches the created save.
-      onLoad(name.replace(/\s+/g, '_'));
+      onCreate(name.replace(/\s+/g, '_'), created?.state, created);
     } catch (e) {
       setCreateError(`Failed to create save: ${e.message}`);
       creatingRef.current = false;
@@ -310,11 +324,11 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center p-6">
+    <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center p-4 sm:p-6">
       <div className="w-full max-w-2xl">
         <button
           onClick={view === 'create' ? () => setView('list') : onBack}
-          className="flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-8"
+          className="min-h-11 inline-flex items-center gap-2 text-gray-400 hover:text-gray-200 transition-colors mb-4 sm:mb-8 pr-3 -ml-1 px-1 rounded-lg"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -375,9 +389,9 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack }) {
                             </p>
                           </div>
                         </div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 shrink-0">
                           <button
-                            onClick={() => handleLoad(save.id)}
+                            onClick={() => handleLoad(save.id, save.active)}
                             disabled={loadingSave === save.id}
                             className="px-4 py-1.5 min-h-[44px] rounded-lg bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-sm transition-colors"
                           >
