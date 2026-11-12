@@ -252,6 +252,11 @@ export default function StageReader({
     revealAllHistory: false,
   });
   const [idleBeatOffset, setIdleBeatOffset] = useState(null);
+  const [dragX, setDragX] = useState(0);
+
+  const cardRef = useRef(null);
+  const touchRef = useRef(null);
+  const lastSwipeAtRef = useRef(0);
 
   const propsRef = useRef({
     messages,
@@ -518,6 +523,19 @@ export default function StageReader({
     ? Math.min(idleBeats.length - 1, Math.max(0, idleBeatOffset ?? idleBeats.length - 1))
     : 0;
 
+  const animatePartSwap = useCallback((dir) => {
+    const el = cardRef.current;
+    if (!el || typeof el.animate !== 'function') return;
+    const fromX = dir > 0 ? 28 : -28;
+    el.animate(
+      [
+        { opacity: 0.45, transform: `translate3d(${fromX}px, 0, 0)` },
+        { opacity: 1, transform: 'translate3d(0, 0, 0)' },
+      ],
+      { duration: 185, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' }
+    );
+  }, []);
+
   // Interactive transport controls
   const togglePause = useCallback(() => {
     const eng = engineRef.current;
@@ -549,24 +567,24 @@ export default function StageReader({
           isStreamComplete: eng.streamDone,
           speed: propsRef.current.readerSpeed,
         });
+        animatePartSwap(-1);
+        return true;
       }
-      return;
+      return false;
     }
     if (idleBeats.length > 1) {
-      setIdleBeatOffset((cur) => Math.max(0, (cur ?? idleBeats.length - 1) - 1));
-    }
-  }, [idleBeats.length]);
-
-  const stepNextBeat = useCallback(() => {
-    const eng = engineRef.current;
-    const now = performance.now();
-    if (eng.mode === 'playing') {
-      // First tap finishes revealing the current sentence; second tap jumps to next sentence
-      if (eng.revealPos < eng.sentencePlain.length) {
-        eng.revealPos = eng.sentencePlain.length;
-        eng.doneHoldUntil = now + 650;
-        return;
+      const curIdx = Math.min(idleBeats.length - 1, Math.max(0, idleBeatOffset ?? idleBeats.length - 1));
+      if (curIdx > 0) {
+        setIdleBeatOffset(curIdx - 1);
+        animatePartSwap(-1);
+        return true;
       }
+    }
+    return false;
+  }, [idleBeats.length, idleBeatOffset, animatePartSwap]);
+
+  const advanceToNextSentence = useCallback(
+    (eng) => {
       const nextIdx = eng.sentenceIdx + 1;
       if (nextIdx < eng.segments.length && eng.segments[nextIdx].complete) {
         const seg = eng.segments[nextIdx];
@@ -588,17 +606,70 @@ export default function StageReader({
           isStreamComplete: eng.streamDone,
           speed: propsRef.current.readerSpeed,
         });
-      } else if (eng.streamDone && nextIdx >= eng.segments.length) {
+        animatePartSwap(1);
+        return true;
+      }
+      if (eng.streamDone && nextIdx >= eng.segments.length) {
         eng.mode = 'idle';
         setIdleBeatOffset(null);
         emitReaderSync({ phase: 'turn_end', turnId: eng.turnId, reason: 'completed' });
+        return true;
       }
-      return;
+      return false;
+    },
+    [animatePartSwap]
+  );
+
+  const stepNextBeat = useCallback(() => {
+    const eng = engineRef.current;
+    const now = performance.now();
+    if (eng.mode === 'playing') {
+      // First tap finishes revealing the current sentence; second tap jumps to next sentence
+      if (eng.revealPos < eng.sentencePlain.length) {
+        eng.revealPos = eng.sentencePlain.length;
+        eng.doneHoldUntil = now + 650;
+        return true;
+      }
+      return advanceToNextSentence(eng);
     }
     if (idleBeats.length > 1) {
-      setIdleBeatOffset((cur) => Math.min(idleBeats.length - 1, (cur ?? idleBeats.length - 1) + 1));
+      const curIdx = Math.min(idleBeats.length - 1, Math.max(0, idleBeatOffset ?? idleBeats.length - 1));
+      if (curIdx < idleBeats.length - 1) {
+        setIdleBeatOffset(curIdx + 1);
+        animatePartSwap(1);
+        return true;
+      }
     }
-  }, [idleBeats.length]);
+    return false;
+  }, [idleBeats.length, idleBeatOffset, advanceToNextSentence, animatePartSwap]);
+
+  // Explicit horizontal swipe left swaps directly to the next part even if the
+  // current sentence is still mid-reveal (falling back to completing reveal if
+  // the next streamed sentence hasn't arrived yet).
+  const swipeNextPart = useCallback(() => {
+    const eng = engineRef.current;
+    const now = performance.now();
+    if (eng.mode === 'playing') {
+      if (advanceToNextSentence(eng)) {
+        return true;
+      }
+      if (eng.revealPos < eng.sentencePlain.length) {
+        eng.revealPos = eng.sentencePlain.length;
+        eng.doneHoldUntil = now + 650;
+        return true;
+      }
+      return false;
+    }
+    if (idleBeats.length > 1) {
+      const curIdx = Math.min(idleBeats.length - 1, Math.max(0, idleBeatOffset ?? idleBeats.length - 1));
+      if (curIdx < idleBeats.length - 1) {
+        setIdleBeatOffset(curIdx + 1);
+        animatePartSwap(1);
+        return true;
+      }
+    }
+    return false;
+  }, [idleBeats.length, idleBeatOffset, advanceToNextSentence, animatePartSwap]);
 
   const skipToEnd = useCallback(() => {
     const eng = engineRef.current;
@@ -672,6 +743,100 @@ export default function StageReader({
     ? view.revealPos < view.totalChars || activeBeatIdx + 1 < totalBeats || Boolean(view.sentenceText)
     : activeBeatIdx + 1 < totalBeats;
 
+  const handleCardClick = useCallback(() => {
+    if (!view.playing) return;
+    if (performance.now() - lastSwipeAtRef.current < 420) return;
+    if (typeof window !== 'undefined' && window.getSelection?.()?.toString()) return;
+    stepNextBeat();
+  }, [view.playing, stepNextBeat]);
+
+  const handleTouchStart = useCallback((e) => {
+    if (e.touches.length !== 1) {
+      touchRef.current = null;
+      return;
+    }
+    const target = e.target;
+    if (
+      target?.closest?.(
+        'button, a, input, textarea, select, summary, [role="button"], [role="slider"]'
+      )
+    ) {
+      touchRef.current = null;
+      return;
+    }
+    const t = e.touches[0];
+    touchRef.current = {
+      startX: t.clientX,
+      startY: t.clientY,
+      startTime: performance.now(),
+      axis: null,
+    };
+  }, []);
+
+  const handleTouchMove = useCallback(
+    (e) => {
+      const state = touchRef.current;
+      if (!state || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      const dx = t.clientX - state.startX;
+      const dy = t.clientY - state.startY;
+
+      if (!state.axis) {
+        if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+        if (Math.abs(dy) > Math.abs(dx) * 1.15) {
+          state.axis = 'y';
+          return;
+        }
+        if (Math.abs(dx) > Math.abs(dy) * 1.25) {
+          state.axis = 'x';
+        } else {
+          return;
+        }
+      }
+
+      if (state.axis !== 'x') return;
+
+      const hasTarget = dx < 0 ? canNext : canPrev;
+      const damped = hasTarget
+        ? Math.max(-88, Math.min(88, dx * 0.45))
+        : Math.max(-22, Math.min(22, dx * 0.14));
+      setDragX(damped);
+    },
+    [canNext, canPrev]
+  );
+
+  const handleTouchEnd = useCallback(
+    (e) => {
+      const state = touchRef.current;
+      touchRef.current = null;
+      setDragX(0);
+      if (!state || state.axis === 'y') return;
+
+      const t = e.changedTouches?.[0];
+      if (!t) return;
+      const dx = t.clientX - state.startX;
+      const dy = t.clientY - state.startY;
+      const elapsed = Math.max(1, performance.now() - state.startTime);
+
+      const isHorizontal = Math.abs(dx) > Math.abs(dy) * 1.45;
+      const isLongEnough = Math.abs(dx) >= 48 || (Math.abs(dx) >= 30 && elapsed < 260);
+      if (!isHorizontal || !isLongEnough) return;
+
+      lastSwipeAtRef.current = performance.now();
+      if (dx < 0) {
+        swipeNextPart();
+      } else {
+        stepPrevBeat();
+      }
+    },
+    [swipeNextPart, stepPrevBeat]
+  );
+
+  const handleTouchCancel = useCallback(() => {
+    touchRef.current = null;
+    setDragX(0);
+  }, []);
+
   return (
     <div className="relative flex-1 min-h-0 flex flex-col bg-gray-900 select-text">
       {/* Subtle top stage toolbar: last player cue + History button */}
@@ -706,8 +871,14 @@ export default function StageReader({
         </button>
       </div>
 
-      {/* Centered reading stage */}
-      <div className="flex-1 min-h-0 flex items-center justify-center px-4 sm:px-8 py-4 overflow-y-auto book-scroll">
+      {/* Centered reading stage (swipe left/right on touch to swap between parts) */}
+      <div
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onTouchCancel={handleTouchCancel}
+        className="flex-1 min-h-0 flex items-center justify-center px-4 sm:px-8 py-4 overflow-y-auto overflow-x-hidden touch-pan-y book-scroll"
+      >
         <div className="w-full max-w-2xl">
           {messages.length === 0 && !view.playing && currentStream == null ? (
             <div className="text-center text-gray-500 text-lg py-12">
@@ -722,13 +893,19 @@ export default function StageReader({
             </div>
           ) : (
             <div
-              onClick={view.playing ? stepNextBeat : undefined}
-              className={`rounded-2xl border px-6 py-8 sm:px-10 sm:py-11 shadow-2xl transition-colors ${
+              ref={cardRef}
+              onClick={view.playing ? handleCardClick : undefined}
+              style={
+                dragX
+                  ? { transform: `translate3d(${dragX}px, 0, 0)`, transition: 'none' }
+                  : { transition: 'transform 180ms cubic-bezier(0.22, 1, 0.36, 1)' }
+              }
+              className={`rounded-2xl border px-6 py-8 sm:px-10 sm:py-11 shadow-2xl transition-colors will-change-transform ${
                 isErrorCard
                   ? 'border-red-800/60 bg-red-950/30 text-red-200'
                   : 'border-gray-700/70 bg-gray-850/90 text-gray-100'
               } ${view.playing ? 'cursor-pointer' : ''}`}
-              title={view.playing ? 'Tap to advance beat' : undefined}
+              title={view.playing ? 'Tap or swipe to advance part' : totalBeats > 1 ? 'Swipe left/right to swap parts' : undefined}
             >
               <div className="text-xl sm:text-2xl leading-relaxed tracking-[0.01em] min-h-[4.5rem] flex items-center">
                 <div className="w-full">
@@ -827,12 +1004,20 @@ export default function StageReader({
               <StageSwipes
                 swipes={swipes}
                 busy={busy}
-                onPrev={() => (swipes.active ?? 0) > 0 && onSwipe(swipes.active - 1)}
-                onNext={() =>
-                  (swipes.active ?? 0) < (swipes.count ?? 1) - 1
-                    ? onSwipe((swipes.active ?? 0) + 1)
-                    : onRegenerate()
-                }
+                onPrev={() => {
+                  if ((swipes.active ?? 0) > 0) {
+                    setIdleBeatOffset(0);
+                    onSwipe(swipes.active - 1);
+                  }
+                }}
+                onNext={() => {
+                  if ((swipes.active ?? 0) < (swipes.count ?? 1) - 1) {
+                    setIdleBeatOffset(0);
+                    onSwipe((swipes.active ?? 0) + 1);
+                  } else {
+                    onRegenerate();
+                  }
+                }}
                 onRegenerate={onRegenerate}
               />
             </div>
