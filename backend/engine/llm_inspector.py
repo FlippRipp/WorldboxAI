@@ -30,6 +30,8 @@ class LLMCallRecord:
     fallback_reason: str = ""
     estimated_cost_usd: float | None = None
     pricing_date: str = ""
+    provider: str = ""
+    cost_source: str = ""
 
 
 CALL_TYPE_LABELS: dict[str, str] = {
@@ -39,8 +41,11 @@ CALL_TYPE_LABELS: dict[str, str] = {
     "embedding": "Embedding",
     "librarian": "Librarian",
     "world_build": "World Build",
+    "world_ideation": "World Ideation",
     "character_build": "Character Build",
     "module_fast": "Module LLM",
+    "search": "Web Search",
+    "image_gen": "Image Gen",
     "diagnostic": "Diagnostic",
 }
 
@@ -52,6 +57,8 @@ class LLMInspector:
         # Optional persistent sink (LLMCallLog): every completed call is
         # appended there, surviving the ring buffer's eviction and restarts.
         self._call_logger = None
+        # Optional compact analytics sink (UsageLedger): stores token/cost rows.
+        self._usage_ledger = None
         # In-flight calls awaiting completion, keyed by call id. The record
         # object is shared with self._calls so updates are reflected in both.
         self._records: dict[str, LLMCallRecord] = {}
@@ -61,6 +68,9 @@ class LLMInspector:
 
     def set_call_logger(self, logger):
         self._call_logger = logger
+
+    def set_usage_ledger(self, ledger):
+        self._usage_ledger = ledger
 
     async def _broadcast(self, record: LLMCallRecord):
         if self._ws_broadcast:
@@ -130,12 +140,28 @@ class LLMInspector:
         record.error = error
         record.status = "cancelled" if cancelled else ("error" if error else "complete")
         for key, value in (metadata or {}).items():
-            if key in {"model", "duration_ms", "decision_outcome", "fallback_reason", "estimated_cost_usd", "pricing_date"}:
+            if key in {
+                "model",
+                "duration_ms",
+                "decision_outcome",
+                "fallback_reason",
+                "estimated_cost_usd",
+                "pricing_date",
+                "provider",
+                "cost_source",
+            }:
                 setattr(record, key, value)
 
+        record_dict = self._record_to_dict(record)
         if self._call_logger:
             try:
-                self._call_logger.log_call(self._record_to_dict(record))
+                self._call_logger.log_call(record_dict)
+            except Exception:
+                pass
+
+        if self._usage_ledger:
+            try:
+                self._usage_ledger.record_call(record_dict)
             except Exception:
                 pass
 
@@ -219,4 +245,6 @@ class LLMInspector:
             "fallback_reason": r.fallback_reason,
             "estimated_cost_usd": r.estimated_cost_usd,
             "pricing_date": r.pricing_date,
+            "provider": r.provider,
+            "cost_source": r.cost_source,
         }

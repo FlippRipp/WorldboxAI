@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from backend.engine.registry import ModuleRegistry, ModuleManagerError, parse_github_url, github_archive_url
@@ -6,6 +6,7 @@ from backend.engine.graph import EngineGraph, CHARACTER_UPDATE_FIELDS
 from backend.engine.llm import LLMProviderError
 from backend.engine.llm_inspector import LLMInspector
 from backend.engine.llm_call_log import LLMCallLog
+from backend.engine.usage_tracker import UsageLedger
 from backend.engine.log_store import LogStore, install_log_capture
 from backend.engine.session import GameSessionManager, sanitize_module_instructions
 from backend.engine.settings_registry import SettingsRegistry
@@ -116,6 +117,12 @@ engine.llm.set_inspector(llm_inspector)
 logs_dir = os.path.join(data_dir, "logs")
 llm_call_log = LLMCallLog(logs_dir)
 llm_inspector.set_call_logger(llm_call_log)
+usage_ledger = UsageLedger(
+    logs_dir,
+    cost_calculator=provider_manager.cost_calculator,
+    backfill_jsonl_path=llm_call_log.log_path,
+)
+llm_inspector.set_usage_ledger(usage_ledger)
 
 
 class ChatHub:
@@ -1335,6 +1342,32 @@ async def get_llm_inspector_calls(since_id: str = "", limit: int = 50):
 @app.delete("/api/llm-inspector/calls")
 async def clear_llm_inspector_calls():
     llm_inspector.clear()
+    return {"cleared": True}
+
+
+@app.get("/api/usage/summary")
+async def get_usage_summary(
+    range: str = "30d",
+    model: list[str] = Query(default=[]),
+    module: list[str] = Query(default=[]),
+    tz_offset: int = 0,
+):
+    module_labels = {
+        mod_id: (mod_data.get("manifest", {}).get("name") or mod_id)
+        for mod_id, mod_data in registry.get_modules().items()
+    }
+    return usage_ledger.query_summary(
+        range_key=range,
+        models=model,
+        modules=module,
+        module_labels=module_labels,
+        tz_offset_minutes=tz_offset,
+    )
+
+
+@app.delete("/api/usage")
+async def clear_usage_ledger():
+    usage_ledger.clear()
     return {"cleared": True}
 
 

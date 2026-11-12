@@ -5,8 +5,11 @@ const TYPE_COLORS = {
   embedding:      { bg: 'bg-gray-800/30', text: 'text-gray-400', border: 'border-gray-700/50', icon: '🧬' },
   librarian:      { bg: 'bg-emerald-900/30', text: 'text-emerald-300', border: 'border-emerald-700/50', icon: '📚' },
   world_build:    { bg: 'bg-orange-900/30', text: 'text-orange-300', border: 'border-orange-700/50', icon: '🌍' },
+  world_ideation: { bg: 'bg-orange-900/30', text: 'text-orange-300', border: 'border-orange-700/50', icon: '🌍' },
   character_build:{ bg: 'bg-pink-900/30', text: 'text-pink-300', border: 'border-pink-700/50', icon: '👤' },
   module_fast:    { bg: 'bg-yellow-900/30', text: 'text-yellow-300', border: 'border-yellow-700/50', icon: '⚡' },
+  search:         { bg: 'bg-teal-900/30', text: 'text-teal-300', border: 'border-teal-700/50', icon: '🔎' },
+  image_gen:      { bg: 'bg-fuchsia-900/30', text: 'text-fuchsia-300', border: 'border-fuchsia-700/50', icon: '🖼️' },
   diagnostic:     { bg: 'bg-red-900/30', text: 'text-red-300', border: 'border-red-700/50', icon: '🔧' },
 };
 
@@ -35,6 +38,12 @@ function formatTimestamp(ts) {
 function formatTokens(tIn, tOut) {
   if (!tIn && !tOut) return '';
   return `⬆${tIn || 0} ⬇${tOut || 0}`;
+}
+
+function formatCallCost(cost) {
+  if (cost == null || cost <= 0) return '';
+  if (cost >= 0.01) return `$${cost.toFixed(4)}`;
+  return `$${cost.toFixed(6)}`;
 }
 
 export default function LLMCallCard({ call, expanded, onToggle }) {
@@ -73,6 +82,11 @@ export default function LLMCallCard({ call, expanded, onToggle }) {
           <>
             <span className="text-[10px] text-gray-500 w-10 text-right">{formatDuration(call.duration_ms)}</span>
             <span className="text-[10px] text-gray-600 w-16 text-right">{formatTokens(call.tokens_in, call.tokens_out)}</span>
+            {call.estimated_cost_usd > 0 && (
+              <span className="text-[10px] font-mono text-emerald-400/90 w-16 text-right">
+                {formatCallCost(call.estimated_cost_usd)}
+              </span>
+            )}
           </>
         )}
         <svg className={`w-3 h-3 text-gray-500 transition-transform ${expanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -92,7 +106,18 @@ export default function LLMCallCard({ call, expanded, onToggle }) {
             {call.decision_outcome && <span>Decision: {call.decision_outcome}</span>}
             {call.fallback_reason && <span>Fallback: {call.fallback_reason}</span>}
             {call.decision_parent_id && <span>Decision source: {call.decision_parent_id}</span>}
-            {call.estimated_cost_usd != null && <span>Estimated cost: ${call.estimated_cost_usd.toFixed(6)} (rates {call.pricing_date}; output free)</span>}
+            {call.estimated_cost_usd != null && (
+              <span className="text-emerald-400/90 font-mono">
+                Cost: ${call.estimated_cost_usd.toFixed(6)}
+                {call.cost_source === 'reported'
+                  ? ' (provider reported)'
+                  : call.pricing_date
+                    ? ` (rates ${call.pricing_date}; output free)`
+                    : call.cost_source === 'priced'
+                      ? ' (estimated)'
+                      : ''}
+              </span>
+            )}
             {call.streaming && <span className="text-purple-400">Streaming</span>}
             {isRunning && <span className="text-amber-300">In progress…</span>}
             {isCancelled && <span className="text-gray-400">Stopped by user</span>}

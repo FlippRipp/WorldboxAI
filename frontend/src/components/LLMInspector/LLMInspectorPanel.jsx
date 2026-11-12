@@ -22,10 +22,14 @@ export default function LLMInspectorPanel() {
 
   const uniqueCalls = [];
   const seen = new Set();
+  let sessionCostUsd = 0;
   for (const c of calls) {
     if (!seen.has(c.id)) {
       seen.add(c.id);
       uniqueCalls.push(c);
+      if (typeof c.estimated_cost_usd === 'number' && c.estimated_cost_usd > 0) {
+        sessionCostUsd += c.estimated_cost_usd;
+      }
     }
   }
 
@@ -41,9 +45,14 @@ export default function LLMInspectorPanel() {
         className="absolute top-0 right-0 h-full w-full sm:w-1/2 sm:min-w-[480px] bg-gray-950 border-l border-gray-800 shadow-2xl flex flex-col"
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800 shrink-0">
-          <h2 className="text-sm font-semibold text-gray-200">
-            LLM Call Inspector
-            <span className="ml-2 text-xs text-gray-500">({uniqueCalls.length})</span>
+          <h2 className="text-sm font-semibold text-gray-200 flex items-center gap-2">
+            <span>LLM Call Inspector</span>
+            <span className="text-xs text-gray-500">({uniqueCalls.length})</span>
+            {sessionCostUsd > 0 && (
+              <span className="text-xs font-mono text-emerald-400 bg-emerald-950/50 border border-emerald-800/50 px-1.5 py-0.5 rounded">
+                ${sessionCostUsd >= 0.01 ? sessionCostUsd.toFixed(4) : sessionCostUsd.toFixed(6)}
+              </span>
+            )}
           </h2>
           <div className="flex items-center gap-2">
             <button

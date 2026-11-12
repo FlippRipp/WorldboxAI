@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import quote
 from backend.engine.providers import PROVIDERS
 from backend.engine.jev import JevService
+from backend.engine.usage_tracker import CostCalculator, PRICING_CACHE_FILENAME
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +21,13 @@ class ProviderManager:
         self._active_id = self._load_active()
         self._llm_service = None
         self.decisions = JevService(self._dir / "jev" / "config.json")
+        self.cost_calculator = CostCalculator(self._dir / PRICING_CACHE_FILENAME)
 
     def set_llm_service(self, llm_service):
         self._llm_service = llm_service
         llm_service.decisions = self.decisions
+        if hasattr(llm_service, "set_cost_calculator"):
+            llm_service.set_cost_calculator(self.cost_calculator)
         print(f"[DEBUG] ProviderManager.set_llm_service: active_id='{self._active_id}'")
         if self._active_id:
             config = self.get_effective_config(self._active_id)
@@ -237,8 +241,10 @@ class ProviderManager:
                 async with httpx.AsyncClient() as client:
                     resp = await client.get("https://openrouter.ai/api/v1/models?output_modalities=all")
                     data = resp.json()
+                    data_items = data.get("data", []) if isinstance(data, dict) else []
+                    self.cost_calculator.update_openrouter_models(data_items)
                     raw_models = []
-                    for m in data.get("data", []):
+                    for m in data_items:
                         mid = m.get("id", "")
                         arch = m.get("architecture", {}) if isinstance(m.get("architecture"), dict) else {}
                         output_modalities = arch.get("output_modalities", [])
@@ -251,16 +257,18 @@ class ProviderManager:
                 headers = {"Authorization": f"Bearer {api_key}"}
                 async with httpx.AsyncClient(timeout=15.0) as client:
                     text_resp, emb_resp = await asyncio.gather(
-                        client.get("https://api.nano-gpt.com/api/v1/models", headers=headers),
-                        client.get("https://api.nano-gpt.com/api/v1/embedding-models", headers=headers),
+                        client.get("https://api.nano-gpt.com/api/v1/models?detailed=true", headers=headers),
+                        client.get("https://api.nano-gpt.com/api/v1/embedding-models?detailed=true", headers=headers),
                         return_exceptions=True,
                     )
                     if isinstance(text_resp, Exception):
                         raise text_resp
                     text_resp.raise_for_status()
                     text_data = text_resp.json()
+                    text_items = text_data.get("data", []) if isinstance(text_data, dict) else []
+                    self.cost_calculator.update_nanogpt_models(text_items)
                     seen = {}
-                    for m in (text_data.get("data", []) if isinstance(text_data, dict) else []):
+                    for m in text_items:
                         mid = m.get("id", "") if isinstance(m, dict) else ""
                         if mid:
                             is_emb = "embed" in mid.lower()
@@ -273,6 +281,7 @@ class ProviderManager:
                             or emb_data.get("models")
                             or (emb_data if isinstance(emb_data, list) else [])
                         ) if isinstance(emb_data, (dict, list)) else []
+                        self.cost_calculator.update_nanogpt_models(emb_items)
                         for m in emb_items:
                             mid = (m.get("id") or m.get("model") or "") if isinstance(m, dict) else ""
                             if mid:

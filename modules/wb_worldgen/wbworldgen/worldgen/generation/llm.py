@@ -24,6 +24,7 @@ async def json_retry_completion(
     retry_attempts: int = 2,
 ) -> dict:
     """Call the LLM expecting a JSON object, retrying on parse failure."""
+    ctx = {"module_source": "wb_worldgen", **(inspector_ctx or {})}
     last_content = ""
     for attempt in range(retry_attempts + 1):
         try:
@@ -32,7 +33,7 @@ async def json_retry_completion(
                 model=model,
                 response_format={"type": "json_object"},
                 temperature=temperature,
-                inspector_ctx=inspector_ctx,
+                inspector_ctx=ctx,
             )
             parsed = json.loads(content)
             return parsed

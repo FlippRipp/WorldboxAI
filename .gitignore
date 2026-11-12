@@ -19,6 +19,8 @@ server_err.log
 # Provider configs contain API keys — commit config.example.json instead
 data/providers/*/config.json
 data/providers/jev/*.tmp
+data/providers/pricing_cache.json
+data/providers/*.tmp
 
 # Frontend
 frontend/node_modules/

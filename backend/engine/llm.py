@@ -8,6 +8,12 @@ from litellm import acompletion, aembedding
 from backend.engine.providers import PROVIDERS
 from backend.engine.schemas import MemorySummary, MemoryImportance
 from backend.engine.llm_inspector import LLMInspector
+from backend.engine.usage_tracker import (
+    CostCalculator,
+    NANOGPT_SEARCH_FEE_USD,
+    OPENROUTER_SEARCH_FEE_USD,
+    _finite_nonneg,
+)
 
 try:
     from litellm.utils import supports_reasoning as _litellm_supports_reasoning
@@ -119,9 +125,63 @@ class LLMService:
         #: logs a warning for unknown models) on every request.
         self._reasoning_support: dict[str, bool] = {}
         self.inspector: LLMInspector | None = None
+        self.cost_calculator: CostCalculator = CostCalculator()
 
     def set_inspector(self, inspector: LLMInspector):
         self.inspector = inspector
+
+    def set_cost_calculator(self, cost_calculator: CostCalculator):
+        self.cost_calculator = cost_calculator
+
+    @staticmethod
+    def _extract_usage(response: Any) -> dict:
+        usage_obj = getattr(response, "usage", None)
+        if usage_obj is None:
+            return {}
+        if hasattr(usage_obj, "to_dict"):
+            try:
+                return usage_obj.to_dict() or {}
+            except Exception:
+                pass
+        if hasattr(usage_obj, "model_dump"):
+            try:
+                return usage_obj.model_dump() or {}
+            except Exception:
+                pass
+        if isinstance(usage_obj, dict):
+            return dict(usage_obj)
+        return {}
+
+    def _cost_metadata(
+        self,
+        model: str,
+        call_type: str = "",
+        usage: dict | None = None,
+        response: Any = None,
+        extra_cost_usd: float = 0.0,
+        extra_included_in_reported: bool = False,
+    ) -> dict:
+        u = usage or {}
+        tokens_in = int(u.get("prompt_tokens") or u.get("input_tokens") or 0)
+        tokens_out = int(u.get("completion_tokens") or u.get("output_tokens") or 0)
+        if call_type == "embedding" and tokens_in == 0:
+            tokens_in = int(u.get("total_tokens") or 0)
+        cost_usd, cost_source = self.cost_calculator.resolve_cost(
+            model=model,
+            provider=self._provider_id,
+            call_type=call_type,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            usage=u,
+            response=response,
+            extra_cost_usd=extra_cost_usd,
+            extra_included_in_reported=extra_included_in_reported,
+        )
+        return {
+            "provider": self._provider_id,
+            "estimated_cost_usd": cost_usd,
+            "cost_source": cost_source,
+        }
 
     def reconfigure(self, provider_id: str, config: dict):
         print(f"[LLMService] reconfigure called: provider='{provider_id}'")
@@ -389,13 +449,23 @@ class LLMService:
             message = response.choices[0].message
             content = (message.content or "").strip()
             sources = self._citation_sources(message)
-            usage = response.usage.to_dict() if hasattr(response, "usage") else {}
+            usage = self._extract_usage(response)
             _llm_log_res("web_search", content, usage,
                          response.choices[0].finish_reason)
             if self.inspector and cid:
-                await self.inspector.end_call(cid, messages, content,
-                                              usage.get("prompt_tokens", 0),
-                                              usage.get("completion_tokens", 0))
+                await self.inspector.end_call(
+                    cid, messages, content,
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0),
+                    metadata=self._cost_metadata(
+                        model=model,
+                        call_type=ctx.get("call_type", "search"),
+                        usage=usage,
+                        response=response,
+                        extra_cost_usd=OPENROUTER_SEARCH_FEE_USD,
+                        extra_included_in_reported=True,
+                    ),
+                )
             return {"answer": content, "sources": sources,
                     "provider": self._provider_id, "model": model}
         except asyncio.CancelledError:
@@ -477,9 +547,27 @@ class LLMService:
                 if len(sources) >= max_results:
                     break
 
+            search_fee = NANOGPT_SEARCH_FEE_USD
+            if isinstance(search_data, dict):
+                reported_search_cost = _finite_nonneg(
+                    search_data.get("cost")
+                    or (search_data.get("usage") or {}).get("cost")
+                    if isinstance(search_data.get("usage"), dict)
+                    else search_data.get("cost")
+                )
+                if reported_search_cost is not None:
+                    search_fee = reported_search_cost
+
             if not sources:
                 if self.inspector and cid:
-                    await self.inspector.end_call(cid, log_input, "", 0, 0)
+                    await self.inspector.end_call(
+                        cid, log_input, "", 0, 0,
+                        metadata={
+                            "provider": self._provider_id,
+                            "estimated_cost_usd": round(search_fee, 9),
+                            "cost_source": "priced",
+                        },
+                    )
                 return {"answer": "", "sources": [],
                         "provider": self._provider_id, "model": model}
 
@@ -511,13 +599,23 @@ class LLMService:
             response = await acompletion(**call_kwargs)
             message = response.choices[0].message
             content = (message.content or "").strip()
-            usage = response.usage.to_dict() if hasattr(response, "usage") else {}
+            usage = self._extract_usage(response)
             _llm_log_res("web_search", content, usage,
                          response.choices[0].finish_reason)
             if self.inspector and cid:
-                await self.inspector.end_call(cid, messages, content,
-                                              usage.get("prompt_tokens", 0),
-                                              usage.get("completion_tokens", 0))
+                await self.inspector.end_call(
+                    cid, messages, content,
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0),
+                    metadata=self._cost_metadata(
+                        model=model,
+                        call_type=ctx.get("call_type", "search"),
+                        usage=usage,
+                        response=response,
+                        extra_cost_usd=search_fee,
+                        extra_included_in_reported=False,
+                    ),
+                )
             return {"answer": content, "sources": sources,
                     "provider": self._provider_id, "model": model}
         except asyncio.CancelledError:
@@ -574,14 +672,22 @@ class LLMService:
             message = response.choices[0].message
             content = message.content or ""
             reasoning = getattr(message, 'reasoning_content', '') or ''
-            usage = response.usage.to_dict() if hasattr(response, 'usage') else {}
+            usage = self._extract_usage(response)
             _llm_log_res("simple_completion", content, usage, response.choices[0].finish_reason)
 
             if self.inspector and cid:
-                await self.inspector.end_call(cid, messages, content,
-                                        usage.get("prompt_tokens", 0),
-                                        usage.get("completion_tokens", 0),
-                                        reasoning=reasoning)
+                await self.inspector.end_call(
+                    cid, messages, content,
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0),
+                    reasoning=reasoning,
+                    metadata=self._cost_metadata(
+                        model=model,
+                        call_type=ctx.get("call_type", "reader"),
+                        usage=usage,
+                        response=response,
+                    ),
+                )
             if return_usage:
                 return content, reasoning, usage
             return (content, reasoning) if return_reasoning else content
@@ -626,14 +732,24 @@ class LLMService:
             emb_kwargs = self._embedding_call_kwargs(text)
             response = await aembedding(**emb_kwargs)
             embedding = response.data[0]["embedding"]
+            usage = self._extract_usage(response)
+            tokens_in = int(usage.get("prompt_tokens") or usage.get("total_tokens") or 0)
             if _llm_debug():
                 print(f"=== LLM EMB RES ===")
                 print(f"  dimension: {len(embedding)}")
                 print("=" * 60)
 
             if self.inspector and cid:
-                await self.inspector.end_call(cid, text, f"vector dim={len(embedding)}",
-                                        tokens_in=0, tokens_out=0)
+                await self.inspector.end_call(
+                    cid, text, f"vector dim={len(embedding)}",
+                    tokens_in=tokens_in, tokens_out=0,
+                    metadata=self._cost_metadata(
+                        model=self.embedding_model,
+                        call_type=ctx.get("call_type", "embedding"),
+                        usage=usage,
+                        response=response,
+                    ),
+                )
             return embedding
         except asyncio.CancelledError:
             if self.inspector and cid:
@@ -670,10 +786,20 @@ class LLMService:
             embeddings = [d["embedding"] for d in data]
             if len(embeddings) != len(texts):
                 raise ValueError(f"Embedding batch returned {len(embeddings)} vectors for {len(texts)} texts.")
+            usage = self._extract_usage(response)
+            tokens_in = int(usage.get("prompt_tokens") or usage.get("total_tokens") or 0)
             if self.inspector and cid:
-                await self.inspector.end_call(cid, f"[batch of {len(texts)}]",
-                                        f"{len(embeddings)} vectors dim={len(embeddings[0])}",
-                                        tokens_in=0, tokens_out=0)
+                await self.inspector.end_call(
+                    cid, f"[batch of {len(texts)}]",
+                    f"{len(embeddings)} vectors dim={len(embeddings[0])}",
+                    tokens_in=tokens_in, tokens_out=0,
+                    metadata=self._cost_metadata(
+                        model=self.embedding_model,
+                        call_type=ctx.get("call_type", "embedding"),
+                        usage=usage,
+                        response=response,
+                    ),
+                )
             return embeddings
         except asyncio.CancelledError:
             if self.inspector and cid:
@@ -922,6 +1048,7 @@ Return a JSON object with:
         try:
             if streaming_callback:
                 kwargs["stream"] = True
+                kwargs["stream_options"] = {"include_usage": True}
                 kwargs.update(self._provider_conn_kwargs(model))
                 kwargs.update(self._provider_route_kwargs(model))
                 kwargs.update(self._reasoning_kwargs(model))
@@ -935,7 +1062,7 @@ Return a JSON object with:
                     # Some providers attach token usage to the final chunk.
                     chunk_usage = getattr(chunk, 'usage', None)
                     if chunk_usage:
-                        usage = chunk_usage.to_dict() if hasattr(chunk_usage, 'to_dict') else dict(chunk_usage)
+                        usage = self._extract_usage(chunk)
                     if not chunk.choices:
                         continue
                     delta = chunk.choices[0].delta
@@ -951,10 +1078,17 @@ Return a JSON object with:
                 full_text, full_reasoning = _split_think(full_text, full_reasoning)
                 _llm_log_res("storyteller_stream", full_text, usage or None)
                 if self.inspector and cid:
-                    await self.inspector.end_call(cid, messages, full_text,
-                                            usage.get("prompt_tokens", 0),
-                                            usage.get("completion_tokens", 0),
-                                            reasoning=full_reasoning)
+                    await self.inspector.end_call(
+                        cid, messages, full_text,
+                        usage.get("prompt_tokens", 0),
+                        usage.get("completion_tokens", 0),
+                        reasoning=full_reasoning,
+                        metadata=self._cost_metadata(
+                            model=model,
+                            call_type=ctx.get("call_type", "storyteller"),
+                            usage=usage,
+                        ),
+                    )
                 return {"content": full_text, "reasoning": full_reasoning, "model": model, "usage": usage}
 
             # No inspector_ctx here: this call is already recorded above as the
@@ -971,10 +1105,17 @@ Return a JSON object with:
             if reasoning_callback and reasoning:
                 await reasoning_callback(reasoning)
             if self.inspector and cid:
-                await self.inspector.end_call(cid, messages, result,
-                                        usage.get("prompt_tokens", 0),
-                                        usage.get("completion_tokens", 0),
-                                        reasoning=reasoning)
+                await self.inspector.end_call(
+                    cid, messages, result,
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0),
+                    reasoning=reasoning,
+                    metadata=self._cost_metadata(
+                        model=model,
+                        call_type=ctx.get("call_type", "storyteller"),
+                        usage=usage,
+                    ),
+                )
             return {"content": result, "reasoning": reasoning, "model": model, "usage": usage}
         except asyncio.CancelledError:
             if self.inspector and cid:

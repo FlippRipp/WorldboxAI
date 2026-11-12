@@ -3585,9 +3585,51 @@ async def _generate_image(cfg: dict, image_prompt: str) -> tuple[bytes, str]:
     test suite's monkeypatch seam keeps working."""
     if _provider(cfg) == "local":
         return await _local_generate(cfg, image_prompt)
-    task_id = await _novita_submit(cfg, image_prompt)
-    image_url = await _novita_poll(cfg, task_id)
-    return await _download(image_url)
+
+    engine = _services.get("engine")
+    llm = getattr(engine, "llm", None)
+    inspector = getattr(llm, "inspector", None)
+    model_label = f"novita/{cfg.get('model_name') or 'txt2img'}"
+    cid = None
+    if inspector is not None:
+        try:
+            cid = await inspector.start_call(
+                call_type="image_gen",
+                model=model_label,
+                step="novita:image",
+                module_source=MODULE_ID,
+                input_data=image_prompt,
+            )
+        except Exception:
+            cid = None
+
+    try:
+        task_id = await _novita_submit(cfg, image_prompt)
+        image_url = await _novita_poll(cfg, task_id)
+        data, ext = await _download(image_url)
+        if inspector is not None and cid:
+            from backend.engine.usage_tracker import CostCalculator
+            img_cost = CostCalculator.estimate_novita_image_cost(
+                str(cfg.get("model_name") or ""), _checkpoint_family(cfg)
+            )
+            await inspector.end_call(
+                cid, image_prompt, f"image ({ext}, {len(data)} bytes)",
+                tokens_in=0, tokens_out=0,
+                metadata={
+                    "provider": "novita",
+                    "estimated_cost_usd": img_cost,
+                    "cost_source": "priced",
+                },
+            )
+        return data, ext
+    except asyncio.CancelledError:
+        if inspector is not None and cid:
+            await inspector.end_call(cid, image_prompt, cancelled=True)
+        raise
+    except Exception as exc:
+        if inspector is not None and cid:
+            await inspector.end_call(cid, image_prompt, "", error=str(exc))
+        raise
 
 
 async def _novita_list_models(cfg: dict, query: str, cursor: str, limit: int,

@@ -1,10 +1,13 @@
 """LLM access bridge exposed to modules through the WorldBox SDK."""
 import asyncio
+from contextvars import ContextVar
 import os
 import logging
 from backend.engine.jev import Decision, FALLBACK_CONTEXT
 
 logger = logging.getLogger(__name__)
+
+_CURRENT_MODULE_VAR: ContextVar[str] = ContextVar("wb_sdk_current_module", default="")
 
 
 class LLMBridge:
@@ -18,7 +21,14 @@ class LLMBridge:
     def __init__(self):
         self._service = None
         self._inspector = None
-        self._current_module = ""
+
+    @property
+    def _current_module(self) -> str:
+        return _CURRENT_MODULE_VAR.get()
+
+    @_current_module.setter
+    def _current_module(self, value: str):
+        _CURRENT_MODULE_VAR.set(str(value or ""))
 
     def _set_service(self, service):
         self._service = service
@@ -88,8 +98,15 @@ class LLMBridge:
             message = response.choices[0].message
             content = message.content or ""
             reasoning = getattr(message, "reasoning_content", "") or ""
+            usage_obj = getattr(response, "usage", None)
+            usage = usage_obj.to_dict() if hasattr(usage_obj, "to_dict") else (dict(usage_obj) if isinstance(usage_obj, dict) else {})
             if self._inspector and cid:
-                await self._inspector.end_call(cid, prompt, content, 0, 0, reasoning=reasoning)
+                await self._inspector.end_call(
+                    cid, prompt, content,
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0),
+                    reasoning=reasoning,
+                )
             return content
         except asyncio.CancelledError:
             # CancelledError bypasses the Exception handler below; close the

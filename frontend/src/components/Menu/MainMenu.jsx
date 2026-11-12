@@ -51,6 +51,12 @@ const CORE_MODES = [
     description: 'View backend server logs and filter for errors',
     icon: '📋',
   },
+  {
+    id: 'api-usage',
+    label: 'API Usage',
+    description: 'Track API spend over time by model and module',
+    icon: '💳',
+  },
 ];
 
 export default function MainMenu({ onSelectMode, modules, onModulesLoaded }) {

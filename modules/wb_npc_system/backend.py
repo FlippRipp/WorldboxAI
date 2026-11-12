@@ -397,7 +397,11 @@ Respond with ONLY a JSON array:
 [{{"text": "short thread description", "npc_ids": ["npc_xxxxxxxx"]}}, ...]"""
 
     try:
-        result = await sdk.llm.generate(prompt, model_preference="fastest")
+        sdk.llm._current_module = "wb_npc_system"
+        try:
+            result = await sdk.llm.generate(prompt, model_preference="fastest")
+        finally:
+            sdk.llm._current_module = ""
         result = result.strip()
         if result.startswith("```"):
             parts = result.split("```")
@@ -1014,7 +1018,11 @@ Respond with ONLY valid JSON:
 {{"npcs": [{{"name": "string", "race": "string", "gender": "male|female|nonbinary|unknown", "appearance": "string", "archetype": "string", "pitch": "string", "personality": ["trait1", "trait2", "trait3"], "role": "string"}}]}}"""
 
     try:
-        result = await sdk.llm.generate(prompt, model_preference="balanced")
+        sdk.llm._current_module = "wb_npc_system"
+        try:
+            result = await sdk.llm.generate(prompt, model_preference="balanced")
+        finally:
+            sdk.llm._current_module = ""
         parsed = _parse_json_block(result)
     except Exception as e:
         print(f"[NPC System] Story-character capture failed: {e}")
@@ -1963,7 +1971,11 @@ If nothing durable changed, return an empty object {{}}.
 
 Respond with ONLY valid JSON containing just the changed fields (plus change_note)."""
 
-    raw = await sdk.llm.generate(prompt, model_preference="balanced")
+    sdk.llm._current_module = "wb_npc_system"
+    try:
+        raw = await sdk.llm.generate(prompt, model_preference="balanced")
+    finally:
+        sdk.llm._current_module = ""
     parsed = _parse_json_block(raw)
     if not isinstance(parsed, dict):
         return {"message": "[NPC] The update pass returned nothing usable -- try again.", "signal": "end_turn", "error": True}
@@ -2193,7 +2205,11 @@ Respond with ONLY valid JSON:
 {{"npc": {{"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description that always states hair color and eye color (or the being's closest equivalent) and visual age (how old they look)", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_map_id": "map_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}}}"""
 
     try:
-        result = await sdk.llm.generate(prompt, model_preference="balanced")
+        sdk.llm._current_module = "wb_npc_system"
+        try:
+            result = await sdk.llm.generate(prompt, model_preference="balanced")
+        finally:
+            sdk.llm._current_module = ""
         result = result.strip()
         if result.startswith("```"):
             parts = result.split("```")

@@ -128,6 +128,15 @@ class Decision:
         self.outcome = outcome
         self.reason = reason or self.reason
         if self.inspector and self.call_id:
+            est_cost = self._estimated_cost_usd()
+            raw_cost = self.usage.get("cost")
+            has_reported = (
+                not isinstance(raw_cost, bool)
+                and isinstance(raw_cost, (int, float))
+                and math.isfinite(raw_cost)
+                and raw_cost >= 0
+            )
+            cost_source = "reported" if has_reported else ("priced" if est_cost is not None else "unknown")
             await self.inspector.end_call(
                 self.call_id, output_data=json.dumps(self.payload, ensure_ascii=False),
                 tokens_in=self.usage.get("input_tokens", 0),
@@ -135,8 +144,10 @@ class Decision:
                 cancelled=outcome == "cancelled",
                 metadata={"model": self.model, "decision_outcome": outcome,
                           "fallback_reason": self.reason if outcome == "fallback" else "",
-                          "estimated_cost_usd": self._estimated_cost_usd(),
+                          "estimated_cost_usd": est_cost,
                           "pricing_date": PRICE_DATE,
+                          "provider": "jev",
+                          "cost_source": cost_source,
                           **({"duration_ms": self.duration_ms} if self.duration_ms is not None else {})})
 
 

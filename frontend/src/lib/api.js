@@ -119,6 +119,20 @@ export const api = {
     return request(`/api/llm-inspector/calls${qs}`);
   },
   clearLLMInspectorCalls: () => request('/api/llm-inspector/calls', { method: 'DELETE' }),
+  getUsageSummary:        ({ range = '30d', models = [], modules = [] } = {}) => {
+    const params = new URLSearchParams();
+    params.set('range', range);
+    // JS getTimezoneOffset() is (UTC - local) in minutes; negate for (local - UTC).
+    params.set('tz_offset', String(-new Date().getTimezoneOffset()));
+    for (const m of models) {
+      if (m) params.append('model', m);
+    }
+    for (const mod of modules) {
+      if (mod) params.append('module', mod);
+    }
+    return request(`/api/usage/summary?${params.toString()}`);
+  },
+  clearUsageHistory:      () => request('/api/usage', { method: 'DELETE' }),
   getServerLogs:          (sinceId = 0, level = '', limit = 1000) => {
     const params = new URLSearchParams({ limit });
     if (sinceId) params.set('since_id', sinceId);
