@@ -11,6 +11,28 @@ function emitReaderSync(detail) {
   window.dispatchEvent(new CustomEvent('wb:reader-sync', { detail }));
 }
 
+function estimateSentenceDurationMs(plainText, speed) {
+  const s = Math.max(15, Number(speed) || 38);
+  const pauseScale = Math.min(1.75, Math.max(0.45, 38 / s));
+  const text = String(plainText || '');
+  const total = text.length;
+  let holdsMs = 0;
+  for (let i = 0; i < total; i += 1) {
+    const ch = text[i];
+    const nextCh = text[i + 1] || '';
+    if ((ch === ',' || ch === ';' || ch === ':') && /\s/.test(nextCh)) {
+      holdsMs += 155 * pauseScale;
+    } else if (ch === '—' || ch === '…') {
+      holdsMs += 220 * pauseScale;
+    } else if ((ch === '.' || ch === '!' || ch === '?') && /\s/.test(nextCh)) {
+      holdsMs += 300 * pauseScale;
+    }
+  }
+  const revealMs = (total / s) * 1000;
+  const doneHoldMs = Math.min(1350, Math.max(520, 410 + total * 3.2)) * pauseScale;
+  return Math.round(Math.max(1200, revealMs + holdsMs + doneHoldMs));
+}
+
 function attrsToReactProps(el, key) {
   const props = { key };
   for (const attr of Array.from(el.attributes || [])) {
@@ -361,6 +383,7 @@ export default function StageReader({
         text: seg.text,
         isStreamComplete: eng.streamDone,
         speed,
+        durationMs: estimateSentenceDurationMs(parsed.plainText, speed),
       });
     };
 
@@ -566,6 +589,7 @@ export default function StageReader({
           text: seg.text,
           isStreamComplete: eng.streamDone,
           speed: propsRef.current.readerSpeed,
+          durationMs: 1800,
         });
         animatePartSwap(-1);
         return true;
@@ -605,6 +629,7 @@ export default function StageReader({
           text: seg.text,
           isStreamComplete: eng.streamDone,
           speed: propsRef.current.readerSpeed,
+          durationMs: estimateSentenceDurationMs(parsed.plainText, propsRef.current.readerSpeed),
         });
         animatePartSwap(1);
         return true;

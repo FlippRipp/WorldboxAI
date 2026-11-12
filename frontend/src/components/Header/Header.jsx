@@ -89,6 +89,7 @@ export default function Header({
               modules={modules}
               state={gameState}
               config={gameState?.module_configs}
+              skeleton={false}
             />
           </div>
 

@@ -12,12 +12,13 @@ test('splits multi-sentence prose while respecting abbreviations and tiny lead-i
   assert.ok(segs.every((s) => s.complete === true));
 });
 
-test('keeps conversational multi-sentence quotes together in one dialogue beat', () => {
+test('splits multi-sentence quotes into individual sentence beats while preserving quote and color wrappers', () => {
   const text = '<pink>"Stay close to me. Don\'t look away."</pink> Her hand rested warmly on his chest.';
   const segs = splitStageSentences(text, { isComplete: true });
-  assert.equal(segs.length, 2);
-  assert.equal(segs[0].text, '<pink>"Stay close to me. Don\'t look away."</pink>');
-  assert.equal(segs[1].text, 'Her hand rested warmly on his chest.');
+  assert.equal(segs.length, 3);
+  assert.equal(segs[0].text, '<pink>"Stay close to me."</pink>');
+  assert.equal(segs[1].text, '<pink>"Don\'t look away."</pink>');
+  assert.equal(segs[2].text, 'Her hand rested warmly on his chest.');
 });
 
 test('marks trailing unfinished streaming sentence as complete=false', () => {
