@@ -10,7 +10,7 @@ const DEFAULT_SAMPLE_RATE = 24000;
 const PREBUFFER_SEC = 0.16;
 
 const HIDDEN_BLOCK_RE =
-  /<!--[\s\S]*?(?:-->|$)|^ {0,3}<(details|internal_states)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gim;
+  /<!--[\s\S]*?(?:-->|$)|<(details|internal_states)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi;
 const TAG_RE = /<\/?\s*(?:color\s*:\s*)?[a-z0-9_:-]+(?:\s+[^>]*)?>/gi;
 const MD_LINK_RE = /\[([^\]]+)\]\([^)]+\)/g;
 const MD_DECOR_RE = /[*_~`#>]+/g;
@@ -109,7 +109,9 @@ class TtsCoordinator {
     this.storyEnabled = true;
     this.speaking = false;
     this.activeEmotion = '';
+    this.lastError = '';
     this.paused = false;
+    this.unlocked = false;
 
     this.audioCtx = null;
     this.activeSources = new Set();
@@ -157,15 +159,40 @@ class TtsCoordinator {
     if (typeof window === 'undefined') return null;
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     if (!AudioCtx) return null;
-    if (!this.audioCtx || this.audioCtx.state === 'closed') {
+
+    if (fromGesture && typeof navigator !== 'undefined' && navigator.audioSession) {
       try {
-        this.audioCtx = new AudioCtx({ sampleRate: DEFAULT_SAMPLE_RATE });
+        if (navigator.audioSession.type !== 'playback') {
+          navigator.audioSession.type = 'playback';
+        }
       } catch (e) {
-        this.audioCtx = new AudioCtx();
+        // ignore unsupported audioSession assignments
       }
     }
-    if (fromGesture && this.audioCtx.state === 'suspended' && !this.paused) {
-      this.audioCtx.resume().catch(() => {});
+
+    if (!this.audioCtx || this.audioCtx.state === 'closed') {
+      // Open at the device's native hardware rate (e.g. 48 kHz on Pixel / mobile)
+      // and let createBuffer(..., 24000) resample cleanly without driver quirks.
+      this.audioCtx = new AudioCtx();
+      this.unlocked = false;
+    }
+
+    if (fromGesture && !this.paused) {
+      if (this.audioCtx.state !== 'running') {
+        this.audioCtx.resume().catch(() => {});
+      }
+      if (!this.unlocked) {
+        try {
+          const silent = this.audioCtx.createBuffer(1, 1, this.audioCtx.sampleRate || 48000);
+          const src = this.audioCtx.createBufferSource();
+          src.buffer = silent;
+          src.connect(this.audioCtx.destination);
+          src.start(0);
+          this.unlocked = true;
+        } catch (e) {
+          // ignore unlock buffer errors
+        }
+      }
     }
     return this.audioCtx;
   }
@@ -174,10 +201,14 @@ class TtsCoordinator {
     if (this.globalAttached || typeof window === 'undefined') return;
     this.globalAttached = true;
 
+    // Android Chrome only grants transient user activation on pointerup/click
+    // (not pointerdown, which could become a scroll), and iOS WebKit unlocks on touchend/click.
     const unlock = () => {
       this.ensureAudioContext(true);
     };
-    window.addEventListener('pointerdown', unlock, { passive: true });
+    window.addEventListener('click', unlock, { passive: true });
+    window.addEventListener('pointerup', unlock, { passive: true });
+    window.addEventListener('touchend', unlock, { passive: true });
     window.addEventListener('keydown', unlock, { passive: true });
 
     const onInterrupt = (e) => {
@@ -304,14 +335,32 @@ class TtsCoordinator {
           return;
         }
         if (!res.ok) {
+          let detail = `HTTP ${res.status}`;
+          try {
+            const errJson = await res.json();
+            if (errJson?.detail) {
+              detail =
+                typeof errJson.detail === 'string'
+                  ? errJson.detail
+                  : `HTTP ${res.status}: ${JSON.stringify(errJson.detail)}`;
+            }
+          } catch (e) {
+            // keep status fallback
+          }
           job.failed = true;
           job.isComplete = true;
-          job.error = `HTTP ${res.status}`;
+          job.error = detail;
+          this.lastError = detail;
           if (turnState && res.status >= 500) {
             turnState.turnFailed = true;
           }
+          this.notify();
           this.onJobUpdated(job);
           return;
+        }
+
+        if (this.lastError) {
+          this.lastError = '';
         }
 
         const srHeader = Number(res.headers.get('X-Sample-Rate'));
@@ -381,7 +430,9 @@ class TtsCoordinator {
         job.failed = true;
         job.isComplete = true;
         job.error = err?.message || 'Stream error';
+        this.lastError = job.error;
         if (turnState) turnState.turnFailed = true;
+        this.notify();
         this.onJobUpdated(job);
       } finally {
         job.abortController = null;
@@ -487,12 +538,18 @@ class TtsCoordinator {
     const ctx = this.ensureAudioContext(false);
     if (!ctx) {
       job.failed = true;
+      job.error = 'Web Audio API is unavailable in this browser.';
+      this.lastError = job.error;
       pb.ended = true;
+      this.notify();
       return;
     }
 
-    if (!this.paused && ctx.state === 'suspended') {
-      ctx.resume().catch(() => {});
+    if (!this.paused && ctx.state !== 'running') {
+      ctx
+        .resume()
+        .then(() => this.pumpPlayback())
+        .catch(() => {});
     }
 
     if (!pb.started) {
@@ -565,6 +622,8 @@ class TtsCoordinator {
 
   async playPreviewSample(sampleText, emotion = '') {
     this.stopAll('preview');
+    this.lastError = '';
+    this.notify();
     this.ensureAudioContext(true);
     const text =
       sampleText ||
@@ -848,4 +907,10 @@ class TtsCoordinator {
   }
 }
 
-export const ttsCoordinator = new TtsCoordinator();
+export const ttsCoordinator =
+  (typeof window !== 'undefined' && window.__wbTtsCoordinator) ||
+  new TtsCoordinator();
+
+if (typeof window !== 'undefined') {
+  window.__wbTtsCoordinator = ttsCoordinator;
+}

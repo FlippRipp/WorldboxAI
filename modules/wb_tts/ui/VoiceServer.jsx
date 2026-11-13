@@ -39,12 +39,14 @@ export default function VoiceServer({ onBack }) {
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState('');
   const [speaking, setSpeaking] = useState(false);
+  const [streamError, setStreamError] = useState('');
 
   useEffect(() => {
     ttsCoordinator.mountWidget();
     const unsub = ttsCoordinator.subscribe(() => {
       setSpeaking(ttsCoordinator.speaking);
       setActiveEmotion(ttsCoordinator.activeEmotion || '');
+      setStreamError(ttsCoordinator.lastError || '');
       if (ttsCoordinator.status?.health) {
         setHealth(ttsCoordinator.status.health);
       }
@@ -309,7 +311,10 @@ export default function VoiceServer({ onBack }) {
             onChange={(e) => setSampleText(e.target.value)}
             className="w-full px-3.5 py-2.5 rounded-xl bg-gray-950 border border-gray-700 text-sm text-gray-100 focus:outline-none focus:border-purple-500"
           />
-          <div className="flex justify-end">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span className="text-xs text-red-400">
+              {streamError ? `Playback error: ${streamError}` : ''}
+            </span>
             <button
               type="button"
               onClick={handlePlaySample}

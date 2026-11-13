@@ -25,6 +25,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
+from fastapi import APIRouter, Body, HTTPException, Request
+from fastapi.responses import Response, StreamingResponse
 
 from backend.engine.jev import Uncertain, choice
 
@@ -37,8 +39,8 @@ MIN_EMOTION_PROB = 0.25
 RECENT_SCENE_MESSAGES = 6
 
 _HIDDEN_BLOCK_RE = re.compile(
-    r"<!--[\s\S]*?(?:-->|$)|^ {0,3}<(details|internal_states)\b[^>]*>[\s\S]*?(?:</\1\s*>|$)",
-    re.IGNORECASE | re.MULTILINE,
+    r"<!--[\s\S]*?(?:-->|$)|<(details|internal_states)\b[^>]*>[\s\S]*?(?:</\1\s*>|$)",
+    re.IGNORECASE,
 )
 _TAG_RE = re.compile(r"</?\s*(?:color\s*:\s*)?[a-z0-9_:-]+(?:\s+[^>]*)?>", re.IGNORECASE)
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
@@ -470,9 +472,6 @@ async def on_command_tts(args: list, state: dict, sdk) -> dict:
 
 
 def get_router():
-    from fastapi import APIRouter, HTTPException, Request
-    from fastapi.responses import Response, StreamingResponse
-
     router = APIRouter()
 
     @router.get("/status")
@@ -488,7 +487,7 @@ def get_router():
         }
 
     @router.post("/probe")
-    async def post_probe(body: dict | None = None):
+    async def post_probe(body: dict | None = Body(default=None)):
         if isinstance(body, dict) and body:
             _save_config(body)
         cfg = _load_config()
@@ -516,7 +515,7 @@ def get_router():
         }
 
     @router.post("/stream")
-    async def stream_tts(request: Request, body: dict | None = None):
+    async def stream_tts(request: Request, body: dict | None = Body(default=None)):
         payload = body or {}
         raw_text = str(payload.get("text") or "")
         text = clean_spoken_text(raw_text)

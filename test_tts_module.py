@@ -390,7 +390,7 @@ def test_wb_tts_jev_emotion_routing_and_fallback(tmp_path, monkeypatch):
     assert "secret" not in sent_state["recent_messages"][1]["content"]
     assert "<color:gold:smirk>" in sent_state["target_sentence"]
     assert sent_state["turn_preceding_sentences"] == ["She tilted her head with a slow grin."]
-    assert inspector.get_calls()[-1]["decision_outcome"] == "accepted"
+    assert inspector.get_calls()[0]["decision_outcome"] == "accepted"
 
     # 2. Low probability (< 0.25) falls back cleanly to `neutral`
     chosen["emotion"] = "awed"
@@ -401,7 +401,7 @@ def test_wb_tts_jev_emotion_routing_and_fallback(tmp_path, monkeypatch):
     )
     assert low_res.status_code == 200
     assert low_res.headers["X-TTS-Emotion"] == "neutral"
-    assert inspector.get_calls()[-1]["decision_outcome"] == "fallback"
+    assert inspector.get_calls()[0]["decision_outcome"] == "fallback"
 
     # 3. Explicit manual emotion (e.g. from VoiceServer test picker) bypasses Jev
     prev_req_count = len(jev_requests)
