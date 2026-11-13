@@ -3204,3 +3204,45 @@ async def apply_provider_preset(provider_id: str, request: PresetApplyRequest):
         return {"id": provider_id, "config": config}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ── Secure LAN Debug Bridge & Localhost Network Boundary ──
+from backend.engine.debug_bridge import DebugBridgeManager
+from backend.api.routers.debug_bridge import (
+    LocalOnlyExceptBridgeMiddleware,
+    create_debug_bridge_router,
+)
+
+debug_bridge = DebugBridgeManager(os.path.join(base_dir, "data", "debug_bridge"))
+
+
+def _broadcast_bridge_state(bridge_status: dict) -> None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(chat_hub.send({"type": "debug_bridge_state", "bridge": bridge_status}))
+
+
+debug_bridge.set_on_state_change(_broadcast_bridge_state)
+
+app.include_router(
+    create_debug_bridge_router(
+        bridge=debug_bridge,
+        engine=engine,
+        registry=registry,
+        session_manager=session_manager,
+        provider_manager=provider_manager,
+        log_store=log_store,
+        llm_inspector=llm_inspector,
+        llm_call_log=llm_call_log,
+        lorebook_store=lorebook_store,
+        chat_hub=chat_hub,
+        enforce_settings_locks=_enforce_settings_locks,
+        character_update_fields=CHARACTER_UPDATE_FIELDS,
+    )
+)
+# Added last so it wraps outermost (ahead of CORS and all HTTP/WS routes):
+# non-loopback peers can only reach `/api/debug-bridge/lan/*` from the exact
+# same local private subnet.
+app.add_middleware(LocalOnlyExceptBridgeMiddleware, bridge=debug_bridge)

@@ -258,9 +258,17 @@ phantom process killer) — it applies here too.
   repo lives inside the container's filesystem
   (`~/../usr/var/lib/proot-distro/installed-rootfs/ubuntu/root/` from the
   Termux side) — back up saves from there if you reinstall the distro.
-- **Access from other devices:** the backend binds `127.0.0.1` only, but the
-  Vite dev server listens on all interfaces and proxies to it, so other
-  devices on the same Wi-Fi can play at `http://<phone-ip>:5173`.
+- **LAN Lockdown & Remote Diagnostic Bridge:** Vite binds to `127.0.0.1` by
+  default so Wi-Fi peers cannot reach `/api` unauthenticated (set `WB_LAN_UI=1`
+  only if you deliberately want to browse the UI from another device). To let
+  your desktop AI assistant inspect or help fix issues on the phone:
+  1. Ensure your PC and phone are on the same local Wi-Fi subnet.
+  2. In WorldBox on the phone, open **Settings → Remote Bridge → Pair Device**
+     and give the one-time 12-character code to Antigravity (`worldbox_pair`).
+  3. On each future session, `worldbox_connect` pops up an **Allow Read-Only
+     (1h)** prompt on your phone (with an optional **Allow making changes**
+     switch and a floating **Agent** badge to toggle write mode or disconnect
+     at any time).
 - **Updating:** `git pull`, then re-run the dependency install if
   dependencies changed — `pip install -r requirements.txt` on Route A, the
   step 3 pip command on Route B — plus `npm install` in `frontend/`.

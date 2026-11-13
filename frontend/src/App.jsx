@@ -39,6 +39,7 @@ import { useMediaQuery } from './hooks/useMediaQuery';
 import { useRootBackNavigation, useBackTrap } from './hooks/useBackNavigation';
 import LLMInspectorButton from './components/LLMInspector/LLMInspectorButton';
 import LLMInspectorPanel from './components/LLMInspector/LLMInspectorPanel';
+import DebugBridgeOverlay from './components/shared/DebugBridgeOverlay';
 import { api } from './lib/api';
 import './index.css';
 
@@ -1023,6 +1024,7 @@ export default function App() {
     <ThemeProvider>
       <LLMInspectorProvider>
         <AppContent />
+        <DebugBridgeOverlay />
         <LLMInspectorButton />
         <LLMInspectorPanel />
       </LLMInspectorProvider>

@@ -119,6 +119,9 @@ export function useWebSocket(onStateChange, onLLMCall) {
           streamRef.current = '';
           reasoningRef.current = '';
           ws.send(JSON.stringify({ action: 'sync' }));
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('wb:ws-reconnected'));
+          }
         }
         hadConnectedRef.current = true;
       }
@@ -276,6 +279,10 @@ export function useWebSocket(onStateChange, onLLMCall) {
         if (data.state && onStateChangeRef.current) onStateChangeRef.current(data.state);
       } else if (data.type === 'llm_call') {
         if (data.call && onLLMCallRef.current) onLLMCallRef.current(data.call);
+      } else if (data.type === 'debug_bridge_state') {
+        if (typeof window !== 'undefined' && data.bridge) {
+          window.dispatchEvent(new CustomEvent('wb:debug-bridge-state', { detail: data.bridge }));
+        }
       }
     };
 

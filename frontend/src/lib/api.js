@@ -369,6 +369,28 @@ export const api = {
   // Fast biome-only re-derive on an already-generated run (no erosion/rivers).
   rederiveBiomes:           (runId, params) => request(`/api/terrain/${runId}/biomes`, { method: 'POST', body: JSON.stringify(params) }),
 
+  // Secure LAN Diagnostic Bridge (loopback-only UI controls)
+  getBridgeStatus:          () => request('/api/debug-bridge/local/status'),
+  startBridgePairing:       () => request('/api/debug-bridge/local/pair/start', { method: 'POST' }),
+  cancelBridgePairing:      () => request('/api/debug-bridge/local/pair/cancel', { method: 'POST' }),
+  unpairBridgeDevice:       () => request('/api/debug-bridge/local/unpair', { method: 'POST' }),
+  decideBridgeSession:      (requestId, approve, allowWrite = false) =>
+    request('/api/debug-bridge/local/session/decide', {
+      method: 'POST',
+      body: JSON.stringify({ request_id: requestId, approve, allow_write: allowWrite }),
+    }),
+  setBridgeWriteMode:       (allowWrite) =>
+    request('/api/debug-bridge/local/session/write-mode', {
+      method: 'PUT',
+      body: JSON.stringify({ allow_write: allowWrite }),
+    }),
+  disconnectBridgeSession:  () => request('/api/debug-bridge/local/session/disconnect', { method: 'POST' }),
+  sendBridgeTelemetry:      (payload) =>
+    request('/api/debug-bridge/local/client-telemetry', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
   // Streaming variant: invokes onFrame(frame) for each work-in-progress preview
   // and resolves with the final payload (run_id + full-res image URLs). Parses
   // Server-Sent Events off a POST body (EventSource can't POST params).

@@ -192,10 +192,12 @@ echo
 echo "[2/2] Starting React Frontend (Vite)..."
 echo
 echo "==== Open http://localhost:5173 in your browser        ===="
-LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-if [ -n "${LAN_IP:-}" ]; then
-    echo "==== On the same network, other devices can connect at: ===="
-    echo "====   http://$LAN_IP:5173"
+if [ "${WB_LAN_UI:-0}" = "1" ]; then
+    LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    if [ -n "${LAN_IP:-}" ]; then
+        echo "==== On the same network, other devices can connect at: ===="
+        echo "====   http://$LAN_IP:5173"
+    fi
 fi
 echo "==== Press Ctrl+C to stop both servers                  ===="
 echo

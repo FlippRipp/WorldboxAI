@@ -18,10 +18,10 @@ export default defineConfig(({ mode }) => {
       }
     },
     server: {
-      // Listen on all network interfaces (0.0.0.0) so other devices on the same
-      // LAN can reach the dev server at http://<this-machine-ip>:5173. All API/WS
-      // calls are relative, so Vite proxies them to the backend.
-      host: true,
+      // Bind strictly to loopback by default so Vite's /api proxy does not
+      // expose unauthenticated backend routes to other devices on the Wi-Fi.
+      // Set WB_LAN_UI=1 to opt into LAN UI hosting.
+      host: env.WB_LAN_UI === '1' ? true : '127.0.0.1',
       proxy: {
         '/api': {
           target: backend,
