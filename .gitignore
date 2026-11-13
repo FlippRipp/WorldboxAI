@@ -49,9 +49,13 @@ data/modules_state.json
 
 # Image generation runtime data (API key, image index, downloaded images)
 data/wb_image_gen/
+data/wb_tts/
 
 # Local SD WebUI installed by modules/wb_image_gen/image_server.sh|.bat
 image_server/
+
+# Local Faster Qwen3-TTS server installed by modules/wb_tts/tts_server.sh|.bat
+tts_server/
 
 # Experimental terrain visualization outputs (generated artifacts)
 data/terrain_experiments/

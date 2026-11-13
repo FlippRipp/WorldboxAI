@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { storage } from './lib/storage';
+import { splitStageSentences } from './lib/stageSegments';
 import { ModuleEventProvider } from './hooks/useModuleEventBus';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useSession } from './hooks/useSession';
@@ -103,6 +104,18 @@ function readSavedUiState() {
   } catch {
     return null;
   }
+}
+
+let globalFeedTurnSeq = 0;
+
+function emitFeedStream(detail) {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent('wb:feed-stream', { detail }));
+}
+
+function emitTtsInterrupt(reason) {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent('wb:tts-interrupt', { detail: { reason } }));
 }
 
 function AppContent() {
@@ -211,7 +224,10 @@ function AppContent() {
         && Object.prototype.hasOwnProperty.call(m.commands || {}, first)
     );
     if (isCommand) ws.sendCommand(text, opts);
-    else ws.sendMessage(text);
+    else {
+      emitTtsInterrupt('send');
+      ws.sendMessage(text);
+    }
   }, [ws, modules, session.moduleConfigs]);
 
   // Commands dispatched by module UI buttons (sidebar widgets, character
@@ -223,14 +239,17 @@ function AppContent() {
   );
 
   const handleContinue = useCallback(() => {
+    emitTtsInterrupt('continue');
     ws.sendContinue();
   }, [ws]);
 
   const handleRegenerate = useCallback(() => {
+    emitTtsInterrupt('regenerate');
     ws.sendRegenerate();
   }, [ws]);
 
   const handleStop = useCallback(() => {
+    emitTtsInterrupt('stop');
     ws.sendStop();
   }, [ws]);
 
@@ -291,6 +310,7 @@ function AppContent() {
   }, [session, ws, showToast, branchPrompt]);
 
   const handleSwipe = useCallback(async (index) => {
+    emitTtsInterrupt('swipe');
     try {
       const r = await api.selectSwipe(index);
       ws.applyServerState(r.state);
@@ -427,6 +447,7 @@ function AppContent() {
       if (generating) {
         setShowExitWarning(true);
       } else {
+        emitTtsInterrupt('exit');
         sentIntroRef.current = false;
         setCurrentMode('storyteller-select');
       }
@@ -440,6 +461,7 @@ function AppContent() {
   const handleConfirmExit = useCallback(() => {
     // Abandon the in-flight turn; otherwise the server keeps generating into
     // the story after we've left and re-entering hits a "busy" error.
+    emitTtsInterrupt('exit');
     ws.sendStop();
     setShowExitWarning(false);
     sentIntroRef.current = false;
@@ -485,6 +507,99 @@ function AppContent() {
     setShowOnboarding(false);
     if (nextMode) setCurrentMode(nextMode);
   }, []);
+
+  // Broadcast sentence-split live stream in Classic Chat ('feed') mode so
+  // sentence-streaming modules (e.g. wb_tts) can begin synthesizing as soon as
+  // the first sentence completes, without duplicating StageReader's pacer path.
+  const feedStreamRef = useRef({
+    active: false,
+    turnId: 0,
+    baselineCount: 0,
+    saveId: null,
+    rawText: '',
+  });
+
+  useEffect(() => {
+    const f = feedStreamRef.current;
+    const saveId = gameState?.active_save_id ?? null;
+
+    if (currentMode !== 'storyteller-game' || displayMode !== 'feed') {
+      if (f.active) {
+        emitFeedStream({ phase: 'abort', turnId: f.turnId, reason: 'mode_switch' });
+        f.active = false;
+        f.rawText = '';
+      }
+      return;
+    }
+
+    if (f.active && f.saveId !== saveId) {
+      emitFeedStream({ phase: 'abort', turnId: f.turnId, reason: 'save_switch' });
+      f.active = false;
+      f.rawText = '';
+    }
+
+    if (ws.currentStream != null) {
+      if (!f.active) {
+        globalFeedTurnSeq += 1;
+        f.active = true;
+        f.turnId = globalFeedTurnSeq;
+        f.baselineCount = ws.messages.length;
+        f.saveId = saveId;
+        f.rawText = ws.currentStream;
+        emitFeedStream({
+          phase: 'start',
+          turnId: f.turnId,
+          saveId,
+          segments: splitStageSentences(ws.currentStream, { isComplete: false }),
+          isComplete: false,
+        });
+      } else if (ws.currentStream !== f.rawText) {
+        f.rawText = ws.currentStream;
+        emitFeedStream({
+          phase: 'segments',
+          turnId: f.turnId,
+          saveId,
+          segments: splitStageSentences(ws.currentStream, { isComplete: false }),
+          isComplete: false,
+        });
+      }
+    } else if (f.active) {
+      const tail = ws.messages[ws.messages.length - 1];
+      const hasNewAssistant =
+        ws.messages.length > f.baselineCount &&
+        tail &&
+        tail.role === 'assistant' &&
+        !tail.error;
+
+      if (hasNewAssistant) {
+        const finalText = tail.content || f.rawText;
+        f.active = false;
+        f.rawText = '';
+        emitFeedStream({
+          phase: 'segments',
+          turnId: f.turnId,
+          saveId,
+          segments: splitStageSentences(finalText, { isComplete: true }),
+          isComplete: true,
+        });
+      } else if (!ws.postProcessing) {
+        f.active = false;
+        f.rawText = '';
+        emitFeedStream({
+          phase: 'abort',
+          turnId: f.turnId,
+          reason: 'stopped',
+        });
+      }
+    }
+  }, [
+    currentMode,
+    displayMode,
+    ws.currentStream,
+    ws.messages,
+    ws.postProcessing,
+    gameState?.active_save_id,
+  ]);
 
   useEffect(() => {
     if (session.sessionState) {

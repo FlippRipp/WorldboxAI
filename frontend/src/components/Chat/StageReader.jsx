@@ -1,10 +1,16 @@
 import { createElement, useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { renderMarkdown } from '../../lib/markdown';
 import { splitStageSentences } from '../../lib/stageSegments';
+import { buildProsodyTimeline, stepAudioSyncedReveal } from '../../lib/stagePacer';
 import { ChatFeed } from './ChatFeed';
 import SlotRenderer from '../Slots/SlotRenderer';
 
 let globalTurnSeq = 0;
+
+function getStagePacer() {
+  if (typeof window === 'undefined') return null;
+  return window.__wbStagePacer || null;
+}
 
 function emitReaderSync(detail) {
   if (typeof window === 'undefined') return;
@@ -265,6 +271,7 @@ export default function StageReader({
     playing: false,
     waitingBuffer: false,
     paused: false,
+    audioSynced: false,
     sentenceText: '',
     sentenceIdx: 0,
     totalSentences: 0,
@@ -300,6 +307,11 @@ export default function StageReader({
     segments: [],
     sentenceIdx: -1,
     sentencePlain: '',
+    prosody: null,
+    sentenceEnteredAt: 0,
+    endedHoldSec: 0,
+    clockFallback: false,
+    audioSynced: false,
     revealPos: 0,
     lastCharIdx: -1,
     holdUntil: 0,
@@ -329,6 +341,7 @@ export default function StageReader({
   // Main 60fps stage playback ticker
   useEffect(() => {
     let rafId = 0;
+    const engRefVal = engineRef.current;
 
     const pushView = (eng) => {
       const seg = eng.sentenceIdx >= 0 ? eng.segments[eng.sentenceIdx] : null;
@@ -336,6 +349,7 @@ export default function StageReader({
         playing: eng.mode === 'playing',
         waitingBuffer: eng.mode === 'playing' && eng.sentenceIdx < 0,
         paused: eng.paused,
+        audioSynced: Boolean(eng.audioSynced && eng.mode === 'playing'),
         sentenceText: seg ? seg.text : '',
         sentenceIdx: Math.max(0, eng.sentenceIdx),
         totalSentences: eng.segments.length,
@@ -349,6 +363,7 @@ export default function StageReader({
           prev.playing === nextView.playing &&
           prev.waitingBuffer === nextView.waitingBuffer &&
           prev.paused === nextView.paused &&
+          prev.audioSynced === nextView.audioSynced &&
           prev.sentenceText === nextView.sentenceText &&
           prev.sentenceIdx === nextView.sentenceIdx &&
           prev.totalSentences === nextView.totalSentences &&
@@ -369,10 +384,22 @@ export default function StageReader({
       const parsed = parseSentenceDom(seg.text);
       eng.sentenceIdx = idx;
       eng.sentencePlain = parsed.plainText;
+      eng.prosody = buildProsodyTimeline(parsed.plainText);
+      eng.sentenceEnteredAt = now;
+      eng.endedHoldSec = 0;
+      eng.clockFallback = false;
       eng.revealPos = 0;
       eng.lastCharIdx = -1;
       eng.holdUntil = 0;
       eng.doneHoldUntil = 0;
+      getStagePacer()?.onEnterSentence?.({
+        turnId: eng.turnId,
+        sentenceIndex: idx,
+        text: seg.text,
+        plainText: parsed.plainText,
+        segments: eng.segments,
+        isStreamComplete: eng.streamDone,
+      });
       emitReaderSync({
         phase: 'sentence',
         turnId: eng.turnId,
@@ -396,6 +423,7 @@ export default function StageReader({
       // Reset cleanly on save switch
       if (eng.saveId !== p.saveId) {
         if (eng.mode === 'playing') {
+          getStagePacer()?.onTurnEnd?.({ turnId: eng.turnId, reason: 'stopped' });
           emitReaderSync({ phase: 'turn_end', turnId: eng.turnId, reason: 'stopped' });
         }
         eng.mode = 'idle';
@@ -403,6 +431,7 @@ export default function StageReader({
         eng.rawText = '';
         eng.segments = [];
         eng.sentenceIdx = -1;
+        eng.audioSynced = false;
         setIdleBeatOffset(null);
         pushView(eng);
       }
@@ -421,6 +450,11 @@ export default function StageReader({
         eng.segments = splitStageSentences(p.currentStream, { isComplete: false });
         eng.sentenceIdx = -1;
         eng.sentencePlain = '';
+        eng.prosody = null;
+        eng.sentenceEnteredAt = 0;
+        eng.endedHoldSec = 0;
+        eng.clockFallback = false;
+        eng.audioSynced = false;
         eng.revealPos = 0;
         eng.lastCharIdx = -1;
         eng.holdUntil = 0;
@@ -428,6 +462,16 @@ export default function StageReader({
         eng.paused = false;
         eng.revealAllHistory = false;
         setIdleBeatOffset(null);
+        const pacer = getStagePacer();
+        pacer?.onTurnStart?.({ turnId: eng.turnId, saveId: eng.saveId });
+        if (eng.segments.length > 0) {
+          pacer?.onSegments?.({
+            turnId: eng.turnId,
+            segments: eng.segments,
+            streamDone: false,
+            activeIdx: -1,
+          });
+        }
         emitReaderSync({ phase: 'turn_start', turnId: eng.turnId, speed: p.readerSpeed });
       }
 
@@ -457,24 +501,38 @@ export default function StageReader({
             // Turn stopped or errored before producing an assistant reply
             eng.mode = 'idle';
             eng.sentenceIdx = -1;
+            eng.audioSynced = false;
+            getStagePacer()?.onTurnEnd?.({ turnId: eng.turnId, reason: 'stopped' });
             emitReaderSync({ phase: 'turn_end', turnId: eng.turnId, reason: 'stopped' });
             pushView(eng);
           }
         }
 
         if (eng.mode === 'playing') {
+          const pacer = getStagePacer();
           if (textChanged) {
             eng.segments = splitStageSentences(eng.rawText, { isComplete: eng.streamDone });
+            pacer?.onSegments?.({
+              turnId: eng.turnId,
+              segments: eng.segments,
+              streamDone: eng.streamDone,
+              activeIdx: eng.sentenceIdx,
+            });
           }
 
           if (eng.segments[0]?.complete && !eng.firstCompleteAt) {
             eng.firstCompleteAt = now;
           }
 
-          // Initial head-start buffer (~550ms after Sentence 0 finishes streaming)
-          // so downstream listeners (e.g. JEV) have Sentence 0 ready before reveal.
+          // Initial head-start buffer (~550ms after Sentence 0 finishes streaming, or
+          // immediately once TTS has prebuffered Sentence 0) so downstream listeners
+          // (TTS / JEV) are ready before reveal begins.
           if (eng.sentenceIdx < 0) {
+            const pacerSentence0Ready = Boolean(
+              eng.segments[0]?.complete && pacer?.isSentenceReady?.(eng.turnId, 0)
+            );
             const headStartReady =
+              pacerSentence0Ready ||
               (eng.segments[0]?.complete && now - eng.firstCompleteAt >= 550) ||
               (eng.streamDone && eng.segments.length > 0 && now - eng.startedAt >= 450) ||
               (eng.segments[0]?.complete && now - eng.startedAt >= 1100);
@@ -483,14 +541,53 @@ export default function StageReader({
               enterSentence(eng, 0, now, p.readerSpeed);
             } else if (eng.streamDone && eng.segments.length === 0) {
               eng.mode = 'idle';
+              eng.audioSynced = false;
+              pacer?.onTurnEnd?.({ turnId: eng.turnId, reason: 'completed' });
               emitReaderSync({ phase: 'turn_end', turnId: eng.turnId, reason: 'completed' });
             }
           } else {
             const speed = Math.max(15, p.readerSpeed || 38);
             const pauseScale = Math.min(1.75, Math.max(0.45, 38 / speed));
             const total = eng.sentencePlain.length;
+            const pacerState = !eng.clockFallback
+              ? pacer?.getSentenceState?.(eng.turnId, eng.sentenceIdx)
+              : null;
+            const useAudioPacer = Boolean(pacerState?.active);
+            eng.audioSynced = useAudioPacer;
 
-            if (!eng.paused && now >= eng.holdUntil) {
+            if (useAudioPacer) {
+              if (!eng.paused) {
+                const synced = stepAudioSyncedReveal({
+                  revealPos: eng.revealPos,
+                  timeline: eng.prosody,
+                  dt,
+                  pacerState,
+                  waitingSec: Math.max(0, (now - eng.sentenceEnteredAt) / 1000),
+                  endedHoldSec: eng.endedHoldSec,
+                });
+                if (synced.fallbackToClock) {
+                  eng.clockFallback = true;
+                  eng.audioSynced = false;
+                } else {
+                  eng.revealPos = synced.revealPos;
+                  eng.endedHoldSec = synced.endedHoldSec;
+                  if (synced.shouldAdvance) {
+                    const nextIdx = eng.sentenceIdx + 1;
+                    if (nextIdx < eng.segments.length) {
+                      if (eng.segments[nextIdx].complete) {
+                        enterSentence(eng, nextIdx, now, speed);
+                      }
+                    } else if (eng.streamDone) {
+                      eng.mode = 'idle';
+                      eng.audioSynced = false;
+                      setIdleBeatOffset(null);
+                      pacer?.onTurnEnd?.({ turnId: eng.turnId, reason: 'completed' });
+                      emitReaderSync({ phase: 'turn_end', turnId: eng.turnId, reason: 'completed' });
+                    }
+                  }
+                }
+              }
+            } else if (!eng.paused && now >= eng.holdUntil) {
               if (eng.revealPos < total) {
                 eng.revealPos = Math.min(total, eng.revealPos + dt * speed);
                 const crossed = Math.floor(eng.revealPos) - 1;
@@ -534,6 +631,9 @@ export default function StageReader({
     rafId = requestAnimationFrame(step);
     return () => {
       cancelAnimationFrame(rafId);
+      if (engRefVal.mode === 'playing') {
+        getStagePacer()?.onTurnEnd?.({ turnId: engRefVal.turnId, reason: 'unmounted' });
+      }
     };
   }, []);
 
@@ -564,6 +664,7 @@ export default function StageReader({
     const eng = engineRef.current;
     if (eng.mode !== 'playing') return;
     eng.paused = !eng.paused;
+    getStagePacer()?.onPauseChange?.({ turnId: eng.turnId, paused: eng.paused });
     emitReaderSync({ phase: eng.paused ? 'pause' : 'resume', turnId: eng.turnId, paused: eng.paused });
     setView((v) => ({ ...v, paused: eng.paused }));
   }, []);
@@ -572,13 +673,27 @@ export default function StageReader({
     const eng = engineRef.current;
     if (eng.mode === 'playing') {
       if (eng.sentenceIdx > 0) {
+        const now = performance.now();
         const prevIdx = eng.sentenceIdx - 1;
         const seg = eng.segments[prevIdx];
         const parsed = parseSentenceDom(seg.text);
         eng.sentenceIdx = prevIdx;
         eng.sentencePlain = parsed.plainText;
+        eng.prosody = buildProsodyTimeline(parsed.plainText);
+        eng.sentenceEnteredAt = now;
+        eng.endedHoldSec = 0;
+        eng.clockFallback = false;
         eng.revealPos = parsed.plainText.length;
-        eng.doneHoldUntil = performance.now() + 1800;
+        eng.doneHoldUntil = now + 1800;
+        getStagePacer()?.onEnterSentence?.({
+          turnId: eng.turnId,
+          sentenceIndex: prevIdx,
+          text: seg.text,
+          plainText: parsed.plainText,
+          segments: eng.segments,
+          isStreamComplete: eng.streamDone,
+          replay: true,
+        });
         emitReaderSync({
           phase: 'sentence',
           turnId: eng.turnId,
@@ -611,14 +726,27 @@ export default function StageReader({
     (eng) => {
       const nextIdx = eng.sentenceIdx + 1;
       if (nextIdx < eng.segments.length && eng.segments[nextIdx].complete) {
+        const now = performance.now();
         const seg = eng.segments[nextIdx];
         const parsed = parseSentenceDom(seg.text);
         eng.sentenceIdx = nextIdx;
         eng.sentencePlain = parsed.plainText;
+        eng.prosody = buildProsodyTimeline(parsed.plainText);
+        eng.sentenceEnteredAt = now;
+        eng.endedHoldSec = 0;
+        eng.clockFallback = false;
         eng.revealPos = 0;
         eng.lastCharIdx = -1;
         eng.holdUntil = 0;
         eng.doneHoldUntil = 0;
+        getStagePacer()?.onEnterSentence?.({
+          turnId: eng.turnId,
+          sentenceIndex: nextIdx,
+          text: seg.text,
+          plainText: parsed.plainText,
+          segments: eng.segments,
+          isStreamComplete: eng.streamDone,
+        });
         emitReaderSync({
           phase: 'sentence',
           turnId: eng.turnId,
@@ -636,7 +764,9 @@ export default function StageReader({
       }
       if (eng.streamDone && nextIdx >= eng.segments.length) {
         eng.mode = 'idle';
+        eng.audioSynced = false;
         setIdleBeatOffset(null);
+        getStagePacer()?.onTurnEnd?.({ turnId: eng.turnId, reason: 'completed' });
         emitReaderSync({ phase: 'turn_end', turnId: eng.turnId, reason: 'completed' });
         return true;
       }
@@ -715,7 +845,9 @@ export default function StageReader({
         });
       }
       eng.mode = 'idle';
+      eng.audioSynced = false;
       setIdleBeatOffset(null);
+      getStagePacer()?.onTurnEnd?.({ turnId: eng.turnId, reason: 'skipped' });
       emitReaderSync({ phase: 'turn_end', turnId: eng.turnId, reason: 'skipped' });
     } else if (eng.segments.length > 0) {
       // Stream still arriving: jump to the newest complete sentence so far
@@ -723,11 +855,24 @@ export default function StageReader({
       while (target > 0 && !eng.segments[target].complete) target -= 1;
       const seg = eng.segments[target];
       if (seg) {
+        const now = performance.now();
         const parsed = parseSentenceDom(seg.text);
         eng.sentenceIdx = target;
         eng.sentencePlain = parsed.plainText;
+        eng.prosody = buildProsodyTimeline(parsed.plainText);
+        eng.sentenceEnteredAt = now;
+        eng.endedHoldSec = 0;
+        eng.clockFallback = false;
         eng.revealPos = parsed.plainText.length;
-        eng.doneHoldUntil = performance.now() + 300;
+        eng.doneHoldUntil = now + 300;
+        getStagePacer()?.onEnterSentence?.({
+          turnId: eng.turnId,
+          sentenceIndex: target,
+          text: seg.text,
+          plainText: parsed.plainText,
+          segments: eng.segments,
+          isStreamComplete: eng.streamDone,
+        });
       }
     }
   }, []);
@@ -1049,23 +1194,35 @@ export default function StageReader({
           )}
         </div>
 
-        {/* Live reading speed slider */}
+        {/* Live reading speed slider (or Voice Synced badge when TTS paces reveal) */}
         <div className="flex items-center gap-2 ml-auto">
-          <span className="text-[11px] text-gray-500">Speed</span>
-          <input
-            type="range"
-            min="15"
-            max="95"
-            step="1"
-            value={readerSpeed}
-            onChange={(e) => onChangeReaderSpeed?.(Number(e.target.value))}
-            className="w-24 sm:w-32 accent-purple-500 cursor-pointer"
-            aria-label="Reading speed"
-            title={`Stage reading speed (~${approxWpm} WPM)`}
-          />
-          <span className="font-mono text-[11px] text-gray-400 w-16 text-right tabular-nums">
-            ~{approxWpm} wpm
-          </span>
+          {view.audioSynced ? (
+            <span
+              className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-purple-500/15 border border-purple-500/35 text-[11px] text-purple-200"
+              title="Reading speed is automatically synchronized to Text-to-Speech audio"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse" />
+              <span>Voice synced</span>
+            </span>
+          ) : (
+            <>
+              <span className="text-[11px] text-gray-500">Speed</span>
+              <input
+                type="range"
+                min="15"
+                max="95"
+                step="1"
+                value={readerSpeed}
+                onChange={(e) => onChangeReaderSpeed?.(Number(e.target.value))}
+                className="w-24 sm:w-32 accent-purple-500 cursor-pointer"
+                aria-label="Reading speed"
+                title={`Stage reading speed (~${approxWpm} WPM)`}
+              />
+              <span className="font-mono text-[11px] text-gray-400 w-16 text-right tabular-nums">
+                ~{approxWpm} wpm
+              </span>
+            </>
+          )}
         </div>
       </div>
 

@@ -1,0 +1,41 @@
+{
+  "id": "wb_tts",
+  "name": "Text to Speech",
+  "version": "1.0.0",
+  "icon": "🔊",
+  "description": "Real-time streaming voice narration powered by Faster Qwen3-TTS (local or remote GPU host). Streams from the first completed sentence in Classic Chat and locks reading pace to speech in Paced Stage mode.",
+  "dependencies": [],
+  "consumes": {
+    "state": ["turn", "active_save_id"],
+    "module_data": [],
+    "module_configs": [],
+    "world_data": false
+  },
+  "produces": {
+    "module_data": false,
+    "context_string": false,
+    "messages": false
+  },
+  "ui_slots": ["slot_sidebar", "slot_header"],
+  "commands": {
+    "/tts": "on_command_tts"
+  },
+  "command_help": {
+    "/tts": "Control Text-to-Speech: on | off | url <server> | status"
+  },
+  "settings_schema": {
+    "enabled": {
+      "type": "toggle",
+      "default": true
+    }
+  },
+  "modes": [
+    {
+      "id": "voice-server",
+      "label": "Voice Server",
+      "description": "Configure local or remote Faster Qwen3-TTS host and test streaming speech",
+      "icon": "🔊",
+      "screen": "ui/VoiceServer.jsx"
+    }
+  ]
+}
