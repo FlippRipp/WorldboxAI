@@ -1,12 +1,36 @@
 import React, { useState, useEffect } from 'react';
 import { ttsCoordinator } from '../ttsClient';
 
+const DEFAULT_EMOTIONS = [
+  { id: 'neutral', label: 'Neutral' },
+  { id: 'warm', label: 'Warm' },
+  { id: 'awed', label: 'Awed' },
+  { id: 'grim', label: 'Grim' },
+  { id: 'somber', label: 'Somber' },
+  { id: 'hushed', label: 'Hushed' },
+  { id: 'tense', label: 'Tense' },
+  { id: 'angry', label: 'Angry' },
+  { id: 'cold', label: 'Cold' },
+  { id: 'fearful', label: 'Fearful' },
+  { id: 'weary', label: 'Weary' },
+  { id: 'excited', label: 'Excited' },
+  { id: 'amused', label: 'Amused' },
+  { id: 'teasing', label: 'Teasing' },
+  { id: 'flustered', label: 'Flustered' },
+  { id: 'horny', label: 'Horny' },
+];
+
 export default function VoiceServer({ onBack }) {
   const [serverUrl, setServerUrl] = useState('http://127.0.0.1:7864');
   const [token, setToken] = useState('');
   const [temperature, setTemperature] = useState(0.9);
   const [chunkSize, setChunkSize] = useState(8);
   const [enabled, setEnabled] = useState(true);
+  const [emotionEnabled, setEmotionEnabled] = useState(true);
+  const [emotions, setEmotions] = useState(DEFAULT_EMOTIONS);
+  const [jevStatus, setJevStatus] = useState({ available: false, enabled: false, tts_enabled: true });
+  const [testEmotion, setTestEmotion] = useState('auto');
+  const [activeEmotion, setActiveEmotion] = useState('');
   const [sampleText, setSampleText] = useState(
     'Warm candlelight flickered across the rain-streaked glass. "Everything is synced and ready," she murmured.'
   );
@@ -20,8 +44,12 @@ export default function VoiceServer({ onBack }) {
     ttsCoordinator.mountWidget();
     const unsub = ttsCoordinator.subscribe(() => {
       setSpeaking(ttsCoordinator.speaking);
+      setActiveEmotion(ttsCoordinator.activeEmotion || '');
       if (ttsCoordinator.status?.health) {
         setHealth(ttsCoordinator.status.health);
+      }
+      if (ttsCoordinator.status?.jev) {
+        setJevStatus(ttsCoordinator.status.jev);
       }
     });
 
@@ -29,11 +57,16 @@ export default function VoiceServer({ onBack }) {
       if (!data) return;
       const cfg = data.config || {};
       setEnabled(cfg.enabled !== false);
+      setEmotionEnabled(cfg.emotion_enabled !== false);
       setServerUrl(cfg.server_url || 'http://127.0.0.1:7864');
       setToken(cfg.token || '');
       setTemperature(Number(cfg.temperature) || 0.9);
       setChunkSize(Number(cfg.chunk_size) || 8);
       if (data.health) setHealth(data.health);
+      if (Array.isArray(data.emotions) && data.emotions.length > 0) {
+        setEmotions(data.emotions);
+      }
+      if (data.jev) setJevStatus(data.jev);
     });
 
     return () => {
@@ -49,6 +82,7 @@ export default function VoiceServer({ onBack }) {
     try {
       const res = await ttsCoordinator.updateConfig({
         enabled,
+        emotion_enabled: emotionEnabled,
         server_url: serverUrl,
         token,
         temperature: Number(temperature),
@@ -56,7 +90,9 @@ export default function VoiceServer({ onBack }) {
       });
       setServerUrl(res.config.server_url);
       setToken(res.config.token || '');
+      setEmotionEnabled(res.config.emotion_enabled !== false);
       setHealth(res.health || {});
+      if (res.jev) setJevStatus(res.jev);
       setFeedback(
         res.health?.ready
           ? `Connected to ${res.health.model || 'Faster Qwen3-TTS'}!`
@@ -74,8 +110,18 @@ export default function VoiceServer({ onBack }) {
       ttsCoordinator.stopAll('sample_stop');
       return;
     }
-    await ttsCoordinator.playPreviewSample(sampleText);
+    await ttsCoordinator.playPreviewSample(sampleText, testEmotion);
   };
+
+  const jevHint = !emotionEnabled
+    ? 'Disabled — narration always uses the clean neutral reference voice.'
+    : jevStatus.available
+      ? 'Jev active — classifying each sentence across 16 vocal emotions automatically.'
+      : !jevStatus.enabled
+        ? 'Enable Jev in Model Settings to classify sentences automatically (falling back to Neutral until enabled).'
+        : !jevStatus.tts_enabled
+          ? 'TTS emotions is unchecked in Jev Settings (falling back to Neutral).'
+          : 'No Jev/Router API key configured — falling back to Neutral.';
 
   return (
     <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 text-gray-100 flex flex-col">
@@ -134,6 +180,24 @@ export default function VoiceServer({ onBack }) {
             </button>
           </div>
 
+          <div className="flex items-center justify-between gap-4 pb-4 border-b border-gray-800">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-100">Emotional Delivery (via Jev)</h2>
+              <p className="text-xs text-gray-400 mt-0.5">{jevHint}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setEmotionEnabled((v) => !v)}
+              className={`px-4 py-2 rounded-xl border text-xs font-semibold transition-colors shrink-0 ${
+                emotionEnabled
+                  ? 'bg-purple-600/30 border-purple-500 text-purple-100'
+                  : 'bg-gray-800 border-gray-700 text-gray-400'
+              }`}
+            >
+              {emotionEnabled ? 'Emotions On' : 'Neutral Only'}
+            </button>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="sm:col-span-2">
               <label className="block text-xs font-medium text-gray-300 mb-1.5">
@@ -166,7 +230,7 @@ export default function VoiceServer({ onBack }) {
 
             <div>
               <div className="flex justify-between text-xs text-gray-300 mb-1">
-                <span>Expressiveness (Temperature)</span>
+                <span>Expressiveness Scale (Temperature)</span>
                 <span className="font-mono text-gray-400">{Number(temperature).toFixed(2)}</span>
               </div>
               <input
@@ -211,7 +275,34 @@ export default function VoiceServer({ onBack }) {
 
         {/* Live Audio Test Card */}
         <div className="rounded-2xl border border-gray-800 bg-gray-900/70 p-5 sm:p-6 space-y-3 shadow-xl">
-          <h2 className="text-sm font-semibold text-gray-100">Test Streaming Playback</h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-semibold text-gray-100">Test Streaming Playback</h2>
+              {speaking && activeEmotion && (
+                <span className="px-2 py-0.5 rounded-full text-[11px] bg-purple-500/20 border border-purple-500/40 text-purple-200">
+                  {activeEmotion}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2 text-xs">
+              <label htmlFor="wb-tts-test-emotion" className="text-gray-400">
+                Emotion:
+              </label>
+              <select
+                id="wb-tts-test-emotion"
+                value={testEmotion}
+                onChange={(e) => setTestEmotion(e.target.value)}
+                className="px-2.5 py-1.5 rounded-lg bg-gray-950 border border-gray-700 text-xs text-gray-100 focus:outline-none focus:border-purple-500"
+              >
+                <option value="auto">Auto (via Jev)</option>
+                {emotions.map((emo) => (
+                  <option key={emo.id} value={emo.id}>
+                    {emo.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
           <textarea
             rows={2}
             value={sampleText}

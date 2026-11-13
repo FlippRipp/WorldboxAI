@@ -2,7 +2,8 @@
 
 Connects WorldBox to a local or remote Faster Qwen3-TTS provider server
 (`modules/wb_tts/server.py`, launched via `tts_server.bat` / `tts_server.sh`)
-and proxies streaming 24 kHz 16-bit mono PCM to desktop and mobile browsers.
+and proxies streaming 24 kHz 16-bit mono PCM to desktop and mobile browsers,
+with optional sentence-level vocal emotion routing via Jev.
 
 Why proxy through WorldBox's backend?
 - Mobile browsers playing over LAN, Tailscale, or HTTPS only ever connect to
@@ -15,6 +16,7 @@ Why proxy through WorldBox's backend?
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -24,11 +26,15 @@ from urllib.parse import urlparse
 
 import httpx
 
+from backend.engine.jev import Uncertain, choice
+
 MODULE_ID = "wb_tts"
 DEFAULT_SERVER_URL = "http://127.0.0.1:7864"
 ACCEPTED_SERVICES = {"worldbox-faster-qwen-tts", "pngtuber-faster-qwen-tts"}
 KEY_MASK_PREFIX = "****"
 SAMPLE_RATE = 24000
+MIN_EMOTION_PROB = 0.25
+RECENT_SCENE_MESSAGES = 6
 
 _HIDDEN_BLOCK_RE = re.compile(
     r"<!--[\s\S]*?(?:-->|$)|^ {0,3}<(details|internal_states)\b[^>]*>[\s\S]*?(?:</\1\s*>|$)",
@@ -39,9 +45,30 @@ _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _MD_DECOR_RE = re.compile(r"[*_~`#>]+")
 _SPEAKABLE_RE = re.compile(r"[A-Za-z0-9\u00C0-\u024F\u0400-\u04FF\u3040-\u30FF\u4E00-\u9FFF]")
 
+_EMOTIONS_MANIFEST = Path(__file__).resolve().parent / "voices" / "emotions" / "manifest.json"
+_DEFAULT_EMOTION_DESCRIPTIONS: dict[str, str] = {
+    "neutral": "Calm, balanced, matter-of-fact narration or ordinary conversation without strong emotion.",
+    "warm": "Gentle affection, comfort, kindness, tenderness, or welcoming warmth.",
+    "awed": "Breathless wonder, amazement, reverence, or spellbound discovery.",
+    "grim": "Dark, solemn, ominous, foreboding, or grave weight and dread.",
+    "somber": "Sorrow, grief, heartbreak, mourning, regret, or quiet sadness.",
+    "hushed": "Secretive whisper, stealth, hiding, or speaking very quietly so others do not overhear.",
+    "tense": "Urgent alarm, immediate danger, combat pressure, panic-action, or high-stakes haste.",
+    "angry": "Fierce anger, fury, outrage, sharp accusation, or heated confrontation.",
+    "cold": "Icy, emotionless menace, detached hostility, disdain, or dangerous calm.",
+    "fearful": "Trembling fear, terror, dread, pleading, or frightened hesitation.",
+    "weary": "Deep exhaustion, physical fatigue, burnout, injury strain, or heavy tired sighs.",
+    "excited": "Bright joy, enthusiasm, triumph, delight, or high-spirited energy.",
+    "amused": "Lighthearted laughter, chuckling, humor, cheerful mirth, or finding something funny.",
+    "teasing": "Playful banter, smug smirk, witty provocation, sly drawl, or cheeky flirting.",
+    "flustered": "Embarrassed, shy, caught off guard, blushing, stammering, or flabbergasted.",
+    "horny": "Erotic arousal, breathless desire, sensual intimacy, seduction, or heavy lustful sighs.",
+}
+
 _services: dict = {}
 _data_dir: Path | None = None
 _config_cache: dict | None = None
+_emotion_catalog_cache: dict[str, dict] | None = None
 _health_cache: dict = {
     "checked_at": 0.0,
     "reachable": False,
@@ -50,6 +77,7 @@ _health_cache: dict = {
     "model": "",
     "sample_rate": SAMPLE_RATE,
     "voices": [],
+    "emotions": [],
     "resolved_voice": "default",
     "error": "",
 }
@@ -58,11 +86,50 @@ _health_cache: dict = {
 def _default_config() -> dict:
     return {
         "enabled": True,
+        "emotion_enabled": True,
         "server_url": DEFAULT_SERVER_URL,
         "token": "",
         "temperature": 0.9,
         "chunk_size": 8,
     }
+
+
+def load_emotion_catalog() -> dict[str, dict]:
+    """Return `{emotion_id: {id, label, description}}` from `voices/emotions/manifest.json`."""
+    global _emotion_catalog_cache
+    if _emotion_catalog_cache is not None:
+        return _emotion_catalog_cache
+
+    catalog: dict[str, dict] = {}
+    if _EMOTIONS_MANIFEST.is_file():
+        try:
+            raw = json.loads(_EMOTIONS_MANIFEST.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                for emo_id, entry in raw.items():
+                    if not isinstance(emo_id, str) or not isinstance(entry, dict):
+                        continue
+                    desc = str(
+                        entry.get("description")
+                        or _DEFAULT_EMOTION_DESCRIPTIONS.get(emo_id)
+                        or emo_id
+                    ).strip()
+                    label = str(entry.get("label") or emo_id.replace("_", " ").title()).strip()
+                    catalog[emo_id] = {"id": emo_id, "label": label, "description": desc}
+        except (OSError, ValueError):
+            catalog = {}
+
+    if not catalog:
+        catalog = {
+            emo_id: {
+                "id": emo_id,
+                "label": emo_id.replace("_", " ").title(),
+                "description": desc,
+            }
+            for emo_id, desc in _DEFAULT_EMOTION_DESCRIPTIONS.items()
+        }
+
+    _emotion_catalog_cache = catalog
+    return catalog
 
 
 def normalize_server_url(raw: str) -> str:
@@ -75,6 +142,14 @@ def normalize_server_url(raw: str) -> str:
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return DEFAULT_SERVER_URL
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
+
+
+def strip_hidden_blocks(raw: str) -> str:
+    """Remove hidden state/details blocks while preserving inline styling cues for Jev."""
+    if not raw:
+        return ""
+    text = _HIDDEN_BLOCK_RE.sub(" ", str(raw))
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def clean_spoken_text(raw: str) -> str:
@@ -96,6 +171,110 @@ def clean_spoken_text(raw: str) -> str:
     if not _SPEAKABLE_RE.search(text):
         return ""
     return text
+
+
+def _jev_status() -> dict:
+    engine = _services.get("engine")
+    llm = getattr(engine, "llm", None)
+    decisions = getattr(llm, "decisions", None)
+    if decisions is None:
+        return {"available": False, "enabled": False, "tts_enabled": False, "has_credentials": False}
+    try:
+        pub = decisions.public_config()
+        has_creds = bool(decisions.has_credentials())
+    except Exception:
+        return {"available": False, "enabled": False, "tts_enabled": False, "has_credentials": False}
+    return {
+        "available": bool(pub.get("enabled") and pub.get("tts_enabled", True) and has_creds),
+        "enabled": bool(pub.get("enabled")),
+        "tts_enabled": bool(pub.get("tts_enabled", True)),
+        "has_credentials": has_creds,
+    }
+
+
+def _collect_recent_scene_messages() -> list[dict[str, str]]:
+    """Gather recent scene messages from the active session without truncating message text."""
+    session_manager = _services.get("session_manager")
+    state = getattr(session_manager, "state", None)
+    if not isinstance(state, dict):
+        return []
+    raw_messages = state.get("chat_messages")
+    if not isinstance(raw_messages, list) or not raw_messages:
+        return []
+    selected = []
+    for msg in raw_messages[-RECENT_SCENE_MESSAGES:]:
+        if not isinstance(msg, dict) or msg.get("error"):
+            continue
+        role = str(msg.get("role") or "")
+        if role not in ("user", "assistant", "system"):
+            continue
+        content = strip_hidden_blocks(str(msg.get("content") or ""))
+        if content:
+            selected.append({"role": role, "content": content})
+    return selected
+
+
+async def classify_sentence_emotion(
+    raw_text: str,
+    spoken_text: str,
+    preceding_sentences: list[str] | None = None,
+) -> str:
+    """Use Jev to pick one of the 16 vocal emotions for `spoken_text`, falling back to `neutral`."""
+    engine = _services.get("engine")
+    llm = getattr(engine, "llm", None)
+    decisions = getattr(llm, "decisions", None)
+    if decisions is None:
+        return "neutral"
+
+    catalog = load_emotion_catalog()
+    inspector = getattr(llm, "inspector", None)
+
+    turn_prev = [
+        strip_hidden_blocks(str(s))
+        for s in (preceding_sentences or [])
+        if isinstance(s, str) and strip_hidden_blocks(s)
+    ]
+    state = {
+        "recent_messages": _collect_recent_scene_messages(),
+        "turn_preceding_sentences": turn_prev,
+        "target_sentence": strip_hidden_blocks(raw_text) or spoken_text,
+        "spoken_text": spoken_text,
+    }
+    questions = {
+        "emotion": choice(
+            "Choose the single vocal delivery emotion that best fits how `target_sentence` should be spoken aloud given `recent_messages` and `turn_preceding_sentences`. Choose `neutral` for ordinary narration or calm matter-of-fact statements without clear emotional charge.",
+            {emo_id: spec["description"] for emo_id, spec in catalog.items()},
+        )
+    }
+
+    try:
+        decision = await decisions.decide(
+            state,
+            questions,
+            module=MODULE_ID,
+            step="tts:emotion",
+            inspector=inspector,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return "neutral"
+
+    try:
+        selected, probs, _conf = decision.choice_distribution("emotion")
+        if selected not in catalog or probs.get(selected, 0.0) < MIN_EMOTION_PROB:
+            raise Uncertain(decision.reason or "low emotion probability")
+        await decision.finish("accepted")
+        return selected
+    except asyncio.CancelledError:
+        await decision.finish("cancelled")
+        raise
+    except Uncertain as exc:
+        await decision.finish("fallback", str(exc))
+        return "neutral"
+    except Exception as exc:
+        await decision.finish("fallback", type(exc).__name__)
+        return "neutral"
 
 
 def _config_path() -> Path:
@@ -127,6 +306,8 @@ def _sanitize_config(updates: dict, existing: dict | None = None) -> dict:
     out = dict(cur)
     if "enabled" in updates:
         out["enabled"] = bool(updates["enabled"])
+    if "emotion_enabled" in updates:
+        out["emotion_enabled"] = bool(updates["emotion_enabled"])
     if "server_url" in updates:
         out["server_url"] = normalize_server_url(updates["server_url"])
     if "token" in updates:
@@ -208,6 +389,7 @@ async def probe_server(force: bool = False) -> dict:
         payload = resp.json() if resp.content else {}
         service = str(payload.get("service") or "")
         voices = [str(v) for v in (payload.get("voices") or []) if isinstance(v, str)]
+        emotions = [str(e) for e in (payload.get("emotions") or []) if isinstance(e, str)]
         ready = bool(payload.get("ready")) and (not service or service in ACCEPTED_SERVICES)
         resolved_voice = _resolve_voice(voices, str(payload.get("default_voice") or ""))
         _health_cache.update({
@@ -218,6 +400,7 @@ async def probe_server(force: bool = False) -> dict:
             "model": str(payload.get("model") or ""),
             "sample_rate": int(payload.get("sample_rate") or SAMPLE_RATE),
             "voices": voices,
+            "emotions": emotions,
             "resolved_voice": resolved_voice,
             "error": "" if ready else (f"Unexpected service: {service}" if service else "Server warming up…"),
         })
@@ -251,6 +434,17 @@ async def on_command_tts(args: list, state: dict, sdk) -> dict:
                 else "🔇 Text-to-Speech muted."
             )
         }
+    if sub in ("emotion", "emotions"):
+        if len(args) < 2 or args[1].lower() not in ("on", "off"):
+            return {"message": "Usage: /tts emotions on | off", "error": True}
+        cfg = _save_config({"emotion_enabled": args[1].lower() == "on"})
+        return {
+            "message": (
+                "🎭 TTS emotional delivery enabled."
+                if cfg["emotion_enabled"]
+                else "🎭 TTS emotional delivery disabled (using neutral voice)."
+            )
+        }
     if sub == "url":
         if len(args) < 2:
             return {"message": "Usage: /tts url <http://host:7864>", "error": True}
@@ -262,14 +456,15 @@ async def on_command_tts(args: list, state: dict, sdk) -> dict:
         cfg = _load_config()
         health = await probe_server(force=True)
         enabled_str = "enabled" if cfg["enabled"] else "muted"
+        emo_str = "emotions on" if cfg.get("emotion_enabled", True) else "emotions off"
         server_str = (
             f"ready ({health['model'] or 'Qwen3-TTS'})"
             if health["ready"]
             else f"offline ({health['error'] or 'not running'})"
         )
-        return {"message": f"🔊 TTS is {enabled_str} · Server {cfg['server_url']}: {server_str}"}
+        return {"message": f"🔊 TTS is {enabled_str} ({emo_str}) · Server {cfg['server_url']}: {server_str}"}
     return {
-        "message": "Usage: /tts on | off | url <http://host:7864> | status",
+        "message": "Usage: /tts on | off | emotions on|off | url <http://host:7864> | status",
         "error": True,
     }
 
@@ -288,6 +483,8 @@ def get_router():
             "module": MODULE_ID,
             "config": _public_config(cfg),
             "health": health,
+            "emotions": list(load_emotion_catalog().values()),
+            "jev": _jev_status(),
         }
 
     @router.post("/probe")
@@ -300,6 +497,8 @@ def get_router():
             "ok": bool(health["ready"]),
             "config": _public_config(cfg),
             "health": health,
+            "emotions": list(load_emotion_catalog().values()),
+            "jev": _jev_status(),
         }
 
     @router.get("/config")
@@ -313,6 +512,7 @@ def get_router():
         return {
             "config": _public_config(saved),
             "health": health,
+            "jev": _jev_status(),
         }
 
     @router.post("/stream")
@@ -327,17 +527,34 @@ def get_router():
         if not cfg.get("enabled", True) and not payload.get("force"):
             raise HTTPException(status_code=409, detail="TTS is currently muted")
 
-        # Ensure we know which voice identifier the target server exposes
+        # Ensure we know which voice identifier and emotion bank the target server exposes
         health = await probe_server(force=False)
         voice = str(payload.get("voice") or "").strip() or health.get("resolved_voice") or "default"
+
+        catalog = load_emotion_catalog()
+        requested_emotion = str(payload.get("emotion") or "").strip().lower()
+        preceding = payload.get("preceding_sentences")
+        preceding_list = preceding if isinstance(preceding, list) else None
+
+        if requested_emotion and requested_emotion != "auto" and requested_emotion in catalog:
+            resolved_emotion = requested_emotion
+        elif cfg.get("emotion_enabled", True):
+            resolved_emotion = await classify_sentence_emotion(
+                raw_text=raw_text,
+                spoken_text=text,
+                preceding_sentences=preceding_list,
+            )
+        else:
+            resolved_emotion = ""
 
         upstream_url = f"{cfg['server_url']}/v1/tts/stream"
         upstream_body = {
             "text": text,
             "voice": voice,
+            "emotion": resolved_emotion,
             "chunk_size": cfg.get("chunk_size", 8),
             "temperature": cfg.get("temperature", 0.9),
-            "instruction": str(payload.get("instruction") or "")[:500],
+            "instruction": str(payload.get("instruction") or ""),
         }
 
         client = httpx.AsyncClient(
@@ -369,6 +586,7 @@ def get_router():
         sample_rate = upstream.headers.get("x-sample-rate") or str(SAMPLE_RATE)
         channels = upstream.headers.get("x-channels") or "1"
         audio_format = upstream.headers.get("x-audio-format") or "s16le"
+        active_emotion = upstream.headers.get("x-tts-emotion") or resolved_emotion
 
         async def forward_pcm():
             try:
@@ -381,16 +599,20 @@ def get_router():
                 await upstream.aclose()
                 await client.aclose()
 
+        headers = {
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+            "X-Audio-Format": audio_format,
+            "X-Sample-Rate": str(sample_rate),
+            "X-Channels": str(channels),
+        }
+        if active_emotion:
+            headers["X-TTS-Emotion"] = active_emotion
+
         return StreamingResponse(
             forward_pcm(),
             media_type="application/octet-stream",
-            headers={
-                "Cache-Control": "no-store",
-                "X-Accel-Buffering": "no",
-                "X-Audio-Format": audio_format,
-                "X-Sample-Rate": str(sample_rate),
-                "X-Channels": str(channels),
-            },
+            headers=headers,
         )
 
     return router

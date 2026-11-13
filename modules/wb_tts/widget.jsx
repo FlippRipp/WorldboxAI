@@ -22,13 +22,19 @@ function useTtsSnapshot(storyConfigEnabled) {
     health: ttsCoordinator.status?.health || {},
     effectiveEnabled: ttsCoordinator.isEffectivelyEnabled(),
     speaking: ttsCoordinator.speaking,
+    activeEmotion: ttsCoordinator.activeEmotion || '',
     paused: ttsCoordinator.paused,
   };
 }
 
 function HeaderTtsControl({ storyEnabled }) {
-  const { health, effectiveEnabled, speaking } = useTtsSnapshot(storyEnabled);
+  const { health, effectiveEnabled, speaking, activeEmotion } = useTtsSnapshot(storyEnabled);
   const ready = Boolean(health.ready);
+  const labelText = speaking
+    ? activeEmotion
+      ? `Speaking · ${activeEmotion}`
+      : 'Speaking'
+    : 'TTS';
 
   return (
     <div className="inline-flex items-center gap-1">
@@ -51,7 +57,7 @@ function HeaderTtsControl({ storyEnabled }) {
         }
       >
         <span>{effectiveEnabled ? '🔊' : '🔇'}</span>
-        <span className="hidden xl:inline">{speaking ? 'Speaking' : 'TTS'}</span>
+        <span className="hidden xl:inline">{labelText}</span>
         <span
           className={`w-1.5 h-1.5 rounded-full ${
             !effectiveEnabled
@@ -79,7 +85,7 @@ function HeaderTtsControl({ storyEnabled }) {
 }
 
 function SidebarTtsPanel({ storyEnabled }) {
-  const { config, health, effectiveEnabled, speaking } = useTtsSnapshot(storyEnabled);
+  const { config, health, effectiveEnabled, speaking, activeEmotion } = useTtsSnapshot(storyEnabled);
   const [editingUrl, setEditingUrl] = useState(false);
   const [urlDraft, setUrlDraft] = useState(config.server_url || 'http://127.0.0.1:7864');
   const [probing, setProbing] = useState(false);
@@ -144,7 +150,13 @@ function SidebarTtsPanel({ storyEnabled }) {
               : 'bg-gray-900/70 hover:bg-gray-700 border-gray-700 text-gray-400'
           }`}
         >
-          {effectiveEnabled ? (speaking ? 'Speaking… (Mute)' : 'Enabled') : 'Muted'}
+          {effectiveEnabled
+            ? speaking
+              ? activeEmotion
+                ? `Speaking (${activeEmotion})…`
+                : 'Speaking… (Mute)'
+              : 'Enabled'
+            : 'Muted'}
         </button>
 
         {speaking ? (

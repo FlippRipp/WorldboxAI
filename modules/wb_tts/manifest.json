@@ -21,7 +21,7 @@
     "/tts": "on_command_tts"
   },
   "command_help": {
-    "/tts": "Control Text-to-Speech: on | off | url <server> | status"
+    "/tts": "Control Text-to-Speech: on | off | emotions on|off | url <server> | status"
   },
   "settings_schema": {
     "enabled": {

@@ -37,6 +37,7 @@ class SentenceJob {
     this.rawText = rawText || '';
     this.text = cleanSpokenText(rawText);
     this.sampleRate = DEFAULT_SAMPLE_RATE;
+    this.emotion = '';
     this.chunks = [];
     this.receivedSamples = 0;
     this.startedFetch = false;
@@ -83,6 +84,7 @@ class TtsCoordinator {
     this.status = {
       config: {
         enabled: true,
+        emotion_enabled: true,
         server_url: 'http://127.0.0.1:7864',
         token: '',
         has_token: false,
@@ -93,11 +95,20 @@ class TtsCoordinator {
         reachable: false,
         ready: false,
         model: '',
+        emotions: [],
         error: '',
+      },
+      emotions: [],
+      jev: {
+        available: false,
+        enabled: false,
+        tts_enabled: true,
+        has_credentials: false,
       },
     };
     this.storyEnabled = true;
     this.speaking = false;
+    this.activeEmotion = '';
     this.paused = false;
 
     this.audioCtx = null;
@@ -233,7 +244,12 @@ class TtsCoordinator {
       throw new Error(err || `HTTP ${res.status}`);
     }
     const data = await res.json();
-    this.status = { ...this.status, config: data.config, health: data.health };
+    this.status = {
+      ...this.status,
+      config: data.config,
+      health: data.health,
+      ...(data.jev ? { jev: data.jev } : {}),
+    };
     if (!this.isEffectivelyEnabled()) {
       this.stopAll('muted');
     }
@@ -257,6 +273,14 @@ class TtsCoordinator {
     const ctrl = new AbortController();
     job.abortController = ctrl;
 
+    const precedingSentences =
+      turnState && Array.isArray(turnState.segments) && job.index > 0
+        ? turnState.segments
+            .slice(0, job.index)
+            .map((s) => (s && typeof s.text === 'string' ? s.text : ''))
+            .filter(Boolean)
+        : [];
+
     (async () => {
       let carryByte = null;
       let isFirstChunk = true;
@@ -265,7 +289,9 @@ class TtsCoordinator {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            text: job.text,
+            text: job.rawText || job.text,
+            preceding_sentences: precedingSentences,
+            ...(opts.emotion ? { emotion: opts.emotion } : {}),
             force: Boolean(opts.force),
           }),
           signal: ctrl.signal,
@@ -291,6 +317,14 @@ class TtsCoordinator {
         const srHeader = Number(res.headers.get('X-Sample-Rate'));
         if (Number.isFinite(srHeader) && srHeader >= 8000 && srHeader <= 96000) {
           job.sampleRate = srHeader;
+        }
+        const emoHeader = res.headers.get('X-TTS-Emotion');
+        if (emoHeader) {
+          job.emotion = emoHeader;
+          if (this.playback && this.playback.job === job) {
+            this.activeEmotion = emoHeader;
+            this.notify();
+          }
         }
 
         // Update cached health optimistically once audio streams cleanly
@@ -383,8 +417,9 @@ class TtsCoordinator {
     });
     this.activeSources.clear();
     this.playback = null;
-    if (this.speaking) {
+    if (this.speaking || this.activeEmotion) {
       this.speaking = false;
+      this.activeEmotion = '';
       this.notify();
     }
   }
@@ -437,8 +472,9 @@ class TtsCoordinator {
 
     if (job.isSilent || job.failed) {
       pb.ended = true;
-      if (this.speaking) {
+      if (this.speaking || this.activeEmotion) {
         this.speaking = false;
+        this.activeEmotion = '';
         this.notify();
       }
       return;
@@ -464,10 +500,11 @@ class TtsCoordinator {
       pb.playStartCtxTime = startAt;
       pb.cursorCtxTime = startAt;
       pb.started = true;
+      this.activeEmotion = job.emotion || '';
       if (!this.speaking) {
         this.speaking = true;
-        this.notify();
       }
+      this.notify();
     }
 
     while (pb.scheduledChunkIdx < job.chunks.length) {
@@ -506,8 +543,9 @@ class TtsCoordinator {
       (this.activeSources.size === 0 && (!ctx || ctx.currentTime >= pb.cursorCtxTime - 0.01))
     ) {
       pb.ended = true;
-      if (this.speaking) {
+      if (this.speaking || this.activeEmotion) {
         this.speaking = false;
+        this.activeEmotion = '';
         this.notify();
       }
       if (this.feedTurn) {
@@ -525,14 +563,14 @@ class TtsCoordinator {
     }
   }
 
-  async playPreviewSample(sampleText) {
+  async playPreviewSample(sampleText, emotion = '') {
     this.stopAll('preview');
     this.ensureAudioContext(true);
     const text =
       sampleText ||
       'Warm candlelight flickered across the rain-streaked window. "Everything works," she said softly.';
     const job = new SentenceJob(0, text);
-    this.startJobFetch(job, null, { force: true });
+    this.startJobFetch(job, null, { force: true, emotion });
     this.beginPlaybackForJob(job, false);
     this.ensureFeedPumpTimer();
   }

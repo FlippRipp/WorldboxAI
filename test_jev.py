@@ -64,7 +64,8 @@ def test_configuration_is_separate_masked_and_persistent(tmp_path):
     service.save({'enabled': True})
     reloaded = JevService(path)
     assert reloaded.public_config() == {'enabled': True, 'rpg_enabled': False,
-        'npc_enabled': True, 'plot_enabled': True, 'model': 'jev-latest', 'api_key_set': True}
+        'npc_enabled': True, 'plot_enabled': True, 'tts_enabled': True,
+        'model': 'jev-latest', 'api_key_set': True}
     assert 'secret' not in json.dumps(reloaded.public_config())
     reloaded.save({'remove_api_key': True})
     assert not reloaded.public_config()['api_key_set']
@@ -72,12 +73,17 @@ def test_configuration_is_separate_masked_and_persistent(tmp_path):
         reloaded.save({'enabled': 'yes'})
 
 
-@pytest.mark.parametrize('mode,updates', [('mock', {}), ('live', {'enabled': False}),
-    ('live', {'rpg_enabled': False}), ('live', {'remove_api_key': True})])
-def test_disabled_missing_and_mock_never_call_network(tmp_path, mode, updates):
+@pytest.mark.parametrize('mode,updates,mod', [
+    ('mock', {}, jev_tasks.RPG),
+    ('live', {'enabled': False}, jev_tasks.RPG),
+    ('live', {'rpg_enabled': False}, jev_tasks.RPG),
+    ('live', {'tts_enabled': False}, 'wb_tts'),
+    ('live', {'remove_api_key': True}, jev_tasks.RPG),
+])
+def test_disabled_missing_and_mock_never_call_network(tmp_path, mode, updates, mod):
     service, _, requests, _, _ = setup_jev(tmp_path)
     service.save(updates)
-    result = run(service.decide('story', {'ok': noul('yes?')}, module=jev_tasks.RPG, step='test', mode=mode))
+    result = run(service.decide('story', {'ok': noul('yes?')}, module=mod, step='test', mode=mode))
     assert not result.answers and not requests
     with pytest.raises(Uncertain):
         result.yes('ok')

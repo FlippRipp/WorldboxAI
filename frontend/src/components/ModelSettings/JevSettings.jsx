@@ -26,7 +26,8 @@ export default function JevSettings({ activeProvider = '' }) {
     setBusy(true); setMessage('');
     try {
       const settings = { enabled: config.enabled, rpg_enabled: config.rpg_enabled,
-        npc_enabled: config.npc_enabled, plot_enabled: config.plot_enabled, model: config.model };
+        npc_enabled: config.npc_enabled, plot_enabled: config.plot_enabled,
+        tts_enabled: config.tts_enabled, model: config.model };
       const next = await request('config', 'PUT', {
         ...settings, ...(key ? { api_key: key } : {}),
         ...(remove ? { remove_api_key: true } : {}),
@@ -49,7 +50,7 @@ export default function JevSettings({ activeProvider = '' }) {
 
   return <section className="mb-6 p-4 rounded-xl bg-gray-800/50 border border-gray-700 space-y-3" aria-label="Jev decisions">
     <h3 className="text-lg font-semibold text-gray-100">Jev decisions</h3>
-    <p className="text-sm text-gray-400">Speed up RPG rulings and NPC decisions. Uncertain answers use your existing models. Storytelling keeps its current model.</p>
+    <p className="text-sm text-gray-400">Speed up RPG rulings, NPC/Plot decisions, and TTS vocal emotions. Uncertain answers use your existing models. Storytelling keeps its current model.</p>
     <p className="text-xs text-gray-500">
       {activeRouterLabel && !config?.api_key_set
         ? `Using your active ${activeRouterLabel} connection automatically (or save a TypeSafe API key below to connect directly).`
@@ -57,7 +58,7 @@ export default function JevSettings({ activeProvider = '' }) {
     </p>
     {config && <>
       <div className="flex flex-wrap gap-5 text-sm text-gray-200">
-        {[['enabled', 'Enable Jev'], ['rpg_enabled', 'RPG decisions'], ['npc_enabled', 'NPC decisions'], ['plot_enabled', 'Plot decisions']].map(([field, label]) =>
+        {[['enabled', 'Enable Jev'], ['rpg_enabled', 'RPG decisions'], ['npc_enabled', 'NPC decisions'], ['plot_enabled', 'Plot decisions'], ['tts_enabled', 'TTS emotions']].map(([field, label]) =>
           <label key={field} className="flex items-center gap-2"><input type="checkbox" checked={config[field]} disabled={busy}
             onChange={e => setConfig({ ...config, [field]: e.target.checked })} />{label}</label>)}
       </div>
