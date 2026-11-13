@@ -75,7 +75,7 @@ if not defined PY_CMD (
 
 set "VENV_DIR=%TTS_DIR%\venv"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
-set "STAMP_FILE=%VENV_DIR%\.wb_tts_ready_v1"
+set "STAMP_FILE=%VENV_DIR%\.wb_tts_ready_v2"
 
 if not exist "%VENV_PY%" (
     echo [wb-tts] Creating virtual environment in "%VENV_DIR%"...
@@ -90,23 +90,25 @@ if not exist "%VENV_PY%" (
 
 if not exist "%STAMP_FILE%" (
     echo [wb-tts] Installing CUDA PyTorch and Faster Qwen3-TTS dependencies...
-    "%VENV_PY%" -m pip install --upgrade pip
+    "%VENV_PY%" -m pip install --upgrade pip setuptools wheel
+    "%VENV_PY%" -m pip uninstall -y qwen-tts-hf >nul 2>nul
     "%VENV_PY%" -m pip install torch torchaudio --index-url "%WB_TTS_TORCH_URL%"
     if errorlevel 1 (
         echo [ERROR] Failed to install CUDA PyTorch from %WB_TTS_TORCH_URL%.
         pause
         exit /b 1
     )
-    "%VENV_PY%" -m pip install "faster-qwen3-tts>=0.3.0" fastapi uvicorn pydantic numpy soundfile huggingface_hub static-ffmpeg
+    "%VENV_PY%" -m pip install "faster-qwen3-tts==0.3.2" "qwen-tts==0.1.1" "transformers>=4.57,<5" "huggingface_hub>=0.36,<1.0" fastapi uvicorn pydantic numpy soundfile static-ffmpeg
     if errorlevel 1 (
-        echo [wb-tts] PyPI install failed; falling back to upstream GitHub repository...
-        "%VENV_PY%" -m pip install "git+https://github.com/andimarafioti/faster-qwen3-tts.git" fastapi uvicorn pydantic numpy soundfile huggingface_hub static-ffmpeg
+        echo [wb-tts] PyPI install failed; falling back to upstream v0.3.2 tag...
+        "%VENV_PY%" -m pip install "git+https://github.com/andimarafioti/faster-qwen3-tts.git@a70afc0" "qwen-tts==0.1.1" "transformers>=4.57,<5" "huggingface_hub>=0.36,<1.0" fastapi uvicorn pydantic numpy soundfile static-ffmpeg
         if errorlevel 1 (
             echo [ERROR] Failed to install faster-qwen3-tts dependencies.
             pause
             exit /b 1
         )
     )
+    if exist "%VENV_DIR%\.wb_tts_ready_v1" del /q "%VENV_DIR%\.wb_tts_ready_v1" >nul 2>nul
     echo ok > "%STAMP_FILE%"
 )
 

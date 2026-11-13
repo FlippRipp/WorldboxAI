@@ -48,7 +48,7 @@ fi
 
 VENV_DIR="$TTS_DIR/venv"
 VENV_PY="$VENV_DIR/bin/python"
-STAMP_FILE="$VENV_DIR/.wb_tts_ready_v1"
+STAMP_FILE="$VENV_DIR/.wb_tts_ready_v2"
 
 if [ ! -x "$VENV_PY" ]; then
     echo "[wb-tts] Creating virtual environment in $VENV_DIR ..."
@@ -58,10 +58,12 @@ fi
 
 if [ ! -f "$STAMP_FILE" ]; then
     echo "[wb-tts] Installing CUDA PyTorch and Faster Qwen3-TTS dependencies..."
-    "$VENV_PY" -m pip install --upgrade pip
+    "$VENV_PY" -m pip install --upgrade pip setuptools wheel
+    "$VENV_PY" -m pip uninstall -y qwen-tts-hf >/dev/null 2>&1 || true
     "$VENV_PY" -m pip install torch torchaudio --index-url "$WB_TTS_TORCH_URL"
-    "$VENV_PY" -m pip install "faster-qwen3-tts>=0.3.0" fastapi uvicorn pydantic numpy soundfile huggingface_hub static-ffmpeg || \
-        "$VENV_PY" -m pip install "git+https://github.com/andimarafioti/faster-qwen3-tts.git" fastapi uvicorn pydantic numpy soundfile huggingface_hub static-ffmpeg
+    "$VENV_PY" -m pip install "faster-qwen3-tts==0.3.2" "qwen-tts==0.1.1" "transformers>=4.57,<5" "huggingface_hub>=0.36,<1.0" fastapi uvicorn pydantic numpy soundfile static-ffmpeg || \
+        "$VENV_PY" -m pip install "git+https://github.com/andimarafioti/faster-qwen3-tts.git@a70afc0" "qwen-tts==0.1.1" "transformers>=4.57,<5" "huggingface_hub>=0.36,<1.0" fastapi uvicorn pydantic numpy soundfile static-ffmpeg
+    rm -f "$VENV_DIR/.wb_tts_ready_v1"
     echo "ok" > "$STAMP_FILE"
 fi
 
