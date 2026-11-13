@@ -85,9 +85,14 @@ export default function LorebookManager({ onBack }) {
       try {
         const raw = JSON.parse(reader.result);
         const fallbackName = file.name.replace(/\.json$/i, '');
-        const { lorebook, stats } = await api.importLorebook(raw, raw.name ? null : fallbackName);
+        const { lorebook, stats, embedding_warning: embWarn } = await api.importLorebook(
+          raw, raw.name ? null : fallbackName
+        );
         refresh();
-        alert(`Imported "${lorebook.name}": ${stats.imported} entries (${stats.skipped} skipped).`);
+        const baseMsg = `Imported "${lorebook.name}": ${stats.imported} entries (${stats.skipped} skipped).`;
+        alert(embWarn
+          ? `${baseMsg}\n\nNote: Could not pre-generate embeddings (${embWarn}) — they will be generated automatically when used in a story.`
+          : baseMsg);
       } catch (err) {
         alert(`Import failed: ${err.message}`);
       }
@@ -180,7 +185,7 @@ export default function LorebookManager({ onBack }) {
                 disabled={importing}
                 className="min-h-11 px-4 py-2 rounded-lg bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-sm font-medium transition-colors whitespace-nowrap shrink-0"
               >
-                {importing ? 'Importing...' : '+ Import JSON'}
+                {importing ? 'Importing & Embedding...' : '+ Import JSON'}
               </button>
               <input ref={fileInputRef} type="file" accept=".json,application/json" onChange={handleImportFile} className="hidden" />
             </div>

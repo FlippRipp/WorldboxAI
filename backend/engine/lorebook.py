@@ -22,6 +22,8 @@ import hashlib
 import json
 import logging
 import re
+import sqlite3
+import struct
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -203,6 +205,37 @@ def story_entries_book(entries: list[dict]) -> dict:
     return {"id": STORY_LOREBOOK_ID, "name": "Story Entries", "entries": list(entries or [])}
 
 
+def lorebook_entry_text(entry: dict) -> str:
+    """Fold title and trigger keywords into the stored text so ST keywords
+    still steer semantic similarity and the entry reads well in prompts."""
+    content = (entry.get("content") or "").strip()
+    if not content:
+        return ""
+    title = (entry.get("title") or "").strip()
+    keys = [k for k in (entry.get("keys") or []) + (entry.get("secondary_keys") or []) if k]
+    prefix = "Lore"
+    if title:
+        prefix += f" — {title}"
+    if keys:
+        prefix += f" (keywords: {', '.join(keys)})"
+    return f"{prefix}: {content}"
+
+
+def entry_text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def embedding_model_key(llm) -> str:
+    """Cache namespace for an LLM/embedder so switching embedding models or
+    mock mode never serves vectors from a different vector space."""
+    if getattr(llm, "mode", None) == "mock":
+        return "mock"
+    model = getattr(llm, "embedding_model", None)
+    if isinstance(model, str):
+        return model.strip()
+    return f"custom:{type(llm).__qualname__}"
+
+
 class LorebookStore:
     def __init__(self, data_dir):
         self.lorebooks_dir = Path(data_dir) / "lorebooks"
@@ -211,6 +244,11 @@ class LorebookStore:
         if not re.fullmatch(r"[a-z0-9_]+", lorebook_id or ""):
             raise ValueError(f"Invalid lorebook id: {lorebook_id!r}")
         return self.lorebooks_dir / f"{lorebook_id}.json"
+
+    def _embeddings_path(self, lorebook_id: str) -> Path:
+        if not re.fullmatch(r"[a-z0-9_]+", lorebook_id or ""):
+            raise ValueError(f"Invalid lorebook id: {lorebook_id!r}")
+        return self.lorebooks_dir / f"{lorebook_id}.embeddings.db"
 
     # ── CRUD ────────────────────────────────────────────────────────────────
 
@@ -277,6 +315,9 @@ class LorebookStore:
         path = self._path(lorebook_id)
         if path.exists():
             path.unlink()
+        emb_path = self._embeddings_path(lorebook_id)
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{emb_path}{suffix}").unlink(missing_ok=True)
         links = self._read_links()
         pruned = {k: [i for i in ids if i != lorebook_id] for k, ids in links.items()}
         pruned = {k: ids for k, ids in pruned.items() if ids}
@@ -421,3 +462,98 @@ class LorebookStore:
             candidate = f"{base}_{i}"
             i += 1
         return candidate
+
+    # ── embedding sidecar ({id}.embeddings.db) ───────────────────────────────
+    #
+    # Vectors live alongside {id}.json in a small SQLite sidecar keyed by
+    # (uid, model) so listing/searching lorebooks over HTTP stays lightweight
+    # and switching embedding models never collides or loses previous vectors.
+    # Connections open and close per batch so Windows never holds a file lock.
+
+    def get_cached_embeddings(self, lorebook_id: str,
+                              model_key: str) -> dict[str, tuple[str, int, bytes]]:
+        """Return ``{uid: (text_hash, dim, float32_blob)}`` cached for ``model_key``."""
+        if not model_key:
+            return {}
+        try:
+            db_path = self._embeddings_path(lorebook_id)
+        except ValueError:
+            return {}
+        if not db_path.exists():
+            return {}
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = conn.execute(
+                "SELECT uid, text_hash, dim, embedding FROM entry_embeddings WHERE model = ?",
+                (model_key,),
+            ).fetchall()
+            return {
+                str(uid): (str(t_hash), int(dim), bytes(blob))
+                for uid, t_hash, dim, blob in rows
+            }
+        except sqlite3.Error as exc:
+            logger.warning("Ignoring unreadable lorebook embedding cache %s: %s", db_path.name, exc)
+            return {}
+        finally:
+            conn.close()
+
+    def put_cached_embeddings(self, lorebook_id: str, model_key: str,
+                              items: list[tuple[str, str, int, bytes]]) -> None:
+        """Upsert ``[(uid, text_hash, dim, float32_blob), ...]`` for ``model_key``."""
+        if not items or not model_key or not self.exists(lorebook_id):
+            return
+        db_path = self._embeddings_path(lorebook_id)
+        self.lorebooks_dir.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS entry_embeddings (
+                       uid TEXT NOT NULL,
+                       model TEXT NOT NULL,
+                       text_hash TEXT NOT NULL,
+                       dim INTEGER NOT NULL,
+                       embedding BLOB NOT NULL,
+                       PRIMARY KEY (uid, model)
+                   )"""
+            )
+            conn.executemany(
+                """INSERT OR REPLACE INTO entry_embeddings (uid, model, text_hash, dim, embedding)
+                   VALUES (?, ?, ?, ?, ?)""",
+                [(str(uid), model_key, t_hash, int(dim), blob) for uid, t_hash, dim, blob in items],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    async def ensure_cached_embeddings(self, record: dict, llm, embed_texts_fn,
+                                       *, only_uids: set[str] | None = None) -> int:
+        """Embed any uncached (or text-changed) entries of ``record`` for ``llm``'s
+        current embedding model and store them in the sidecar. Includes disabled
+        and constant entries so toggling flags later needs zero API calls."""
+        model_key = embedding_model_key(llm)
+        if not model_key:
+            raise ValueError("No embedding model is configured.")
+        book_id = record.get("id", "")
+        cached = self.get_cached_embeddings(book_id, model_key)
+        missing: list[tuple[str, str, str]] = []  # (uid, text, text_hash)
+        for entry in record.get("entries", []):
+            uid = str(entry.get("uid", ""))
+            if only_uids is not None and uid not in only_uids:
+                continue
+            text = lorebook_entry_text(entry)
+            if not text:
+                continue
+            t_hash = entry_text_hash(text)
+            prev = cached.get(uid)
+            if prev is not None and prev[0] == t_hash:
+                continue
+            missing.append((uid, text, t_hash))
+        if not missing:
+            return 0
+        vectors = await embed_texts_fn([t for _, t, _ in missing], llm)
+        items = [
+            (uid, t_hash, len(vec), struct.pack(f"{len(vec)}f", *vec))
+            for (uid, _, t_hash), vec in zip(missing, vectors)
+        ]
+        self.put_cached_embeddings(book_id, model_key, items)
+        return len(items)

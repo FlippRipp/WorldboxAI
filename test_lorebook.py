@@ -783,3 +783,166 @@ def test_undo_preserves_lorebook_links_and_keeps_toggles_effective(tmp_path, mon
     resp = client.put(f"/api/lorebooks/{book_id}/entries/0", json={"enabled": False})
     assert resp.json()["synced"] is True
     assert [r[0] for r in _world_db_lorebook_rows(tmp_path, "autosave")] == [f"{book_id}:1"]
+
+
+# ── pre-computed lorebook embeddings (sidecar cache) ─────────────────────────
+
+def _install_counting_embedder(monkeypatch):
+    """Spy on entry embeddings while letting ensure_memory's 'init' probe run."""
+    embedded_texts: list[str] = []
+    orig_single = server.engine.llm.get_embedding
+
+    async def spy_single(text: str, inspector_ctx=None):
+        if text != "init":
+            embedded_texts.append(text)
+        return await orig_single(text, inspector_ctx=inspector_ctx)
+
+    async def spy_batch(texts: list[str], inspector_ctx=None):
+        embedded_texts.extend(texts)
+        return [await orig_single(t, inspector_ctx=inspector_ctx) for t in texts]
+
+    monkeypatch.setattr(server.engine.llm, "get_embedding", spy_single)
+    monkeypatch.setattr(server.engine.llm, "get_embeddings", spy_batch)
+    return embedded_texts
+
+
+def test_import_preembeds_entries_and_reuses_across_stories_and_edits(tmp_path, monkeypatch):
+    client, _, lorebook_store, scenario_store = make_client(tmp_path, monkeypatch)
+    embedded_texts = _install_counting_embedder(monkeypatch)
+
+    # Import embeds all 3 non-empty entries (including disabled uid 2) once.
+    resp = client.post("/api/lorebooks/import", json={"data": V2_LOREBOOK, "name": "Realm Lore"})
+    assert resp.status_code == 200
+    body = resp.json()
+    book_id = body["lorebook"]["id"]
+    assert body["embedded"] == 3
+    assert "embedding_warning" not in body
+    assert len(embedded_texts) == 3
+    assert lorebook_store._embeddings_path(book_id).exists()
+    embedded_texts.clear()
+
+    # Attaching to an existing save copies from the sidecar — zero embed calls.
+    assert client.put("/api/saves/autosave/lorebooks", json={"lorebook_ids": [book_id]}).status_code == 200
+    assert embedded_texts == []
+    assert [r[0] for r in _world_db_lorebook_rows(tmp_path, "autosave")] == [
+        f"{book_id}:0", f"{book_id}:1"
+    ]
+
+    # Starting two new stories linked to the same book also makes zero embed calls.
+    scenario = scenario_store.save_scenario({
+        "name": "Ambush",
+        "scenario_description": "Bandits.",
+        "starting_prompt": "Dusk falls.",
+    })
+    client.put(f"/api/lorebooks/links/scenario/{scenario['id']}", json={"lorebook_ids": [book_id]})
+    for save_name in ("story_one", "story_two"):
+        r = client.post("/api/saves", json={"save_id": save_name, "scenario_id": scenario["id"]})
+        assert r.status_code == 200
+        assert len(_world_db_lorebook_rows(tmp_path, save_name)) == 2
+    assert embedded_texts == []
+
+    # Enabling the initially-disabled uid 2, toggling constant/sticky/depth, or
+    # changing book-level sticky_turns makes zero embed calls.
+    assert client.put(f"/api/lorebooks/{book_id}/entries/2", json={"enabled": True}).status_code == 200
+    assert client.put(f"/api/lorebooks/{book_id}/entries/0", json={"sticky_turns": 5, "injection_depth": 1}).status_code == 200
+    assert client.put(f"/api/lorebooks/{book_id}", json={"sticky_turns": 2}).status_code == 200
+    assert embedded_texts == []
+    assert len(_world_db_lorebook_rows(tmp_path, "story_two")) == 3
+
+    # Editing ONE entry's text re-embeds only that single entry, not all 3.
+    assert client.put(
+        f"/api/lorebooks/{book_id}/entries/0",
+        json={"content": "Eldoria was rebuilt in obsidian."},
+    ).status_code == 200
+    assert len(embedded_texts) == 1
+    assert "Eldoria was rebuilt in obsidian." in embedded_texts[0]
+
+    # Deleting the book cleans up the sidecar file alongside {id}.json.
+    assert client.delete(f"/api/lorebooks/{book_id}").status_code == 200
+    assert not lorebook_store._embeddings_path(book_id).exists()
+
+
+def test_import_still_saves_on_embedding_failure_and_backfills_later(tmp_path, monkeypatch):
+    client, _, lorebook_store, _ = make_client(tmp_path, monkeypatch)
+
+    async def broken_batch(texts, inspector_ctx=None):
+        raise RuntimeError("Embedding provider unreachable")
+
+    monkeypatch.setattr(server.engine.llm, "get_embeddings", broken_batch)
+
+    # Import succeeds and persists the book even though embedding failed.
+    resp = client.post("/api/lorebooks/import", json={"data": CHARACTER_BOOK, "name": "Vale Book"})
+    assert resp.status_code == 200
+    body = resp.json()
+    book_id = body["lorebook"]["id"]
+    assert body["embedded"] == 0
+    assert "unreachable" in body["embedding_warning"]
+    assert lorebook_store.exists(book_id)
+
+    # Once the provider recovers, the first save sync embeds the missing entry
+    # and writes it back to the sidecar so the second save gets a cache hit.
+    embedded_texts = _install_counting_embedder(monkeypatch)
+    assert client.put("/api/saves/autosave/lorebooks", json={"lorebook_ids": [book_id]}).status_code == 200
+    assert len(embedded_texts) == 1  # only the 1 enabled entry in CHARACTER_BOOK
+    embedded_texts.clear()
+
+    assert client.post("/api/saves", json={"save_id": "second_save"}).status_code == 200
+    assert client.put("/api/saves/second_save/lorebooks", json={"lorebook_ids": [book_id]}).status_code == 200
+    assert embedded_texts == []
+
+
+def test_switching_embedding_model_namespaces_sidecar_cache(tmp_path, monkeypatch):
+    client, _, lorebook_store, _ = make_client(tmp_path, monkeypatch)
+    embedded_calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(server.engine.llm, "mode", "live")
+    monkeypatch.setattr(server.engine.llm, "embedding_model", "provider/model-a")
+
+    async def fake_single(text: str, inspector_ctx=None):
+        if text != "init":
+            embedded_calls.append((server.engine.llm.embedding_model, text))
+        return [1.0, 0.0, 0.0, 0.0] if server.engine.llm.embedding_model.endswith("a") else [0.0, 0.0, 0.0, 1.0]
+
+    async def fake_batch(texts: list[str], inspector_ctx=None):
+        return [await fake_single(t) for t in texts]
+
+    monkeypatch.setattr(server.engine.llm, "get_embedding", fake_single)
+    monkeypatch.setattr(server.engine.llm, "get_embeddings", fake_batch)
+
+    book_id = client.post(
+        "/api/lorebooks/import", json={"data": CHARACTER_BOOK, "name": "Vale Book"}
+    ).json()["lorebook"]["id"]
+    assert len(embedded_calls) == 2
+    embedded_calls.clear()
+
+    # Switching to model-b misses model-a's cache, embeds for model-b, and
+    # keeps both models cached in the sidecar.
+    monkeypatch.setattr(server.engine.llm, "embedding_model", "provider/model-b")
+    server.engine.memory = None
+    assert client.put("/api/saves/autosave/lorebooks", json={"lorebook_ids": [book_id]}).status_code == 200
+    assert [m for m, _ in embedded_calls] == ["provider/model-b"]
+    assert lorebook_store.get_cached_embeddings(book_id, "provider/model-a")
+    assert lorebook_store.get_cached_embeddings(book_id, "provider/model-b")
+
+
+def test_adding_story_entry_reuses_existing_story_entry_vectors(tmp_path, monkeypatch):
+    client, _, _, _ = make_client(tmp_path, monkeypatch)
+    embedded_texts = _install_counting_embedder(monkeypatch)
+
+    e1 = client.post("/api/saves/autosave/lorebooks/entries", json={
+        "title": "First", "content": "First custom note."
+    }).json()["entry"]
+    assert len(embedded_texts) == 1
+    embedded_texts.clear()
+
+    # Adding a second story entry only embeds the new one; toggling flags on
+    # the first makes zero embed calls.
+    client.post("/api/saves/autosave/lorebooks/entries", json={
+        "title": "Second", "content": "Second custom note."
+    })
+    assert len(embedded_texts) == 1
+    assert "Second custom note." in embedded_texts[0]
+    embedded_texts.clear()
+
+    client.put(f"/api/saves/autosave/lorebooks/entries/{e1['uid']}", json={"sticky_turns": 3})
+    assert embedded_texts == []

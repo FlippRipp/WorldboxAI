@@ -5,6 +5,13 @@ import sqlite3
 import uuid
 from typing import List, Optional
 
+from backend.engine.lorebook import (
+    STORY_LOREBOOK_ID,
+    embedding_model_key,
+    entry_text_hash,
+    lorebook_entry_text,
+)
+
 try:
     import sqlite_vec
 except ImportError:
@@ -66,6 +73,30 @@ def _serialize(vector: List[float]) -> bytes:
 # semaphore — keeps a big world/lorebook from stampeding the provider).
 _EMBED_BATCH_SIZE = 64
 _EMBED_CONCURRENCY = 4
+
+
+async def embed_texts_batch(texts: list[str], llm) -> list[List[float]]:
+    """Embed texts in ``_EMBED_BATCH_SIZE`` provider batches with up to
+    ``_EMBED_CONCURRENCY`` batches in flight; result order matches input."""
+    if not texts:
+        return []
+    semaphore = asyncio.Semaphore(_EMBED_CONCURRENCY)
+
+    if hasattr(llm, "get_embeddings"):
+        async def embed_chunk(chunk):
+            async with semaphore:
+                return await llm.get_embeddings(chunk)
+
+        chunks = [texts[i:i + _EMBED_BATCH_SIZE]
+                  for i in range(0, len(texts), _EMBED_BATCH_SIZE)]
+        results = await asyncio.gather(*(embed_chunk(c) for c in chunks))
+        return [vec for chunk_vectors in results for vec in chunk_vectors]
+
+    async def embed_one(text):
+        async with semaphore:
+            return await llm.get_embedding(text)
+
+    return list(await asyncio.gather(*(embed_one(t) for t in texts)))
 
 
 class MemoryManager:
@@ -354,72 +385,99 @@ class MemoryManager:
     async def _embed_texts(self, texts: list[str], llm) -> list[List[float]]:
         """Embed texts in _EMBED_BATCH_SIZE provider batches with up to
         _EMBED_CONCURRENCY batches in flight; result order matches input."""
-        semaphore = asyncio.Semaphore(_EMBED_CONCURRENCY)
+        return await embed_texts_batch(texts, llm)
 
-        if hasattr(llm, "get_embeddings"):
-            async def embed_chunk(chunk):
-                async with semaphore:
-                    return await llm.get_embeddings(chunk)
-
-            chunks = [texts[i:i + _EMBED_BATCH_SIZE]
-                      for i in range(0, len(texts), _EMBED_BATCH_SIZE)]
-            results = await asyncio.gather(*(embed_chunk(c) for c in chunks))
-            return [vec for chunk_vectors in results for vec in chunk_vectors]
-
-        async def embed_one(text):
-            async with semaphore:
-                return await llm.get_embedding(text)
-
-        return list(await asyncio.gather(*(embed_one(t) for t in texts)))
-
-    async def embed_lorebooks(self, lorebooks: list[dict], llm) -> int:
+    async def embed_lorebooks(self, lorebooks: list[dict], llm, lorebook_store=None) -> int:
         """Replace all lorebook rows in the world index with the enabled entries
-        of the given lorebook records (idempotent — safe to call on every sync)."""
+        of the given lorebook records (idempotent — safe to call on every sync).
+
+        Reuses pre-computed vectors from ``lorebook_store``'s per-book sidecar
+        when available (writing back any cache misses), and reuses existing
+        save-index vectors for unchanged free-standing story entries.
+        """
         if self._world_conn is None:
             raise RuntimeError("World index not initialized. Call init_world_index() first.")
-        self._world_conn.execute("DELETE FROM world_entries WHERE source_type = 'lorebook'")
-        pending = []  # (text, source_id, constant, sticky_turns, injection_depth)
+
+        existing_story_blobs: dict[tuple[str, str], bytes] = {}
+        for row in self._world_conn.execute(
+            "SELECT source_id, text, embedding FROM world_entries WHERE source_type = 'lorebook'"
+        ).fetchall():
+            sid = row["source_id"] or ""
+            if sid.startswith(f"{STORY_LOREBOOK_ID}:") and row["text"] and row["embedding"]:
+                existing_story_blobs[(sid, row["text"])] = bytes(row["embedding"])
+
+        model_key = embedding_model_key(llm)
+        expected_dim = self._embedding_dim or 0
+        expected_bytes = expected_dim * 4
+
+        pending = []  # (book_id, uid, text, t_hash, source_id, constant, sticky, depth, blob_or_none)
+        book_caches: dict[str, dict[str, tuple[str, int, bytes]]] = {}
+
         for book in lorebooks:
             book_id = book.get("id", "")
             book_sticky = int(book.get("sticky_turns") or 0)
+            is_store_book = bool(lorebook_store is not None and book_id and book_id != STORY_LOREBOOK_ID)
+            if is_store_book and book_id not in book_caches:
+                book_caches[book_id] = lorebook_store.get_cached_embeddings(book_id, model_key)
+            cache = book_caches.get(book_id, {})
+
             for entry in book.get("entries", []):
                 if not entry.get("enabled", True):
                     continue
                 text = self._lorebook_entry_text(entry)
                 if not text:
                     continue
+                uid = str(entry.get("uid", ""))
+                source_id = f"{book_id}:{uid}"
+                t_hash = entry_text_hash(text)
                 # Per-entry sticky override wins; None inherits the book value.
                 override = entry.get("sticky_turns")
                 sticky = book_sticky if override is None else int(override)
                 depth = entry.get("injection_depth")
-                pending.append((text, f"{book_id}:{entry.get('uid', '')}",
-                                1 if entry.get("constant") else 0, max(0, sticky),
-                                None if depth is None else max(0, int(depth))))
-        vectors = await self._embed_texts([t for t, _, _, _, _ in pending], llm)
-        for (text, source_id, constant, sticky, depth), vec in zip(pending, vectors):
+
+                blob = None
+                cached_item = cache.get(uid)
+                if cached_item is not None:
+                    c_hash, c_dim, c_blob = cached_item
+                    if c_hash == t_hash and (not expected_dim or c_dim == expected_dim):
+                        blob = c_blob
+                elif book_id == STORY_LOREBOOK_ID:
+                    prev = existing_story_blobs.get((source_id, text))
+                    if prev is not None and (not expected_bytes or len(prev) == expected_bytes):
+                        blob = prev
+
+                pending.append((
+                    book_id, uid, text, t_hash, source_id,
+                    1 if entry.get("constant") else 0,
+                    max(0, sticky),
+                    None if depth is None else max(0, int(depth)),
+                    blob,
+                ))
+
+        miss_indices = [i for i, item in enumerate(pending) if item[8] is None]
+        if miss_indices:
+            miss_vectors = await self._embed_texts([pending[i][2] for i in miss_indices], llm)
+            writebacks: dict[str, list[tuple[str, str, int, bytes]]] = {}
+            for idx, vec in zip(miss_indices, miss_vectors):
+                book_id, uid, text, t_hash, source_id, constant, sticky, depth, _ = pending[idx]
+                blob = _serialize(vec)
+                pending[idx] = (book_id, uid, text, t_hash, source_id, constant, sticky, depth, blob)
+                if lorebook_store is not None and book_id and book_id != STORY_LOREBOOK_ID:
+                    writebacks.setdefault(book_id, []).append((uid, t_hash, len(vec), blob))
+            for book_id, rows in writebacks.items():
+                lorebook_store.put_cached_embeddings(book_id, model_key, rows)
+
+        self._world_conn.execute("DELETE FROM world_entries WHERE source_type = 'lorebook'")
+        for _, _, text, _, source_id, constant, sticky, depth, blob in pending:
             self._world_conn.execute(
                 """INSERT INTO world_entries (id, embedding, text, source_type, source_id, region, constant, sticky_turns, injection_depth)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (str(uuid.uuid4()), _serialize(vec), text, "lorebook", source_id, "", constant, sticky, depth),
+                (str(uuid.uuid4()), blob, text, "lorebook", source_id, "", constant, sticky, depth),
             )
         self._world_conn.commit()
         return len(pending)
 
-    @staticmethod
-    def _lorebook_entry_text(entry: dict) -> str:
-        """Fold title and trigger keywords into the stored text so ST keywords
-        still steer semantic similarity and the entry reads well in prompts."""
-        content = (entry.get("content") or "").strip()
-        if not content:
-            return ""
-        title = (entry.get("title") or "").strip()
-        keys = [k for k in (entry.get("keys") or []) + (entry.get("secondary_keys") or []) if k]
-        prefix = "Lore"
-        if title:
-            prefix += f" — {title}"
-        if keys:
-            prefix += f" (keywords: {', '.join(keys)})"
-        return f"{prefix}: {content}"
+    _lorebook_entry_text = staticmethod(lorebook_entry_text)
 
     def get_constant_lorebook_entries(self) -> list[dict]:
         """Always-injected lorebook entries (ST 'constant' flag); no vector math."""

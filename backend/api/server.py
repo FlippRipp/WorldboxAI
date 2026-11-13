@@ -14,6 +14,7 @@ from backend.engine.character_builder import CharacterBuilder
 from backend.engine.scenario import ScenarioStore
 from backend.engine.prompt_pipeline import STORY_STYLE_FIELDS
 from backend.engine.lorebook import LorebookStore, make_story_entry, patch_story_entry, story_entries_book
+from backend.engine.memory import embed_texts_batch
 from backend.engine.provider_manager import ProviderManager
 from backend.engine.prompt_library import PromptLibrary, get_default_library_path
 from backend.engine.prompt_pipeline import AVAILABLE_MACROS, default_prompt_pipeline, ALLOWED_ROLES, ALLOWED_PLACEMENTS, ALLOWED_BLOCK_TYPES, DEFAULT_CONTINUE_PROMPT
@@ -2165,7 +2166,9 @@ async def _sync_lorebooks_for_save(save_id: str):
     books = lorebook_store.resolve_save_lorebooks(lorebook_ids)
     if story_entries:
         books.append(story_entries_book(story_entries))
-    count = await engine.memory.embed_lorebooks(books, engine.llm)
+    count = await engine.memory.embed_lorebooks(
+        books, engine.llm, lorebook_store=lorebook_store
+    )
     session_manager.save_manager.update_metadata(
         save_id, {"lorebook_embed_fingerprint": fingerprint}
     )
@@ -2211,9 +2214,18 @@ class LorebookLinksRequest(BaseModel):
 @app.post("/api/lorebooks/import")
 async def import_lorebook(request: LorebookImportRequest):
     try:
-        return lorebook_store.import_lorebook(request.data, name=request.name)
+        result = lorebook_store.import_lorebook(request.data, name=request.name)
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    try:
+        result["embedded"] = await lorebook_store.ensure_cached_embeddings(
+            result["lorebook"], engine.llm, embed_texts_batch
+        )
+    except Exception as exc:
+        print(f"[Lorebook] Warning: could not pre-embed '{result['lorebook']['id']}' on import: {exc}")
+        result["embedded"] = 0
+        result["embedding_warning"] = str(exc)
+    return result
 
 
 @app.get("/api/lorebooks")
@@ -2296,6 +2308,13 @@ async def update_lorebook_entry(lorebook_id: str, uid: str, request: LorebookEnt
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    if any(k in patch for k in _EMBEDDED_ENTRY_FIELDS):
+        try:
+            await lorebook_store.ensure_cached_embeddings(
+                record, engine.llm, embed_texts_batch, only_uids={uid}
+            )
+        except Exception as exc:
+            print(f"[Lorebook] Warning: could not re-embed '{lorebook_id}:{uid}' on edit: {exc}")
     synced = await _resync_active_save_if_uses(lorebook_id)
     return {"lorebook": record, "synced": synced}
 
