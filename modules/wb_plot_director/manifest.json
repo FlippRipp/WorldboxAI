@@ -152,7 +152,7 @@
       "type": "module_prompt",
       "enabled": true,
       "role_type": "system",
-      "placement": "system_relative",
+      "placement": "chat_injection",
       "depth": 0,
       "config": {}
     }

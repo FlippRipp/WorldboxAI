@@ -59,7 +59,8 @@ class LLMBridge:
             return getattr(self._service, "module_fast_model", "") or self._service.reader_model
         return os.getenv("MODULE_FAST_MODEL", "") or self._reader_model
 
-    async def generate(self, prompt: str, model_preference: str = "balanced", max_tokens: int = None) -> str:
+    async def generate(self, prompt: str, model_preference: str = "balanced", max_tokens: int = None,
+                       system_prompt: str = None) -> str:
         # NOTE: `max_tokens` should NOT be used for content generation. It cuts off LLM output
         # mid-sentence and causes bugs. Instead, prompt the model to produce the desired output
         # length (e.g. "respond with ONLY valid JSON", "keep to one sentence", "2-3 paragraphs").
@@ -70,17 +71,21 @@ class LLMBridge:
         model = self._pick_model(model_preference) if self._service else self._reader_model
 
         if self._mode == "mock":
-            result = f"[mock llm response for: {prompt[:80]}...]"
+            full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+            result = f"[mock llm response for: {full_prompt[:80]}...]"
             if self._inspector:
-                cid = await self._inspector.start_call(call_type="module_fast", model="mock", step="module:generate", module_source=mod_src, input_data=prompt)
-                await self._inspector.end_call(cid, prompt, result, 0, 0)
+                cid = await self._inspector.start_call(call_type="module_fast", model="mock", step="module:generate", module_source=mod_src, input_data=full_prompt)
+                await self._inspector.end_call(cid, full_prompt, result, 0, 0)
             return result
 
         if not model:
             logger.error("Module LLM call skipped: no LLM service configured and no model env override set.")
             return ""
 
-        messages = [{"role": "user", "content": prompt}]
+        messages = []
+        if system_prompt and str(system_prompt).strip():
+            messages.append({"role": "system", "content": str(system_prompt).strip()})
+        messages.append({"role": "user", "content": prompt})
 
         cid = None
         try:

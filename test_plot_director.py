@@ -1996,9 +1996,15 @@ def test_plot_injection_scene_mode_withhold_hook_only_and_missing_assessment_fal
         backend,
         created_turn=1,
         scene_mode="withhold",
+        pacing_note="Let the rooftop confession finish before outside trouble arrives.",
         last_assessment={"turn": 4, "scene_mode": "withhold", "thread_engaged": False, "player_interest": "indifferent", "momentum": "steady"},
     )
-    assert asyncio.run(backend.on_render_prompt_block(block, _state(turn=4, data=data_withhold), sdk_no_jev))["content"] == ""
+    withhold_content = asyncio.run(backend.on_render_prompt_block(block, _state(turn=4, data=data_withhold), sdk_no_jev))["content"]
+    assert "[Scene Pacing — HOLD]" in withhold_content
+    assert "AMBIENT / HOLD" in withhold_content
+    assert "Current beat: Let the rooftop confession finish" in withhold_content
+    assert "Salt Baron" not in withhold_content
+    assert "stolen ledger" not in withhold_content
 
     data_hook_only = _active_data(
         backend,
@@ -2051,7 +2057,8 @@ def test_plot_injection_scene_mode_withhold_hook_only_and_missing_assessment_fal
         st_fresh = _state(turn=4, data=data_fresh_active, _jev_return="withhold")
         out_fresh = asyncio.run(backend.on_render_prompt_block(block, st_fresh, sdk_with_jev))["content"]
         assert jev_calls[-1] == data_fresh_active["last_assessment"]
-        assert out_fresh == ""
+        assert "[Scene Pacing — HOLD]" in out_fresh
+        assert "stolen ledger" not in out_fresh
     finally:
         backend.jev_tasks = orig_jev_tasks
 
@@ -2331,6 +2338,66 @@ def test_bg_job_patches_snapshots_for_delete_and_branch_and_rejects_deleted_turn
     }
     asyncio.run(backend._execute_bg_job(stale_job))
     assert session.state["module_data"]["wb_plot_director"].get("gm_notes") != "Stale deleted turn notes"
+
+
+def test_scene_hold_on_defer_and_quiet_period_and_gm_notes_system_prompt():
+    """Deferred generation and post-thread quiet periods emit the HOLD pacing cue,
+    defer preserves gm_notes + pacing_note, and _iterate_gm_notes uses a dedicated
+    system_prompt when supported by sdk.llm.generate."""
+    backend = _load_backend()
+    block = {"id": "plot_thread"}
+
+    # Initial observation (turn 1, defer_streak=0, last_closed_turn=0) stays silent.
+    obs = _observing_data(backend)
+    assert asyncio.run(backend.on_render_prompt_block(block, _state(turn=1, data=obs, config={"observation_turns": 4}), _make_sdk([], {})))["content"] == ""
+
+    # Verify _iterate_gm_notes passes system_prompt separately when supported,
+    # and _generate_thread preserves gm_notes + pacing_note on defer.
+    obs["profile"] = backend._clean_profile(_profile_reply(), obs["profile"])
+    calls = []
+    replies = iter([
+        json.dumps({"gm_notes": "Let the intimate prologue play out before the altar summoning."}),
+        json.dumps({
+            "defer": True,
+            "pacing_note": "Player is mid-encounter with the goddess before stepping into the rift.",
+            "gm_notes": "Hold the summoning ritual until the player steps toward the portal.",
+        }),
+    ])
+
+    async def fake_generate(prompt, model_preference="balanced", max_tokens=None, system_prompt=None):
+        calls.append({"prompt": prompt, "system_prompt": system_prompt, "model": model_preference})
+        return next(replies)
+
+    sdk = SimpleNamespace(llm=SimpleNamespace(generate=fake_generate, _current_module=""))
+    st_t5 = _state(turn=5, data=obs, config={"planning_iterations": 2, "observation_turns": 4})
+    res = asyncio.run(backend.on_librarian(st_t5, sdk))
+    upd = _updates(res)
+
+    assert calls[0]["system_prompt"] is not None
+    assert "tabletop RPG GM" in calls[0]["system_prompt"]
+    assert "motives, scene pacing, dramatic irony" in calls[0]["system_prompt"]
+    assert "PLAYER PROFILE:" in calls[0]["prompt"]
+    assert upd["defer_streak"] == 1
+    assert upd["gm_notes"] == "Hold the summoning ritual until the player steps toward the portal."
+    assert upd["pacing_note"] == "Player is mid-encounter with the goddess before stepping into the rift."
+
+    deferred_data = {**obs, **upd}
+    hold_out = asyncio.run(backend.on_render_prompt_block(block, _state(turn=6, data=deferred_data), sdk))["content"]
+    assert "[Scene Pacing — HOLD]" in hold_out
+    assert "AMBIENT / HOLD" in hold_out
+    assert "Current beat: Player is mid-encounter with the goddess" in hold_out
+
+    # Quiet period after closing a thread also emits the HOLD pacing cue.
+    quiet_data = {
+        **obs,
+        "defer_streak": 0,
+        "pacing_note": "",
+        "last_closed_turn": 6,
+        "next_thread_turn": 9,
+    }
+    quiet_out = asyncio.run(backend.on_render_prompt_block(block, _state(turn=7, data=quiet_data), sdk))["content"]
+    assert "[Scene Pacing — HOLD]" in quiet_out
+
 
 
 

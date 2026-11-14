@@ -580,8 +580,15 @@ class GameSessionManager:
         if index < 0 or index >= n:
             raise ValueError("Message index out of range.")
         turn = self.state.get("turn", 0)
-        # Last turn = the trailing user+ai pair (indices n-2, n-1) for turn >= 1.
-        if turn >= 1 and index >= n - 2:
+        # Last turn = the trailing user+ai pair (indices n-2, n-1) for normal
+        # turns, or just the trailing ai entry (n-1) for a continue turn.
+        has_trailing_user = (
+            n >= 2
+            and msgs[-1].get("role") == "ai"
+            and msgs[-2].get("role") == "user"
+        )
+        last_turn_start = n - 2 if has_trailing_user else n - 1
+        if turn >= 1 and index >= last_turn_start:
             self.save_manager.undo_turn(self.active_save_id, turn - 1)
             self.state = self.load_active_state()
         else:
@@ -665,13 +672,8 @@ class GameSessionManager:
                     )
                 # Roll the copied memory index back to the branch point.
                 branch_db = new_path / "vector_index"
-                if (branch_db / "memories.db").exists():
-                    from backend.engine.memory import MemoryManager
-                    mm = MemoryManager(str(branch_db), 1)
-                    try:
-                        mm.rollback_memories(target_turn)
-                    finally:
-                        mm.close()
+                from backend.engine.memory import MemoryManager
+                MemoryManager.rollback_at_path(str(branch_db), target_turn)
 
             clean_name = (display_name or "").strip()
             if clean_name:

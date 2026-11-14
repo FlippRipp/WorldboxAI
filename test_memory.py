@@ -711,3 +711,62 @@ def test_mock_structured_importance():
     finally:
         if previous:
             os.environ["LLM_MODE"] = previous
+
+
+def test_rollback_memory_works_when_engine_memory_is_uninitialized(tmp_path):
+    """Regression: after a server restart or save load, engine.memory is None
+    until the next turn runs. Deleting or undoing a turn before generating
+    must still prune memories from the on-disk SQLite store."""
+    from backend.engine.graph import EngineGraph
+    from backend.engine.registry import ModuleRegistry
+
+    db_dir = str(tmp_path / "vector_index")
+    # Missing DB is a clean False without creating an empty file.
+    assert MemoryManager.rollback_at_path(db_dir, target_turn=2) is False
+    assert not os.path.exists(os.path.join(db_dir, "memories.db"))
+
+    seeded = MemoryManager(db_dir, embedding_dim=3)
+    try:
+        seeded.add_memory([1.0, 0.0, 0.0], "Turn 2 memory", turn=2, importance=6)
+        seeded.add_memory([0.0, 1.0, 0.0], "Turn 1-3 summary", turn=3, importance=7, turn_range="turns 1-3")
+        seeded.add_memory([0.0, 0.0, 1.0], "Turn 3 permanent profile", turn=3, importance=8, permanent=True)
+    finally:
+        seeded.close()
+
+    engine = EngineGraph(ModuleRegistry("modules"))
+    engine.set_memory_path(db_dir)
+    assert engine.memory is None
+    assert engine.rollback_memory(2) is True
+
+    reopened = MemoryManager(db_dir, embedding_dim=3)
+    try:
+        remaining = reopened.list_all_memories()
+        assert [m["text"] for m in remaining] == ["Turn 2 memory"]
+    finally:
+        reopened.close()
+
+
+def test_prune_orphaned_npc_memories_preserves_valid_npcs_and_general_memories(tmp_path):
+    db_dir = str(tmp_path / "vector_index")
+    assert MemoryManager.prune_orphaned_npc_memories_at_path(db_dir, {"npc_valid"}) == 0
+
+    mm = MemoryManager(db_dir, embedding_dim=3)
+    try:
+        mm.add_memory([1.0, 0.0, 0.0], "General story event", turn=4, importance=8, entities=["Hero", "Altar"], permanent=True)
+        mm.add_memory([0.0, 1.0, 0.0], "Valid goddess profile", turn=0, importance=8, entities=["npc:npc_valid", "profile"], permanent=True)
+        mm.add_memory([0.0, 0.0, 1.0], "Orphan catgirl profile", turn=6, importance=8, entities=["npc:npc_orphan1", "profile"], permanent=True)
+        mm.add_memory([0.5, 0.5, 0.0], "Orphan catgirl encounter", turn=6, importance=6, entities=["npc:npc_orphan2"])
+    finally:
+        mm.close()
+
+    pruned = MemoryManager.prune_orphaned_npc_memories_at_path(db_dir, {"npc_valid"})
+    assert pruned == 2
+
+    reopened = MemoryManager(db_dir, embedding_dim=3)
+    try:
+        texts = {m["text"] for m in reopened.list_all_memories()}
+        assert texts == {"General story event", "Valid goddess profile"}
+    finally:
+        reopened.close()
+
+

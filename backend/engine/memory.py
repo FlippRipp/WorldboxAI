@@ -195,6 +195,66 @@ class MemoryManager:
         self.conn.execute("DELETE FROM memories WHERE turn_generated > ?", (target_turn,))
         self.conn.commit()
 
+    @classmethod
+    def rollback_at_path(cls, db_path: str, target_turn: int) -> bool:
+        """Roll back memories in an on-disk store without needing an embedding
+        dimension or an open engine session. Returns False when no DB exists."""
+        if not db_path:
+            return False
+        db_file = os.path.join(db_path, "memories.db")
+        if not os.path.exists(db_file):
+            return False
+        mm = cls(db_path, embedding_dim=1)
+        try:
+            mm.rollback_memories(target_turn)
+        finally:
+            mm.close()
+        return True
+
+    def prune_orphaned_npc_memories(self, valid_npc_ids: set[str]) -> int:
+        """Remove NPC-scoped memories (tagged ``npc:<id>``) whose character IDs
+        no longer exist in ``valid_npc_ids`` (e.g. after rolling back, swiping,
+        or deleting phantom characters). Non-NPC general story memories are
+        never touched."""
+        rows = self.conn.execute(
+            "SELECT id, entities FROM memories WHERE entities LIKE '%\"npc:%'"
+        ).fetchall()
+        orphan_ids: list[str] = []
+        for row in rows:
+            try:
+                ents = json.loads(row["entities"]) if row["entities"] else []
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(ents, list):
+                continue
+            npc_ids = [
+                e[4:] for e in ents
+                if isinstance(e, str) and e.startswith("npc:") and len(e) > 4
+            ]
+            if npc_ids and not any(nid in valid_npc_ids for nid in npc_ids):
+                orphan_ids.append(row["id"])
+        if not orphan_ids:
+            return 0
+        placeholders = ",".join("?" for _ in orphan_ids)
+        self.conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", orphan_ids)
+        self.conn.commit()
+        return len(orphan_ids)
+
+    @classmethod
+    def prune_orphaned_npc_memories_at_path(cls, db_path: str, valid_npc_ids: set[str]) -> int:
+        """On-disk variant of ``prune_orphaned_npc_memories`` for save/swipe
+        rollbacks when no engine memory instance is open."""
+        if not db_path:
+            return 0
+        db_file = os.path.join(db_path, "memories.db")
+        if not os.path.exists(db_file):
+            return 0
+        mm = cls(db_path, embedding_dim=1)
+        try:
+            return mm.prune_orphaned_npc_memories(valid_npc_ids)
+        finally:
+            mm.close()
+
     def list_all_memories(self, limit: int = 50) -> list[dict]:
         rows = self.conn.execute("SELECT * FROM memories LIMIT ?", (limit,)).fetchall()
         return [self._format_memory_row(row) for row in rows]

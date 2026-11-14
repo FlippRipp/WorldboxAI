@@ -177,10 +177,12 @@ class EngineGraph:
         pass
 
     def rollback_memory(self, target_turn: int) -> bool:
-        if self.memory is None:
-            return False
-        self.memory.rollback_memories(target_turn)
-        return True
+        if self.memory is not None:
+            self.memory.rollback_memories(target_turn)
+            return True
+        if self.memory_db_path:
+            return MemoryManager.rollback_at_path(self.memory_db_path, target_turn)
+        return False
 
     def _deep_merge(self, base: dict, update: dict) -> dict:
         merged = dict(base)
@@ -643,12 +645,11 @@ class EngineGraph:
         keys wholesale, the same way the LangGraph channels merge them.
         Mutates and returns ``state``.
 
-        The opening is not a numbered turn: the reader advances the turn
-        counter as it does mid-graph, but swipes, regenerate and delete all
-        rely on turn 0 identifying the opening scene, so the counter is
-        pinned back to 0 before the librarian runs and the state is saved.
+        The opening is not a numbered turn: swipes, regenerate and delete all
+        rely on turn 0 identifying the opening scene, so the reader runs with
+        ``advance_turn=False`` and the counter stays at 0 through both phases.
         """
-        state.update(await self.reader_node(state))
+        state.update(await self.reader_node(state, advance_turn=False))
         state["turn"] = 0
         state.update(await self.librarian_node(state))
         return state
@@ -764,6 +765,14 @@ class EngineGraph:
         gathered_context = []
 
         await self._ensure_memory()
+        if self.memory is not None:
+            active_mods = state.get("__active_modules__")
+            npc_active = active_mods is None or "wb_npc_system" in active_mods
+            npc_mod = (state.get("module_data") or {}).get("wb_npc_system")
+            if npc_active and isinstance(npc_mod, dict) and isinstance(npc_mod.get("characters"), dict):
+                pruned = self.memory.prune_orphaned_npc_memories(set(npc_mod["characters"].keys()))
+                if pruned:
+                    print(f"[Memory] Pruned {pruned} orphaned NPC memory row(s).")
 
         turn = state.get("turn", 0)
         retrieved_ids = []
@@ -1127,7 +1136,9 @@ class EngineGraph:
 
         return final_blocks
 
-    async def reader_node(self, state: WorldState):
+    async def reader_node(self, state: WorldState, advance_turn: bool = True):
+        if state.get("needs_rewrite") and state.get("veto_retries", 0) < VETO_MAX_RETRIES:
+            return {}
         print("\n[Node: Reader] Parsing story output for state mutations...")
         await self.sdk.ui.emit_status("reader", "Updating the world…")
 
@@ -1227,9 +1238,16 @@ class EngineGraph:
                 if key in result:
                     location_update[key] = result[key]
 
+        turn = state.get("turn", 0) + 1 if advance_turn else state.get("turn", 0)
+        # Stamp the turn being finalized before on_mutate_state runs so modules
+        # that record memories or turn metadata (e.g. wb_npc_system character
+        # introductions/captures) tag them with THIS turn, not the prior one —
+        # otherwise deleting or regenerating the turn fails to roll them back.
+        mutate_state = {**state, "turn": turn}
+
         accumulated = await self._run_modules_in_levels(
             "on_mutate_state",
-            state,
+            mutate_state,
             build_args=build_mutate_args,
             collect=collect_location,
             merge_module_data=True,
@@ -1243,8 +1261,6 @@ class EngineGraph:
                   f"region={location_update.get('player_location_region')}, "
                   f"map={location_update.get('player_location_map_id')}")
 
-        turn = state.get("turn", 0) + 1
-        
         # Preserve the turn's input for post-turn phases (librarian modules like
         # the character tracker need to see what the player actually declared).
         return self._deep_merge(state_update, {"current_context": [], "input_text": "",

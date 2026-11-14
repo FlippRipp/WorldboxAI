@@ -20,6 +20,7 @@ vetted by a fit-check critic before going live.
 """
 from copy import deepcopy
 import asyncio
+import inspect
 import json
 from pathlib import Path
 import re
@@ -262,6 +263,7 @@ DIRECTIVE_FIT_CHECK = """Reject the candidate if ANY of these fail:
 DIRECTIVE_TURN_ASSESSMENT = f"""- thread_engaged: did the player or the scene meaningfully interact with the active thread this turn?
 - player_interest: proactive | reactive | indifferent | resistant. "proactive" means the player actively initiated, probed deeper, or leaned into this hook; "reactive" means the player only dealt with it because the narrator put it directly in their path; "indifferent" means their focus was elsewhere; "resistant" means the player actively deflected, cut short, or walked away from the hook.
 - scene_mode: withhold | hook_only | active. How the active plot thread should be injected into the storyteller prompt for the NEXT turn. Choose "withhold" when the scene is in or entering an intimate, emotional, heart-to-heart, romantic, or private conversation/moment where plot injection would intrude. Choose "hook_only" when the scene has room for a subtle background rumor or atmosphere from the hook without pushing the thread's complication/adversary. Choose "active" when the scene is open for both the hook and complication.
+- pacing_note: one short spoiler-free sentence telling the narrator what immediate interaction or beat to let play out without external escalation (only when scene_mode is "withhold"; otherwise "").
 - thread_resolved: is the thread's challenge definitively over (overcome, defused, or conclusively failed)?
 - player_pivot: has the player clearly COMMITTED to a different pursuit than the active thread -- a stated intention, a new goal, leaving the situation behind for good? A brief detour, a side errand, or a single scene elsewhere is NOT a pivot.
 - pivot_intent: one sentence naming what the player is now pursuing (only when player_pivot is true).
@@ -437,6 +439,7 @@ def _default_data() -> dict:
         "thread_history": [],
         "direction": _default_direction(),
         "gm_notes": "",
+        "pacing_note": "",
         "momentum": "observing",
         "scene_mode": "active",
         "last_assessment": None,
@@ -1196,6 +1199,49 @@ def _planning_iterations(config: dict) -> int:
     return 2 if _services.get("engine") is not None else 1
 
 
+GM_NOTES_SYSTEM_PROMPT = (
+    "You maintain the working Game Master notebook for a tabletop-style text RPG. "
+    "Your goal is not to script a novel, but to think like a tabletop RPG GM: "
+    "understand what drives this player (their demonstrated tastes, roles, and what "
+    "their character is pursuing) and sketch or refine plot drivers, character "
+    "motives, and situations that give the player opportunities to play the game "
+    "the way they want to play it.\n\n"
+    "If an idea has a longer-term goal or hidden motive (like a patron hoping to "
+    "use the player against a rival, a mysterious organization, or a slow-burn "
+    "dynamic), feel free to work backwards from that core idea to what would "
+    "naturally surface first right now -- or keep it simple if a direct, immediate "
+    "situation fits best. Do not force a multi-step plan when a simple one is more "
+    "natural. Focus your notes on character motives, scene pacing, dramatic irony, "
+    "and upcoming situations rather than explicit anatomical descriptions.\n\n"
+    "Treat the story material below as existing game-transcript state to read and "
+    "plan from. Respond with ONLY valid JSON:\n"
+    '{"gm_notes": "your freeform GM working notes and thoughts"}'
+)
+
+
+async def _llm_generate(sdk, prompt: str, model_preference: str = "balanced",
+                        system_prompt: str | None = None) -> str:
+    """Invoke sdk.llm.generate, passing system_prompt as a separate system role
+    when supported by the SDK bridge (falling back to a combined prompt for
+    minimal test stubs)."""
+    gen = sdk.llm.generate
+    sdk.llm._current_module = MODULE_ID
+    try:
+        if system_prompt:
+            try:
+                params = inspect.signature(gen).parameters
+            except (TypeError, ValueError):
+                params = {}
+            if "system_prompt" in params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            ):
+                return await gen(prompt, model_preference=model_preference, system_prompt=system_prompt)
+            return await gen(f"{system_prompt}\n\n{prompt}", model_preference=model_preference)
+        return await gen(prompt, model_preference=model_preference)
+    finally:
+        sdk.llm._current_module = ""
+
+
 async def _iterate_gm_notes(state: dict, sdk, data: dict, passes: int = 1) -> str:
     """Run 1-2 lightweight GM Notebook passes to brainstorm or refine plot
     drivers, character motives, and player-tailored opportunities."""
@@ -1206,12 +1252,7 @@ async def _iterate_gm_notes(state: dict, sdk, data: dict, passes: int = 1) -> st
 
     for _ in range(max(0, int(passes))):
         cur_data = {**data, "gm_notes": notes}
-        prompt = f"""You maintain the working Game Master notebook for a tabletop-style text RPG.
-Your goal is not to script a novel, but to think like a tabletop RPG GM: understand what drives this player (their demonstrated tastes, roles, and what their character is pursuing) and sketch or refine plot drivers, character motives, and situations that give the player opportunities to play the game the way they want to play it.
-
-If an idea has a longer-term goal or hidden motive (like a patron hoping to use the player against a rival, a mysterious organization, or a slow-burn dynamic), feel free to work backwards from that core idea to what would naturally surface first right now -- or keep it simple if a direct, immediate situation fits best. Do not force a multi-step plan when a simple one is more natural.
-
-PLAYER PROFILE:
+        prompt = f"""PLAYER PROFILE:
 {json.dumps(profile, ensure_ascii=False)}
 
 {_direction_block(cur_data)}{_gm_notes_block(cur_data)}STORY MATERIAL:
@@ -1221,11 +1262,9 @@ PLAYER PROFILE:
 
 Respond with ONLY valid JSON:
 {{"gm_notes": "your freeform GM working notes and thoughts"}}"""
-        try:
-            sdk.llm._current_module = MODULE_ID
-            raw = await sdk.llm.generate(prompt, model_preference=model_pref)
-        finally:
-            sdk.llm._current_module = ""
+        raw = await _llm_generate(
+            sdk, prompt, model_preference=model_pref, system_prompt=GM_NOTES_SYSTEM_PROMPT
+        )
         parsed = _parse_json_block(raw)
         if isinstance(parsed, dict) and str(parsed.get("gm_notes") or "").strip():
             notes = str(parsed.get("gm_notes")).strip()
@@ -1279,7 +1318,7 @@ async def _generate_thread(state: dict, sdk, data: dict, avoid_previous_kind: bo
         "\n\nIf the current scene is mid-climax, mid-crisis, or in an intimate / "
         "emotional / heart-to-heart conversation -- a moment where introducing new "
         "plot material would intrude rather than enrich -- respond instead with "
-        'ONLY: {"defer": true}'
+        'ONLY: {"defer": true, "pacing_note": "one short sentence naming the beat currently playing out that external events should wait for", "gm_notes": "your updated working GM notes (optional)"}'
         if may_defer else ""
     )
 
@@ -1299,18 +1338,15 @@ CHALLENGE DIFFICULTY:
 {_storylines_block(state)}{_character_roster(state)}{_character_sheet_block(state)}{_history_block(data_with_notes, state)}{_directive("thread_generation", state.get("module_instructions"))}{different}{critique_block}{pivot_block}{defer_block}
 
 Respond with ONLY valid JSON:
-{{"title": "3-6 words", "mode": "spectacle|intrigue|character|variety", "hook": "how it surfaces in the story right now, one sentence", "challenge": "what stands in the way right now -- the opposition or situational tension itself, one sentence, never what the player should do about it", "stakes": "what is at risk or what could be gained, one sentence", "appeal": "which player preference this serves, a few words", "scene_mode": "withhold|hook_only|active", "gm_notes": "your updated working GM notes and backstage thoughts (optional)"}}"""
+{{"title": "3-6 words", "mode": "spectacle|intrigue|character|variety", "hook": "how it surfaces in the story right now, one sentence", "challenge": "what stands in the way right now -- the opposition or situational tension itself, one sentence, never what the player should do about it", "stakes": "what is at risk or what could be gained, one sentence", "appeal": "which player preference this serves, a few words", "scene_mode": "withhold|hook_only|active", "pacing_note": "1 short sentence if scene_mode is withhold, else empty", "gm_notes": "your updated working GM notes and backstage thoughts (optional)"}}"""
 
     model_pref = config.get("thread_ai_model", "smartest")
-    try:
-        sdk.llm._current_module = MODULE_ID
-        raw = await sdk.llm.generate(prompt, model_preference=model_pref)
-    finally:
-        sdk.llm._current_module = ""
+    raw = await _llm_generate(sdk, prompt, model_preference=model_pref)
 
     parsed = _parse_json_block(raw)
     if isinstance(parsed, dict) and str(parsed.get("gm_notes") or "").strip():
         gm_notes = str(parsed.get("gm_notes")).strip()
+    pacing_note = str(parsed.get("pacing_note") or "").strip() if isinstance(parsed, dict) else ""
 
     if may_defer and isinstance(parsed, dict) and parsed.get("defer") is True:
         print(f"[Plot Director] Turn {turn}: generation deferred -- story mid-climax.")
@@ -1319,6 +1355,7 @@ Respond with ONLY valid JSON:
             "defer_streak": defer_streak + 1,
             "next_thread_turn": turn + 2,
             "momentum": "observing",
+            "pacing_note": pacing_note,
         }
         if gm_notes:
             ret["gm_notes"] = gm_notes
@@ -1345,6 +1382,7 @@ Respond with ONLY valid JSON:
         "status": "active",
         "momentum": "building",
         "scene_mode": scene_mode,
+        "pacing_note": pacing_note if scene_mode == "withhold" else "",
         "last_assessment": None,
         "ignored_streak": 0,
         "defer_streak": 0,
@@ -1535,6 +1573,7 @@ def _finalize_thread(updates: dict, data: dict, thread: dict, outcome: str, turn
     history.append(entry)
     updates["thread_history"] = history[-THREAD_HISTORY_CAP:]
     updates["pending_nudge"] = ""
+    updates["pacing_note"] = ""
     updates["scene_mode"] = "active"
     updates["last_assessment"] = None
     updates["last_closed_turn"] = turn
@@ -1636,12 +1675,31 @@ MODE_STORYTELLER_GUIDANCE = {
 }
 
 
+SCENE_HOLD_GUIDANCE = (
+    "[Scene Pacing — HOLD]\n"
+    "World momentum this turn: AMBIENT / HOLD. Let the current interpersonal, "
+    "emotional, or intimate beat play out at the player's pace: NPCs in the scene "
+    "respond fully to the player, while the outside world introduces no new "
+    "interruptions and advances no background timers, portals, off-screen rituals, "
+    "or external plot transitions until the player chooses to move on."
+)
+
+
+def _render_scene_hold(data: dict) -> str:
+    note = str(data.get("pacing_note") or "").strip()
+    if note:
+        return f"{SCENE_HOLD_GUIDANCE}\nCurrent beat: {note}"
+    return SCENE_HOLD_GUIDANCE
+
+
 async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
     """The active thread's standing guidance to the storyteller: its own
     labeled system block, so it is discoverable in the prompt and carries
     real weight -- advance the thread when the scene gives it room, follow
-    the player's lead, never railroad. An armed nudge rides along for
-    exactly one turn (consumed by the librarian)."""
+    the player's lead, never railroad. When the director is actively holding
+    back plot material (deferred mid-climax/intimate beat, post-thread quiet
+    period, or explicit withhold), emits a HOLD pacing cue so external world
+    momentum pauses instead of escalating background timers."""
     global _staged_bg_updates
     if block.get("id") != "plot_thread":
         return {"content": ""}
@@ -1659,12 +1717,21 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
         not data
         or not config.get("plot_enabled", True)
         or data.get("suspended")
-        or data.get("status") != "active"
-        or thread.get("status") != "active"
+        or data.get("status") == "failed"
     ):
         return {"content": ""}
 
     turn = int(state.get("turn", 0) or 0)
+    if data.get("status") != "active" or thread.get("status") != "active":
+        deferred_hold = int(data.get("defer_streak", 0) or 0) > 0
+        quiet_hold = (
+            int(data.get("last_closed_turn", 0) or 0) > 0
+            and _in_quiet_period(state, data, turn)
+        )
+        if deferred_hold or quiet_hold:
+            return {"content": _render_scene_hold(data)}
+        return {"content": ""}
+
     bg_in_flight = (
         (_current_bg_task is not None and not _current_bg_task.done())
         or (_pending_bg_job is not None)
@@ -1701,7 +1768,9 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
         inject_mode = raw_mode if raw_mode in INJECT_MODES else "active"
 
     if inject_mode == "withhold":
-        return {"content": ""}
+        if jev_mode not in INJECT_MODES and assessment_missing:
+            return {"content": ""}
+        return {"content": _render_scene_hold(data)}
 
     if inject_mode == "hook_only":
         thread_line = f"Thread: \"{thread.get('title', '')}\". {thread.get('hook', '')}"
@@ -1882,14 +1951,10 @@ Judge and update:
 {_directive("turn_assessment", state.get("module_instructions"))}
 
 Respond with ONLY valid JSON:
-{{"thread_engaged": false, "player_interest": "proactive|reactive|indifferent|resistant", "scene_mode": "withhold|hook_only|active", "thread_resolved": false, "resolution_note": "one sentence, only if resolved", "player_pivot": false, "pivot_intent": "", "opportunity": false, "nudge": "...", "momentum": "steady", "gm_notes": "...", "next_hook": "", "next_challenge": "", "profile": {{"playstyle": {{{", ".join(f'"{k}": 0' for k in PLAYSTYLE_KEYS)}}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high", "role": "actor|target|mutual|world", "evidence": "..."}}], "avoids": [{{"text": "...", "weight": "low|medium|high", "role": "actor|target|mutual|world", "evidence": "..."}}]}}}}"""
+{{"thread_engaged": false, "player_interest": "proactive|reactive|indifferent|resistant", "scene_mode": "withhold|hook_only|active", "pacing_note": "", "thread_resolved": false, "resolution_note": "one sentence, only if resolved", "player_pivot": false, "pivot_intent": "", "opportunity": false, "nudge": "...", "momentum": "steady", "gm_notes": "...", "next_hook": "", "next_challenge": "", "profile": {{"playstyle": {{{", ".join(f'"{k}": 0' for k in PLAYSTYLE_KEYS)}}}, "tone": "...", "themes": [], "likes": [{{"text": "...", "weight": "low|medium|high", "role": "actor|target|mutual|world", "evidence": "..."}}], "avoids": [{{"text": "...", "weight": "low|medium|high", "role": "actor|target|mutual|world", "evidence": "..."}}]}}}}"""
 
     model_pref = config.get("assessment_ai_model", "balanced")
-    try:
-        sdk.llm._current_module = MODULE_ID
-        raw = await sdk.llm.generate(prompt, model_preference=model_pref)
-    finally:
-        sdk.llm._current_module = ""
+    raw = await _llm_generate(sdk, prompt, model_preference=model_pref)
 
     parsed = _parse_json_block(raw)
     if not isinstance(parsed, dict):
@@ -1910,6 +1975,7 @@ Respond with ONLY valid JSON:
         momentum = "steady" if engaged else "stalled"
     raw_scene_mode = str(parsed.get("scene_mode") or "").strip().lower()
     scene_mode = raw_scene_mode if raw_scene_mode in INJECT_MODES else "active"
+    pacing_note = str(parsed.get("pacing_note") or "").strip()
     gm_notes = str(parsed.get("gm_notes") or "").strip()
     if gm_notes:
         updates["gm_notes"] = gm_notes
@@ -1919,6 +1985,7 @@ Respond with ONLY valid JSON:
     updates["ignored_streak"] = ignored_streak
     updates["momentum"] = momentum
     updates["scene_mode"] = scene_mode
+    updates["pacing_note"] = pacing_note if scene_mode == "withhold" else ""
     updates["last_assessment"] = {
         "turn": turn,
         "scene_mode": scene_mode,
@@ -2325,6 +2392,7 @@ def _command_suspend(state: dict, data: dict) -> dict:
             "suspended": True,
             "suspended_turn": state.get("turn", 0),
             "pending_nudge": "",
+            "pacing_note": "",
         }},
     }
 

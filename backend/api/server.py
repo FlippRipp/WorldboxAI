@@ -1859,6 +1859,7 @@ async def undo_save(save_id: str, request: UndoTurnRequest):
         raise HTTPException(status_code=409, detail="Undo is only supported for the active save.")
     try:
         state = session_manager.undo_turn(request.target_turn)
+        engine.set_memory_path(session_manager.get_memory_path())
         memory_rolled_back = engine.rollback_memory(request.target_turn)
         return {
             "session": session_manager.get_status(),
@@ -1885,6 +1886,7 @@ async def select_swipe(request: SwipeRequest):
         # own turn-level memory, if any, is not separately restored — see plan).
         meta = session_manager.swipes_meta()
         if meta and meta.get("turn"):
+            engine.set_memory_path(session_manager.get_memory_path())
             engine.rollback_memory(meta["turn"] - 1)
         return {"session": session_manager.get_status(), "state": state}
     except FileNotFoundError as exc:
@@ -1914,6 +1916,7 @@ async def delete_message(index: int):
         raise HTTPException(status_code=409, detail="Wait for the current operation to finish.")
     try:
         state = session_manager.delete_message(index)
+        engine.set_memory_path(session_manager.get_memory_path())
         engine.rollback_memory(session_manager.state.get("turn", 0))
         return {"session": session_manager.get_status(), "state": state}
     except FileNotFoundError as exc:
@@ -2205,6 +2208,7 @@ class LorebookUpdateRequest(BaseModel):
 # Entry-PUT fields where an explicit null is a meaningful "clear this" value
 # rather than "leave untouched" (requests use exclude_unset to tell them apart).
 _NULLABLE_ENTRY_FIELDS = {"sticky_turns", "injection_depth"}
+_EMBEDDED_ENTRY_FIELDS = {"title", "keys", "secondary_keys", "content"}
 
 
 class LorebookLinksRequest(BaseModel):
@@ -2724,11 +2728,15 @@ async def websocket_endpoint(websocket: WebSocket):
         state["swipes"] = session_manager.swipes_meta()
         await chat_hub.send({"type": "done", "state": state})
 
-    def restore_after_aborted_regenerate():
+    def restore_after_aborted_regenerate(regen_turn: Optional[int] = None):
         # `prepare_regenerate` rolls the workspace back to before the last turn,
         # so a stop or failure mid-generation must put the previously active
         # swipe variant back — otherwise the last user+ai pair silently
-        # disappears from the transcript.
+        # disappears from the transcript. Also prune any memories written by the
+        # aborted pass before the cancel/error landed.
+        if regen_turn is not None:
+            engine.set_memory_path(session_manager.get_memory_path())
+            engine.rollback_memory(regen_turn - 1)
         try:
             session_manager.restore_active_swipe()
         except Exception as exc:
@@ -2750,8 +2758,10 @@ async def websocket_endpoint(websocket: WebSocket):
         # story), which would blank input_text before the save.
         regen_input = session_manager.state.get("input_text", "")
         try:
-            engine.rollback_memory(regen_turn - 1)
             engine.set_memory_path(session_manager.get_memory_path())
+            engine.rollback_memory(regen_turn - 1)
+            if engine.memory_db_path:
+                await engine.ensure_memory()
             _init_world_index_for_save(session_manager.active_save_id)
             await engine.dispatch_turn_start(session_manager.state)
             final_state = await engine.app.ainvoke(session_manager.state)
@@ -2761,10 +2771,10 @@ async def websocket_endpoint(websocket: WebSocket):
             await engine.dispatch_turn_stopped(active_state, "completed")
             await chat_hub.send({"type": "done", "state": active_state})
         except asyncio.CancelledError:
-            restore_after_aborted_regenerate()
+            restore_after_aborted_regenerate(regen_turn)
             raise
         except LLMProviderError as exc:
-            restore_after_aborted_regenerate()
+            restore_after_aborted_regenerate(regen_turn)
             await chat_hub.send_or_queue({
                 "type": "error", "code": "llm_provider_unavailable",
                 "message": "The AI provider is temporarily unavailable. Please try again in a moment.",
@@ -2772,7 +2782,7 @@ async def websocket_endpoint(websocket: WebSocket):
             })
         except Exception as exc:
             print(f"Unexpected error during regenerate: {exc}")
-            restore_after_aborted_regenerate()
+            restore_after_aborted_regenerate(regen_turn)
             await chat_hub.send_or_queue({
                 "type": "error", "code": "regenerate_failed",
                 "message": "Regeneration failed.", "detail": str(exc),
@@ -2799,6 +2809,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Show the generated action in the client as the user message
                 # (replacing any locally echoed guidance text).
                 await chat_hub.send({"type": "player_action", "content": generated})
+        pre_turn = session_manager.state.get("turn", 0)
         session_manager.set_input(text)
         engine.set_memory_path(session_manager.get_memory_path())
         # ensure_memory first: after a server restart engine.memory is None and
@@ -2821,8 +2832,12 @@ async def websocket_endpoint(websocket: WebSocket):
             # client is gone this is a no-op: the turn is already saved, so a
             # later sync replays it from authoritative state.
             await chat_hub.send({"type": "done", "state": active_state})
+        except asyncio.CancelledError:
+            engine.rollback_memory(pre_turn)
+            raise
         except LLMProviderError as exc:
             print(f"LLM provider error during WebSocket turn: {exc}")
+            engine.rollback_memory(pre_turn)
             session_manager.set_input("")
             await chat_hub.send_or_queue({
                 "type": "error",
@@ -2833,6 +2848,7 @@ async def websocket_endpoint(websocket: WebSocket):
             })
         except Exception as exc:
             print(f"Unexpected error during WebSocket turn: {exc}")
+            engine.rollback_memory(pre_turn)
             session_manager.set_input("")
             await chat_hub.send_or_queue({
                 "type": "error",

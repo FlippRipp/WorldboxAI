@@ -458,6 +458,24 @@ class SaveManager:
                     meta.pop(key, None)
         return meta
 
+    @staticmethod
+    def _prune_orphaned_npc_memories_in_workspace(save_path: Path) -> int:
+        npc_state_file = save_path / "Module_States" / "wb_npc_system.json"
+        if not npc_state_file.exists():
+            return 0
+        try:
+            with open(npc_state_file, "r", encoding="utf-8") as f:
+                npc_data = json.load(f)
+        except Exception:
+            return 0
+        if not isinstance(npc_data, dict) or not isinstance(npc_data.get("characters"), dict):
+            return 0
+        from backend.engine.memory import MemoryManager
+        return MemoryManager.prune_orphaned_npc_memories_at_path(
+            str(save_path / "vector_index"),
+            set(npc_data["characters"].keys()),
+        )
+
     def undo_turn(self, save_id: str, target_turn: int) -> dict:
         """Restores state from a snapshot and removes newer snapshots."""
         save_path = self.saves_dir / save_id
@@ -482,6 +500,10 @@ class SaveManager:
         meta["turn"] = target_turn
         with open(save_path / "Core" / "metadata.json", "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
+
+        from backend.engine.memory import MemoryManager
+        MemoryManager.rollback_at_path(str(save_path / "vector_index"), target_turn)
+        self._prune_orphaned_npc_memories_in_workspace(save_path)
 
         self._pack_save(save_id)
         self.clear_swipes(save_id)
@@ -582,7 +604,13 @@ class SaveManager:
         variant = self._swipes_dir(save_id) / f"v{index}.zip"
         if not variant.exists():
             raise FileNotFoundError(f"Swipe variant {index} not found.")
+        if manifest.get("turn"):
+            from backend.engine.memory import MemoryManager
+            MemoryManager.rollback_at_path(
+                str(self.saves_dir / save_id / "vector_index"), manifest["turn"] - 1
+            )
         self._restore_full_workspace(save_id, variant)
+        self._prune_orphaned_npc_memories_in_workspace(self.saves_dir / save_id)
         manifest["active"] = index
         self._write_swipe_manifest(save_id, manifest)
         return manifest

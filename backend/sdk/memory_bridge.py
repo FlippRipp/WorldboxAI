@@ -30,7 +30,11 @@ class MemoryBridge:
         """Delete an NPC's stored memories -- all of them, or only those carrying
         every tag in ``tags`` (e.g. tags=["profile"] removes just the embedded
         profile). Returns the number of memories deleted."""
-        if self._engine is None or self._engine.memory is None:
+        if self._engine is None:
+            return 0
+        if self._engine.memory is None and getattr(self._engine, "memory_db_path", None):
+            await self._engine._ensure_memory()
+        if self._engine.memory is None:
             return 0
         try:
             wanted = set(tags or [])

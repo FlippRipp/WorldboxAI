@@ -823,8 +823,18 @@ async def on_mutation_schema(state: dict, sdk) -> dict | None:
     if not _config(state).get("capture_story_characters", True):
         return schema
 
-    known = sorted(n for n in _known_names(bank, state) if n)
-    known_list = ", ".join(known) if known else "(none yet)"
+    known_parts = []
+    for n in sorted(bank.values(), key=lambda c: str(c.get("name", "")).lower()):
+        raw_name = str(n.get("name", "")).strip()
+        if not raw_name:
+            continue
+        cues = [str(n.get(k, "")).strip() for k in ("race", "gender", "archetype") if str(n.get(k, "")).strip()]
+        cue_str = f" ({'/'.join(cues)})" if cues else ""
+        known_parts.append(f"{raw_name.lower()}{cue_str}")
+    player = _player_name(state)
+    if player and player.lower() not in {str(n.get("name", "")).strip().lower() for n in bank.values()}:
+        known_parts.append(player.lower())
+    known_list = ", ".join(known_parts) if known_parts else "(none yet)"
     schema["story_characters"] = (
         "array of objects: {name: string, descriptor: string (who they are / what "
         "they did this scene), evidence: string (brief quote or action from the scene)} "
@@ -835,7 +845,10 @@ async def on_mutation_schema(state: dict, sdk) -> dict | None:
         "that as the name. "
         f"Already-known characters (exclude these, case-insensitive): {known_list} -- "
         "some of these are epithets for characters not yet named by the story; match "
-        "them by identity, not exact wording. "
+        "them by identity, not exact wording. Never report an already-known character "
+        "who physically transformed, shapeshifted, changed outfit or form, had their "
+        "mind or persona altered, or is referred to by a pet name or new descriptive "
+        "epithet in this scene -- they are still the same character, not a new one. "
         "Omit incidental extras with no story weight (a passing guard, the crowd), "
         "the player, and anyone already known."
     )
@@ -970,7 +983,7 @@ async def _capture_story_characters(mutation: dict, state: dict, bank: dict, sdk
     if not pending:
         return added
 
-    scene = "\n".join(str(h) for h in state.get("history", [])[-3:])[-2500:]
+    scene = "\n\n".join(str(h) for h in state.get("history", [])[-3:])
     listing = "\n".join(
         f"- {p['name']}: {p['descriptor']}" + (f" (in the scene: {p['evidence']})" if p["evidence"] else "")
         for p in pending
@@ -979,21 +992,34 @@ async def _capture_story_characters(mutation: dict, state: dict, bank: dict, sdk
     roster_section = ""
     dedup_rule = ""
     if bank:
-        roster = "\n".join(
-            f"- {npc['id']} | {npc.get('name', '?')} ({npc.get('archetype', '')}): {npc.get('pitch', '')}"
-            for npc in bank.values()
-        )
+        roster_lines = []
+        for npc in bank.values():
+            ident = " / ".join(
+                str(npc.get(k, "")).strip()
+                for k in ("race", "gender", "archetype")
+                if str(npc.get(k, "")).strip()
+            )
+            head = f"- {npc['id']} | {npc.get('name', '?')}" + (f" ({ident})" if ident else "")
+            details = [f"Pitch: {npc.get('pitch', '')}"] if str(npc.get("pitch", "")).strip() else []
+            if str(npc.get("appearance", "")).strip():
+                details.append(f"Appearance: {npc['appearance']}")
+            if str(npc.get("notes", "")).strip():
+                details.append(f"Notes: {npc['notes']}")
+            roster_lines.append(head + (": " + " | ".join(details) if details else ""))
+        roster = "\n".join(roster_lines)
         roster_section = f"""
 
 CHARACTERS ALREADY ON RECORD (for identity checks -- these are already tracked):
 {roster}"""
         dedup_rule = ("\n\nIMPORTANT -- no duplicates: compare each character to profile against the "
                       "characters already on record. If one of them is actually an existing character "
-                      "appearing under a different name, spelling, title, or epithet (or the story "
-                      "finally revealed the real name of a character recorded under an epithet), do "
-                      'NOT build a profile for them. Instead return {"existing_npc_id": "<their '
-                      'npc_id from the record list>", "name": "<the name the story now uses>"} for '
-                      "that character. Only profile genuinely new characters.")
+                      "appearing under a different name, spelling, title, pet name, or epithet -- "
+                      "including an existing character who physically transformed, shapeshifted, "
+                      "changed form/species/outfit, disguised themselves, or had their mind or "
+                      "persona altered/rewritten in the scene (or whose real name was finally "
+                      "revealed) -- do NOT build a new profile for them. Instead return "
+                      '{"existing_npc_id": "<their npc_id from the record list>", "name": "<the name '
+                      'the story now uses>"} for that character. Only profile genuinely new, separate individuals.')
 
     prompt = f"""You are a character designer for a text RPG. The story just introduced the following characters on its own. Build a full character record for EACH one, staying faithful to how they appear in the scene — do not contradict it, and infer sensible details where the scene is silent.
 

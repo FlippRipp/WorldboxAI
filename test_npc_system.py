@@ -1136,3 +1136,56 @@ def test_introduction_pass_shows_creation_need():
 
     prompt = next(p for p in calls["prompts"] if "narrative director" in p)
     assert "Created for: The enforcer question needs an informant." in prompt
+
+
+def test_transformation_dedup_and_untruncated_capture_context():
+    """Known characters who physically transform or have their mind rewritten
+    are flagged against duplication in both reader schema and profiler context,
+    and history[-3:] is not truncated at 2500 characters."""
+    backend = _load_backend()
+    bank = {
+        "npc_goddess": {
+            "id": "npc_goddess",
+            "name": "The Star-Eyed Goddess",
+            "race": "Deity",
+            "gender": "female",
+            "appearance": "Luminous white hair with fluffy white cat ears and a white tail where her golden wings vanished.",
+            "archetype": "Jaded Bureaucrat",
+            "pitch": "Ancient reincarnation deity.",
+            "personality": ["ditzy", "submissive", "lustful"],
+            "role": "ally",
+            "encounter_type": "location_bound",
+            "introduced": True,
+            "status": "active",
+            "notes": "Mind rewritten to act as a devoted cat-girl calling the player Master.",
+        }
+    }
+    state = _state(bank)
+    early_marker = "EARLY_TRANSFORMATION_MARKER: Her golden wings dissolved into white cat ears."
+    state["history"] = [
+        early_marker + (" " + "detail" * 600),
+        "Scene two continuation.",
+        "Scene three continuation.",
+    ]
+
+    sdk, calls = _make_sdk(json.dumps({
+        "npcs": [{"existing_npc_id": "npc_goddess", "name": "The White Catgirl"}]
+    }))
+    schema = asyncio.run(backend.on_mutation_schema(state, sdk))
+    assert "the star-eyed goddess" in schema["story_characters"]
+    assert "transformed" in schema["story_characters"]
+    assert "shapeshifted" in schema["story_characters"]
+
+    asyncio.run(backend._capture_story_characters(
+        {"story_characters": [{"name": "The White Catgirl", "descriptor": "Cat-eared girl clinging to player", "evidence": "nya"}]},
+        state,
+        bank,
+        sdk,
+    ))
+    assert len(bank) == 1
+    capture_prompt = calls["prompts"][-1]
+    assert early_marker in capture_prompt
+    assert "Appearance: Luminous white hair with fluffy white cat ears" in capture_prompt
+    assert "Notes: Mind rewritten to act as a devoted cat-girl" in capture_prompt
+    assert "physically transformed, shapeshifted" in capture_prompt
+
