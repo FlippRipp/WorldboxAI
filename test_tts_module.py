@@ -152,11 +152,12 @@ def test_standalone_tts_server_health_auth_emotions_and_pcm_stream():
     assert len(stream_res.content) == 3 * 240 * 2
     assert fake_model.closed_generators == 1
 
-    # Emotion-routed stream selects emotion ref_audio, instruct, nsm, and horny breath cue
+    # Emotion-routed stream selects emotion ref_audio, instruct, and nsm without mutating sentence text
+    horny_text = "Close the door behind you, and come sit right here next to me."
     horny_res = client.post(
         "/v1/tts/stream",
         json={
-            "text": "Close the door behind you, and come sit right here next to me.",
+            "text": horny_text,
             "voice": "default",
             "emotion": "horny",
         },
@@ -166,7 +167,8 @@ def test_standalone_tts_server_health_auth_emotions_and_pcm_stream():
     assert horny_res.headers["X-TTS-Emotion"] == "horny"
     last_call = fake_model.calls[-1]
     assert last_call["ref_audio"].endswith("horny.wav")
-    assert "... haah..." in last_call["text"]
+    assert last_call["text"] == horny_text
+    assert "haah" not in last_call["text"]
     assert last_call["non_streaming_mode"] is False
     assert "breathless" in (last_call["instruct"] or "").lower()
 

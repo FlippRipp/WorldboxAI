@@ -184,12 +184,11 @@
     "txt": "horny.txt",
     "label": "Horny",
     "description": "Erotic arousal, breathless desire, sensual intimacy, seduction, or heavy lustful sighs.",
-    "ref_text": "Come a little closer... haah... don't stop now... haah... I can barely catch my breath when you touch me like that.",
-    "instruct": "Speak in a breathless, sultry, gasping close-mic voice, pausing for audible open-mouth breathy sighs and heavy catches of breath between phrases, warm and trembling with desire.",
-    "temperature": 0.88,
+    "ref_text": "Come a little closer... right here... don't pull away tonight... I can barely catch my breath... when your hands are on my skin...",
+    "instruct": "Whisper very slowly right against the ear in an extremely breathless, trembling, aroused ASMR half-whisper, almost pure warm air and soft shaky exhales on every single word.",
+    "temperature": 0.86,
     "non_streaming_mode": false,
-    "target_rms": 0.052,
-    "gain": 0.8069,
-    "clause_breath_cue": "... haah... "
+    "target_rms": 0.05,
+    "gain": 0.7983
   }
 }
