@@ -621,16 +621,17 @@ TOOLS_SPEC: list[dict[str, Any]] = [
     },
     {
         "name": "worldbox_get_llm_calls",
-        "description": "Inspect recent LLM calls (model, module/caller, token usage, latency, response, errors, and full prompts when `call_id` or `include_messages=true` is passed).",
+        "description": "Inspect recent LLM calls (model, module_source/call_type/step, token usage, latency, response, errors, and full untruncated prompts when `call_id` or `include_messages=true` is passed).",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "limit": {"type": "integer", "description": "Max calls to return (default 20)."},
-                "source": {"type": "string", "enum": ["inspector", "persistent"], "description": "'inspector' (in-memory ring buffer) or 'persistent' (on-disk llm_calls.jsonl)."},
+                "limit": {"type": "integer", "description": "Max calls to return, newest-first (default 20)."},
+                "source": {"type": "string", "enum": ["inspector", "persistent"], "description": "'inspector' (in-memory ring buffer) or 'persistent' (on-disk llm_calls.jsonl across restarts)."},
+                "since_id": {"type": "string", "description": "For 'inspector' source: return calls strictly newer than this call ID."},
                 "call_id": {"type": "string", "description": "Specific LLM call ID to fetch with full untruncated input messages."},
-                "module": {"type": "string", "description": "Filter by module ID or caller (e.g. 'wb_plot_director', 'storyteller', 'reader')."},
+                "module": {"type": "string", "description": "Filter by module_source, call_type, or step (e.g. 'wb_plot_director', 'storyteller', 'reader')."},
                 "errors_only": {"type": "boolean", "description": "Only return failed LLM calls."},
-                "include_messages": {"type": "boolean", "description": "Include full prompt message arrays in list results."},
+                "include_messages": {"type": "boolean", "description": "Include full untruncated `full_input` prompts in list results."},
             },
         },
     },
@@ -666,10 +667,11 @@ TOOLS_SPEC: list[dict[str, Any]] = [
     },
     {
         "name": "worldbox_get_memories",
-        "description": "Read story vector memories and world entries from the active session.",
+        "description": "Read story vector memories and world lore entries from the active session.",
         "inputSchema": {
             "type": "object",
             "properties": {
+                "limit": {"type": "integer", "description": "Max memories to return (default 500)."},
                 "include_world_entries": {"type": "boolean", "description": "Include world lore vector entries (default true)."},
             },
         },

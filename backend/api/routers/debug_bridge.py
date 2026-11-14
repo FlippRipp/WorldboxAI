@@ -320,55 +320,113 @@ def create_debug_bridge_router(
             "client_ui": telemetry["ui_state"],
         }
 
+    def _matches_llm_call(
+        rec: dict[str, Any],
+        call_id: Optional[str],
+        module_filter: str,
+        errors_only: bool,
+    ) -> bool:
+        if call_id and rec.get("id") != call_id:
+            return False
+        if module_filter:
+            target = module_filter.lower()
+            matched = False
+            for field in ("module_source", "call_type", "step", "module", "caller"):
+                val = str(rec.get(field) or "").lower()
+                if val and (val == target or target in val.split(":")):
+                    matched = True
+                    break
+            if not matched:
+                return False
+        if errors_only and not (rec.get("error") or rec.get("status") == "error"):
+            return False
+        return True
+
+    def _tail_persistent_llm_calls(
+        call_id: Optional[str],
+        module_filter: str,
+        errors_only: bool,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Read matching records newest-first from llm_calls.jsonl by scanning
+        64 KiB chunks backwards from EOF instead of loading the whole file."""
+        log_path = getattr(llm_call_log, "log_path", None)
+        lock = getattr(llm_call_log, "_lock", None)
+
+        def _scan() -> list[dict[str, Any]]:
+            if log_path is None or not log_path.exists():
+                return []
+            results: list[dict[str, Any]] = []
+            chunk_size = 65536
+            with open(log_path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                pos = f.tell()
+                carry = b""
+                while pos > 0 and len(results) < limit:
+                    read_len = min(chunk_size, pos)
+                    pos -= read_len
+                    f.seek(pos)
+                    data = f.read(read_len) + carry
+                    lines = data.split(b"\n")
+                    if pos > 0:
+                        carry = lines[0]
+                        lines = lines[1:]
+                    else:
+                        carry = b""
+                    for raw_line in reversed(lines):
+                        raw_line = raw_line.strip()
+                        if not raw_line:
+                            continue
+                        try:
+                            rec = json.loads(raw_line.decode("utf-8", errors="replace"))
+                        except Exception:
+                            continue
+                        if _matches_llm_call(rec, call_id, module_filter, errors_only):
+                            results.append(rec)
+                            if len(results) >= limit:
+                                break
+            return results
+
+        if lock is not None:
+            with lock:
+                return _scan()
+        return _scan()
+
     async def _rpc_get_llm_calls(params: dict[str, Any]) -> dict[str, Any]:
         source = str(params.get("source") or "inspector")
         limit = max(1, min(int(params.get("limit") or 20), 200))
-        call_id = params.get("call_id")
+        call_id = str(params["call_id"]).strip() if params.get("call_id") else None
         module_filter = str(params.get("module") or "").strip()
         errors_only = bool(params.get("errors_only", False))
         include_messages = bool(params.get("include_messages", False))
 
         if source == "persistent":
-            raw_text = llm_call_log.read_all()
-            lines = [ln for ln in raw_text.splitlines() if ln.strip()]
-            parsed = []
-            for ln in reversed(lines):
-                try:
-                    rec = json.loads(ln)
-                except Exception:
-                    continue
-                if call_id and rec.get("id") != call_id:
-                    continue
-                if module_filter and rec.get("module") != module_filter and rec.get("caller") != module_filter:
-                    continue
-                if errors_only and not rec.get("error"):
-                    continue
-                parsed.append(rec)
-                if len(parsed) >= limit:
-                    break
-            calls = list(reversed(parsed))
+            calls = _tail_persistent_llm_calls(
+                call_id=call_id,
+                module_filter=module_filter,
+                errors_only=errors_only,
+                limit=1 if call_id else limit,
+            )
         else:
             since_id = str(params.get("since_id") or "")
-            calls = llm_inspector.get_calls(since_id=since_id, limit=max(limit, 50))
-            if call_id:
-                calls = [c for c in calls if c.get("id") == call_id]
-            if module_filter:
-                calls = [c for c in calls if c.get("module") == module_filter or c.get("caller") == module_filter]
-            if errors_only:
-                calls = [c for c in calls if c.get("error")]
-            calls = calls[-limit:]
+            ring_capacity = max(limit, len(getattr(llm_inspector, "_calls", ())) or 200)
+            raw_calls = llm_inspector.get_calls(since_id=since_id, limit=ring_capacity)
+            calls = [
+                c for c in raw_calls
+                if _matches_llm_call(c, call_id, module_filter, errors_only)
+            ][: (1 if call_id else limit)]
 
         if not include_messages and not call_id:
-            # Summarize large message arrays in list mode while keeping full output/error
-            # so a specific call_id (or include_messages=True) can inspect full prompts.
+            # Omit full_input in list mode (input_summary + full_output/error stay
+            # intact) so listing 20 calls stays compact; passing call_id or
+            # include_messages=True returns the complete untruncated full_input.
             compact = []
             for c in calls:
                 item = dict(c)
-                msgs = item.get("messages")
-                if isinstance(msgs, list):
-                    item["message_count"] = len(msgs)
-                    item["messages_omitted"] = True
-                    item.pop("messages", None)
+                if "full_input" in item and item["full_input"] is not None:
+                    full_in = item.pop("full_input")
+                    item["message_count"] = len(full_in) if isinstance(full_in, list) else 1
+                    item["full_input_omitted"] = True
                 compact.append(item)
             calls = compact
 
@@ -478,27 +536,105 @@ def create_debug_bridge_router(
         }
 
     async def _rpc_get_memories(params: dict[str, Any]) -> dict[str, Any]:
+        from backend.engine.memory import MemoryManager
+
         include_world = bool(params.get("include_world_entries", True))
-        if engine.memory is None and engine.memory_db_path:
-            await engine.ensure_memory()
-        if engine.memory is None:
-            return {"initialized": False, "memories": [], "world_entries": []}
-        memories = engine.memory.list_memories()
-        world_entries = engine.memory.list_world_entries() if include_world else []
-        return {
-            "initialized": True,
-            "memories": memories,
-            "world_entries": world_entries,
-        }
+        limit = max(1, min(int(params.get("limit") or 500), 2000))
+        save_id = session_manager.active_save_id
+        mem_path = session_manager.get_memory_path() or engine.memory_db_path
+        world_index_path = (
+            session_manager.data_dir / "saves" / save_id / "world_index"
+            if save_id
+            else None
+        )
+
+        mem = None
+        temp_mem = None
+        try:
+            if engine.memory is not None and (not mem_path or engine.memory_db_path == mem_path):
+                mem = engine.memory
+            elif mem_path and engine.memory is None and engine.memory_db_path == mem_path:
+                try:
+                    await engine.ensure_memory()
+                    mem = engine.memory
+                except Exception:
+                    mem = None
+
+            if mem is not None:
+                if (
+                    include_world
+                    and world_index_path is not None
+                    and world_index_path.exists()
+                    and not mem.has_world_index()
+                ):
+                    mem.init_world_index(str(world_index_path))
+            elif mem_path:
+                has_mem_db = os.path.exists(os.path.join(mem_path, "memories.db"))
+                has_world_db = bool(world_index_path and (world_index_path / "world.db").exists())
+                if has_mem_db or has_world_db:
+                    temp_mem = MemoryManager(mem_path, embedding_dim=1)
+                    if include_world and world_index_path is not None and world_index_path.exists():
+                        temp_mem.init_world_index(str(world_index_path))
+                    mem = temp_mem
+
+            state = session_manager.state or {}
+            if mem is None:
+                return {
+                    "initialized": False,
+                    "memories": [],
+                    "count": 0,
+                    "active_memory_ids": state.get("last_retrieved_memory_ids", []),
+                    "world_entries": [],
+                    "world_entry_count": 0,
+                    "active_world_ids": state.get("last_retrieved_world_ids", []),
+                    "sticky_source_ids": state.get("sticky_world_entries", {}) or {},
+                    "context_query": state.get("last_context_query", ""),
+                }
+
+            memories = mem.list_all_memories(limit=limit)
+            world_entries = (
+                mem.list_world_entries()
+                if (include_world and mem.has_world_index())
+                else []
+            )
+            return {
+                "initialized": True,
+                "memories": memories,
+                "count": mem.get_memory_count(),
+                "active_memory_ids": state.get("last_retrieved_memory_ids", []),
+                "world_entries": world_entries,
+                "world_entry_count": len(world_entries),
+                "active_world_ids": state.get("last_retrieved_world_ids", []),
+                "sticky_source_ids": state.get("sticky_world_entries", {}) or {},
+                "context_query": state.get("last_context_query", ""),
+            }
+        finally:
+            if temp_mem is not None:
+                temp_mem.close()
 
     async def _rpc_get_settings_and_prompts(params: dict[str, Any]) -> dict[str, Any]:
         save_id = session_manager.active_save_id
-        lorebooks = session_manager.get_story_lorebooks(save_id) if save_id else None
+        lorebooks = None
+        story_style = None
+        if save_id:
+            meta = session_manager.save_manager.read_core_json(save_id, "metadata.json", None)
+            if isinstance(meta, dict):
+                lorebooks = {
+                    "lorebook_ids": meta.get("lorebook_ids", []),
+                    "story_entries": meta.get("story_lorebook_entries", []) or [],
+                }
+            try:
+                story_style = session_manager.get_story_style(save_id)
+            except Exception:
+                story_style = (session_manager.state or {}).get("story_style") or {}
+        state = session_manager.state or {}
         return {
             "story_settings": session_manager.get_settings_descriptors(scope="story"),
             "global_settings": session_manager.get_settings_descriptors(scope="global"),
-            "prompt_pipeline": session_manager.state.get("prompt_pipeline", []),
-            "last_prompt_trace": session_manager.state.get("last_prompt_trace", []),
+            "prompt_pipeline": state.get("prompt_pipeline", []),
+            "continue_prompt": state.get("continue_prompt", ""),
+            "story_style": story_style,
+            "last_prompt_trace": state.get("last_prompt_trace", []),
             "story_lorebooks": lorebooks,
             "all_lorebooks": lorebook_store.list_lorebooks() if params.get("include_all_lorebooks") else None,
         }

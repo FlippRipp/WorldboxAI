@@ -31,7 +31,12 @@ from backend.engine.debug_bridge import (
     x25519_scalar_mult,
     x25519_shared_secret,
 )
+from backend.engine.llm_call_log import LLMCallLog
+from backend.engine.llm_inspector import LLMInspector
+from backend.engine.lorebook import LorebookStore
+from backend.engine.memory import MemoryManager, _serialize
 from backend.engine.session import GameSessionManager
+from backend.engine.settings_registry import SettingsRegistry
 import backend.api.server as wb_server
 from tools.mobile_bridge_mcp import (
     BRIDGE_HEADERS,
@@ -114,15 +119,30 @@ def test_secret_scrubber_strips_keys_but_preserves_llm_token_counts():
 # 2. Isolated Harness for Subnet Firewall + Handshake Security
 # ---------------------------------------------------------------------------
 
-def _build_isolated_app(tmp_path: Path, allowed_subnets: list[str] | None = None):
+def _build_isolated_app(
+    tmp_path: Path,
+    allowed_subnets: list[str] | None = None,
+    return_deps: bool = False,
+):
     verifier = SubnetVerifier(override_subnets=allowed_subnets or ["192.168.1.0/24"])
     bridge = DebugBridgeManager(
         storage_dir=tmp_path / "server_bridge",
         server_name="Pixel-Termux",
         subnet_verifier=verifier,
     )
-    isolated_sm = GameSessionManager(str(tmp_path / "wb_data"), settings=wb_server.backend_settings)
+    isolated_settings = SettingsRegistry()
+    isolated_settings.bind_global(str(tmp_path / "wb_data" / "global_engine_settings.json"))
+    isolated_settings.register("memory.rag_limit", "slider", 3, label="RAG Limit", category="Memory", min=1, max=10)
+    isolated_settings.register("cheats.enabled", "toggle", False, label="Cheats", category="Cheats", is_global=True)
+
+    isolated_sm = GameSessionManager(str(tmp_path / "wb_data"), settings=isolated_settings)
     isolated_sm.create_save("save1")
+
+    isolated_inspector = LLMInspector()
+    isolated_call_log = LLMCallLog(str(tmp_path / "wb_data" / "logs"))
+    isolated_inspector.set_call_logger(isolated_call_log)
+    isolated_lorebooks = LorebookStore(str(tmp_path / "wb_data"))
+
     app = FastAPI()
 
     @app.get("/api/health")
@@ -140,15 +160,17 @@ def _build_isolated_app(tmp_path: Path, allowed_subnets: list[str] | None = None
         session_manager=isolated_sm,
         provider_manager=wb_server.provider_manager,
         log_store=wb_server.log_store,
-        llm_inspector=wb_server.llm_inspector,
-        llm_call_log=wb_server.llm_call_log,
-        lorebook_store=wb_server.lorebook_store,
+        llm_inspector=isolated_inspector,
+        llm_call_log=isolated_call_log,
+        lorebook_store=isolated_lorebooks,
         chat_hub=wb_server.chat_hub,
         enforce_settings_locks=wb_server._enforce_settings_locks,
         character_update_fields=wb_server.CHARACTER_UPDATE_FIELDS,
     )
     app.include_router(router)
     app.add_middleware(LocalOnlyExceptBridgeMiddleware, bridge=bridge)
+    if return_deps:
+        return app, bridge, isolated_sm, isolated_inspector, isolated_call_log, isolated_lorebooks
     return app, bridge, isolated_sm
 
 
@@ -420,3 +442,241 @@ def test_stealth_udp_discovery_and_mcp_stdio_protocol(tmp_path: Path):
     parsed, was_framed = _read_mcp_stream(buf)
     assert was_framed is True
     assert parsed["id"] == 1
+
+
+def test_all_rpc_methods_memories_settings_llm_calls_and_story_writes(tmp_path: Path, monkeypatch):
+    import asyncio
+
+    app, bridge, sm, inspector, _call_log, lorebooks = _build_isolated_app(
+        tmp_path,
+        allowed_subnets=["192.168.1.0/24"],
+        return_deps=True,
+    )
+    monkeypatch.setattr(
+        "tools.mobile_bridge_mcp.discover_local_private_subnets",
+        lambda: bridge.subnet_verifier.get_subnets(),
+    )
+
+    local_ui = TestClient(app, client=("127.0.0.1", 54000))
+    lan_http = TestClient(app, client=("192.168.1.77", 54001))
+    client = WorldBoxBridgeClient(state_dir=tmp_path / "pc_state")
+
+    code = local_ui.post("/api/debug-bridge/local/pair/start").json()["pairing"]["code"]
+    client.pair(code=code, host="192.168.1.10", http_client=lan_http)
+    client.connect(host="192.168.1.10", wait_seconds=0.0, http_client=lan_http)
+    req_id = local_ui.get("/api/debug-bridge/local/status").json()["pending_session"]["request_id"]
+    local_ui.post(
+        "/api/debug-bridge/local/session/decide",
+        json={"request_id": req_id, "approve": True, "allow_write": True},
+    )
+    conn_res = client.poll_pending(wait_seconds=1.0, http_client=lan_http)
+    assert conn_res["allow_write"] is True
+
+    # 1. get_memories before any DB exists -> initialized=False, no crash
+    mem_empty = client.rpc("get_memories", {}, http_client=lan_http)
+    assert mem_empty["initialized"] is False
+    assert mem_empty["memories"] == []
+    assert mem_empty["world_entries"] == []
+
+    # 2. get_memories with memories.db present, BEFORE world_index exists (regression for
+    #    both `list_all_memories` and `has_world_index()` guard)
+    mem_dir = sm.get_memory_path()
+    mm = MemoryManager(mem_dir, embedding_dim=4)
+    try:
+        mid = mm.add_memory(
+            [0.1, 0.2, 0.3, 0.4],
+            "The Harbour Warden gave Lyra a brass lantern key.",
+            turn=1,
+            importance=8,
+            summary="Lyra received the brass lantern key.",
+            entities=["Lyra", "Harbour Warden"],
+            topics=["key", "lantern"],
+        )
+    finally:
+        mm.close()
+
+    sm.state["last_retrieved_memory_ids"] = [mid]
+    sm.state["last_context_query"] = "unlock the lantern room"
+    mem_only = client.rpc("get_memories", {}, http_client=lan_http)
+    assert mem_only["initialized"] is True
+    assert mem_only["count"] == 1
+    assert mem_only["memories"][0]["id"] == mid
+    assert mem_only["memories"][0]["entities"] == ["Lyra", "Harbour Warden"]
+    assert mem_only["active_memory_ids"] == [mid]
+    assert mem_only["world_entries"] == []
+
+    # 3. Seed world_index as well and verify world_entries + include_world_entries=False
+    world_dir = sm.data_dir / "saves" / "save1" / "world_index"
+    mm2 = MemoryManager(mem_dir, embedding_dim=4)
+    try:
+        mm2.init_world_index(str(world_dir))
+        mm2._world_conn.execute(
+            "INSERT INTO world_entries (id, embedding, text, source_type, source_id, region) VALUES (?, ?, ?, ?, ?, ?)",
+            ("we_1", _serialize([0.2, 0.1, 0.4, 0.3]), "Ironwatch Lighthouse guards the shoals.", "node", "node_lighthouse", "Coast"),
+        )
+        mm2._world_conn.commit()
+    finally:
+        mm2.close()
+
+    mem_with_world = client.rpc("get_memories", {"include_world_entries": True}, http_client=lan_http)
+    assert mem_with_world["world_entry_count"] == 1
+    assert mem_with_world["world_entries"][0]["source_id"] == "node_lighthouse"
+
+    mem_no_world = client.rpc("get_memories", {"include_world_entries": False}, http_client=lan_http)
+    assert mem_no_world["world_entries"] == []
+    assert mem_no_world["count"] == 1
+
+    # 4. get_settings_and_prompts + update_settings_or_prompts (regression for story_lorebooks)
+    imported_lb = lorebooks.import_lorebook(
+        {"entries": {"0": {"key": ["ironwatch"], "content": "Built of meteoric iron."}}},
+        name="Ironwatch Lore",
+    )
+    lb_id = imported_lb["lorebook"]["id"]
+    sm.save_manager.update_metadata(
+        "save1",
+        {
+            "lorebook_ids": [lb_id],
+            "story_lorebook_entries": [{"uid": "se1", "keys": ["warden"], "content": "Never sleeps."}],
+        },
+    )
+    sm.set_story_style("save1", {"themes": "gothic mystery", "pacing": "measured"})
+
+    sp = client.rpc("get_settings_and_prompts", {"include_all_lorebooks": True}, http_client=lan_http)
+    assert sp["story_lorebooks"]["lorebook_ids"] == [lb_id]
+    assert sp["story_lorebooks"]["story_entries"][0]["uid"] == "se1"
+    assert sp["story_style"]["themes"] == "gothic mystery"
+    assert any(b["id"] == lb_id for b in sp["all_lorebooks"])
+
+    upd_sp = client.rpc(
+        "update_settings_or_prompts",
+        {"settings": {"memory.rag_limit": 6}, "scope": "story"},
+        http_client=lan_http,
+    )
+    assert upd_sp["updated"] is True
+    rag_desc = next(d for d in upd_sp["settings"]["Memory"] if d["key"] == "memory.rag_limit")
+    assert rag_desc["value"] == 6
+
+    # 5. get_llm_calls across both `inspector` and `persistent` (regression for
+    #    module_source/call_type/step, newest-first slicing, and full_input compaction)
+    async def _seed_calls():
+        cid1 = await inspector.start_call(
+            call_type="storyteller",
+            model="gemini-pro",
+            step="storyteller",
+            module_source="",
+            input_data=[{"role": "system", "content": "SYS"}, {"role": "user", "content": "Open the door"}],
+        )
+        await inspector.end_call(cid1, output_data="The heavy oak door groans open.", tokens_in=120, tokens_out=30)
+        await asyncio.sleep(0.005)
+
+        cid2 = await inspector.start_call(
+            call_type="module_fast",
+            model="gemini-flash",
+            step="plot_beat",
+            module_source="wb_plot_director",
+            input_data=[{"role": "user", "content": "UNTRUNCATED PLOT PROMPT"}],
+        )
+        await inspector.end_call(cid2, output_data='{"tension": "rising"}', tokens_in=80, tokens_out=12)
+        await asyncio.sleep(0.005)
+
+        cid3 = await inspector.start_call(
+            call_type="reader",
+            model="gemini-flash",
+            step="reader",
+            module_source="",
+            input_data=[{"role": "user", "content": "EXTRACT STATE"}],
+        )
+        await inspector.end_call(cid3, error="Upstream 503 overloaded")
+        return cid1, cid2, cid3
+
+    cid1, cid2, cid3 = asyncio.run(_seed_calls())
+
+    # Newest-first slicing: limit=2 returns [cid3, cid2], NOT [cid2, cid1]
+    latest_two = client.rpc("get_llm_calls", {"source": "inspector", "limit": 2}, http_client=lan_http)
+    assert [c["id"] for c in latest_two["calls"]] == [cid3, cid2]
+    assert "full_input" not in latest_two["calls"][0]
+    assert latest_two["calls"][0]["full_input_omitted"] is True
+    assert latest_two["calls"][0]["message_count"] == 1
+
+    # Filtering by module_source ("wb_plot_director") and call_type ("storyteller")
+    plot_calls = client.rpc("get_llm_calls", {"module": "wb_plot_director"}, http_client=lan_http)
+    assert [c["id"] for c in plot_calls["calls"]] == [cid2]
+
+    st_calls = client.rpc("get_llm_calls", {"module": "storyteller"}, http_client=lan_http)
+    assert [c["id"] for c in st_calls["calls"]] == [cid1]
+
+    # Single call_id returns complete untruncated full_input
+    single_call = client.rpc("get_llm_calls", {"call_id": cid2}, http_client=lan_http)
+    assert single_call["calls"][0]["full_input"] == [{"role": "user", "content": "UNTRUNCATED PLOT PROMPT"}]
+
+    # Clear RAM inspector to simulate app restart -> persistent JSONL still serves full history!
+    inspector.clear()
+    assert client.rpc("get_llm_calls", {"source": "inspector"}, http_client=lan_http)["count"] == 0
+
+    persisted_all = client.rpc("get_llm_calls", {"source": "persistent", "limit": 2}, http_client=lan_http)
+    assert [c["id"] for c in persisted_all["calls"]] == [cid3, cid2]
+
+    persisted_err = client.rpc("get_llm_calls", {"source": "persistent", "errors_only": True}, http_client=lan_http)
+    assert [c["id"] for c in persisted_err["calls"]] == [cid3]
+
+    persisted_plot = client.rpc(
+        "get_llm_calls",
+        {"source": "persistent", "module": "wb_plot_director", "include_messages": True},
+        http_client=lan_http,
+    )
+    assert [c["id"] for c in persisted_plot["calls"]] == [cid2]
+    assert persisted_plot["calls"][0]["full_input"] == [{"role": "user", "content": "UNTRUNCATED PLOT PROMPT"}]
+
+    # 6. get_session_state, update_module_configs, and update_story_state (patch / edit / undo)
+    sm.state["history"] = ["Opening scene."]
+    sm.state["chat_messages"] = [{"role": "ai", "content": "Opening scene."}]
+    sm.save_manager.save_turn("save1", sm.state, 0)
+    sm.save_completed_turn(
+        {"history": ["Opening scene.", "Turn 1 narration."], "turn": 1},
+        user_text="Step into the tower",
+    )
+
+    sess_state = client.rpc(
+        "get_session_state",
+        {"include_saves_list": True, "message_limit": 2},
+        http_client=lan_http,
+    )
+    assert sess_state["is_active_session"] is True
+    assert sess_state["state"]["chat_messages_total"] == 3
+    assert len(sess_state["state"]["chat_messages"]) == 2
+    assert any(s["id"] == "save1" for s in sess_state["saves"])
+
+    cfg_res = client.rpc(
+        "update_module_configs",
+        {"module_configs": {"__active_modules__": ["wb_plot_director"], "wb_plot_director": {"custom_flag": True}}},
+        http_client=lan_http,
+    )
+    assert cfg_res["module_configs"]["wb_plot_director"]["custom_flag"] is True
+
+    patch_res = client.rpc(
+        "update_story_state",
+        {
+            "action": "patch",
+            "characters": {"default_player": {"name": "Lyra"}},
+            "player_location_node_id": "node_lighthouse",
+        },
+        http_client=lan_http,
+    )
+    assert patch_res["characters"]["default_player"]["name"] == "Lyra"
+    assert patch_res["player_location_node_id"] == "node_lighthouse"
+
+    edit_res = client.rpc(
+        "update_story_state",
+        {"action": "edit_message", "index": 2, "content": "Turn 1 narration (edited)."},
+        http_client=lan_http,
+    )
+    assert edit_res["edited_index"] == 2
+    assert sm.state["chat_messages"][2]["content"] == "Turn 1 narration (edited)."
+
+    undo_res = client.rpc(
+        "update_story_state",
+        {"action": "undo_turn", "target_turn": 0},
+        http_client=lan_http,
+    )
+    assert undo_res["undone_to_turn"] == 0
+    assert len(sm.state["chat_messages"]) == 1
