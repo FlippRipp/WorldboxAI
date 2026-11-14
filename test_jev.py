@@ -676,6 +676,56 @@ def test_plot_injection_classifier(tmp_path):
     assert len(requests) == 2
 
 
+def test_plot_injection_realistic_multi_bucket_distributions(tmp_path):
+    thread = {
+        'title': "The Saintly Princess's Golden Leash",
+        'mode': 'intrigue',
+        'hook': 'Seraphina rests breathless against your chest.',
+        'challenge': 'Deciding whether to maintain the facade or act.',
+        'stakes': 'Control in the royal court.',
+    }
+    state = {'turn': 15, 'history': ['A private moment in the tower chamber.'], 'input_text': ''}
+    cases = iter([
+        # Realistic bedroom withhold (conf 0.55 < 0.90, withhold 0.70 >= 0.60) -> accepted
+        ('withhold', 0.55, {'withhold': 0.70, 'hook_only': 0.12, 'active': 0.18}),
+        # Realistic active turn (conf 0.85 < 0.90, active 0.90, non-withhold 0.94 >= 0.85) -> accepted
+        ('active', 0.85, {'withhold': 0.06, 'hook_only': 0.04, 'active': 0.90}),
+        # Realistic hook_only turn (conf 0.65 < 0.90, hook_only 0.78, non-withhold 0.90 >= 0.85) -> accepted
+        ('hook_only', 0.65, {'withhold': 0.10, 'hook_only': 0.78, 'active': 0.12}),
+        # Ambiguous active with too much withhold mass (0.28 > 0.15) -> fallback None
+        ('active', 0.46, {'withhold': 0.28, 'hook_only': 0.08, 'active': 0.64}),
+        # Weak withhold below 0.60 -> fallback None
+        ('withhold', 0.28, {'withhold': 0.52, 'hook_only': 0.18, 'active': 0.30}),
+    ])
+
+    def handler(request, payload):
+        selected, conf, probs = next(cases)
+        criteria = payload['questions']['inject']['criteria']
+        assert 'takes precedence' in criteria['withhold']
+        assert 'NOT in an intimate' in criteria['active']
+        return httpx.Response(200, json={
+            'model': 'typesafe/jev-1.14-20261014',
+            'usage': {'input_tokens': 400, 'output_tokens': 41},
+            'answers': {
+                'inject': {
+                    'type': 'choice',
+                    'choice': selected,
+                    'confidence': conf,
+                    'probabilities': probs,
+                },
+            },
+        })
+
+    _, sdk, _, _, inspector = setup_jev(tmp_path, handler=handler)
+    assert run(jev_tasks.plot_injection(sdk, state, thread)) == 'withhold'
+    assert run(jev_tasks.plot_injection(sdk, state, thread)) == 'active'
+    assert run(jev_tasks.plot_injection(sdk, state, thread)) == 'hook_only'
+    assert run(jev_tasks.plot_injection(sdk, state, thread)) is None
+    assert run(jev_tasks.plot_injection(sdk, state, thread)) is None
+    outcomes = [c['decision_outcome'] for c in reversed(inspector.get_calls())]
+    assert outcomes == ['accepted', 'accepted', 'accepted', 'fallback', 'fallback']
+
+
 def test_plugin_modules_can_decide_when_jev_enabled(tmp_path):
     service, sdk, requests, _, inspector = setup_jev(tmp_path, {'active': 1.0})
     d = run(sdk.llm.decide({'prose': 'A gentle kiss.'}, {'active': noul('Is physical touch active?')},

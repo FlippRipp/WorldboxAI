@@ -2018,7 +2018,9 @@ def test_plot_injection_scene_mode_withhold_hook_only_and_missing_assessment_fal
     assert "hold back active complications or adversaries" in hook_only_content
 
     # 2. Without JEV (or when JEV is uncertain): stale assessment from an earlier
-    # turn (turn=3 < state turn=4) has no clear affirmative -> waits ('withhold').
+    # turn (turn=3 < state turn=4) has no clear affirmative -> waits ('withhold'),
+    # returning empty when the previous mode was active, or keeping the hold cue
+    # when the scene was already in 'withhold' (e.g. a post-turn assessment failed).
     data_stale = _active_data(
         backend,
         created_turn=1,
@@ -2026,6 +2028,17 @@ def test_plot_injection_scene_mode_withhold_hook_only_and_missing_assessment_fal
         last_assessment={"turn": 3, "scene_mode": "active", "thread_engaged": True, "player_interest": "proactive", "momentum": "building"},
     )
     assert asyncio.run(backend.on_render_prompt_block(block, _state(turn=4, data=data_stale), sdk_no_jev))["content"] == ""
+
+    data_stale_hold = _active_data(
+        backend,
+        created_turn=1,
+        scene_mode="withhold",
+        pacing_note="Keep the chamber quiet until they step outside.",
+        last_assessment={"turn": 3, "scene_mode": "withhold", "thread_engaged": True, "player_interest": "proactive", "momentum": "building"},
+    )
+    stale_hold_out = asyncio.run(backend.on_render_prompt_block(block, _state(turn=4, data=data_stale_hold), sdk_no_jev))["content"]
+    assert "[Scene Pacing — HOLD]" in stale_hold_out
+    assert "Keep the chamber quiet until they step outside." in stale_hold_out
 
     # 3. With JEV: fresh assessment is passed to JEV; stale assessment passes None
     # so JEV determines readiness for itself.

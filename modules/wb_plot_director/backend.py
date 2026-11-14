@@ -1768,7 +1768,8 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
         inject_mode = raw_mode if raw_mode in INJECT_MODES else "active"
 
     if inject_mode == "withhold":
-        if jev_mode not in INJECT_MODES and assessment_missing:
+        prior_hold = str(data.get("scene_mode") or "").strip().lower() == "withhold"
+        if jev_mode not in INJECT_MODES and assessment_missing and not prior_hold:
             return {"content": ""}
         return {"content": _render_scene_hold(data)}
 

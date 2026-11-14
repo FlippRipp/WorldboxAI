@@ -37,6 +37,23 @@ def _facts(value, path="context"):
 
 DIFFICULTIES = ("trivial", "easy", "moderate", "hard", "extreme", "impossible")
 POSITIVE_XP_REASONS = ("success", "failure", "ingenuity", "extraordinary")
+PLOT_INJECT_MODES = ("withhold", "hook_only", "active")
+
+
+def _pick_plot_injection(d):
+    selected, probs, conf = d.choice_distribution("inject")
+    if selected not in PLOT_INJECT_MODES:
+        raise Uncertain(d.reason or "uncertain choice: inject")
+    if conf >= 0.90:
+        return selected
+    if selected == "withhold":
+        if probs.get("withhold", 0.0) < 0.60:
+            raise Uncertain(d.reason or "uncertain choice: inject")
+        return "withhold"
+    non_withhold = probs.get("hook_only", 0.0) + probs.get("active", 0.0)
+    if non_withhold < 0.85 or probs.get(selected, 0.0) < 0.55:
+        raise Uncertain(d.reason or "uncertain choice: inject")
+    return selected
 
 
 def _pick_feasibility(d, fail_max):
@@ -285,18 +302,22 @@ async def plot_injection(sdk, state, thread, last_assessment=None):
     turn; otherwise determines readiness directly from recent_story and player_action."""
     options = {
         "withhold": (
-            "Withhold the plot thread this turn: the player is in or initiating an "
-            "intimate, emotional, heart-to-heart, or private conversation/moment "
-            "(or a focused scene) where injecting plot material would interrupt or intrude."
+            "Withhold external plot advancement this turn (takes precedence over "
+            "hook_only and active): the player is in or initiating an intimate, "
+            "erotic, romantic, emotional, heart-to-heart, or private conversation/moment "
+            "where pushing plot complications or external events would intrude — even "
+            "if the moment involves a character from the plot thread or thread_engaged "
+            "was true."
         ),
         "hook_only": (
-            "Inject only the subtle hook/breadcrumb: the scene has room for a light "
-            "background hook or invitation without bringing in the adversary or complication."
+            "Inject only the subtle hook/breadcrumb: the scene is NOT in an intimate, "
+            "emotional, or private hold beat, and has room for a light background hook "
+            "or atmosphere without bringing in the complication or adversary."
         ),
         "active": (
-            "Inject the full thread (hook and challenge/complication): the player is "
-            "actively engaging with the plot thread or the current scene naturally calls "
-            "for its complication."
+            "Inject the full thread (hook and challenge/complication): the scene is "
+            "NOT in an intimate, emotional, or private hold beat, and is open for "
+            "advancing the plot thread and its complication."
         ),
     }
     context = {
@@ -322,7 +343,7 @@ async def plot_injection(sdk, state, thread, last_assessment=None):
         )
     d = await ask(sdk, context, {"inject": choice(instruction, options)}, PLOT, "plot:inject")
     try:
-        selected = d.pick("inject")
+        selected = _pick_plot_injection(d)
         await d.finish("accepted")
         return selected
     except asyncio.CancelledError:
