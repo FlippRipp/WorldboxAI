@@ -19,12 +19,10 @@ New threads are adapted to the story's genre and playstyle via thread modes
 vetted by a fit-check critic before going live.
 """
 from copy import deepcopy
-import asyncio
-import inspect
 import json
-from pathlib import Path
 import re
-import zipfile
+
+from backend.engine import director_shared as _shared
 
 try:
     from backend.engine import jev_tasks
@@ -34,11 +32,11 @@ except ImportError:
 MODULE_ID = "wb_plot_director"
 
 SCHEMA_VERSION = 3
-DEFAULT_OBSERVATION_TURNS = 4
+DEFAULT_OBSERVATION_TURNS = _shared.DEFAULT_OBSERVATION_TURNS
 THREAD_MODES = ("spectacle", "intrigue", "character", "variety")
 ENGAGEMENT_KINDS = ("proactive", "reactive", "indifferent", "resistant")
 INJECT_MODES = ("withhold", "hook_only", "active")
-PREF_ROLES = ("actor", "target", "mutual", "world")
+PREF_ROLES = _shared.PREF_ROLES
 PLAYSTYLE_KEYS = (
     "combat", "diplomacy", "exploration", "mystery", "social", "intrigue",
     "stealth", "strategy", "romance", "crafting", "roleplay", "humor",
@@ -55,166 +53,58 @@ OPPORTUNITY_COOLDOWN_TURNS = 3
 DIRECTION_LIST_CAP = 6
 HORIZON_LIST_CAP = 4
 SEEDS_LIST_CAP = 4
-RECENT_INPUTS_COUNT = 6
+RECENT_INPUTS_COUNT = _shared.RECENT_INPUTS_COUNT
 FIT_MAX_REJECTS = 2
 DEFER_MAX_STREAK = 2
-ABANDON_COOLDOWN_FACTOR = 2
+ABANDON_COOLDOWN_FACTOR = _shared.ABANDON_COOLDOWN_FACTOR
 PIVOT_COOLDOWN_TURNS = 3  # min turns between pivot-driven thread replacements
 # In-world time thresholds (when wb_time_tracker is active; falls back to turns when absent):
 MIN_THREAD_LIFESPAN_MINUTES = 180   # 3 hours: rapid-fire dialogue turns (<3h) won't expire an active thread early
-COOLDOWN_REST_SKIP_MINUTES = 360    # 6 hours: sleeping/traveling satisfies a normal quiet period once >=1 turn passes
-MIN_COOLDOWN_MINUTES = 30           # 30 minutes: rapid dialogue turns (<30m) wait up to 2 extra turns before weaving
-TIME_OF_DAY_BANDS = (
-    (0, 5, "the dead of night"),
-    (5, 8, "early morning"),
-    (8, 12, "morning"),
-    (12, 14, "midday"),
-    (14, 18, "afternoon"),
-    (18, 21, "evening"),
-    (21, 24, "night"),
-)
+COOLDOWN_REST_SKIP_MINUTES = _shared.COOLDOWN_REST_SKIP_MINUTES
+MIN_COOLDOWN_MINUTES = _shared.MIN_COOLDOWN_MINUTES
+TIME_OF_DAY_BANDS = _shared.TIME_OF_DAY_BANDS
 # Evidence marker distinguishing likes the player typed in themselves from
 # AI-observed ones; player-set entries survive a /plot reset.
-PLAYER_SET_EVIDENCE = "set directly by the player"
+PLAYER_SET_EVIDENCE = _shared.PLAYER_SET_EVIDENCE
 BOOTSTRAP_SCENES = 15
 BOOTSTRAP_INPUTS = 15
 
 MOMENTUM_VALUES = ("observing", "building", "steady", "stalled", "resolving")
-PREF_WEIGHTS = ("low", "medium", "high")  # likes/dislikes strength, weakest first
+PREF_WEIGHTS = _shared.PREF_WEIGHTS  # likes/dislikes strength, weakest first
 
-# Shared engine services injected by the server at startup (set_services).
-# When running inside a live WebSocket turn, on_librarian hands off LLM passes
-# to a non-blocking background task spawned at on_turn_stopped so plot
-# generation never delays turn completion.
-_services: dict = {}
-_bg_tasks: set[asyncio.Task] = set()
-_current_bg_task: asyncio.Task | None = None
-_current_bg_job_meta: dict | None = None
-_pending_bg_job: dict | None = None
-_staged_bg_updates: dict | None = None
-_bg_epoch: int = 0
+# Shared non-blocking background runner (services injected at startup via set_services).
+_bg_runner = _shared.ModuleBackgroundRunner(
+    MODULE_ID,
+    label="Plot Director",
+    default_data=lambda: _default_data(),
+    should_discard_live=lambda live_mod: bool(live_mod.get("suspended")),
+)
 
 
 def set_services(services: dict) -> None:
-    global _services
-    _services = services or {}
+    _bg_runner.set_services(services)
 
 
 def _cancel_bg_task() -> None:
-    global _current_bg_task, _current_bg_job_meta, _pending_bg_job, _staged_bg_updates, _bg_epoch
-    _bg_epoch += 1
-    _pending_bg_job = None
-    _staged_bg_updates = None
-    _current_bg_job_meta = None
-    for task in list(_bg_tasks):
-        if not task.done():
-            task.cancel()
-    if _current_bg_task is not None and not _current_bg_task.done():
-        _current_bg_task.cancel()
-    _current_bg_task = None
+    _bg_runner.cancel()
 
 
-def _job_matches_state(meta: dict | None, state: dict, allow_later_turn: bool = True) -> bool:
-    """True when a background job or staged update still belongs to the timeline
-    of `state` (same save, same epoch, not rolled back past the job's turn, and
-    the scene at the job's history index has not been deleted or replaced)."""
-    if not isinstance(meta, dict):
-        return False
-    if meta.get("epoch") is not None and meta.get("epoch") != _bg_epoch:
-        return False
-    if meta.get("save_id") != state.get("active_save_id"):
-        return False
-    state_turn = int(state.get("turn", 0) or 0)
-    job_turn = int(meta.get("turn", 0) or 0)
-    if state_turn < job_turn:
-        return False
-    if not allow_later_turn and state_turn != job_turn:
-        return False
-    hist_len = int(meta.get("hist_len", 0) or 0)
-    if hist_len > 0:
-        history = state.get("history") or []
-        if len(history) < hist_len or str(history[hist_len - 1]) != str(meta.get("scene", "")):
-            return False
-    return True
-
-
-def _patch_zip_plot_state(zip_path: Path, engine, own_updates: dict, fallback_base: dict | None = None) -> bool:
-    """Merge `own_updates` into `Module_States/wb_plot_director.json` inside an
-    existing turn snapshot or swipe variant zip archive on disk."""
-    if not zip_path.exists():
-        return False
-    target_arc = f"Module_States/{MODULE_ID}.json"
-    try:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            members = {}
-            existing_plot = None
-            for name in zf.namelist():
-                raw_bytes = zf.read(name)
-                if name.replace("\\", "/") == target_arc:
-                    try:
-                        existing_plot = json.loads(raw_bytes.decode("utf-8"))
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        existing_plot = None
-                else:
-                    members[name] = raw_bytes
-        base_plot = existing_plot if isinstance(existing_plot, dict) else deepcopy(fallback_base or _default_data())
-        merged_plot = engine._deep_merge(base_plot, own_updates)
-        tmp_path = zip_path.with_suffix(".zip.tmp")
-        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for name, raw_bytes in members.items():
-                zf.writestr(name, raw_bytes)
-            zf.writestr(target_arc, json.dumps(merged_plot, indent=2).encode("utf-8"))
-        tmp_path.replace(zip_path)
-        return True
-    except OSError:
-        return False
-
-
-def _patch_saved_turn_archives(
-    sm,
-    engine,
-    save_id: str | None,
-    turn_number: int,
-    own_updates: dict,
-    fallback_base: dict | None = None,
-    patch_snapshot: bool = True,
-    patch_swipe: bool = True,
-    repack: bool = False,
-) -> None:
-    """Keep `Snapshots/turn_{N}.zip` and `Swipes/v{active}.zip` in sync when a
-    background Plot Director pass finishes after the turn was already saved."""
-    save_manager = getattr(sm, "save_manager", None)
-    saves_dir = getattr(save_manager, "saves_dir", None)
-    if not save_id or saves_dir is None:
-        return
-    save_path = Path(saves_dir) / str(save_id)
-    if not save_path.exists():
-        return
-
-    changed = False
-    if patch_snapshot:
-        snap_path = save_path / "Snapshots" / f"turn_{turn_number}.zip"
-        if _patch_zip_plot_state(snap_path, engine, own_updates, fallback_base=fallback_base):
-            changed = True
-
-    if patch_swipe:
-        manifest_path = save_path / "Swipes" / "manifest.json"
-        if manifest_path.exists():
-            try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                manifest = None
-            if isinstance(manifest, dict) and int(manifest.get("turn", -1)) == turn_number:
-                active_idx = int(manifest.get("active", 0) or 0)
-                swipe_zip = save_path / "Swipes" / f"v{active_idx}.zip"
-                if _patch_zip_plot_state(swipe_zip, engine, own_updates, fallback_base=fallback_base):
-                    changed = True
-
-    if changed and repack and hasattr(save_manager, "_pack_save"):
-        try:
-            save_manager._pack_save(save_id)
-        except OSError:
-            pass
+def __getattr__(name: str):
+    if name == "_services":
+        return _bg_runner.services
+    if name == "_bg_tasks":
+        return _bg_runner.tasks
+    if name == "_bg_epoch":
+        return _bg_runner.epoch
+    if name == "_current_bg_task":
+        return _bg_runner.current_task
+    if name == "_current_bg_job_meta":
+        return _bg_runner.current_job_meta
+    if name == "_pending_bg_job":
+        return _bg_runner.pending_job
+    if name == "_staged_bg_updates":
+        return _bg_runner.staged_updates
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # Legacy (v1, 3-act outline) keys wiped on migration. Writing "" replaces the
 # old dicts/lists outright because _deep_merge only recurses dict-into-dict.
@@ -357,20 +247,7 @@ def _own_data(state: dict) -> dict:
 
 
 def _parse_json_block(raw: str):
-    """Strip Markdown code fences and parse a JSON object from an LLM reply."""
-    text = (raw or "").strip()
-    if text.startswith("```"):
-        parts = text.split("```")
-        text = parts[1] if len(parts) > 1 else text
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return None
+    return _shared.parse_json_block(raw)
 
 
 def _empty_thread() -> dict:
@@ -769,54 +646,7 @@ def _character_roster(state: dict) -> str:
 
 
 def _character_sheet_block(state: dict) -> str:
-    """The player character's capabilities from the RPG system, so generated
-    challenges have something to bite on: favored skills get a stage, and the
-    opposition is pitched at abilities that actually exist. Soft-fails to ""
-    when the RPG module is absent."""
-    rpg = state.get("module_data", {}).get("wb_core_rpg", {})
-    if not isinstance(rpg, dict):
-        return ""
-    skills = rpg.get("skills", {})
-    skills = skills if isinstance(skills, dict) else {}
-
-    lines = []
-    header_bits = []
-    level = rpg.get("level")
-    if isinstance(level, int) and level > 0:
-        header_bits.append(f"Level {level}")
-    stats = rpg.get("stats", {})
-    if isinstance(stats, dict):
-        top_stats = sorted(
-            ((k, v) for k, v in stats.items() if isinstance(v, (int, float))),
-            key=lambda kv: kv[1], reverse=True,
-        )[:3]
-        if top_stats:
-            header_bits.append("strongest stats: " + ", ".join(f"{k} {int(v)}" for k, v in top_stats))
-    if header_bits:
-        lines.append(" · ".join(header_bits))
-
-    for name, skill in skills.items():
-        if not isinstance(skill, dict):
-            continue
-        kind = str(skill.get("type", "active")).strip() or "active"
-        rating = skill.get("rating", "")
-        description = str(skill.get("description", "")).strip()
-        line = f"- [{kind}] {name}"
-        if rating != "":
-            line += f" ({rating}/10)"
-        if description:
-            line += f": {description}"
-        lines.append(line)
-
-    if not lines:
-        return ""
-    return (
-        "PLAYER CHARACTER SHEET (from the RPG system -- design the challenge so "
-        "these abilities matter: give favored skills a stage to shine, pitch "
-        "opposition their capabilities can meaningfully engage at the guided "
-        "difficulty, and let a curse or weakness complicate things where one "
-        "exists):\n" + "\n".join(lines) + "\n\n"
-    )
+    return _shared.character_sheet_block(state)
 
 
 def _direction_block(data: dict) -> str:
@@ -857,62 +687,11 @@ def _direction_block(data: dict) -> str:
     return "\n".join(lines) + "\n\n"
 
 
-def _get_time_clock(state: dict) -> dict | None:
-    """Return the active wb_time_tracker clock dict if present, else None."""
-    time_data = (state.get("module_data") or {}).get("wb_time_tracker")
-    if not isinstance(time_data, dict):
-        return None
-    clock = time_data.get("clock")
-    if not isinstance(clock, dict):
-        return None
-    return clock
-
-
-def _current_minutes(state: dict) -> int | None:
-    """Return total in-world minutes elapsed from wb_time_tracker, or None when
-    the time module is inactive/uninitialized."""
-    clock = _get_time_clock(state)
-    if clock is None:
-        return None
-    try:
-        return int(clock.get("total_minutes_elapsed", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _time_of_day_label(hour: int) -> str:
-    for start, end, label in TIME_OF_DAY_BANDS:
-        if start <= hour < end:
-            return label
-    return "night"
-
-
-def _format_clock_text(clock: dict) -> str:
-    year = int(clock.get("year", 1) or 1)
-    month = int(clock.get("month", 1) or 1)
-    day = int(clock.get("day", 1) or 1)
-    hour = int(clock.get("hour", 8) or 0)
-    minute = int(clock.get("minute", 0) or 0)
-    return (
-        f"Year {year}, Month {month}, Day {day} -- "
-        f"{hour:02d}:{minute:02d} ({_time_of_day_label(hour)})"
-    )
-
-
-def _format_duration_minutes(minutes: int) -> str:
-    minutes = max(0, int(minutes or 0))
-    if minutes < 60:
-        return f"{minutes} minute{'s' if minutes != 1 else ''}"
-    days, rem = divmod(minutes, 24 * 60)
-    hours, mins = divmod(rem, 60)
-    parts = []
-    if days:
-        parts.append(f"{days} day{'s' if days != 1 else ''}")
-    if hours:
-        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
-    if not days and mins:
-        parts.append(f"{mins} minute{'s' if mins != 1 else ''}")
-    return ", ".join(parts) or "0 minutes"
+_get_time_clock = _shared.get_time_clock
+_current_minutes = _shared.current_minutes
+_time_of_day_label = _shared.time_of_day_label
+_format_clock_text = _shared.format_clock_text
+_format_duration_minutes = _shared.format_duration_minutes
 
 
 def _should_expire_thread(state: dict, thread: dict, turn: int, thread_max_turns: int) -> bool:
@@ -932,87 +711,9 @@ def _should_expire_thread(state: dict, thread: dict, turn: int, thread_max_turns
     return max(0, cur_minutes - created_minutes) >= MIN_THREAD_LIFESPAN_MINUTES
 
 
-def _in_quiet_period(state: dict, data: dict, turn: int) -> bool:
-    """Whether the story is still in its between-thread breather.
-    Falls back to pure turn counting when wb_time_tracker is absent.
-    When wb_time_tracker is active:
-    - A major in-world rest/travel skip (>=6h, or >=12h after an abandoned
-      thread) satisfies the breather once at least 1 turn has passed.
-    - Rapid 1-minute dialogue turns where <30 in-world minutes have passed
-      extend the breather by up to 2 extra turns so a new plot thread does not
-      drop into the middle of the same conversation."""
-    next_thread_turn = int(data.get("next_thread_turn", 0) or 0)
-    last_closed_turn = int(data.get("last_closed_turn", 0) or 0)
-    if next_thread_turn <= 0 or (last_closed_turn > 0 and next_thread_turn <= last_closed_turn):
-        return False
-
-    cur_minutes = _current_minutes(state)
-    if cur_minutes is None:
-        return turn < next_thread_turn
-
-    last_closed_minutes = int(data.get("last_closed_minutes", 0) or 0)
-    minutes_since_close = max(0, cur_minutes - last_closed_minutes)
-    last_outcome = (data.get("thread_history") or [{}])[-1].get("outcome", "")
-    skip_threshold = COOLDOWN_REST_SKIP_MINUTES * (
-        ABANDON_COOLDOWN_FACTOR if last_outcome == "abandoned" else 1
-    )
-    if turn > last_closed_turn and minutes_since_close >= skip_threshold:
-        return False
-
-    if turn < next_thread_turn:
-        return True
-
-    if minutes_since_close < MIN_COOLDOWN_MINUTES and turn < next_thread_turn + 2:
-        return True
-
-    return False
-
-
-def _setting_material(state: dict) -> list[str]:
-    """Scenario, world rules/lore, and in-world clock blocks shared by every
-    generation prompt."""
-    parts = []
-
-    scenario = state.get("scenario_data")
-    if isinstance(scenario, dict):
-        description = str(scenario.get("scenario_description", "")).strip()
-        if description:
-            parts.append(f"<scenario>\n{description}\n</scenario>")
-
-    world = state.get("world_data")
-    if isinstance(world, dict):
-        rules = world.get("rules", {}) or {}
-        lore = world.get("lore", {}) or {}
-        lines = []
-        for label, value in (
-            ("Genre", rules.get("genre")),
-            ("Tone", rules.get("tone")),
-            ("World", lore.get("world_name")),
-            ("Premise", lore.get("premise")),
-            ("Central Conflict", lore.get("central_conflict")),
-        ):
-            if value:
-                lines.append(f"{label}: {value}")
-        if lines:
-            parts.append("<world>\n" + "\n".join(lines) + "\n</world>")
-
-    clock = _get_time_clock(state)
-    if clock is not None:
-        parts.append(
-            f"<in_world_time>\nCurrent in-world date and time: {_format_clock_text(clock)}.\n</in_world_time>"
-        )
-
-    return parts
-
-
-def _recent_player_inputs(state: dict, limit: int = RECENT_INPUTS_COUNT) -> list[str]:
-    """Recent non-empty player messages (oldest to newest)."""
-    inputs = [
-        str(m.get("content", "")).strip()
-        for m in state.get("chat_messages", [])
-        if m.get("role") == "user" and str(m.get("content", "")).strip()
-    ]
-    return inputs[-limit:] if limit > 0 else inputs
+_in_quiet_period = _shared.in_quiet_period
+_setting_material = _shared.setting_material
+_recent_player_inputs = _shared.recent_player_inputs
 
 
 def _story_material(state: dict) -> str:
@@ -1047,43 +748,8 @@ def _is_profile_empty(profile: dict) -> bool:
     )
 
 
-def _is_profile_unobserved(profile: dict) -> bool:
-    """True while the AI has not yet observed any behavior from the story
-    (ignoring likes/dislikes typed in directly by the player at creation)."""
-    if not isinstance(profile, dict):
-        return True
-    observed_likes = [
-        e for e in (profile.get("likes") or [])
-        if isinstance(e, dict) and e.get("evidence") != PLAYER_SET_EVIDENCE
-    ]
-    return (
-        not any((profile.get("playstyle") or {}).values())
-        and not profile.get("tone")
-        and not profile.get("themes")
-        and not observed_likes
-        and not profile.get("avoids")
-        and not profile.get("attachments")
-    )
-
-
-def _in_initial_observation(state: dict, data: dict) -> bool:
-    """Whether a fresh story is still in its initial observation window before
-    the first direction and plot thread are woven."""
-    if data.get("status") != "observing" or data.get("thread_history"):
-        return False
-    if (data.get("thread") or {}).get("status") == "active":
-        return False
-    config = _config(state)
-    turn = int(state.get("turn", 0) or 0)
-    if "observation_turns" in config:
-        obs_turns = max(0, int(config.get("observation_turns") or 0))
-        return turn < obs_turns
-    # Default observation window applies when neither direction nor observed
-    # profile exists yet (a genuinely fresh story).
-    has_direction = bool(str((data.get("direction") or {}).get("premise", "")).strip())
-    if has_direction or not _is_profile_unobserved(data.get("profile") or {}):
-        return False
-    return turn < DEFAULT_OBSERVATION_TURNS
+_is_profile_unobserved = _shared.is_profile_unobserved
+_in_initial_observation = _shared.in_initial_observation
 
 
 async def _bootstrap_profile(state: dict, sdk, preserved: dict | None = None) -> dict | None:
@@ -1189,14 +855,7 @@ def _gm_notes_block(data: dict) -> str:
 
 
 def _planning_iterations(config: dict) -> int:
-    """Number of GM planning passes configured (1-3). Defaults to 2 in live
-    server sessions (matching manifest.json) and 1 when unset in unit tests."""
-    if "planning_iterations" in (config or {}):
-        try:
-            return max(1, min(3, int(config.get("planning_iterations") or 1)))
-        except (TypeError, ValueError):
-            return 1
-    return 2 if _services.get("engine") is not None else 1
+    return _shared.planning_iterations(config, "planning_iterations", _bg_runner.services)
 
 
 GM_NOTES_SYSTEM_PROMPT = (
@@ -1221,25 +880,9 @@ GM_NOTES_SYSTEM_PROMPT = (
 
 async def _llm_generate(sdk, prompt: str, model_preference: str = "balanced",
                         system_prompt: str | None = None) -> str:
-    """Invoke sdk.llm.generate, passing system_prompt as a separate system role
-    when supported by the SDK bridge (falling back to a combined prompt for
-    minimal test stubs)."""
-    gen = sdk.llm.generate
-    sdk.llm._current_module = MODULE_ID
-    try:
-        if system_prompt:
-            try:
-                params = inspect.signature(gen).parameters
-            except (TypeError, ValueError):
-                params = {}
-            if "system_prompt" in params or any(
-                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
-            ):
-                return await gen(prompt, model_preference=model_preference, system_prompt=system_prompt)
-            return await gen(f"{system_prompt}\n\n{prompt}", model_preference=model_preference)
-        return await gen(prompt, model_preference=model_preference)
-    finally:
-        sdk.llm._current_module = ""
+    return await _shared.llm_generate(
+        sdk, MODULE_ID, prompt, model_preference=model_preference, system_prompt=system_prompt
+    )
 
 
 async def _iterate_gm_notes(state: dict, sdk, data: dict, passes: int = 1) -> str:
@@ -1615,26 +1258,17 @@ async def _close_thread(state: dict, sdk, data: dict, updates: dict, thread: dic
 
 
 async def on_gather_context(state: dict, sdk) -> dict:
-    global _staged_bg_updates
-    if _current_bg_job_meta is not None and not _job_matches_state(_current_bg_job_meta, state):
-        _cancel_bg_task()
-    if _staged_bg_updates is not None and not _job_matches_state(_staged_bg_updates, state):
-        _staged_bg_updates = None
+    _bg_runner.reconcile_on_gather(state)
 
     data = _own_data(state)
     if not data:
         seeded = _seeded_default_data(state)
-        sm = _services.get("session_manager")
-        engine = _services.get("engine")
-        if sm is not None and engine is not None:
-            _patch_saved_turn_archives(
-                sm,
-                engine,
-                state.get("active_save_id") or getattr(sm, "active_save_id", None),
-                int(state.get("turn", 0) or 0),
-                seeded,
-                fallback_base=seeded,
-            )
+        _bg_runner.patch_archives(
+            state.get("active_save_id"),
+            int(state.get("turn", 0) or 0),
+            seeded,
+            fallback_base=seeded,
+        )
         return {"module_data": {MODULE_ID: seeded}}
 
     if data.get("schema") == 2:
@@ -1700,17 +1334,10 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
     back plot material (deferred mid-climax/intimate beat, post-thread quiet
     period, or explicit withhold), emits a HOLD pacing cue so external world
     momentum pauses instead of escalating background timers."""
-    global _staged_bg_updates
     if block.get("id") != "plot_thread":
         return {"content": ""}
     config = _config(state)
-    data = _own_data(state)
-    if _staged_bg_updates is not None and isinstance(data, dict):
-        if _job_matches_state(_staged_bg_updates, state) and isinstance(_staged_bg_updates.get("updates"), dict):
-            data = deepcopy(data)
-            data.update(_staged_bg_updates["updates"])
-        else:
-            _staged_bg_updates = None
+    data = _bg_runner.overlay_staged(state, _own_data(state))
 
     thread = (data.get("thread") or {}) if data else {}
     if (
@@ -1732,10 +1359,7 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
             return {"content": _render_scene_hold(data)}
         return {"content": ""}
 
-    bg_in_flight = (
-        (_current_bg_task is not None and not _current_bg_task.done())
-        or (_pending_bg_job is not None)
-    )
+    bg_in_flight = _bg_runner.in_flight()
     raw_assessment = data.get("last_assessment")
     fresh_assessment = (
         raw_assessment
@@ -1821,12 +1445,7 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict:
 
 
 def _is_live_turn_armed() -> bool:
-    """True when running inside a live server turn that will fire on_turn_stopped,
-    so heavy LLM passes can run in a non-blocking background task after the
-    turn completes."""
-    engine = _services.get("engine")
-    sm = _services.get("session_manager")
-    return bool(engine is not None and sm is not None and getattr(engine, "_turn_hooks_armed", False))
+    return _bg_runner.is_live_turn_armed()
 
 
 async def _run_librarian_llm_pass(state: dict, sdk, base_updates: dict | None = None) -> dict | None:
@@ -2073,98 +1692,10 @@ async def _execute_bg_job(job: dict) -> None:
     """Run the deferred librarian pass in the background after the turn has
     already completed and unlocked the UI, then persist and broadcast the
     updated module_data."""
-    global _staged_bg_updates
-    try:
-        prev_task = job.get("prev_task")
-        if prev_task is not None and not prev_task.done():
-            try:
-                await prev_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        if job.get("epoch") != _bg_epoch:
-            return
-        if _staged_bg_updates is not None:
-            staged = _staged_bg_updates
-            if (
-                _job_matches_state(staged, job["state"])
-                and int(staged.get("turn", 0) or 0) < int(job.get("turn", 0) or 0)
-                and isinstance(staged.get("updates"), dict)
-            ):
-                _staged_bg_updates = None
-                job["state"].setdefault("module_data", {}).setdefault(MODULE_ID, {}).update(staged["updates"])
-                job.setdefault("base_updates", {}).update(staged["updates"])
-
-        result = await _run_librarian_llm_pass(job["state"], job["sdk"], job.get("base_updates"))
-        own_updates = (result or {}).get("module_data", {}).get(MODULE_ID)
-        if not isinstance(own_updates, dict) or not own_updates:
-            return
-        if job.get("epoch") != _bg_epoch:
-            return
-
-        sm = _services.get("session_manager")
-        engine = _services.get("engine")
-        chat_hub = _services.get("chat_hub")
-        if sm is None or engine is None:
-            return
-
-        live_state = sm.state
-        if not _job_matches_state(job, live_state):
-            # The turn this job analyzed was deleted, undone, regenerated, or branched away from.
-            return
-        live_plot = (live_state.get("module_data") or {}).get(MODULE_ID) or {}
-        if live_plot.get("suspended"):
-            return
-
-        job_turn = int(job.get("turn", 0) or 0)
-        live_turn = int(live_state.get("turn", 0) or 0)
-        fallback_base = (job["state"].get("module_data") or {}).get(MODULE_ID)
-
-        if chat_hub is not None and chat_hub.turn_running():
-            # Another turn started while this background pass was in flight:
-            # patch this turn's snapshot/swipe archives on disk right away so
-            # rolling back or branching to `job_turn` has the completed plot
-            # state, and stage the updates for the running turn's librarian.
-            _patch_saved_turn_archives(
-                sm, engine, sm.active_save_id, job_turn, own_updates,
-                fallback_base=fallback_base, repack=False,
-            )
-            if live_turn == job_turn:
-                merged = engine._deep_merge(live_plot, own_updates)
-                live_state.setdefault("module_data", {})[MODULE_ID] = merged
-            _staged_bg_updates = {
-                "save_id": job.get("save_id"),
-                "turn": job_turn,
-                "hist_len": job.get("hist_len", 0),
-                "scene": job.get("scene", ""),
-                "epoch": job.get("epoch"),
-                "updates": deepcopy(own_updates),
-            }
-            return
-
-        if live_turn == job_turn:
-            merged = engine._deep_merge(live_plot, own_updates)
-            live_state.setdefault("module_data", {})[MODULE_ID] = merged
-            if getattr(sm, "save_manager", None) is not None:
-                sm.save_manager.save_turn(sm.active_save_id, live_state, job_turn)
-                _patch_saved_turn_archives(
-                    sm, engine, sm.active_save_id, job_turn, own_updates,
-                    fallback_base=merged, patch_snapshot=False, patch_swipe=True, repack=True,
-                )
-            if chat_hub is not None:
-                await chat_hub.send({"type": "state_update", "state": dict(live_state)})
-        elif live_turn > job_turn:
-            _patch_saved_turn_archives(
-                sm, engine, sm.active_save_id, job_turn, own_updates,
-                fallback_base=fallback_base, repack=True,
-            )
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        print(f"[Plot Director] Background pass failed: {exc}")
+    await _bg_runner._execute_job(job, _run_librarian_llm_pass)
 
 
 async def on_librarian(state: dict, sdk) -> dict | None:
-    global _pending_bg_job, _staged_bg_updates
     config = _config(state)
     if not config.get("plot_enabled", True):
         return None
@@ -2180,21 +1711,9 @@ async def on_librarian(state: dict, sdk) -> dict | None:
         return None
 
     turn = state.get("turn", 0)
-    updates: dict = {}
-
-    # Pick up any updates completed by a previous turn's background task while
-    # this turn was already streaming (discarding anything from a rolled-back turn).
-    if _staged_bg_updates is not None:
-        staged = _staged_bg_updates
-        _staged_bg_updates = None
-        staged_turn = int(staged.get("turn", 0) or 0)
-        if (
-            _job_matches_state(staged, state)
-            and staged_turn < turn
-            and isinstance(staged.get("updates"), dict)
-        ):
-            updates.update(staged["updates"])
-            data.update(staged["updates"])
+    updates: dict = _bg_runner.consume_staged_for_librarian(state)
+    if updates:
+        data.update(updates)
 
     # A nudge armed on an earlier turn was rendered into this turn's prompt;
     # consume it so it fires exactly once. _deep_merge never deletes keys, so
@@ -2204,21 +1723,8 @@ async def on_librarian(state: dict, sdk) -> dict | None:
 
     # In a live WebSocket turn, defer all LLM calls to the post-turn background
     # task spawned at on_turn_stopped so the turn finishes with zero added delay.
-    if _is_live_turn_armed():
-        snap = deepcopy(state)
-        if updates:
-            snap.setdefault("module_data", {}).setdefault(MODULE_ID, {}).update(updates)
-        history = state.get("history") or []
-        _pending_bg_job = {
-            "save_id": state.get("active_save_id"),
-            "turn": turn,
-            "hist_len": len(history),
-            "scene": str(history[-1]) if history else "",
-            "epoch": _bg_epoch,
-            "state": snap,
-            "sdk": sdk,
-            "base_updates": {},
-        }
+    if _bg_runner.is_live_turn_armed():
+        _bg_runner.queue_job(state, sdk, immediate_updates=updates)
         return {"module_data": {MODULE_ID: updates}} if updates else None
 
     return await _run_librarian_llm_pass(state, sdk, base_updates=updates)
@@ -2227,33 +1733,7 @@ async def on_librarian(state: dict, sdk) -> dict | None:
 async def on_turn_stopped(state: dict, sdk, reason: str) -> None:
     """Spawn the queued background Plot Director pass once the turn has been
     saved (reason == 'completed'), or discard it if the turn was cancelled."""
-    global _pending_bg_job, _current_bg_task, _current_bg_job_meta
-    job = _pending_bg_job
-    _pending_bg_job = None
-    if reason != "completed" or job is None:
-        return
-    prev_task = _current_bg_task
-    if prev_task is not None and not prev_task.done():
-        if (
-            isinstance(_current_bg_job_meta, dict)
-            and _current_bg_job_meta.get("save_id") == job.get("save_id")
-            and int(_current_bg_job_meta.get("turn", 0) or 0) < int(job.get("turn", 0) or 0)
-            and _current_bg_job_meta.get("epoch") == job.get("epoch")
-        ):
-            job["prev_task"] = prev_task
-        else:
-            prev_task.cancel()
-    _current_bg_job_meta = {
-        "save_id": job.get("save_id"),
-        "turn": job.get("turn"),
-        "hist_len": job.get("hist_len"),
-        "scene": job.get("scene"),
-        "epoch": job.get("epoch"),
-    }
-    task = asyncio.get_running_loop().create_task(_execute_bg_job(job))
-    _current_bg_task = task
-    _bg_tasks.add(task)
-    task.add_done_callback(_bg_tasks.discard)
+    await _bg_runner.on_turn_stopped(reason, _run_librarian_llm_pass)
 
 
 def _profile_line(profile: dict) -> str:

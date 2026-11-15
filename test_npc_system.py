@@ -825,7 +825,7 @@ def test_tracking_pass_rename_never_takes_another_characters_name():
     npc = _bank_from_result(result)["npc_1"]
     # The colliding rename is dropped; the rest of the update still lands.
     assert npc["name"] == "Mara"
-    assert npc["personality"] == ["grim", "loyal", "quiet"]
+    assert npc["personality"] == "grim, loyal, quiet"
 
 
 def test_tracking_pass_resolves_name_echo_to_record():
@@ -1188,4 +1188,611 @@ def test_transformation_dedup_and_untruncated_capture_context():
     assert "Appearance: Luminous white hair with fluffy white cat ears" in capture_prompt
     assert "Notes: Mind rewritten to act as a devoted cat-girl" in capture_prompt
     assert "physically transformed, shapeshifted" in capture_prompt
+
+
+# ── Part K: Character depth, Plot Director borrowing, fit-check, & async runner ─
+
+def test_legacy_list_personality_healed_and_rename_sweeps_personality():
+    backend = _load_backend()
+    state = _state({
+        "npc_1": {
+            "id": "npc_1",
+            "name": "The Hooded Stranger",
+            "appearance": "The Hooded Stranger wears salt-stained wool.",
+            "pitch": "The Hooded Stranger watches the pier.",
+            "personality": ["guarded", "The Hooded Stranger speaks in clipped whispers"],
+            "role": "informant",
+            "introduced": True,
+            "status": "active",
+            "notes": "",
+        }
+    })
+    bank = backend._get_bank(state)
+    assert bank["npc_1"]["personality"] == "guarded, The Hooded Stranger speaks in clipped whispers"
+
+    reply = json.dumps({
+        "updates": [{"npc_id": "npc_1", "name": "Veyra", "change_note": "Reveals her name."}]
+    })
+    sdk, _ = _make_sdk(reply)
+    state["history"] = ["The hooded stranger lowers her hood. 'Call me Veyra.'"]
+    result = asyncio.run(backend.on_librarian(state, sdk))
+    npc = _bank_from_result(result)["npc_1"]
+    assert npc["name"] == "Veyra"
+    assert "Veyra speaks in clipped whispers" in npc["personality"]
+    assert "The Hooded Stranger" not in npc["personality"]
+
+
+def test_instruction_slots_contract_and_custom_overrides():
+    backend = _load_backend()
+    slots = backend.get_instruction_slots()
+    slot_ids = [s["id"] for s in slots]
+    assert slot_ids == [
+        "character_generation",
+        "character_fit_check",
+        "character_capture",
+        "character_introduction",
+        "character_tracking",
+    ]
+    for s in slots:
+        assert s["label"] and s["description"] and s["default"].strip()
+    # Returned list/dicts are defensive copies.
+    slots[0]["default"] = "mutated"
+    assert backend.get_instruction_slots()[0]["default"] != "mutated"
+
+    custom = {
+        "character_generation": "CUSTOM_GEN_DIRECTIVE",
+        "character_fit_check": "CUSTOM_FIT_DIRECTIVE",
+        "character_capture": "CUSTOM_CAPTURE_DIRECTIVE",
+        "character_introduction": "CUSTOM_INTRO_DIRECTIVE",
+        "character_tracking": "CUSTOM_TRACKING_DIRECTIVE",
+    }
+    state = _state(
+        {
+            "npc_unmet": {
+                "id": "npc_unmet", "name": "Kael", "archetype": "scout",
+                "role": "ally", "encounter_type": "encounter",
+                "introduced": False, "status": "unintroduced", "personality": "wry",
+            },
+            "npc_met": {
+                "id": "npc_met", "name": "Mara", "archetype": "guard",
+                "role": "ally", "encounter_type": "location_bound",
+                "location_node_id": "node_market", "location_region": "Harborside",
+                "introduced": True, "status": "active", "personality": "steady",
+            },
+        },
+        mutation_config={"generator_frequency": 1, "demand_driven_generation": False},
+        history=["Mara steps into the market square."],
+    )
+    state["turn"] = 2
+    state["module_instructions"] = custom
+
+    # Generation + Fit-Check + Tracking prompts pick up overrides while keeping JSON schema & booru hair/eye rules.
+    def reply_router(prompt):
+        if "continuity and casting editor" in prompt:
+            return json.dumps({"verdict": "accept", "rejected_names": [], "critique": ""})
+        if "LASTING way" in prompt:
+            return json.dumps({"updates": []})
+        if "active story threads" in prompt:
+            return json.dumps([])
+        return json.dumps({"npcs": [{
+            "name": "Orin", "race": "human", "gender": "male",
+            "appearance": "Dark hair, grey eyes, early thirties.",
+            "archetype": "broker", "pitch": "Sells dock manifests.",
+            "personality": "Polite smile over cold calculation; wants harbor leverage; taps his signet ring.",
+            "role": "informant", "encounter_type": "encounter",
+        }]})
+
+    sdk, calls = _make_sdk(reply_router)
+    asyncio.run(backend.on_librarian(state, sdk))
+    joined_prompts = "\n".join(calls["prompts"])
+    assert "CUSTOM_GEN_DIRECTIVE" in joined_prompts
+    assert "hair color and eye color" in joined_prompts
+    assert "CUSTOM_FIT_DIRECTIVE" in joined_prompts
+    assert "CUSTOM_TRACKING_DIRECTIVE" in joined_prompts
+
+    # Introduction override
+    sdk_intro, intro_calls = _make_sdk(json.dumps({"introduce": False, "npc_id": None, "reason": "wait"}))
+    asyncio.run(backend._introduction_pass(state, sdk_intro))
+    assert any("CUSTOM_INTRO_DIRECTIVE" in p for p in intro_calls["prompts"])
+
+    # Capture override
+    sdk_cap, cap_calls = _make_sdk(json.dumps({"npcs": [{
+        "name": "Tessa", "race": "human", "gender": "female",
+        "appearance": "Auburn hair, green eyes, mid-twenties.",
+        "archetype": "ferryman", "pitch": "Controls the night skiff.",
+        "personality": "gruff humor hiding debt panic", "role": "neutral",
+    }]}))
+    asyncio.run(backend._capture_story_characters(
+        {"story_characters": [{"name": "Tessa", "descriptor": "ferryman", "evidence": "rows"}]},
+        state, backend._get_bank(state), sdk_cap,
+    ))
+    assert any("CUSTOM_CAPTURE_DIRECTIVE" in p and "hair color and eye color" in p for p in cap_calls["prompts"])
+
+
+def test_character_craft_rubric_and_casting_notes_iterations():
+    backend = _load_backend()
+    system_prompts = []
+    prompts = []
+
+    class RecordingLLM:
+        async def generate(self, prompt, model_preference="balanced", system_prompt=None, **kw):
+            prompts.append(prompt)
+            system_prompts.append(system_prompt)
+            if system_prompt == backend.CASTING_NOTES_SYSTEM_PROMPT:
+                if "Orin" in prompt:
+                    return json.dumps({"casting_notes": "Post-gen note: Orin covers harbor leverage; hold off on smugglers."})
+                return json.dumps({"casting_notes": "Pre-gen note: Aria needs a charming customs foil with a nervous tell."})
+            if "continuity and casting editor" in prompt:
+                return json.dumps({"verdict": "accept", "rejected_names": [], "critique": ""})
+            if "active story threads" in prompt:
+                return json.dumps([])
+            return json.dumps({"npcs": [{
+                "need": "Harbor smuggling arc needs an insider foil.",
+                "name": "Orin",
+                "race": "human",
+                "gender": "male",
+                "appearance": "Black hair, amber eyes, late thirties.",
+                "archetype": "customs broker",
+                "pitch": "Controls the manifest stamps and needs Aria's silence.",
+                "personality": "Projects unflappable bureaucratic warmth, yet panics whenever the auditing magistrate is named. Wants off-ledger gold to buy out his indenture, speaking in clipped shipping idioms while thumbing an ink-stained brass seal.",
+                "role": "informant",
+                "encounter_type": "encounter",
+            }]})
+
+    sdk, _ = _make_sdk()
+    sdk.llm = RecordingLLM()
+
+    state = _state(
+        mutation_config={
+            "generator_frequency": 3,
+            "casting_iterations": 3,
+            "demand_driven_generation": True,
+        },
+        history=["Aria inspects the sealed harbor warehouse."],
+    )
+    state["turn"] = 3
+
+    result = asyncio.run(backend.on_librarian(state, sdk))
+    mod_out = result["module_data"]["wb_npc_system"]
+    assert "Post-gen note: Orin covers harbor leverage" in mod_out["casting_notes"]
+
+    # casting_iterations=3 -> 2 pre-gen casting-note passes + 1 post-gen pass with CASTING_NOTES_SYSTEM_PROMPT
+    note_calls = [sp for sp in system_prompts if sp == backend.CASTING_NOTES_SYSTEM_PROMPT]
+    assert len(note_calls) == 3
+
+    gen_prompt = next(p for p in prompts if "Create at most" in p and "Pre-gen note" in p)
+    assert "Mask vs. Undercurrent" in gen_prompt
+    assert "Active Want" in gen_prompt
+    assert "Voice & Somatic Tell" in gen_prompt
+    assert "NEVER invert the player's role" in gen_prompt
+
+    orin = next(n for n in mod_out["characters"].values() if n["name"] == "Orin")
+    assert isinstance(orin["personality"], str)
+    assert "thumbing an ink-stained brass seal" in orin["personality"]
+
+
+def test_borrows_plot_director_profile_roles_threads_gm_notes_and_protagonist():
+    backend = _load_backend()
+    state = _state(
+        mutation_config={
+            "generator_frequency": 3,
+            "casting_iterations": 1,
+            "demand_driven_generation": False,
+            "fit_check_enabled": False,
+        },
+        history=["Aria bargains with the guild factors at dusk."],
+    )
+    state["turn"] = 3
+    state["characters"] = {
+        "default_player": {
+            "name": "Aria",
+            "race": "Half-Elf",
+            "context": "Disgraced Admiralty Cipher-Clerk",
+        }
+    }
+    state["module_data"]["wb_core_rpg"] = {
+        "level": 4,
+        "stats": {"Dexterity": 16, "Cunning": 15},
+        "skills": {"Lockpicking": {"type": "active", "rating": 8, "description": "Opens port vaults"}},
+    }
+    state["module_data"]["wb_time_tracker"] = {
+        "clock": {"day": 3, "hour": 19, "minute": 45, "time_of_day": "Evening", "total_minutes_elapsed": 4065}
+    }
+    state["module_data"]["wb_plot_director"] = {
+        "status": "active",
+        "profile": {
+            "tone": "tense maritime intrigue",
+            "themes": ["leverage", "double-crosses"],
+            "likes": [{"text": "turning arrogant officials into informants", "role": "actor", "weight": "high"}],
+            "avoids": [{"text": "being blackmailed or stripped of agency", "role": "target", "weight": "high"}],
+            "dislikes": ["slapstick comedy"],
+            "attachments": [{"name": "Harborside", "note": "protecting the dockworkers"}],
+        },
+        "direction": {
+            "premise": "Expose the admiralty contraband ring.",
+            "endgame": "Reclaim Aria's cleared name or seize the port.",
+            "heading": "Infiltrating the customs house.",
+            "horizon": ["Who forged the admiral's cipher?"],
+            "planted_seeds": [{"seed": "A missing ledger with silver clasps", "payoff": "proves the forgery"}],
+        },
+        "thread": {
+            "status": "active",
+            "title": "Break into the customs vault",
+            "hook": "The night clerk owes gambling debts",
+        },
+        "gm_notes": "Player loves verbal cat-and-mouse where Aria holds the cards.",
+    }
+
+    sdk, calls = _make_sdk(json.dumps({"npcs": [{
+        "name": "Cassian", "race": "human", "gender": "male",
+        "appearance": "Silver-streaked brown hair, hazel eyes, forties.",
+        "archetype": "indebted night clerk",
+        "pitch": "Keeps the vault keys and fears his creditors.",
+        "personality": "Fussy, pedantic clerk mask cracking into sweaty desperation; wants his chit burned; adjusts spectacles constantly.",
+        "role": "informant", "encounter_type": "location_bound",
+        "location_region": "Harborside",
+    }]}))
+
+    result = asyncio.run(backend.on_librarian(state, sdk))
+    mod_out = result["module_data"]["wb_npc_system"]
+
+    # Plot Director threads were borrowed WITHOUT spending an _update_story_threads LLM call!
+    assert not any("Extract 3-5 active story threads" in p for p in calls["prompts"])
+    assert any("Break into the customs vault" in t["text"] for t in mod_out["story_threads"])
+
+    gen_prompt = calls["prompts"][-1]
+    assert "Disgraced Admiralty Cipher-Clerk" in gen_prompt
+    assert "Lockpicking" in gen_prompt
+    assert "Day 3" in gen_prompt
+    assert "turning arrogant officials into informants (high, role: actor)" in gen_prompt
+    assert "being blackmailed or stripped of agency (high, role: target)" in gen_prompt
+    assert "Reclaim Aria's cleared name" in gen_prompt
+    assert "A missing ledger with silver clasps" in gen_prompt
+    assert "Player loves verbal cat-and-mouse" in gen_prompt
+
+
+def test_introduction_pass_stands_down_when_plot_director_is_holding():
+    backend = _load_backend()
+    bank = {"npc_1": {
+        "id": "npc_1", "name": "Sela", "race": "human", "gender": "female",
+        "archetype": "informant", "pitch": "Sela hears everything.",
+        "personality": "wry and watchful", "role": "informant", "encounter_type": "encounter",
+        "introduced": False, "status": "unintroduced",
+    }}
+    sdk, calls = _make_sdk(json.dumps({"introduce": True, "npc_id": "npc_1", "reason": "enter"}))
+
+    # 1. Withhold mode during intimate/private beat -> 0 LLM calls, no introduction
+    state_withhold = _state(bank)
+    state_withhold["module_configs"]["wb_plot_director"] = {"plot_enabled": True}
+    state_withhold["module_data"]["wb_plot_director"] = {
+        "status": "active",
+        "thread": {"status": "active", "title": "Port intrigue"},
+        "last_assessment": {"turn": state_withhold["turn"], "scene_mode": "withhold"},
+    }
+    assert asyncio.run(backend._introduction_pass(state_withhold, sdk)) is None
+    assert calls["generate_count"] == 0
+
+    # 2. Deferred climax streak -> 0 LLM calls, no introduction
+    state_defer = _state(bank)
+    state_defer["module_configs"]["wb_plot_director"] = {"plot_enabled": True}
+    state_defer["module_data"]["wb_plot_director"] = {"status": "idle", "defer_streak": 2}
+    assert asyncio.run(backend._introduction_pass(state_defer, sdk)) is None
+    assert calls["generate_count"] == 0
+
+    # 3. Post-thread quiet period -> 0 LLM calls, no introduction
+    state_quiet = _state(bank)
+    state_quiet["turn"] = 6
+    state_quiet["module_configs"]["wb_plot_director"] = {"plot_enabled": True}
+    state_quiet["module_data"]["wb_plot_director"] = {
+        "status": "idle",
+        "thread": None,
+        "last_closed_turn": 5,
+        "next_thread_turn": 8,
+    }
+    assert asyncio.run(backend._introduction_pass(state_quiet, sdk)) is None
+    assert calls["generate_count"] == 0
+
+
+def test_librarian_respects_plot_observation_and_rapid_dialogue_hold():
+    backend = _load_backend()
+    gen_payload = json.dumps({"npcs": [{
+        "name": "Voss", "race": "human", "gender": "male",
+        "appearance": "Grey hair, blue eyes, fifties.",
+        "archetype": "captain", "pitch": "Commands a brig.",
+        "personality": "Crisp demeanor over homesick exhaustion.",
+        "role": "ally", "encounter_type": "encounter",
+    }]})
+
+    # A. Plot Director still in initial observation window -> no NPC generation
+    sdk_obs, obs_calls = _make_sdk(lambda p: "[]" if "story threads" in p else gen_payload)
+    state_obs = _state(mutation_config={"generator_frequency": 3, "demand_driven_generation": False})
+    state_obs["turn"] = 3
+    state_obs["module_configs"]["wb_plot_director"] = {"plot_enabled": True, "observation_turns": 5}
+    state_obs["module_data"]["wb_plot_director"] = {"status": "observing", "profile": {}}
+    res_obs = asyncio.run(backend.on_librarian(state_obs, sdk_obs))
+    assert not res_obs or not res_obs.get("module_data", {}).get("wb_npc_system", {}).get("characters")
+    assert not any("Create" in p and "NPC concepts" in p for p in obs_calls["prompts"])
+
+    # B. Rapid-fire dialogue (<30 in-world minutes since last_gen_minutes) holds generation...
+    sdk_hold, hold_calls = _make_sdk(lambda p: "[]" if "story threads" in p else gen_payload)
+    state_hold = _state(mutation_config={
+        "generator_frequency": 3, "demand_driven_generation": False, "fit_check_enabled": False,
+    })
+    state_hold["turn"] = 6
+    state_hold["module_data"]["wb_npc_system"]["last_gen_turn"] = 3
+    state_hold["module_data"]["wb_npc_system"]["last_gen_minutes"] = 600
+    state_hold["module_data"]["wb_time_tracker"] = {"clock": {"total_minutes_elapsed": 612}}
+    res_hold = asyncio.run(backend.on_librarian(state_hold, sdk_hold))
+    assert not res_hold or not res_hold.get("module_data", {}).get("wb_npc_system", {}).get("characters")
+    assert not any("NPC concepts" in p for p in hold_calls["prompts"])
+
+    # ...until the 2x turn cap (turn - last_gen_turn >= 2 * frequency) overrides the hold.
+    state_hold["turn"] = 9
+    res_cap = asyncio.run(backend.on_librarian(state_hold, sdk_hold))
+    chars = _bank_from_result(res_cap)
+    assert any(n["name"] == "Voss" for n in chars.values())
+
+
+def test_fit_check_rejects_role_inversion_retries_and_filters_rejected_names():
+    backend = _load_backend()
+    gen_attempt = {"n": 0}
+
+    def router(prompt):
+        if "active story threads" in prompt:
+            return "[]"
+        if "continuity and casting editor" in prompt:
+            if "Inquisitor Malakor" in prompt and "Lady Sera" not in prompt:
+                return json.dumps({
+                    "verdict": "reject",
+                    "rejected_names": ["Inquisitor Malakor"],
+                    "critique": "Inverts player's actor role by scripting Aria as helpless captive target.",
+                })
+            if "BadClone" in prompt:
+                return json.dumps({
+                    "verdict": "reject",
+                    "rejected_names": ["BadClone"],
+                    "critique": "BadClone duplicates existing cast; Lady Sera is great.",
+                })
+            return json.dumps({"verdict": "accept", "rejected_names": [], "critique": ""})
+        gen_attempt["n"] += 1
+        if gen_attempt["n"] == 1:
+            return json.dumps({"npcs": [{
+                "name": "Inquisitor Malakor", "race": "human", "gender": "male",
+                "appearance": "Black hair, pale eyes, forties.",
+                "archetype": "captor", "pitch": "Collars the player in irons.",
+                "personality": "Cruel zealot.", "role": "antagonist", "encounter_type": "encounter",
+            }]})
+        # Second attempt includes critique and returns 2 candidates, 1 good + 1 rejected selectively
+        assert "PREVIOUS DRAFT REJECTED" in prompt
+        assert "Inverts player's actor role" in prompt
+        return json.dumps({"npcs": [
+            {
+                "name": "Lady Sera", "race": "elf", "gender": "female",
+                "appearance": "Blonde hair, green eyes, thirties.",
+                "archetype": "haughty envoy", "pitch": "Rival diplomat ripe to be outmaneuvered.",
+                "personality": "Icy courtly poise hiding terror of scandal; wants treaty credit; snaps her fan shut.",
+                "role": "rival", "encounter_type": "encounter",
+            },
+            {
+                "name": "BadClone", "race": "human", "gender": "male",
+                "appearance": "Brown hair, brown eyes, twenties.",
+                "archetype": "extra", "pitch": "Redundant.",
+                "personality": "Flat.", "role": "neutral", "encounter_type": "encounter",
+            },
+        ]})
+
+    sdk, _ = _make_sdk(router)
+    state = _state(mutation_config={
+        "generator_frequency": 3,
+        "demand_driven_generation": False,
+        "fit_check_enabled": True,
+    })
+    state["turn"] = 3
+    result = asyncio.run(backend.on_librarian(state, sdk))
+    names = {n["name"] for n in _bank_from_result(result).values()}
+    assert names == {"Lady Sera"}
+    assert gen_attempt["n"] == 2
+
+
+def test_model_preferences_route_casting_and_tracking_calls():
+    backend = _load_backend()
+    prefs = []
+
+    class PrefLLM:
+        async def generate(self, prompt, model_preference="balanced", **kw):
+            prefs.append((model_preference, prompt))
+            if "LASTING way" in prompt:
+                return json.dumps({"updates": []})
+            if "continuity and casting editor" in prompt:
+                return json.dumps({"verdict": "accept", "rejected_names": [], "critique": ""})
+            if "active story threads" in prompt:
+                return "[]"
+            return json.dumps({"npcs": [{
+                "name": "Nera", "race": "human", "gender": "female",
+                "appearance": "Red hair, grey eyes, twenties.",
+                "archetype": "courier", "pitch": "Runs rooftop packets.",
+                "personality": "Brisk bravado over fear of heights; wants guild tenure; rolls knuckles.",
+                "role": "ally", "encounter_type": "encounter",
+            }]})
+
+    sdk, _ = _make_sdk()
+    sdk.llm = PrefLLM()
+    bank = {"npc_1": _present_npc("npc_1", "Mara")}
+    state = _tracking_state(bank, "Mara checks the watchtower.", mutation_config={
+        "generator_frequency": 5,
+        "demand_driven_generation": False,
+        "casting_ai_model": "smartest",
+        "tracking_ai_model": "fastest",
+    })
+    state["turn"] = 5
+    asyncio.run(backend.on_librarian(state, sdk))
+
+    gen_prefs = [m for m, p in prefs if "NPC concepts" in p]
+    fit_prefs = [m for m, p in prefs if "continuity and casting editor" in p]
+    track_prefs = [m for m, p in prefs if "LASTING way" in p]
+    assert gen_prefs == ["smartest"]
+    assert fit_prefs == ["fastest"]
+    assert track_prefs == ["fastest"]
+
+
+def test_untruncated_notes_story_threads_and_manual_update_context():
+    backend = _load_backend()
+    long_note_prefix = "EARLY_NOTE_FACT: Mara secretly carries the signet of House Vane. "
+    long_notes = long_note_prefix + ("x" * 900) + " LATE_NOTE_FACT"
+    npc = _present_npc("npc_1", "Mara", notes=long_notes)
+    state = _state({"npc_1": npc})
+
+    # 1. _present_characters_context does not slice notes[-400:]
+    ctx = backend._present_characters_context(state, [npc])
+    assert "EARLY_NOTE_FACT" in ctx and "LATE_NOTE_FACT" in ctx
+
+    # 2. _update_story_threads does not slice recent[:2000]
+    early_thread_marker = "EARLY_THREAD_MARKER: The Obsidian Fleet blockaded Saltreach."
+    state["history"] = [
+        early_thread_marker + (" " + "word" * 700),
+        "LATE_THREAD_MARKER: Aria arrived at the docks.",
+    ]
+    sdk_threads, thread_calls = _make_sdk("[]")
+    asyncio.run(backend._update_story_threads(state, sdk_threads))
+    assert "EARLY_THREAD_MARKER" in thread_calls["prompts"][-1]
+    assert "LATE_THREAD_MARKER" in thread_calls["prompts"][-1]
+
+    # 3. /npc update does not slice story[-10000:]
+    early_story_marker = "CHAPTER_ONE_MARKER: Mara swore the blood-oath at Dawnspire."
+    state["history"] = [
+        early_story_marker + (" " + "scene" * 2600),
+        "CHAPTER_TEN_MARKER: Mara stands at the harbor gate.",
+    ]
+    sdk_upd, upd_calls = _make_sdk("{}")
+    asyncio.run(backend.on_command_npc(["update", "npc_1"], state, sdk_upd))
+    assert "CHAPTER_ONE_MARKER" in upd_calls["prompts"][-1]
+    assert "CHAPTER_TEN_MARKER" in upd_calls["prompts"][-1]
+
+
+def test_background_runner_defers_live_turns_patches_snapshots_and_cancels_on_command(tmp_path):
+    import zipfile
+
+    backend = _load_backend()
+    save_id = "save_bg_npc"
+    save_dir = tmp_path / save_id
+    snap_dir = save_dir / "Snapshots"
+    swipe_dir = save_dir / "Swipes"
+    snap_dir.mkdir(parents=True)
+    swipe_dir.mkdir(parents=True)
+
+    initial_state = _state(
+        mutation_config={
+            "generator_frequency": 3,
+            "demand_driven_generation": False,
+            "fit_check_enabled": False,
+            "casting_iterations": 1,
+        },
+        history=["Aria steps onto the rainy pier."],
+    )
+    initial_state["turn"] = 3
+    initial_state["active_save_id"] = save_id
+
+    for zpath in (snap_dir / "turn_3.zip", swipe_dir / "v0.zip"):
+        with zipfile.ZipFile(zpath, "w") as zf:
+            zf.writestr("Module_States/wb_npc_system.json", json.dumps({"characters": {}}))
+    (swipe_dir / "manifest.json").write_text(
+        json.dumps({"turn": 3, "active": 0}), encoding="utf-8"
+    )
+
+    persisted = {"state": json.loads(json.dumps(initial_state)), "saved_turns": []}
+
+    class FakeSaveManager:
+        saves_dir = tmp_path
+
+        def save_turn(self, sid, st, turn_num):
+            persisted["saved_turns"].append((sid, turn_num))
+            with zipfile.ZipFile(snap_dir / f"turn_{turn_num}.zip", "w") as zf:
+                zf.writestr(
+                    "Module_States/wb_npc_system.json",
+                    json.dumps(st["module_data"]["wb_npc_system"]),
+                )
+
+    class FakeSessionManager:
+        active_save_id = save_id
+        save_manager = FakeSaveManager()
+
+        @property
+        def state(self):
+            return persisted["state"]
+
+    class FakeEngine:
+        _turn_hooks_armed = True
+
+        @staticmethod
+        def _deep_merge(base, updates):
+            out = dict(base or {})
+            for k, v in (updates or {}).items():
+                if isinstance(v, dict) and isinstance(out.get(k), dict):
+                    out[k] = FakeEngine._deep_merge(out[k], v)
+                else:
+                    out[k] = v
+            return out
+
+    backend.set_services({
+        "session_manager": FakeSessionManager(),
+        "engine": FakeEngine(),
+    })
+
+    gen_reply = json.dumps({"npcs": [{
+        "name": "Dorian", "race": "human", "gender": "male",
+        "appearance": "Dark curls, grey eyes, thirties.",
+        "archetype": "harbor pilot", "pitch": "Knows the reef channels.",
+        "personality": "Easygoing whistle hiding survivor's guilt; wants his ship salvaged.",
+        "role": "ally", "encounter_type": "encounter",
+    }]})
+    sdk, calls = _make_sdk(lambda p: "[]" if "story threads" in p else gen_reply)
+
+    try:
+        async def run_flow():
+            # During live turn: on_librarian defers LLM work with 0 blocking LLM calls
+            imm = await backend.on_librarian(initial_state, sdk)
+            assert imm is None
+            assert calls["generate_count"] == 0
+
+            # Turn finishes -> spawns background task and persists into state + snapshot + swipe zip
+            await backend.on_turn_stopped(initial_state, sdk, "completed")
+            await asyncio.gather(*list(backend._bg_tasks), return_exceptions=True)
+
+        asyncio.run(run_flow())
+
+        live_chars = persisted["state"]["module_data"]["wb_npc_system"]["characters"]
+        assert any(n["name"] == "Dorian" for n in live_chars.values())
+        assert persisted["saved_turns"] == [(save_id, 3)]
+
+        for zpath in (snap_dir / "turn_3.zip", swipe_dir / "v0.zip"):
+            with zipfile.ZipFile(zpath, "r") as zf:
+                snap_mod = json.loads(zf.read("Module_States/wb_npc_system.json").decode("utf-8"))
+            snap_chars = snap_mod["characters"]
+            assert any(n["name"] == "Dorian" for n in snap_chars.values())
+
+        # Manual /npc command cancels any in-flight background task cleanly
+        async def run_cancel():
+            gate = asyncio.Event()
+
+            async def slow_gen(prompt, **kw):
+                await gate.wait()
+                return "{}"
+
+            slow_sdk, _ = _make_sdk(slow_gen)
+            persisted["state"]["turn"] = 6
+            state_t6 = json.loads(json.dumps(persisted["state"]))
+            await backend.on_librarian(state_t6, slow_sdk)
+            await backend.on_turn_stopped(state_t6, slow_sdk, "completed")
+            assert len(backend._bg_tasks) == 1
+            epoch_before = backend._bg_epoch
+            await backend.on_command_npc(["delete", "npc_nonexistent"], state_t6, sdk)
+            assert backend._bg_epoch > epoch_before
+            gate.set()
+            await asyncio.sleep(0.02)
+
+        asyncio.run(run_cancel())
+    finally:
+        backend._cancel_bg_task()
+        backend.set_services({})
+
 

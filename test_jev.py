@@ -742,4 +742,52 @@ def test_plugin_modules_can_decide_when_jev_enabled(tmp_path):
     assert not d_off.answers and len(requests) == 1
 
 
+def test_npc_introduce_realistic_multi_bucket_distributions(tmp_path):
+    candidates = [
+        {'id': 'n1', 'name': 'Borin', 'pitch': 'A smith who supplies the guard.', 'role': 'ally'},
+        {'id': 'n2', 'name': 'Lyra', 'pitch': 'A courier who haunts the docks.', 'role': 'neutral'},
+    ]
+    state = npc_state()
+    cases = iter([
+        # Realistic intimate/quiet 'none' (conf 0.52 < 0.90, none 0.72 >= 0.60) -> accepted as introduce=False
+        ('none', 0.52, {'option_0': 0.14, 'option_1': 0.12, 'none': 0.72, 'unsupported': 0.02}),
+        # Realistic candidate pick (conf 0.68 < 0.90, option_0 0.78 >= 0.55, candidate_mass 0.88 >= 0.80) -> grounded & accepted
+        ('option_0', 0.68, {'option_0': 0.78, 'option_1': 0.10, 'none': 0.10, 'unsupported': 0.02}),
+        # Ambiguous candidate pick where 'none' mass is too high (0.28 -> candidate_mass 0.70 < 0.80) -> fallback None
+        ('option_0', 0.40, {'option_0': 0.60, 'option_1': 0.10, 'none': 0.28, 'unsupported': 0.02}),
+        # Weak 'none' below 0.60 -> fallback None
+        ('none', 0.25, {'option_0': 0.25, 'option_1': 0.20, 'none': 0.53, 'unsupported': 0.02}),
+    ])
+
+    def handler(request, payload):
+        qs = payload['questions']
+        if 'npc' in qs:
+            selected, conf, probs = next(cases)
+            assert 'takes precedence during intimate' in qs['npc']['criteria']['none']
+            return httpx.Response(200, json={
+                'model': 'typesafe/jev-1.14-20261014',
+                'usage': {'input_tokens': 380, 'output_tokens': 35},
+                'answers': {
+                    'npc': {
+                        'type': 'choice',
+                        'choice': selected,
+                        'confidence': conf,
+                        'probabilities': probs,
+                    },
+                },
+            })
+        return httpx.Response(200, json=response_for(payload, {'category': 'need', 'evidence': 'option_0'}))
+
+    _, sdk, _, _, _ = setup_jev(tmp_path, handler=handler)
+    v1, d1 = run(jev_tasks.introduce(sdk, state, candidates, 'Check scene.'))
+    assert v1 == {'introduce': False} and d1.outcome == 'accepted'
+    v2, d2 = run(jev_tasks.introduce(sdk, state, candidates, 'The player needs a smith.'))
+    assert v2['introduce'] is True and v2['npc_id'] == 'n1' and d2.outcome == 'accepted'
+    v3, _ = run(jev_tasks.introduce(sdk, state, candidates, 'Ambiguous scene.'))
+    assert v3 is None
+    v4, _ = run(jev_tasks.introduce(sdk, state, candidates, 'Weak none scene.'))
+    assert v4 is None
+
+
+
 

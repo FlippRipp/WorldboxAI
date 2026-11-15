@@ -1,12 +1,15 @@
-"""NPC System -- background character generation and introduction management."""
+"""NPC System -- background character generation, depth-focused casting, and introduction management."""
+from copy import deepcopy
 import asyncio
 import json
 import re
 import urllib.parse
 import uuid
+from backend.engine import director_shared as _shared
 from backend.engine import jev_tasks
 from backend.engine.jev import Decision, fallback_generate
 
+MODULE_ID = "wb_npc_system"
 
 NPC_ROLES = ["quest_giver", "antagonist", "ally", "informant", "rival", "neutral", "wildcard"]
 NPC_STATUSES = ["unintroduced", "active", "departed", "deceased"]
@@ -26,6 +29,8 @@ MAX_GEN_REQUEST_CHARS = 500  # cap on the free-text /npc generate brief
 DEFAULT_GENERATOR_FREQUENCY = 5
 DEFAULT_MAX_POOL = 6
 DEFAULT_TRAVEL_COOLDOWN_TURNS = 10
+MIN_GEN_INTERVAL_MINUTES = 30  # avoid periodic NPC generation mid-conversation on rapid 1-min turns
+FIT_MAX_REJECTS = 1
 
 # Distance-tier check cadence, keyed off wb_time_tracker's total_minutes_elapsed
 # (turns vary 5-1440 in-world minutes each, so gating on minutes rather than
@@ -34,26 +39,173 @@ TRAVEL_CHECK_MINUTES = {"near": 60, "far": 360, "very_far": 1440}
 TRAVEL_HOP_BUDGET = {"near": 1, "far": 3, "very_far": 1}
 MOTIVATION_THRESHOLD = 0.3
 
+# Shared non-blocking background runner (services injected at startup via set_services).
+_bg_runner = _shared.ModuleBackgroundRunner(
+    MODULE_ID,
+    label="NPC System",
+    default_data=lambda: {"characters": {}},
+)
+
+
+def set_services(services: dict) -> None:
+    _bg_runner.set_services(services)
+
+
+def _cancel_bg_task() -> None:
+    _bg_runner.cancel()
+
+
+def __getattr__(name: str):
+    if name == "_services":
+        return _bg_runner.services
+    if name == "_bg_tasks":
+        return _bg_runner.tasks
+    if name == "_bg_epoch":
+        return _bg_runner.epoch
+    if name == "_current_bg_task":
+        return _bg_runner.current_task
+    if name == "_current_bg_job_meta":
+        return _bg_runner.current_job_meta
+    if name == "_pending_bg_job":
+        return _bg_runner.pending_job
+    if name == "_staged_bg_updates":
+        return _bg_runner.staged_updates
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# --------------------------------------------------------------------------
+# Character craft rubric, Casting Notebook system prompt, & instruction slots
+# --------------------------------------------------------------------------
+
+CHARACTER_CRAFT_RUBRIC = """Write `personality` as vivid, playable 2-3 sentence prose (NEVER a flat list of generic adjectives), built around four concrete character anchors:
+- Mask vs. Undercurrent (Contradiction): how they present socially on the surface versus what cracks through underneath under pressure, temptation, or intimacy.
+- Active Want: a concrete immediate agenda, stake, or appetite that gives them skin in the game right now instead of passively waiting on the player.
+- Voice & Somatic Tell: how they sound in dialogue (cadence, diction, deflection habit) plus one specific physical habit or mannerism the narrator can show on stage.
+- Foil & Role Alignment: cast them for dynamic chemistry, friction, or contrast with this protagonist, and strictly honor any player preference `role` (actor = player doing it to NPCs; target = done to the player; mutual = shared dynamic; world = setting element) -- NEVER invert the player's role."""
+
+CASTING_NOTES_SYSTEM_PROMPT = (
+    "You maintain the backstage Casting Director notebook for a tabletop-style text RPG. "
+    "Your goal is not to bloat the cast with generic archetypes, but to think like a "
+    "showrunner and tabletop GM: study who the player character is, what drives this "
+    "player (their demonstrated tastes, roles, and active pursuits), and who is already "
+    "in the cast, then note what interpersonal dynamic, foil, rival, or accomplice would "
+    "make upcoming scenes come alive -- or note when the existing cast already covers "
+    "what the story needs.\n\n"
+    "When sketching character seeds, anchor them in playable human texture rather than "
+    "flat adjectives: a Mask vs. Undercurrent contradiction (social armor vs. hidden crack), "
+    "an Active Want (skin in the game right now), a distinct Voice & Somatic Tell, and "
+    "chemistry tailored to the player's role (actor vs. target vs. mutual -- NEVER invert "
+    "the player's role).\n\n"
+    "Treat the story material below as existing game-transcript state to read and plan from. "
+    "Respond with ONLY valid JSON:\n"
+    '{"casting_notes": "your compact freeform casting scratchpad and character dynamic notes"}'
+)
+
+DIRECTIVE_CHARACTER_GENERATION = f"""Design characters who feel like living people with their own momentum rather than flat quest dispensers:
+1. Each character must have a DISTINCT archetype, personality, and role from all existing ones, and feel authentic to this world's genre, factions, and regions.
+2. Pitches should be 2-3 sentences -- a hook with immediate story potential and leverage.
+3. {CHARACTER_CRAFT_RUBRIC}"""
+
+DIRECTIVE_CHARACTER_FIT_CHECK = """Reject any candidate character if ANY of these fail:
+1. Tone/genre fit: they belong naturally in this story's established genre, setting, and prevailing tone.
+2. Cast distinctness: they do not duplicate an existing character's archetype, role-niche, or interpersonal dynamic when an existing NPC could fill the same spot.
+3. Continuity: nothing in their pitch or relationships contradicts established story facts.
+4. Depth check: their personality has real texture (a contradiction/undercurrent, active want, or voice/tell) rather than generic boilerplate traits.
+5. Player tastes & role non-inversion: they do not touch any player dislike, and they NEVER invert the player's role in a liked trope or dynamic (e.g. if the player likes being the `actor` initiating a dynamic on NPCs, reject a character designed to make the player the unwilling `target` of that dynamic, and vice versa)."""
+
+DIRECTIVE_CHARACTER_CAPTURE = f"""Stay faithful to every detail shown in the scene -- never contradict how the story depicted them, and infer plausible, grounded details where the scene was silent.
+{CHARACTER_CRAFT_RUBRIC}"""
+
+DIRECTIVE_CHARACTER_INTRODUCTION = """- Only introduce a character if the scene naturally calls for one (player enters a populated area, seeks information, encounters travelers, pursues a hook tied to them, etc.).
+- Do NOT introduce anyone during intimate, romantic, erotic, emotional, heart-to-heart, or private conversations/moments -- let interpersonal beats breathe uninterrupted.
+- Do NOT introduce anyone if the player is alone in isolated wilderness, mid-combat, or the scene is self-contained.
+- If introducing, pick the character that best fits the scene's tone, timing, and needs, preferring location-bound NPCs over encounter NPCs when at their specific location.
+- Never introduce an NPC in the very first turn (turn 0), and never re-introduce an NPC who is already introduced."""
+
+DIRECTIVE_CHARACTER_TRACKING = """Report changes ONLY in these areas:
+- name: what the character is called (revealed true names of epithet records, adopted aliases/titles, or a new name the story consistently uses)
+- appearance / physical condition: new scars, wounds, lost limbs, aging, a transformation, altered hair/eyes/skin, changed garb that defines their look
+- personality: a lasting shift in temperament, mask/undercurrent, active want, demeanor, or voice/mannerisms (rewritten as 2-3 sentence prose preserving unchanged core traits)
+- pitch: their concept or role in the story materially changed (a secret revealed, an allegiance switched, their story hook resolved or replaced)
+- role: their narrative function clearly shifted
+- status: the story shows them dying (deceased) or leaving the story for good (departed)
+- notes: noteworthy things they did or revealed, appended to the running log
+Do NOT report momentary emotions, temporary states (drunk, tired, briefly disguised), location changes, or characters who do not actually appear in this turn's scene."""
+
+INSTRUCTION_SLOTS = [
+    {
+        "id": "character_generation",
+        "label": "Character Generation",
+        "description": "How new NPCs are cast and written: depth anchors, voice, foil chemistry, and role alignment.",
+        "default": DIRECTIVE_CHARACTER_GENERATION,
+    },
+    {
+        "id": "character_fit_check",
+        "label": "Character Quality Gate",
+        "description": "The criteria a newly generated NPC must pass before entering the character bank.",
+        "default": DIRECTIVE_CHARACTER_FIT_CHECK,
+    },
+    {
+        "id": "character_capture",
+        "label": "Story Character Capture",
+        "description": "How characters introduced directly by the storyteller are profiled into full records.",
+        "default": DIRECTIVE_CHARACTER_CAPTURE,
+    },
+    {
+        "id": "character_introduction",
+        "label": "Character Introduction Pacing",
+        "description": "When the Introduction Director brings a waiting character onstage vs. holding back.",
+        "default": DIRECTIVE_CHARACTER_INTRODUCTION,
+    },
+    {
+        "id": "character_tracking",
+        "label": "Character Change Tracking",
+        "description": "What counts as a lasting change when updating NPC records after scenes.",
+        "default": DIRECTIVE_CHARACTER_TRACKING,
+    },
+]
+
+_SLOT_DEFAULTS = {slot["id"]: slot["default"] for slot in INSTRUCTION_SLOTS}
+
+
+def get_instruction_slots() -> list[dict]:
+    """Generic module contract: the customizable instruction slots this module
+    exposes to the UI and scenario overrides."""
+    return [dict(slot) for slot in INSTRUCTION_SLOTS]
+
+
+def _directive(slot_id: str, instructions: dict | None) -> str:
+    text = str((instructions or {}).get(slot_id) or "").strip()
+    return text or _SLOT_DEFAULTS[slot_id]
+
 
 def _config(state: dict) -> dict:
-    return state.get("module_configs", {}).get("wb_npc_system", {})
+    return state.get("module_configs", {}).get(MODULE_ID, {})
+
+
+def _own_data(state: dict) -> dict:
+    return state.get("module_data", {}).get(MODULE_ID, {})
 
 
 def _parse_json_block(raw: str):
-    """Strip Markdown code fences and parse a JSON value from an LLM reply."""
-    text = (raw or "").strip()
-    if text.startswith("```"):
-        parts = text.split("```")
-        text = parts[1] if len(parts) > 1 else text
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return None
+    return _shared.parse_json_block(raw)
+
+
+async def _llm_generate(sdk, prompt: str, model_preference: str = "balanced",
+                        system_prompt: str | None = None) -> str:
+    return await _shared.llm_generate(
+        sdk, MODULE_ID, prompt, model_preference=model_preference, system_prompt=system_prompt
+    )
+
+
+def _normalize_personality(value) -> str:
+    """Normalize an NPC personality (prose string or legacy trait list) into a
+    clean prose string."""
+    if isinstance(value, list):
+        return ", ".join(str(p).strip() for p in value if str(p).strip())
+    if isinstance(value, str):
+        return value.strip()
+    return ""
 
 
 def _profile_text(npc: dict) -> str:
@@ -67,7 +219,7 @@ def _profile_text(npc: dict) -> str:
     parts.append(f"Role: {npc.get('role', 'neutral')}")
     if npc.get("appearance"):
         parts.append(f"Appearance: {npc['appearance']}")
-    personality = ", ".join(npc.get("personality", []))
+    personality = _normalize_personality(npc.get("personality", ""))
     if personality:
         parts.append(f"Personality: {personality}")
     if npc.get("pitch"):
@@ -140,7 +292,7 @@ def _build_npc_record(npc_data: dict, turn: int, bank: dict, *, introduced: bool
         "appearance": npc_data.get("appearance", ""),
         "archetype": npc_data.get("archetype", ""),
         "pitch": npc_data.get("pitch", ""),
-        "personality": npc_data.get("personality", []),
+        "personality": _normalize_personality(npc_data.get("personality", "")),
         "role": role,
         "encounter_type": "location_bound" if introduced else npc_data.get("encounter_type", "encounter"),
         "location_node_id": node_id if introduced else npc_data.get("location_node_id"),
@@ -173,6 +325,8 @@ def _get_bank(state: dict) -> dict[str, dict]:
     for npc in bank.values():
         if not isinstance(npc, dict):
             continue
+        if isinstance(npc.get("personality"), list):
+            npc["personality"] = _normalize_personality(npc["personality"])
         if npc.get("status") == "active" and not npc.get("introduced"):
             npc["introduced"] = True
             if npc.get("met_turn") is None:
@@ -238,13 +392,24 @@ def _scene_summary(state: dict) -> str:
         f"Player action: {state.get('input_text', '(system/game start)')}",
         f"Turn: {state.get('turn', 0)}",
     ]
+    clock = _shared.get_time_clock(state)
+    if clock is not None:
+        parts.append(f"<in_world_time>\nCurrent in-world date and time: {_shared.format_clock_text(clock)}.\n</in_world_time>")
 
     if recent:
         parts.append("Recent events:")
         for i, h in enumerate(recent):
             parts.append(f"  [{i + 1}] {h}")
 
-    threads = _normalize_threads(state.get("module_data", {}).get("wb_npc_system", {}).get("story_threads", []))
+    recent_inputs = _shared.recent_player_inputs(state)
+    if recent_inputs:
+        parts.append("Recent player actions:")
+        for inp in recent_inputs:
+            parts.append(f"  - {inp}")
+
+    threads = _shared.plot_threads_for_npc(state, _get_bank(state))
+    if threads is None:
+        threads = _normalize_threads(state.get("module_data", {}).get("wb_npc_system", {}).get("story_threads", []))
     if threads:
         parts.append("Active story threads:")
         for t in threads:
@@ -272,10 +437,12 @@ def _bank_summary(bank: dict[str, dict]) -> str:
     lines = []
     for npc_id, npc in bank.items():
         status = "(introduced)" if npc.get("introduced") else "(unintroduced)"
+        personality = _normalize_personality(npc.get("personality", ""))
+        pers_line = f"\n    Personality: {personality}" if personality else ""
         lines.append(
             f"  - [{npc_id}] {npc.get('name')} -- {npc.get('archetype')} "
             f"({npc.get('role', 'neutral')}, {npc.get('encounter_type', 'encounter')}) {status}\n"
-            f"    Pitch: {npc.get('pitch', '')}"
+            f"    Pitch: {npc.get('pitch', '')}{pers_line}"
         )
         rels = npc.get("relationships", [])
         if rels:
@@ -285,96 +452,150 @@ def _bank_summary(bank: dict[str, dict]) -> str:
 
 
 def _world_context(state: dict) -> str:
+    parts = list(_shared.setting_material(state))
     world_data = state.get("world_data", {})
-    if not world_data:
-        return ""
+    if isinstance(world_data, dict) and world_data:
+        regions = world_data.get("regions", {}).get("regions", [])
+        if regions:
+            reg_lines = ["Regions:"]
+            for r in regions:
+                reg_lines.append(f"  - {r.get('name', 'unknown')}: terrain={r.get('terrain', '?')}, climate={r.get('climate', '?')}")
+            factions = world_data.get("regions", {}).get("factions", [])
+            if factions:
+                reg_lines.append(f"  Factions: {', '.join(factions)}")
+            parts.append("\n".join(reg_lines))
 
-    parts = []
-    regions = world_data.get("regions", {}).get("regions", [])
-    if regions:
-        parts.append("Regions:")
-        for r in regions:
-            parts.append(f"  - {r.get('name', 'unknown')}: terrain={r.get('terrain', '?')}, climate={r.get('climate', '?')}")
-        factions = world_data.get("regions", {}).get("factions", [])
-        if factions:
-            parts.append(f"  Factions: {', '.join(factions)}")
+    protagonist = _shared.protagonist_context_block(state)
+    if protagonist:
+        parts.append(protagonist)
 
-    lore = world_data.get("lore", {})
-    if lore:
-        prem = lore.get("premise", "")
-        if prem:
-            parts.append(f"Premise: {prem}")
-
-    return "\n".join(parts)
+    return "\n\n".join(parts)
 
 
 def _plot_profile_block(state: dict) -> str:
-    """When the Plot Director module is present, surface its learned story
-    profile (tone, themes, the player's weighted likes/dislikes and observed
-    avoids) and its evolving narrative direction (premise, heading, open
-    questions) so newly generated characters serve the same direction. Returns
-    "" when the module is absent, unmet, or has learned nothing yet."""
-    plot = state.get("module_data", {}).get("wb_plot_director")
-    if not isinstance(plot, dict):
+    """Borrow Plot Director's learned player profile (including role-explicit
+    likes/avoids/dislikes), narrative direction, active thread, and GM notes."""
+    return _shared.format_plot_casting_block(state)
+
+
+def _casting_notes_block(npc_mod_data: dict) -> str:
+    notes = str((npc_mod_data or {}).get("casting_notes") or "").strip()
+    if not notes:
         return ""
-    profile = plot.get("profile")
-    profile = profile if isinstance(profile, dict) else {}
-    direction = plot.get("direction")
-    direction = direction if isinstance(direction, dict) else {}
+    return f"CASTING NOTEBOOK (your backstage character dynamic and foil notes):\n{notes}"
 
-    tone = str(profile.get("tone") or "").strip()
-    themes = [str(t).strip() for t in profile.get("themes", []) if str(t).strip()]
 
-    def _prefs(entries) -> list[str]:
-        out = []
-        for e in entries if isinstance(entries, list) else []:
-            if isinstance(e, dict):
-                text = str(e.get("text", "")).strip()
-                weight = e.get("weight", "medium")
-            else:
-                text, weight = str(e).strip(), "medium"
-            if text:
-                out.append(f"{text} ({weight})")
-        return out
+def _casting_iterations(config: dict) -> int:
+    return _shared.planning_iterations(config, "casting_iterations", _bg_runner.services)
 
-    likes = _prefs(profile.get("likes"))
-    dislikes = _prefs(profile.get("dislikes"))
-    avoids = _prefs(profile.get("avoids"))
 
-    premise = str(direction.get("premise") or "").strip()
-    heading = str(direction.get("heading") or "").strip()
-    questions = [str(q).strip() for q in direction.get("open_questions", []) if str(q).strip()]
+async def _iterate_casting_notes(state: dict, sdk, own_data: dict, bank: dict, passes: int = 1) -> str:
+    """Run 1-2 lightweight Casting Director notebook passes to brainstorm what
+    interpersonal dynamic or foil the cast needs (or confirm the existing cast suffices)."""
+    config = _config(state)
+    notes = str((own_data or {}).get("casting_notes") or "").strip()
+    model_pref = config.get("casting_ai_model", "smartest")
+    wctx = _world_context(state)
+    plot_block = _plot_profile_block(state)
+    scene = _scene_summary(state)
+    bank_text = _bank_summary(bank)
 
-    if not (tone or themes or likes or dislikes or avoids or premise):
-        return ""
+    for _ in range(max(0, int(passes))):
+        notes_section = f"\n\n{_casting_notes_block({'casting_notes': notes})}" if notes else ""
+        plot_section = f"\n\n{plot_block}" if plot_block else ""
+        prompt = f"""WORLD & PROTAGONIST CONTEXT:
+{wctx}{plot_section}{notes_section}
 
-    lines = [
-        "STORY DIRECTION (from the Plot Director -- align this character with the story's "
-        "established tone and themes and the player's tastes; the weight in parentheses marks "
-        "how strongly the player feels):"
-    ]
-    if premise:
-        lines.append(f"Arc premise: {premise}")
-    if heading:
-        lines.append(f"Heading: {heading}")
-    if questions:
-        lines.append("Open questions: " + "; ".join(questions))
-    if tone:
-        lines.append(f"Tone: {tone}")
-    if themes:
-        lines.append(f"Themes: {', '.join(themes)}")
-    if likes:
-        lines.append(f"Player enjoys (lean into these): {'; '.join(likes)}")
-    if dislikes:
-        lines.append(f"Player dislikes (steer clear of these): {'; '.join(dislikes)}")
-    if avoids:
-        lines.append(f"Player tends to steer away from (observed): {'; '.join(avoids)}")
-    return "\n".join(lines)
+CURRENT STORY STATE:
+{scene}
+
+EXISTING CAST:
+{bank_text}
+
+Write or refine your working Casting Director notes for this story right now.
+
+Respond with ONLY valid JSON:
+{{"casting_notes": "your compact freeform casting scratchpad and character dynamic notes"}}"""
+        raw = await _llm_generate(
+            sdk, prompt, model_preference=model_pref, system_prompt=CASTING_NOTES_SYSTEM_PROMPT
+        )
+        parsed = _parse_json_block(raw)
+        if isinstance(parsed, dict) and str(parsed.get("casting_notes") or "").strip():
+            notes = str(parsed.get("casting_notes")).strip()
+    return notes
+
+
+async def _fit_check_npcs(state: dict, sdk, candidates: list[dict], bank: dict) -> tuple[list[dict], str]:
+    """Quality gate vetting generated NPCs against genre/tone fit, cast redundancy,
+    continuity, depth, player dislikes, and player role non-inversion. Fails open
+    on malformed/unparseable replies so transient LLM hiccups never lose valid work."""
+    if not candidates:
+        return [], ""
+    config = _config(state)
+    if not config.get("fit_check_enabled", True):
+        return candidates, ""
+
+    wctx = _world_context(state)
+    plot_block = _plot_profile_block(state)
+    plot_section = f"\n\n{plot_block}" if plot_block else ""
+    scene = _scene_summary(state)
+    bank_text = _bank_summary(bank)
+    cand_json = json.dumps(candidates, ensure_ascii=False)
+
+    prompt = f"""You are a continuity and casting editor for a text-based RPG. Review the candidate NPC(s) below before they enter the game's character pool.
+
+WORLD & PROTAGONIST CONTEXT:
+{wctx}{plot_section}
+
+CURRENT STORY STATE:
+{scene}
+
+EXISTING CAST:
+{bank_text}
+
+CANDIDATE CHARACTERS TO VET:
+{cand_json}
+
+{_directive("character_fit_check", state.get("module_instructions"))}
+
+Respond with ONLY valid JSON:
+{{"verdict": "accept|reject", "rejected_names": ["exact candidate name if rejecting"], "critique": "one concise sentence explaining what failed, or empty if accepted"}}"""
+
+    try:
+        model_pref = config.get("tracking_ai_model", "balanced")
+        raw = await _llm_generate(sdk, prompt, model_preference=model_pref)
+        parsed = _parse_json_block(raw)
+    except Exception as e:
+        print(f"[NPC System] Fit-check failed open: {e}")
+        return candidates, ""
+
+    if not isinstance(parsed, dict):
+        return candidates, ""
+    verdict = str(parsed.get("verdict") or "").strip().lower()
+    if verdict != "reject":
+        return candidates, ""
+
+    critique = str(parsed.get("critique") or "").strip()
+    raw_rejected = parsed.get("rejected_names")
+    rejected_lower = {
+        str(n).strip().lower()
+        for n in (raw_rejected if isinstance(raw_rejected, list) else [])
+        if str(n).strip()
+    }
+    if rejected_lower:
+        kept = [
+            c for c in candidates
+            if str(c.get("name") or "").strip().lower() not in rejected_lower
+        ]
+        if len(kept) < len(candidates):
+            return kept, critique
+    return [], critique
 
 
 async def _update_story_threads(state: dict, sdk) -> list[dict]:
     """Ask the LLM to extract active story threads from recent history, tagged with
-    which existing NPCs (if any) each thread involves."""
+    which existing NPCs (if any) each thread involves. Used only as a fallback when
+    Plot Director is absent or has no active thread/direction yet."""
     history = state.get("history", [])
     if not history:
         return []
@@ -385,7 +606,7 @@ async def _update_story_threads(state: dict, sdk) -> list[dict]:
     prompt = f"""Extract 3-5 active story threads from this RPG narrative. These are ongoing plotlines, goals, or tensions.
 
 Narrative:
-{recent[:2000]}
+{recent}
 
 EXISTING CHARACTERS:
 {bank_text}
@@ -397,20 +618,8 @@ Respond with ONLY a JSON array:
 [{{"text": "short thread description", "npc_ids": ["npc_xxxxxxxx"]}}, ...]"""
 
     try:
-        sdk.llm._current_module = "wb_npc_system"
-        try:
-            result = await sdk.llm.generate(prompt, model_preference="fastest")
-        finally:
-            sdk.llm._current_module = ""
-        result = result.strip()
-        if result.startswith("```"):
-            parts = result.split("```")
-            result = parts[1] if len(parts) > 1 else result
-            if result.startswith("json"):
-                result = result[4:]
-            result = result.strip()
-
-        parsed = json.loads(result)
+        result = await _llm_generate(sdk, prompt, model_preference="fastest")
+        parsed = _parse_json_block(result)
         if not isinstance(parsed, list):
             return []
 
@@ -598,22 +807,37 @@ def _present_characters_context(state: dict, present: list[dict]) -> str:
         lines.append(f"- {_profile_text(npc)}{party}")
         notes = str(npc.get("notes", "")).strip()
         if notes:
-            lines.append(f"  Notes: {notes[-400:]}")
+            lines.append(f"  Notes: {notes}")
     return "\n".join(lines)
 
 
+def _state_with_staged_overlay(state: dict) -> dict:
+    """When a background pass finished while a new turn started, overlay its
+    staged NPC updates onto a shallow state view for context gathering."""
+    if _bg_runner.staged_updates is None:
+        return state
+    overlaid_mod = _bg_runner.overlay_staged(state, _own_data(state))
+    if overlaid_mod is _own_data(state):
+        return state
+    view = dict(state)
+    view["module_data"] = {**(state.get("module_data") or {}), MODULE_ID: overlaid_mod}
+    return view
+
+
 async def on_gather_context(state: dict, sdk) -> dict | None:
+    _bg_runner.reconcile_on_gather(state)
+    effective_state = _state_with_staged_overlay(state)
     result = {}
 
     # Scene presence (active characters) and the introduction pass
     # (unintroduced candidates) look at disjoint parts of the bank, so their
     # LLM calls run concurrently instead of back-to-back.
     present, introduction = await asyncio.gather(
-        _present_npcs(state, sdk),
-        _introduction_pass(state, sdk),
+        _present_npcs(effective_state, sdk),
+        _introduction_pass(effective_state, sdk),
     )
 
-    context = _present_characters_context(state, present)
+    context = _present_characters_context(effective_state, present)
     if context:
         result["context_string"] = context
 
@@ -642,6 +866,11 @@ async def _introduction_pass(state: dict, sdk) -> dict | None:
     if state.get("turn", 0) == 0 or not config.get("introduction_enabled", True):
         return None
 
+    # Stand down whenever Plot Director is holding back external world momentum
+    # (intimate/emotional withhold, deferred mid-climax hold, or between-thread quiet period).
+    if _shared.is_plot_holding(state):
+        return None
+
     bank = _get_bank(state)
     candidates = _filter_candidates(state)
 
@@ -654,13 +883,14 @@ async def _introduction_pass(state: dict, sdk) -> dict | None:
     for i, npc in enumerate(candidates):
         need = str(npc.get("creation_need", "") or "").strip()
         need_line = f"    Created for: {need}\n" if need else ""
+        personality = _normalize_personality(npc.get("personality", ""))
         candidate_text += (
             f"[{i}] ID: {npc['id']} | {npc['name']} ({npc.get('race', '?')}, {npc.get('gender', '?')})\n"
             f"    Archetype: {npc.get('archetype', '')}\n"
             f"    Role: {npc.get('role', 'neutral')}\n"
             f"    Pitch: {npc.get('pitch', '')}\n"
             f"{need_line}"
-            f"    Personality: {', '.join(npc.get('personality', []))}\n"
+            f"    Personality: {personality}\n"
             f"    Type: {npc.get('encounter_type', 'encounter')}\n\n"
         )
 
@@ -673,12 +903,7 @@ AVAILABLE CHARACTERS (unintroduced, in this location):
 {candidate_text}
 
 RULES:
-- Only introduce a character if the scene naturally calls for one (player enters a populated area, seeks information, encounters travelers, needs help, etc.)
-- Do NOT introduce anyone if the player is alone in wilderness, mid-combat, or the scene is self-contained.
-- If introducing, pick the character that best fits the scene's tone and needs.
-- Prefer location-bound NPCs over encounter NPCs when at their specific location.
-- IMPORTANT: Never introduce an NPC in the very first turn (turn 0) -- the opening scene should establish the world first.
-- An NPC who is already in the story (introduced) should not be re-introduced.
+{_directive("character_introduction", state.get("module_instructions"))}
 
 Respond with ONLY valid JSON:
 {{"introduce": true/false, "npc_id": "id or null", "reason": "one sentence why/why not"}}"""
@@ -687,15 +912,9 @@ Respond with ONLY valid JSON:
     try:
         result = (json.dumps(decision) if decision is not None else
                   await fallback_generate(sdk, decision_call, prompt, "fastest"))
-        result = result.strip()
-        if result.startswith("```"):
-            parts = result.split("```")
-            result = parts[1] if len(parts) > 1 else result
-            if result.startswith("json"):
-                result = result[4:]
-            result = result.strip()
-
-        decision = json.loads(result)
+        decision = _parse_json_block(result)
+        if not isinstance(decision, dict):
+            return None
     except Exception as e:
         print(f"[NPC System] Introduction Agent failed: {e}")
         return None
@@ -718,8 +937,9 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict | None:
     if block_id != "npc_introduction":
         return None
 
-    bank = _get_bank(state)
-    npc_data = state.get("module_data", {}).get("wb_npc_system", {})
+    effective_state = _state_with_staged_overlay(state)
+    bank = _get_bank(effective_state)
+    npc_data = effective_state.get("module_data", {}).get("wb_npc_system", {})
     pending_id = npc_data.get("pending_introduction")
     reason = npc_data.get("introduction_reason", "")
 
@@ -727,7 +947,7 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict | None:
         return None
 
     npc = bank[pending_id]
-    personality = ', '.join(npc.get('personality', []))
+    personality = _normalize_personality(npc.get("personality", ""))
 
     past = await sdk.memory.recall(pending_id, limit=2)
     past_section = ""
@@ -736,7 +956,7 @@ async def on_render_prompt_block(block: dict, state: dict, sdk) -> dict | None:
         past_section = f"\nPast interactions:\n{past_lines}\n"
 
     content = f"""<npc_introduction>
-A new character should be introduced in this scene. Weave them naturally into the narrative.
+A prepared character has a natural opening to enter this scene. Follow the player's lead first: weave them in organically where the player's action gives room, never overriding what the player is doing or intruding on a private moment.
 
 Character to introduce:
   Name: {npc.get('name')}
@@ -748,14 +968,12 @@ Character to introduce:
   Narrative Role: {npc.get('role', 'neutral')}
   Character Pitch: {npc.get('pitch')}
 
-Why they should appear now: {reason}
+Why they fit this moment: {reason}
 {past_section}
-How to introduce them:
-- Make their entrance feel organic to the scene
-- Show their personality through action and dialogue
-- Do not dump their entire backstory -- reveal character through interaction
-
-IMPORTANT: Mention the character's name clearly in the narrative so they can be identified.
+How to bring them on stage:
+- Make their entrance feel unhurried and organic to the setting and current action
+- Show their personality, voice, physical mannerisms, and immediate agenda through action and dialogue rather than exposition dumps
+- Mention their name ({npc.get('name')}) naturally when they introduce themselves or someone addresses them (if their name would not naturally surface yet on first sight, make their look and demeanor unmistakably match this profile)
 </npc_introduction>"""
 
     return {"content": content}
@@ -905,7 +1123,7 @@ def _finish_rename(npc: dict, old_name: str) -> None:
     if not old_name or old_name.lower() == new_name.lower():
         return
     pattern = re.compile(rf"\b{re.escape(old_name)}\b", re.IGNORECASE)
-    for field in ("appearance", "pitch", "notes"):
+    for field in ("appearance", "personality", "pitch", "notes"):
         text = npc.get(field)
         if isinstance(text, str) and pattern.search(text):
             npc[field] = pattern.sub(new_name, text)
@@ -1021,7 +1239,12 @@ CHARACTERS ALREADY ON RECORD (for identity checks -- these are already tracked):
                       '{"existing_npc_id": "<their npc_id from the record list>", "name": "<the name '
                       'the story now uses>"} for that character. Only profile genuinely new, separate individuals.')
 
-    prompt = f"""You are a character designer for a text RPG. The story just introduced the following characters on its own. Build a full character record for EACH one, staying faithful to how they appear in the scene — do not contradict it, and infer sensible details where the scene is silent.
+    wctx = _world_context(state)
+    plot_block = _plot_profile_block(state)
+    context_extras = "\n\n".join(b for b in (wctx, plot_block) if b)
+    context_section = f"\n\nWORLD & STORY CONTEXT:\n{context_extras}" if context_extras else ""
+
+    prompt = f"""You are a character designer for a text RPG. The story just introduced the following characters on its own. Build a full character record for EACH one, staying faithful to how they appear in the scene — do not contradict it, and infer sensible details where the scene is silent.{context_section}
 
 SCENE:
 {scene}
@@ -1031,24 +1254,23 @@ CHARACTERS TO PROFILE (use these exact names):
 
 Some of these names may be descriptive epithets for characters the story has not named yet (e.g. 'The Hooded Stranger'). Keep such an epithet as the name exactly as given -- do NOT invent a real name for them; the record is renamed once the story reveals one.{dedup_rule}
 
+{_directive("character_capture", state.get("module_instructions"))}
+
 For each character return:
 - name (exactly as given above)
 - race, gender (infer from the scene; use "unknown" if truly unclear)
 - appearance: 1-2 sentence physical description grounded in the scene; ALWAYS state hair color and eye color (or the being's closest equivalent -- fur, scales, glow) and their visual age (how old they look, e.g. "appears mid-twenties", "elderly"), inferring plausible ones where the scene is silent
 - archetype: short label
 - pitch: 2-3 sentence concept with a story hook
-- personality: exactly 3 trait keywords
+- personality: 2-3 sentence prose capturing their outward mask vs. undercurrent contradiction, immediate active want, and voice/physical tell
 - role: one of quest_giver|antagonist|ally|informant|rival|neutral|wildcard
 
 Respond with ONLY valid JSON:
-{{"npcs": [{{"name": "string", "race": "string", "gender": "male|female|nonbinary|unknown", "appearance": "string", "archetype": "string", "pitch": "string", "personality": ["trait1", "trait2", "trait3"], "role": "string"}}]}}"""
+{{"npcs": [{{"name": "string", "race": "string", "gender": "male|female|nonbinary|unknown", "appearance": "string", "archetype": "string", "pitch": "string", "personality": "2-3 sentence prose personality", "role": "string"}}]}}"""
 
     try:
-        sdk.llm._current_module = "wb_npc_system"
-        try:
-            result = await sdk.llm.generate(prompt, model_preference="balanced")
-        finally:
-            sdk.llm._current_module = ""
+        model_pref = _config(state).get("tracking_ai_model", "balanced")
+        result = await _llm_generate(sdk, prompt, model_preference=model_pref)
         parsed = _parse_json_block(result)
     except Exception as e:
         print(f"[NPC System] Story-character capture failed: {e}")
@@ -1556,7 +1778,7 @@ def _tracking_candidates(state: dict, bank: dict) -> list[dict]:
 
 
 def _tracking_record(npc: dict) -> str:
-    personality = ", ".join(npc.get("personality", []))
+    personality = _normalize_personality(npc.get("personality", ""))
     return (
         f"[{npc['id']}] Name: {npc.get('name', '')}\n"
         f"  Race/Gender: {npc.get('race', '') or '?'} / {npc.get('gender', '') or '?'}\n"
@@ -1575,7 +1797,8 @@ async def _track_character_changes(state: dict, bank: dict, sdk) -> bool:
     rewrites the changed record fields. Runs in the librarian phase, parallel
     with other modules' post-turn work, so it neither burdens the reader's
     mutation schema nor delays the storyteller."""
-    if not _config(state).get("track_character_changes", True):
+    config = _config(state)
+    if not config.get("track_character_changes", True):
         return False
     history = state.get("history", [])
     if not history:
@@ -1600,26 +1823,17 @@ TRACKED CHARACTERS (the only characters you may report on):
 {earlier_block}{action_block}THIS TURN'S SCENE (check this for changes):
 {latest}
 
-Report changes ONLY in these areas:
-- name: what the character is called (see NAME CHANGES below)
-- appearance / physical condition: new scars, wounds, lost limbs, aging, a transformation, altered hair/eyes/skin, changed garb that defines their look
-- personality: a lasting shift in temperament, outlook, values, or defining traits
-- pitch: their concept or role in the story materially changed (a secret revealed, an allegiance switched, their story hook resolved or replaced)
-- role: their narrative function clearly shifted
-- status: the story shows them dying (deceased) or leaving the story for good (departed)
-- notes: noteworthy things they did or revealed, appended to the running log
+{_directive("character_tracking", state.get("module_instructions"))}
 
 NAME CHANGES need no ceremony -- report one whenever:
 - the story reveals the actual name of a character recorded under a descriptive epithet (e.g. "The Hooded Stranger" introduces herself as Veyra), OR
 - the character adopts, accepts, or is granted a new name, alias, nickname, or title and answers to it, OR
 - the scene consistently calls the character something other than the recorded name.
 
-Do NOT report momentary emotions, temporary states (drunk, tired, briefly disguised), location changes, or characters who do not actually appear in this turn's scene. Only durable changes to who a character IS, how they LOOK, what they are CALLED, or where their story stands.
-
 For each changed field return its NEW full value (rewrite the field in full, incorporating the change):
 - "name": the new name only
 - "appearance": full rewritten text; keep hair color, eye color, and visual age stated (updated when the change is about them, otherwise carried over from the record)
-- "personality": the full updated list of exactly 3 trait keywords
+- "personality": full rewritten 2-3 sentence prose incorporating the shift while preserving core traits, voice, and mannerisms that still hold
 - "pitch": full rewritten text
 - "role": one of {'|'.join(NPC_ROLES)}
 - "status": active|departed|deceased
@@ -1638,7 +1852,8 @@ Return {{"updates": []}} if nothing durable changed."""
     if skip:
         return False
     try:
-        raw = await fallback_generate(sdk, decision, prompt, "balanced")
+        model_pref = config.get("tracking_ai_model", "balanced")
+        raw = await fallback_generate(sdk, decision, prompt, model_pref)
     except Exception as e:
         print(f"[NPC System] Change-tracking pass failed: {e}")
         return False
@@ -1689,90 +1904,69 @@ Return {{"updates": []}} if nothing durable changed."""
     return changed_any
 
 
-async def on_librarian(state: dict, sdk) -> dict | None:
-    config = _config(state)
-    frequency = config.get("generator_frequency", DEFAULT_GENERATOR_FREQUENCY)
-    max_pool = config.get("max_unintroduced_pool", DEFAULT_MAX_POOL)
-    turn = state.get("turn", 0)
+def _rapid_dialogue_hold(state: dict, own_data: dict, turn: int, frequency: int) -> bool:
+    """True when wb_time_tracker shows <30 in-world minutes have passed since the
+    last periodic generation check, holding off mid-conversation up to a 2x turn cap."""
+    cur_minutes = _shared.current_minutes(state)
+    if cur_minutes is None:
+        return False
+    last_gen_turn = int((own_data or {}).get("last_gen_turn", 0) or 0)
+    if last_gen_turn <= 0 or "last_gen_minutes" not in (own_data or {}):
+        return False
+    if turn - last_gen_turn >= max(1, frequency) * 2:
+        return False
+    last_gen_minutes = int(own_data.get("last_gen_minutes", 0) or 0)
+    return max(0, cur_minutes - last_gen_minutes) < MIN_GEN_INTERVAL_MINUTES
 
-    if turn == 0:
-        return None
 
-    bank = _get_bank(state)
-
-    if turn % frequency != 0:
-        evolved = await _track_character_changes(state, bank, sdk)
-        return _set_bank({}, bank) if evolved else None
-
-    # Generator turn: change tracking, thread extraction, and the travel pass
-    # are independent LLM calls touching disjoint record fields, so run them
-    # concurrently.
-    evolved, threads, traveled = await asyncio.gather(
-        _track_character_changes(state, bank, sdk),
-        _update_story_threads(state, sdk),
-        _independent_travel_pass(state, bank, sdk),
-    )
-    bank_changed = evolved or traveled
-
-    unintroduced_count = sum(
-        1 for n in bank.values()
-        if not n.get("introduced") and n.get("status") == "unintroduced"
-    )
-
-    if unintroduced_count >= max_pool:
-        return _set_bank({"story_threads": threads}, bank) if (threads or bank_changed) else None
-
+def _build_generator_prompt(state: dict, bank: dict, needed: int, demand_driven: bool,
+                            casting_notes: str = "", critique: str = "") -> str:
     scene = _scene_summary(state)
     bank_text = _bank_summary(bank)
     wctx = _world_context(state)
     region = state.get("player_location_region", "unknown")
-    node_id = state.get("player_location_node_id", "")
-
-    needed = min(3, max_pool - unintroduced_count)
-    demand_driven = config.get("demand_driven_generation", True)
 
     plot_block = _plot_profile_block(state)
     plot_section = f"\n\n{plot_block}" if plot_block else ""
-    plot_rule = ("\n9. Make these characters resonate with the STORY DIRECTION above -- fit its tone "
-                 "and themes, lean into what the player enjoys, and steer clear of what they dislike."
+    notes_block = _casting_notes_block({"casting_notes": casting_notes})
+    notes_section = f"\n\n{notes_block}" if notes_block else ""
+    critique_section = (
+        f"\n\nPREVIOUS DRAFT REJECTED -- FIX THIS ISSUE:\n{critique}"
+        if critique else ""
+    )
+    plot_rule = ("\n7. Make these characters resonate with the STORY DIRECTION above -- fit its tone "
+                 "and themes, lean into what the player enjoys (strictly honoring their actor/target/mutual role), "
+                 "and steer clear of what they dislike."
                  if plot_block else "")
 
+    craft_directive = _directive("character_generation", state.get("module_instructions"))
+
     if demand_driven:
-        # Characters exist to serve the story, not to fill a pool: nothing is
-        # created without a concrete, citable story need, and an empty reply
-        # is the normal outcome.
-        task = f"""You are a casting director for a text-based RPG. First decide whether the story ACTUALLY NEEDS any new character right now -- only then design new NPC concepts for the game.
+        task = """You are a casting director for a text-based RPG. First decide whether the story ACTUALLY NEEDS any new character right now -- only then design new NPC concepts for the game.
 
 A new character is justified ONLY when a concrete story signal calls for one: the story direction or one of its open questions points at a person who does not exist yet, an active story thread needs an actor no existing character can play, or where the story is clearly heading will obviously require someone new. If an EXISTING character (introduced or not) can serve the need, use them instead and create no one.
 
-If nothing clearly calls for a new character, respond with {{"npcs": []}} -- that is the normal, expected outcome, not a failure."""
+If nothing clearly calls for a new character, respond with {"npcs": []} -- that is the normal, expected outcome, not a failure."""
         rules = f"""INSTRUCTIONS (only for characters that pass the test above):
 1. Create at most {needed} characters, and no more than the story clearly needs -- usually zero or one.
 2. Every character carries a "need": one sentence naming the specific story signal (direction, open question, story thread, or scene) that demands them. A character without a concrete need must not be created.
-3. Each character must have a DISTINCT archetype, personality, and role from all existing ones.
-4. Bind a character to a location (current region: {region}) only when their need ties them there; otherwise make them encounter-type.
-5. Characters should feel authentic to this world's genre, factions, and regions.
-6. Pitches should be 2-3 sentences -- a hook that suggests story potential.
-7. Personality should be exactly 3 keywords describing core traits.
-8. Optionally relate 0-2 new characters to EXISTING characters above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.{plot_rule}"""
+3. Bind a character to a location (current region: {region}) only when their need ties them there; otherwise make them encounter-type.
+4. {craft_directive}
+6. Optionally relate 0-2 new characters to EXISTING characters above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.{plot_rule}"""
         need_field = '"need": "the story signal that demands this character, one sentence", '
     else:
         task = f"You are a character designer for a text-based RPG. Create {needed} new NPC concepts for the game."
         rules = f"""INSTRUCTIONS:
 1. Create {needed} characters that fill gaps NOT covered by existing NPCs.
-2. Each character must have a DISTINCT archetype, personality, and role from all existing ones.
-3. At least one should be location-bound to the current region: {region}
-4. The rest can be encounter-type (can appear anywhere).
-5. Characters should feel authentic to this world's genre, factions, and regions.
-6. Pitches should be 2-3 sentences -- a hook that suggests story potential.
-7. Personality should be exactly 3 keywords describing core traits.
-8. Optionally relate 0-2 new characters to EXISTING characters above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.{plot_rule}"""
+2. At least one should be location-bound to the current region: {region}; the rest can be encounter-type (can appear anywhere).
+3. {craft_directive}
+6. Optionally relate 0-2 new characters to EXISTING characters above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.{plot_rule}"""
         need_field = ""
 
-    prompt = f"""{task}
+    return f"""{task}
 
 WORLD CONTEXT:
-{wctx}{plot_section}
+{wctx}{plot_section}{notes_section}{critique_section}
 
 CURRENT STORY STATE:
 {scene}
@@ -1783,51 +1977,186 @@ EXISTING CHARACTERS (DO NOT duplicate or create similar concepts):
 {rules}
 
 Respond with ONLY valid JSON:
-{{"npcs": [{{{need_field}"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description that always states hair color and eye color (or the being's closest equivalent) and visual age (how old they look)", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_map_id": "map_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}]}}"""
+{{"npcs": [{{{need_field}"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description that always states hair color and eye color (or the being's closest equivalent) and visual age (how old they look)", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": "2-3 sentence prose capturing outward mask vs. undercurrent contradiction, immediate active want, and voice/physical tell", "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_map_id": "map_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}], "casting_notes": "optional updated backstage casting notes"}}"""
 
+
+async def _run_librarian_llm_pass(state: dict, sdk, base_updates: dict | None = None) -> dict | None:
+    """Core post-turn tracking, travel, and casting pass. Runs inline in unit
+    tests and asynchronously via ModuleBackgroundRunner after live turns."""
+    config = _config(state)
+    frequency = max(1, int(config.get("generator_frequency", DEFAULT_GENERATOR_FREQUENCY) or DEFAULT_GENERATOR_FREQUENCY))
+    max_pool = int(config.get("max_unintroduced_pool", DEFAULT_MAX_POOL) or DEFAULT_MAX_POOL)
+    turn = int(state.get("turn", 0) or 0)
+
+    if turn == 0:
+        return None
+
+    if base_updates:
+        mod_state = state.setdefault("module_data", {}).setdefault(MODULE_ID, {})
+        if isinstance(base_updates.get("characters"), dict):
+            mod_state.setdefault("characters", {}).update(deepcopy(base_updates["characters"]))
+        for k, v in base_updates.items():
+            if k != "characters":
+                mod_state[k] = deepcopy(v)
+
+    own_data = _own_data(state)
+    bank = _get_bank(state)
+    extra_updates: dict = {k: v for k, v in (base_updates or {}).items() if k != "characters"}
+
+    if turn % frequency != 0:
+        evolved = await _track_character_changes(state, bank, sdk)
+        if evolved or extra_updates:
+            return _set_bank(extra_updates, bank)
+        return None
+
+    # Borrow active story threads directly from Plot Director when available so
+    # we don't spend a duplicate LLM call extracting threads every N turns.
+    borrowed_threads = _shared.plot_threads_for_npc(state, bank)
+
+    async def _get_threads():
+        if borrowed_threads is not None:
+            return borrowed_threads
+        return await _update_story_threads(state, sdk)
+
+    evolved, threads, traveled = await asyncio.gather(
+        _track_character_changes(state, bank, sdk),
+        _get_threads(),
+        _independent_travel_pass(state, bank, sdk),
+    )
+    bank_changed = evolved or traveled
+    if threads:
+        extra_updates["story_threads"] = threads
+
+    # Respect Plot Director's initial observation window and avoid periodic
+    # character generation in the middle of rapid-fire (<30 min) conversations.
+    if _shared.is_plot_observing(state) or _rapid_dialogue_hold(state, own_data, turn, frequency):
+        return _set_bank(extra_updates, bank) if (extra_updates or bank_changed) else None
+
+    unintroduced_count = sum(
+        1 for n in bank.values()
+        if not n.get("introduced") and n.get("status") == "unintroduced"
+    )
+
+    if unintroduced_count >= max_pool:
+        return _set_bank(extra_updates, bank) if (extra_updates or bank_changed) else None
+
+    needed = min(3, max_pool - unintroduced_count)
+    demand_driven = config.get("demand_driven_generation", True)
+    casting_notes = str(own_data.get("casting_notes") or "").strip()
+
+    probe_prompt = _build_generator_prompt(
+        state, bank, needed, demand_driven, casting_notes=casting_notes
+    )
     decision = Decision()
     if demand_driven:
         skip, decision = await jev_tasks.screen(sdk,
             {**jev_tasks.npc_context(state, list(bank.values()), player_action=state.get("last_input_text", "")),
-             "task": prompt},
+             "task": probe_prompt},
             {"new_character": "Does the story actually need any NEW character now, because of a concrete scene, direction or thread that no EXISTING character (introduced or unintroduced) can serve?"},
             jev_tasks.NPC, "npc:creation_screen")
         if skip:
-            return _set_bank({"story_threads": threads}, bank) if (threads or bank_changed) else None
-    try:
-        result = await fallback_generate(sdk, decision, prompt, "balanced")
-        result = result.strip()
-        if result.startswith("```"):
-            parts = result.split("```")
-            result = parts[1] if len(parts) > 1 else result
-            if result.startswith("json"):
-                result = result[4:]
-            result = result.strip()
+            return _set_bank(extra_updates, bank) if (extra_updates or bank_changed) else None
 
-        parsed = json.loads(result)
-    except Exception as e:
-        print(f"[NPC System] Generator Agent failed: {e}")
-        return _set_bank({"story_threads": threads}, bank) if (threads or bank_changed) else None
+    iterations = _casting_iterations(config)
+    if iterations > 1:
+        casting_notes = await _iterate_casting_notes(
+            state, sdk, {**own_data, "casting_notes": casting_notes}, bank, passes=iterations - 1
+        )
+        if casting_notes:
+            extra_updates["casting_notes"] = casting_notes
 
-    new_npcs = parsed.get("npcs", [])
-    if demand_driven:
-        # No citable story need, no character -- drop anything the model
-        # created out of habit, and cap at what was asked for.
-        justified = [n for n in new_npcs
-                     if isinstance(n, dict) and str(n.get("need", "")).strip()]
-        dropped = len(new_npcs) - len(justified)
-        if dropped:
-            print(f"[NPC System] Dropped {dropped} generated NPC(s) without a stated story need.")
-        new_npcs = justified[:needed]
-    if not new_npcs:
-        return _set_bank({"story_threads": threads}, bank) if (threads or bank_changed) else None
+    casting_model = config.get("casting_ai_model", "smartest")
+    critique = ""
+    vetted_npcs: list[dict] = []
 
-    for npc_data in new_npcs:
+    for attempt in range(FIT_MAX_REJECTS + 1):
+        prompt = _build_generator_prompt(
+            state, bank, needed, demand_driven, casting_notes=casting_notes, critique=critique
+        )
+        try:
+            if attempt == 0:
+                result = await fallback_generate(sdk, decision, prompt, casting_model)
+            else:
+                result = await _llm_generate(sdk, prompt, model_preference=casting_model)
+            parsed = _parse_json_block(result)
+            if not isinstance(parsed, dict):
+                break
+        except Exception as e:
+            print(f"[NPC System] Generator Agent failed: {e}")
+            break
+
+        returned_notes = str(parsed.get("casting_notes") or "").strip()
+        if returned_notes:
+            casting_notes = returned_notes
+            extra_updates["casting_notes"] = casting_notes
+
+        raw_npcs = parsed.get("npcs", [])
+        if not isinstance(raw_npcs, list):
+            raw_npcs = []
+        if demand_driven:
+            justified = [
+                n for n in raw_npcs
+                if isinstance(n, dict) and str(n.get("need", "")).strip()
+            ]
+            dropped = len(raw_npcs) - len(justified)
+            if dropped:
+                print(f"[NPC System] Dropped {dropped} generated NPC(s) without a stated story need.")
+            candidates = justified[:needed]
+        else:
+            candidates = [n for n in raw_npcs if isinstance(n, dict)][:needed]
+
+        if not candidates:
+            break
+
+        vetted_npcs, critique = await _fit_check_npcs(state, sdk, candidates, bank)
+        if vetted_npcs or not critique:
+            break
+        print(f"[NPC System] Fit-check rejected candidate batch (attempt {attempt + 1}): {critique}")
+
+    cur_minutes = _shared.current_minutes(state)
+    extra_updates["last_gen_turn"] = turn
+    if cur_minutes is not None:
+        extra_updates["last_gen_minutes"] = cur_minutes
+
+    if not vetted_npcs:
+        return _set_bank(extra_updates, bank) if (extra_updates or bank_changed) else None
+
+    for npc_data in vetted_npcs:
         npc_id, record = _build_npc_record(npc_data, turn, bank, source="generated")
         bank[npc_id] = record
 
-    print(f"[NPC System] Generated {len(new_npcs)} new NPCs (bank size: {len(bank)})")
-    return _set_bank({"story_threads": threads}, bank)
+    if iterations >= 3:
+        refined_notes = await _iterate_casting_notes(
+            state, sdk, {**own_data, "casting_notes": casting_notes}, bank, passes=1
+        )
+        if refined_notes:
+            extra_updates["casting_notes"] = refined_notes
+
+    print(f"[NPC System] Generated {len(vetted_npcs)} new NPCs (bank size: {len(bank)})")
+    return _set_bank(extra_updates, bank)
+
+
+async def _execute_bg_job(job: dict) -> None:
+    await _bg_runner._execute_job(job, _run_librarian_llm_pass)
+
+
+async def on_librarian(state: dict, sdk) -> dict | None:
+    turn = int(state.get("turn", 0) or 0)
+    if turn == 0:
+        return None
+
+    staged = _bg_runner.consume_staged_for_librarian(state)
+    if _bg_runner.is_live_turn_armed():
+        _bg_runner.queue_job(state, sdk, immediate_updates=staged)
+        return {"module_data": {MODULE_ID: staged}} if staged else None
+
+    return await _run_librarian_llm_pass(state, sdk, base_updates=staged)
+
+
+async def on_turn_stopped(state: dict, sdk, reason: str) -> None:
+    """Spawn the queued background NPC pass once the turn has completed and
+    unlocked the UI, or discard it if cancelled."""
+    await _bg_runner.on_turn_stopped(reason, _run_librarian_llm_pass)
 
 
 async def on_command_npcs(args: list[str], state: dict, sdk) -> dict:
@@ -1927,11 +2256,14 @@ def _sanitize_edits(raw: dict, npc: dict) -> dict:
             continue
         val = raw[field]
         if field == "personality":
-            if isinstance(val, str):
-                val = val.split(",")
-            if not isinstance(val, list):
+            if not isinstance(val, (str, list)):
                 continue
-            val = [str(p).strip() for p in val if str(p).strip()]
+            val = _normalize_personality(val)
+            if not val:
+                continue
+            if val != _normalize_personality(npc.get("personality", "")):
+                edits[field] = val
+            continue
         elif field == "role":
             if val not in NPC_ROLES:
                 continue
@@ -1961,8 +2293,8 @@ async def _update_npc_from_story(npc_id: str, state: dict, sdk) -> dict:
     if not history:
         return {"message": "[NPC] There is no story yet to update from.", "signal": "end_turn", "error": True}
 
-    story = "\n\n".join(str(h) for h in history)[-10000:]
-    personality = ", ".join(npc.get("personality", []))
+    story = "\n\n".join(str(h) for h in history)
+    personality = _normalize_personality(npc.get("personality", ""))
 
     prompt = f"""You maintain the character records for the NPCs of a text RPG. The player has asked you to bring one character's record up to date: check the recent story for LASTING changes to this character and rewrite only the fields that changed.
 
@@ -1981,12 +2313,12 @@ CHARACTER RECORD FOR: {npc.get('name', '')}
 RECENT STORY (oldest to newest):
 {story}
 
-Report ONLY durable changes this character undergoes in the story above -- new injuries or looks, a new name or title, a lasting personality shift, a changed narrative role, death or departure, or noteworthy things they did. Ignore scenes that don't involve them and momentary emotions or states.
+{_directive("character_tracking", state.get("module_instructions"))}
 
 For each changed field return its NEW full value (rewrite the field in full, incorporating the change):
 - "appearance": full rewritten text; keep hair color, eye color, and visual age stated (updated when the change is about them, otherwise carried over from the record)
 - "pitch": full rewritten text
-- "personality": the full updated list of exactly 3 trait keywords
+- "personality": full rewritten 2-3 sentence prose incorporating the shift while preserving core traits, voice, and mannerisms that still hold
 - "name": only if they are now called something else
 - "role": one of {'|'.join(NPC_ROLES)} -- only if their narrative function clearly shifted
 - "status": one of active|departed|deceased -- only if the story shows them dying or leaving the story
@@ -1997,11 +2329,8 @@ If nothing durable changed, return an empty object {{}}.
 
 Respond with ONLY valid JSON containing just the changed fields (plus change_note)."""
 
-    sdk.llm._current_module = "wb_npc_system"
-    try:
-        raw = await sdk.llm.generate(prompt, model_preference="balanced")
-    finally:
-        sdk.llm._current_module = ""
+    model_pref = _config(state).get("tracking_ai_model", "balanced")
+    raw = await _llm_generate(sdk, prompt, model_preference=model_pref)
     parsed = _parse_json_block(raw)
     if not isinstance(parsed, dict):
         return {"message": "[NPC] The update pass returned nothing usable -- try again.", "signal": "end_turn", "error": True}
@@ -2106,13 +2435,9 @@ async def _apply_manual_edit(npc_id: str, payload: str, state: dict, sdk) -> dic
     }
 
 
-def _coerce_personality(value) -> list[str]:
-    """Normalize a personality field (comma string or list) to a trait list."""
-    if isinstance(value, str):
-        value = value.split(",")
-    if not isinstance(value, list):
-        return []
-    return [str(p).strip() for p in value if str(p).strip()]
+def _coerce_personality(value) -> str:
+    """Normalize a personality field (prose string or legacy list) to prose."""
+    return _normalize_personality(value)
 
 
 async def _apply_manual_add(payload: str, state: dict, sdk) -> dict:
@@ -2151,7 +2476,7 @@ async def _apply_manual_add(payload: str, state: dict, sdk) -> dict:
         "appearance": str(raw.get("appearance", "")).strip(),
         "archetype": str(raw.get("archetype", "")).strip(),
         "pitch": str(raw.get("pitch", "")).strip(),
-        "personality": _coerce_personality(raw.get("personality", [])),
+        "personality": _coerce_personality(raw.get("personality", "")),
         "role": raw.get("role", "neutral"),
     }
 
@@ -2203,14 +2528,19 @@ async def _generate_random_character(state: dict, sdk, request: str = "") -> dic
 
     plot_block = _plot_profile_block(state)
     plot_section = f"\n\n{plot_block}" if plot_block else ""
-    plot_rule = ("\n8. Make the character resonate with the STORY DIRECTION above -- fit its tone "
-                 "and themes, lean into what the player enjoys, and steer clear of what they dislike."
+    notes_block = _casting_notes_block(_own_data(state))
+    notes_section = f"\n\n{notes_block}" if notes_block else ""
+    plot_rule = ("\n7. Make the character resonate with the STORY DIRECTION above -- fit its tone "
+                 "and themes, lean into what the player enjoys (strictly honoring their actor/target/mutual role), "
+                 "and steer clear of what they dislike."
                  if plot_block else "")
+
+    craft_directive = _directive("character_generation", state.get("module_instructions"))
 
     prompt = f"""You are a character designer for a text-based RPG. Create 1 new NPC concept for the game.{request_section}
 
 WORLD CONTEXT:
-{wctx}{plot_section}
+{wctx}{plot_section}{notes_section}
 
 CURRENT STORY STATE:
 {scene}
@@ -2220,30 +2550,19 @@ EXISTING CHARACTERS (DO NOT duplicate or create similar concepts):
 
 INSTRUCTIONS:
 1. Create 1 character that fills a gap NOT covered by existing NPCs.
-2. The character must have a DISTINCT archetype, personality, and role from all existing ones.
-3. The character can be location-bound to the current region ({region}) or an encounter-type NPC that can appear anywhere.
-4. The character should feel authentic to this world's genre, factions, and regions.
-5. The pitch should be 2-3 sentences -- a hook that suggests story potential.
-6. Personality should be exactly 3 keywords describing core traits.
-7. Optionally relate the character to an EXISTING character above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.{plot_rule}
+2. The character can be location-bound to the current region ({region}) or an encounter-type NPC that can appear anywhere.
+3. {craft_directive}
+6. Optionally relate the character to an EXISTING character above via "relationships", using their exact npc_id (e.g. ally, rival, family, mentor, rumored_enemy). Omit "relationships" or leave it empty if no natural connection exists.{plot_rule}
 
 Respond with ONLY valid JSON:
-{{"npc": {{"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description that always states hair color and eye color (or the being's closest equivalent) and visual age (how old they look)", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": ["trait1", "trait2", "trait3"], "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_map_id": "map_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}}}"""
+{{"npc": {{"name": "string", "race": "string", "gender": "male|female|nonbinary", "appearance": "1-2 sentence physical description that always states hair color and eye color (or the being's closest equivalent) and visual age (how old they look)", "archetype": "short archetype label", "pitch": "2-3 sentence character concept with story hook", "personality": "2-3 sentence prose capturing outward mask vs. undercurrent contradiction, immediate active want, and voice/physical tell", "role": "quest_giver|antagonist|ally|informant|rival|neutral|wildcard", "encounter_type": "location_bound|encounter", "location_node_id": "node_id or null", "location_region": "region name or null", "location_map_id": "map_id or null (only if encounter_type is location_bound)", "relationships": [{{"npc_id": "existing npc_id", "type": "ally|rival|family|mentor|rumored_enemy|...", "description": "short description of the connection"}}]}}}}"""
 
     try:
-        sdk.llm._current_module = "wb_npc_system"
-        try:
-            result = await sdk.llm.generate(prompt, model_preference="balanced")
-        finally:
-            sdk.llm._current_module = ""
-        result = result.strip()
-        if result.startswith("```"):
-            parts = result.split("```")
-            result = parts[1] if len(parts) > 1 else result
-            if result.startswith("json"):
-                result = result[4:]
-            result = result.strip()
-        parsed = json.loads(result)
+        model_pref = _config(state).get("casting_ai_model", "smartest")
+        result = await _llm_generate(sdk, prompt, model_preference=model_pref)
+        parsed = _parse_json_block(result)
+        if not isinstance(parsed, dict):
+            raise ValueError("Non-JSON generator output")
     except Exception as e:
         print(f"[NPC System] Generate-character command failed: {e}")
         return {"message": "[NPC] Could not generate a character right now. Try again.", "signal": "end_turn", "error": True}
@@ -2303,20 +2622,30 @@ async def _delete_npc(npc_id: str, state: dict, sdk) -> dict:
 
 async def on_command_npc(args: list[str], state: dict, sdk) -> dict:
     usage = ("[NPC] Usage: /npc generate | /npc add <data> | /npc update <npc_id> | "
-             "/npc edit <npc_id> <data> | /npc delete <npc_id>")
+             "/npc edit <npc_id> <data> | /npc delete <npc_id> | /npc notes")
     if not args:
         return {"message": usage, "signal": "end_turn", "error": True}
 
     sub = args[0].lower()
+    if sub == "notes":
+        notes = str(_own_data(state).get("casting_notes") or "").strip()
+        if not notes:
+            return {"message": "[NPC] No casting notes recorded yet.", "signal": "end_turn"}
+        return {"message": f"[NPC] Casting notes (spoiler):\n{notes}", "signal": "end_turn"}
     if sub in ("generate", "gen", "random"):
+        _cancel_bg_task()
         request = urllib.parse.unquote(" ".join(args[1:])).strip() if len(args) >= 2 else ""
         return await _generate_random_character(state, sdk, request)
     if sub in ("update", "refresh") and len(args) >= 2:
+        _cancel_bg_task()
         return await _update_npc_from_story(args[1], state, sdk)
     if sub == "edit" and len(args) >= 3:
+        _cancel_bg_task()
         return await _apply_manual_edit(args[1], " ".join(args[2:]), state, sdk)
     if sub == "add" and len(args) >= 2:
+        _cancel_bg_task()
         return await _apply_manual_add(args[1], state, sdk)
     if sub in ("delete", "remove") and len(args) >= 2:
+        _cancel_bg_task()
         return await _delete_npc(args[1], state, sdk)
     return {"message": usage, "signal": "end_turn"}

@@ -56,6 +56,24 @@ def _pick_plot_injection(d):
     return selected
 
 
+def _pick_npc_introduction(d, valid_keys):
+    selected, probs, conf = d.choice_distribution("npc")
+    if selected == "unsupported":
+        raise Uncertain("unsupported introduction")
+    if selected not in valid_keys:
+        raise Uncertain(d.reason or "uncertain choice: npc")
+    if conf >= 0.90:
+        return selected
+    if selected == "none":
+        if probs.get("none", 0.0) < 0.60:
+            raise Uncertain(d.reason or "uncertain choice: npc")
+        return "none"
+    candidate_mass = 1.0 - probs.get("none", 0.0) - probs.get("unsupported", 0.0)
+    if candidate_mass < 0.80 or probs.get(selected, 0.0) < 0.55:
+        raise Uncertain(d.reason or "uncertain choice: npc")
+    return selected
+
+
 def _pick_feasibility(d, fail_max):
     selected, probs, conf = d.choice_distribution("feasibility")
     val = int(selected)
@@ -264,18 +282,25 @@ async def npc_ids(sdk, state, candidates, kind):
 
 async def introduce(sdk, state, candidates, prompt):
     mapping, options = _options(candidates, lambda npc: npc)
+    options["none"] = (
+        "Do NOT introduce anyone this turn (takes precedence during intimate, "
+        "romantic, erotic, emotional, heart-to-heart, or private conversations/moments, "
+        "wilderness/isolated settings, active combat, or when existing characters suffice)."
+    )
     options["unsupported"] = "The decision needs reasoning not represented by the eligible candidates."
     context = {**npc_context(state, candidates, player_action=state.get("input_text", "")),
                "task": prompt}
-    d = await ask(sdk, context, {"npc": choice(
-        "Choose the single eligible character the scene naturally calls for now, or none. Respect the supplied introduction rules.", options)}, NPC, "npc:introduction")
+    instruction = (
+        "Choose the single eligible character the scene naturally calls for now, or none. "
+        "Choose none unless there is a clear, non-intrusive opening; never intrude on "
+        "intimate, emotional, or private moments. Respect the supplied introduction rules."
+    )
+    d = await ask(sdk, context, {"npc": choice(instruction, options)}, NPC, "npc:introduction")
     try:
-        selected = d.pick("npc")
+        selected = _pick_npc_introduction(d, set(mapping) | {"none"})
         if selected == "none":
             await d.finish("accepted")
             return {"introduce": False}, d
-        if selected == "unsupported":
-            raise Uncertain("unsupported introduction")
         npc = mapping[selected]
         reason, reason_call = await grounded_reason(sdk, {**context, "selected_character": npc},
             _facts({"character": npc, "recent_story": context["recent_story"]}),

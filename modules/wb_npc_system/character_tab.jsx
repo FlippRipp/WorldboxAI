@@ -23,6 +23,10 @@ const STATUSES = ['active', 'departed', 'deceased', 'unintroduced'];
 // records saved before the backend synced the introduced flag with it.
 const isKnown = (npc) => npc.introduced || npc.status === 'active';
 
+const formatPersonality = (val) => (
+  Array.isArray(val) ? val.filter(Boolean).join(', ') : String(val || '').trim()
+);
+
 const ROLE_COLORS = {
   quest_giver: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
   antagonist: 'bg-red-500/15 text-red-300 border-red-500/30',
@@ -64,13 +68,11 @@ function AddForm({ busy, onCreate, onCancel }) {
     const name = draft.name.trim();
     if (!name) return;
     const payload = { name, introduced: draft.introduced };
-    for (const key of ['archetype', 'race', 'gender', 'appearance', 'pitch', 'notes']) {
+    for (const key of ['archetype', 'race', 'gender', 'appearance', 'pitch', 'personality', 'notes']) {
       const v = draft[key].trim();
       if (v) payload[key] = v;
     }
     if (draft.role) payload.role = draft.role;
-    const traits = draft.personality.split(',').map((t) => t.trim()).filter(Boolean);
-    if (traits.length) payload.personality = traits;
     onCreate(payload);
   };
 
@@ -100,7 +102,7 @@ function AddForm({ busy, onCreate, onCancel }) {
       </div>
       <Field label="Appearance"><textarea className={inputCls} rows={2} value={draft.appearance} onChange={set('appearance')} /></Field>
       <Field label="Pitch"><textarea className={inputCls} rows={2} value={draft.pitch} onChange={set('pitch')} /></Field>
-      <Field label="Personality (comma-separated)"><input className={inputCls} value={draft.personality} onChange={set('personality')} /></Field>
+      <Field label="Personality"><textarea className={inputCls} rows={3} value={draft.personality} onChange={set('personality')} placeholder="Outward demeanor vs. hidden undercurrent, active want, and voice/mannerisms…" /></Field>
       <Field label="Notes"><textarea className={inputCls} rows={2} value={draft.notes} onChange={set('notes')} /></Field>
       <div className="flex gap-2 justify-end">
         <button
@@ -131,7 +133,7 @@ function EditForm({ npc, busy, onSave, onCancel }) {
     status: npc.status || 'active',
     appearance: npc.appearance || '',
     pitch: npc.pitch || '',
-    personality: (npc.personality || []).join(', '),
+    personality: formatPersonality(npc.personality),
     notes: npc.notes || '',
   });
 
@@ -148,8 +150,7 @@ function EditForm({ npc, busy, onSave, onCancel }) {
     if (draft.appearance.trim() !== (npc.appearance || '')) changed.appearance = draft.appearance.trim();
     if (draft.pitch.trim() !== (npc.pitch || '')) changed.pitch = draft.pitch.trim();
     if (draft.notes.trim() !== (npc.notes || '')) changed.notes = draft.notes.trim();
-    const traits = draft.personality.split(',').map((t) => t.trim()).filter(Boolean);
-    if (traits.join(', ') !== (npc.personality || []).join(', ')) changed.personality = traits;
+    if (draft.personality.trim() !== formatPersonality(npc.personality)) changed.personality = draft.personality.trim();
     onSave(changed);
   };
 
@@ -173,7 +174,7 @@ function EditForm({ npc, busy, onSave, onCancel }) {
       </div>
       <Field label="Appearance"><textarea className={inputCls} rows={3} value={draft.appearance} onChange={set('appearance')} /></Field>
       <Field label="Pitch"><textarea className={inputCls} rows={3} value={draft.pitch} onChange={set('pitch')} /></Field>
-      <Field label="Personality (comma-separated)"><input className={inputCls} value={draft.personality} onChange={set('personality')} /></Field>
+      <Field label="Personality"><textarea className={inputCls} rows={3} value={draft.personality} onChange={set('personality')} /></Field>
       <Field label="Notes"><textarea className={inputCls} rows={2} value={draft.notes} onChange={set('notes')} /></Field>
       <div className="flex gap-2 justify-end">
         <button
@@ -549,13 +550,9 @@ export default function CharacterTab({ state, onCommand, busy }) {
                 {npc.pitch && (
                   <Field label="Pitch"><p className="text-sm text-gray-300 leading-relaxed">{npc.pitch}</p></Field>
                 )}
-                {(npc.personality || []).length > 0 && (
+                {formatPersonality(npc.personality) && (
                   <Field label="Personality">
-                    <div className="flex flex-wrap gap-1">
-                      {npc.personality.map((t, i) => (
-                        <span key={i} className="text-xs px-2 py-0.5 bg-gray-700/60 text-gray-300 rounded capitalize">{t}</span>
-                      ))}
-                    </div>
+                    <p className="text-sm text-gray-300 leading-relaxed">{formatPersonality(npc.personality)}</p>
                   </Field>
                 )}
                 {npc.notes && (

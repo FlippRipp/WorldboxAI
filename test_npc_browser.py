@@ -116,15 +116,23 @@ def test_edit_survives_url_encoding_of_spaces_and_quotes():
     assert npc["pitch"] == text
 
 
-def test_edit_coerces_personality_string_to_list():
+def test_edit_stores_prose_personality_and_heals_legacy_list():
     backend = _load_backend()
+    prose = "Warm and disarming at the bar, yet watches every doorway; taps a brass coin when lying."
     result = asyncio.run(backend.on_command_npc(
-        _edit_cmd("npc_aaaa1111", {"personality": "bold, weary,  loyal "}),
+        _edit_cmd("npc_aaaa1111", {"personality": f"  {prose}  "}),
         _state(), _make_sdk("{}", {}),
     ))
 
     npc = result["module_data"]["wb_npc_system"]["characters"]["npc_aaaa1111"]
-    assert npc["personality"] == ["bold", "weary", "loyal"]
+    assert npc["personality"] == prose
+
+    legacy = asyncio.run(backend.on_command_npc(
+        _edit_cmd("npc_aaaa1111", {"personality": ["bold", " weary ", "loyal"]}),
+        _state(), _make_sdk("{}", {}),
+    ))
+    npc_legacy = legacy["module_data"]["wb_npc_system"]["characters"]["npc_aaaa1111"]
+    assert npc_legacy["personality"] == "bold, weary, loyal"
 
 
 def test_edit_rejects_invalid_role_and_status():
@@ -383,7 +391,7 @@ def test_add_creates_introduced_character_and_embeds_profile():
     assert added["source"] == "manual"
     assert added["met_turn"] == state["turn"]
     assert added["role"] == "informant"
-    assert added["personality"] == ["shrewd", "wry", "cautious"]
+    assert added["personality"] == "shrewd, wry, cautious"
     assert added["notes"] == "Owes nobody, trusts nobody."
     assert added["change_log"][-1]["source"] == "manual"
     # An introduced manual character gets its profile embedded into RAG.
@@ -480,7 +488,7 @@ def test_generate_creates_hidden_character():
     assert gen["met_turn"] is None
     assert gen["source"] == "generated"
     assert gen["role"] == "wildcard"
-    assert gen["personality"] == ["restless", "clever", "secretive"]
+    assert gen["personality"] == "restless, clever, secretive"
     assert gen["change_log"][-1]["source"] == "generated"
     # Nothing embedded into RAG while the character is unmet.
     assert "memories" not in captured
@@ -670,3 +678,16 @@ def test_delete_unknown_id_is_a_noop():
     ))
     assert "module_data" not in result
     assert "Unknown character" in result["message"]
+
+
+def test_notes_command_reports_backstage_casting_notes():
+    backend = _load_backend()
+    empty = asyncio.run(backend.on_command_npc(["notes"], _state(), _make_sdk("{}", {})))
+    assert "No casting notes recorded yet" in empty["message"]
+
+    state = _state()
+    state["module_data"]["wb_npc_system"]["casting_notes"] = (
+        "Harbor tension needs a smiling customs broker who secretly bankrolls smugglers."
+    )
+    populated = asyncio.run(backend.on_command_npc(["notes"], state, _make_sdk("{}", {})))
+    assert "customs broker" in populated["message"]

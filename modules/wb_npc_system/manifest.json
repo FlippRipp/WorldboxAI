@@ -4,9 +4,9 @@
   "version": "1.0.0",
   "dependencies": ["wb_time_tracker"],
   "consumes": {
-    "state": ["input_text", "last_input_text", "turn", "history", "player_location_node_id", "player_location_region", "player_location_map_id", "characters"],
-    "module_data": ["wb_time_tracker", "wb_plot_director"],
-    "module_configs": [],
+    "state": "*",
+    "module_data": ["wb_time_tracker", "wb_plot_director", "wb_core_rpg"],
+    "module_configs": ["wb_plot_director"],
     "world_data": true
   },
   "produces": {
@@ -104,6 +104,43 @@
       "label": "Auto-Track Character Changes",
       "category": "NPC System",
       "description": "After each turn, check the scene for lasting changes to the characters in it -- new names or revealed names, appearance changes, personality shifts, a changed pitch or narrative role, death or departure -- and update their records automatically."
+    },
+    "casting_iterations": {
+      "type": "slider",
+      "min": 1,
+      "max": 3,
+      "default": 2,
+      "label": "Character Casting Iterations",
+      "category": "NPC System",
+      "description": "How many background passes the Casting Director spends brainstorming in its Casting Notebook before generating new characters (1 = single-pass, 2 = brainstorm casting notes then design character, 3 = extra casting refinement pass). Runs asynchronously after turns."
+    },
+    "fit_check_enabled": {
+      "type": "toggle",
+      "default": true,
+      "label": "Character Quality Gate",
+      "category": "NPC System",
+      "description": "Vet newly generated background characters against the world's genre/tone, cast redundancy, continuity, player dislikes, and player role alignment before adding them to the pool."
+    },
+    "tracking_ai_model": {
+      "type": "select",
+      "options": [
+        {"value": "fastest", "label": "Fastest (cheapest)"},
+        {"value": "balanced", "label": "Balanced (default)"},
+        {"value": "smartest", "label": "Smartest"}
+      ],
+      "default": "balanced",
+      "label": "Tracking & Capture Model",
+      "category": "NPC System"
+    },
+    "casting_ai_model": {
+      "type": "select",
+      "options": [
+        {"value": "balanced", "label": "Balanced"},
+        {"value": "smartest", "label": "Smartest (default)"}
+      ],
+      "default": "smartest",
+      "label": "Character Casting Model",
+      "category": "NPC System"
     }
   },
   "mutation_schema": {
@@ -116,8 +153,8 @@
       "type": "module_prompt",
       "enabled": true,
       "role_type": "system",
-      "placement": "system_relative",
-      "depth": null,
+      "placement": "chat_injection",
+      "depth": 0,
       "config": {}
     }
   ],
@@ -131,6 +168,6 @@
   "command_help": {
     "/npcs": "Show details on known NPCs",
     "/npclist": "List all NPCs you've met",
-    "/npc": "Manage a character: /npc generate [request] | /npc add <data> | /npc update <id> | /npc edit <id> <data> | /npc delete <id>"
+    "/npc": "Manage a character: /npc generate [request] | /npc add <data> | /npc update <id> | /npc edit <id> <data> | /npc delete <id> | /npc notes"
   }
 }
