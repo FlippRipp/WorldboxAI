@@ -17,9 +17,11 @@ Why proxy through WorldBox's backend?
 from __future__ import annotations
 
 import asyncio
+from array import array
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -37,6 +39,27 @@ KEY_MASK_PREFIX = "****"
 SAMPLE_RATE = 24000
 MIN_EMOTION_PROB = 0.25
 RECENT_SCENE_MESSAGES = 6
+SPAN_PAUSE_SEC = 0.075
+
+_DIALOGUE_COLORS = (
+    "cyan",
+    "pink",
+    "teal",
+    "orange",
+    "gold",
+    "violet",
+    "salmon",
+    "orchid",
+    "yellow",
+    "plum",
+)
+_COLOR_OPEN_RE = re.compile(
+    r"<\s*(?:color\s*:\s*)?("
+    + "|".join(_DIALOGUE_COLORS)
+    + r")(?:(?:\s*:\s*|\s+)[a-z0-9_-]+)?\s*>",
+    re.IGNORECASE,
+)
+_LEADING_QUOTE_RE = re.compile(r'^\s*(?:"[^"]*"|“[^”]*”)')
 
 _HIDDEN_BLOCK_RE = re.compile(
     r"<!--[\s\S]*?(?:-->|$)|<(details|internal_states)\b[^>]*>[\s\S]*?(?:</\1\s*>|$)",
@@ -89,6 +112,7 @@ def _default_config() -> dict:
     return {
         "enabled": True,
         "emotion_enabled": True,
+        "narration_emotion": "neutral",
         "server_url": DEFAULT_SERVER_URL,
         "token": "",
         "temperature": 0.9,
@@ -175,6 +199,89 @@ def clean_spoken_text(raw: str) -> str:
     return text
 
 
+def split_narration_and_dialogue(raw_text: str) -> list[dict[str, str]]:
+    """Split a sentence into ordered `narration` and `dialogue` spans.
+
+    Matches WorldBox's dialogue conventions (`"..."`, `“...”`, and `<color:...>`
+    dialogue tags) while keeping contractions/possessives (`don't`, `Elena's`)
+    inside narration. Punctuation-only fragments without speakable characters
+    are dropped automatically.
+    """
+    if not raw_text:
+        return []
+    cleaned = _HIDDEN_BLOCK_RE.sub(" ", str(raw_text))
+    n = len(cleaned)
+    raw_spans: list[tuple[str, str]] = []
+    nar_start = 0
+    i = 0
+
+    while i < n:
+        ch = cleaned[i]
+
+        if ch == "<":
+            m_open = _COLOR_OPEN_RE.match(cleaned, i)
+            if m_open:
+                if i > nar_start:
+                    raw_spans.append(("narration", cleaned[nar_start:i]))
+                color_name = m_open.group(1).lower()
+                close_re = re.compile(
+                    rf"</\s*(?:color\s*:\s*)?(?:{re.escape(color_name)}|color)(?:(?:\s*:\s*|\s+)[a-z0-9_-]+)?\s*>",
+                    re.IGNORECASE,
+                )
+                rest_start = m_open.end()
+                m_close = close_re.search(cleaned, rest_start)
+                if m_close:
+                    end_idx = m_close.end()
+                else:
+                    m_quote = _LEADING_QUOTE_RE.match(cleaned[rest_start:])
+                    end_idx = (rest_start + m_quote.end()) if m_quote else n
+                raw_spans.append(("dialogue", cleaned[i:end_idx]))
+                i = end_idx
+                nar_start = i
+                continue
+
+        if ch in ('"', "“"):
+            if i > nar_start:
+                raw_spans.append(("narration", cleaned[nar_start:i]))
+            close_ch = '"' if ch == '"' else "”"
+            end_quote = cleaned.find(close_ch, i + 1)
+            end_idx = (end_quote + 1) if end_quote != -1 else n
+            raw_spans.append(("dialogue", cleaned[i:end_idx]))
+            i = end_idx
+            nar_start = i
+            continue
+
+        i += 1
+
+    if nar_start < n:
+        raw_spans.append(("narration", cleaned[nar_start:n]))
+
+    result: list[dict[str, str]] = []
+    for kind, raw_slice in raw_spans:
+        spoken = clean_spoken_text(raw_slice)
+        if spoken:
+            result.append({"kind": kind, "raw": raw_slice, "spoken": spoken})
+    return result
+
+
+def _fade_in_pcm16(pcm_bytes: bytes, ramp_samples: int = 72) -> bytes:
+    """Apply a short (~3 ms at 24 kHz) linear fade-in to s16le PCM bytes to prevent stitch clicks."""
+    n_samples = len(pcm_bytes) // 2
+    if n_samples <= 0 or ramp_samples <= 0:
+        return pcm_bytes
+    even_len = n_samples * 2
+    samples = array("h")
+    samples.frombytes(pcm_bytes[:even_len])
+    if sys.byteorder != "little":
+        samples.byteswap()
+    ramp = min(ramp_samples, len(samples))
+    for idx in range(ramp):
+        samples[idx] = int(samples[idx] * (idx / ramp))
+    if sys.byteorder != "little":
+        samples.byteswap()
+    return samples.tobytes() + pcm_bytes[even_len:]
+
+
 def _jev_status() -> dict:
     engine = _services.get("engine")
     llm = getattr(engine, "llm", None)
@@ -220,15 +327,20 @@ async def classify_sentence_emotion(
     raw_text: str,
     spoken_text: str,
     preceding_sentences: list[str] | None = None,
+    *,
+    full_sentence: str | None = None,
+    fallback_emotion: str = "neutral",
 ) -> str:
-    """Use Jev to pick one of the 16 vocal emotions for `spoken_text`, falling back to `neutral`."""
+    """Use Jev to pick one of the 16 vocal emotions for a dialogue span, falling back cleanly."""
+    catalog = load_emotion_catalog()
+    fallback = fallback_emotion if fallback_emotion in catalog else "neutral"
+
     engine = _services.get("engine")
     llm = getattr(engine, "llm", None)
     decisions = getattr(llm, "decisions", None)
     if decisions is None:
-        return "neutral"
+        return fallback
 
-    catalog = load_emotion_catalog()
     inspector = getattr(llm, "inspector", None)
 
     turn_prev = [
@@ -236,15 +348,20 @@ async def classify_sentence_emotion(
         for s in (preceding_sentences or [])
         if isinstance(s, str) and strip_hidden_blocks(s)
     ]
+    target = strip_hidden_blocks(raw_text) or spoken_text
+    full_ctx = strip_hidden_blocks(full_sentence) if full_sentence else ""
     state = {
         "recent_messages": _collect_recent_scene_messages(),
         "turn_preceding_sentences": turn_prev,
-        "target_sentence": strip_hidden_blocks(raw_text) or spoken_text,
+        "target_sentence": target,
         "spoken_text": spoken_text,
     }
+    if full_ctx and full_ctx != target:
+        state["surrounding_sentence"] = full_ctx
+
     questions = {
         "emotion": choice(
-            "Choose the single vocal delivery emotion that best fits how `target_sentence` should be spoken aloud given `recent_messages` and `turn_preceding_sentences`. Choose `neutral` for ordinary narration or calm matter-of-fact statements without clear emotional charge.",
+            "Choose the single vocal delivery emotion that best fits how the character dialogue in `target_sentence` should be spoken aloud given any attribution cues in `surrounding_sentence`, `turn_preceding_sentences`, and `recent_messages`. Choose `neutral` for calm, ordinary conversation without clear emotional charge.",
             {emo_id: spec["description"] for emo_id, spec in catalog.items()},
         )
     }
@@ -260,7 +377,7 @@ async def classify_sentence_emotion(
     except asyncio.CancelledError:
         raise
     except Exception:
-        return "neutral"
+        return fallback
 
     try:
         selected, probs, _conf = decision.choice_distribution("emotion")
@@ -273,10 +390,10 @@ async def classify_sentence_emotion(
         raise
     except Uncertain as exc:
         await decision.finish("fallback", str(exc))
-        return "neutral"
+        return fallback
     except Exception as exc:
         await decision.finish("fallback", type(exc).__name__)
-        return "neutral"
+        return fallback
 
 
 def _config_path() -> Path:
@@ -310,6 +427,11 @@ def _sanitize_config(updates: dict, existing: dict | None = None) -> dict:
         out["enabled"] = bool(updates["enabled"])
     if "emotion_enabled" in updates:
         out["emotion_enabled"] = bool(updates["emotion_enabled"])
+    if "narration_emotion" in updates:
+        nar_emo = str(updates.get("narration_emotion") or "").strip().lower()
+        catalog = load_emotion_catalog()
+        if nar_emo in catalog:
+            out["narration_emotion"] = nar_emo
     if "server_url" in updates:
         out["server_url"] = normalize_server_url(updates["server_url"])
     if "token" in updates:
@@ -442,11 +564,18 @@ async def on_command_tts(args: list, state: dict, sdk) -> dict:
         cfg = _save_config({"emotion_enabled": args[1].lower() == "on"})
         return {
             "message": (
-                "🎭 TTS emotional delivery enabled."
+                "🎭 TTS dialogue emotions enabled."
                 if cfg["emotion_enabled"]
-                else "🎭 TTS emotional delivery disabled (using neutral voice)."
+                else f"🎭 TTS dialogue emotions disabled (using '{cfg.get('narration_emotion', 'neutral')}' voice)."
             )
         }
+    if sub in ("narrator", "narration"):
+        catalog = load_emotion_catalog()
+        if len(args) < 2 or args[1].lower() not in catalog:
+            opts = ", ".join(catalog.keys())
+            return {"message": f"Usage: /tts narrator <{opts}>", "error": True}
+        cfg = _save_config({"narration_emotion": args[1].lower()})
+        return {"message": f"📖 TTS narration emotion set to '{cfg['narration_emotion']}'."}
     if sub == "url":
         if len(args) < 2:
             return {"message": "Usage: /tts url <http://host:7864>", "error": True}
@@ -458,15 +587,16 @@ async def on_command_tts(args: list, state: dict, sdk) -> dict:
         cfg = _load_config()
         health = await probe_server(force=True)
         enabled_str = "enabled" if cfg["enabled"] else "muted"
-        emo_str = "emotions on" if cfg.get("emotion_enabled", True) else "emotions off"
+        nar_str = f"narration: {cfg.get('narration_emotion', 'neutral')}"
+        emo_str = "dialogue emotions on" if cfg.get("emotion_enabled", True) else "dialogue emotions off"
         server_str = (
             f"ready ({health['model'] or 'Qwen3-TTS'})"
             if health["ready"]
             else f"offline ({health['error'] or 'not running'})"
         )
-        return {"message": f"🔊 TTS is {enabled_str} ({emo_str}) · Server {cfg['server_url']}: {server_str}"}
+        return {"message": f"🔊 TTS is {enabled_str} ({nar_str}, {emo_str}) · Server {cfg['server_url']}: {server_str}"}
     return {
-        "message": "Usage: /tts on | off | emotions on|off | url <http://host:7864> | status",
+        "message": "Usage: /tts on | off | narrator <emotion> | emotions on|off | url <http://host:7864> | status",
         "error": True,
     }
 
@@ -531,42 +661,91 @@ def get_router():
         voice = str(payload.get("voice") or "").strip() or health.get("resolved_voice") or "default"
 
         catalog = load_emotion_catalog()
+        narration_emotion = str(cfg.get("narration_emotion") or "neutral").strip().lower()
+        if narration_emotion not in catalog:
+            narration_emotion = "neutral"
+
         requested_emotion = str(payload.get("emotion") or "").strip().lower()
         preceding = payload.get("preceding_sentences")
         preceding_list = preceding if isinstance(preceding, list) else None
+        instruction_override = str(payload.get("instruction") or "")
 
         if requested_emotion and requested_emotion != "auto" and requested_emotion in catalog:
-            resolved_emotion = requested_emotion
-        elif cfg.get("emotion_enabled", True):
-            resolved_emotion = await classify_sentence_emotion(
-                raw_text=raw_text,
-                spoken_text=text,
-                preceding_sentences=preceding_list,
-            )
+            merged_spans = [{"kind": "explicit", "raw": raw_text, "spoken": text, "emotion": requested_emotion}]
+            header_emotion = requested_emotion
         else:
-            resolved_emotion = ""
+            raw_spans = split_narration_and_dialogue(raw_text)
+            if not raw_spans:
+                raw_spans = [{"kind": "narration", "raw": raw_text, "spoken": text}]
+
+            dialogue_indices = [idx for idx, sp in enumerate(raw_spans) if sp["kind"] == "dialogue"]
+            dialogue_emotions: dict[int, str] = {}
+            if dialogue_indices and cfg.get("emotion_enabled", True):
+                resolved_list = await asyncio.gather(
+                    *(
+                        classify_sentence_emotion(
+                            raw_text=raw_spans[idx]["raw"],
+                            spoken_text=raw_spans[idx]["spoken"],
+                            preceding_sentences=preceding_list,
+                            full_sentence=raw_text,
+                            fallback_emotion=narration_emotion,
+                        )
+                        for idx in dialogue_indices
+                    )
+                )
+                for idx, emo in zip(dialogue_indices, resolved_list):
+                    dialogue_emotions[idx] = emo
+
+            tagged_spans: list[dict[str, str]] = []
+            for idx, sp in enumerate(raw_spans):
+                emo = dialogue_emotions.get(idx, narration_emotion) if sp["kind"] == "dialogue" else narration_emotion
+                tagged_spans.append({**sp, "emotion": emo})
+
+            # Coalesce adjacent spans only when they share the exact same emotion
+            # (e.g. when dialogue emotions are off, or calm dialogue matches narration).
+            merged_spans = []
+            for sp in tagged_spans:
+                if merged_spans and merged_spans[-1]["emotion"] == sp["emotion"]:
+                    combined_raw = merged_spans[-1]["raw"] + sp["raw"]
+                    combined_spoken = clean_spoken_text(combined_raw) or f"{merged_spans[-1]['spoken']} {sp['spoken']}".strip()
+                    merged_spans[-1] = {
+                        "kind": "mixed",
+                        "raw": combined_raw,
+                        "spoken": combined_spoken,
+                        "emotion": sp["emotion"],
+                    }
+                else:
+                    merged_spans.append(dict(sp))
+
+            if dialogue_indices:
+                first_diag = dialogue_indices[0]
+                header_emotion = dialogue_emotions.get(first_diag, narration_emotion)
+            else:
+                header_emotion = narration_emotion
 
         upstream_url = f"{cfg['server_url']}/v1/tts/stream"
-        upstream_body = {
-            "text": text,
-            "voice": voice,
-            "emotion": resolved_emotion,
-            "chunk_size": cfg.get("chunk_size", 8),
-            "temperature": cfg.get("temperature", 0.9),
-            "instruction": str(payload.get("instruction") or ""),
-        }
+
+        def _make_upstream_body(span_item: dict[str, str]) -> dict:
+            return {
+                "text": span_item["spoken"],
+                "voice": voice,
+                "emotion": span_item["emotion"],
+                "chunk_size": cfg.get("chunk_size", 8),
+                "temperature": cfg.get("temperature", 0.9),
+                "instruction": instruction_override,
+            }
 
         client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=4.0, read=120.0, write=10.0, pool=5.0)
         )
         try:
-            req = client.build_request(
+            first_req = client.build_request(
                 "POST",
                 upstream_url,
-                json=upstream_body,
+                json=_make_upstream_body(merged_spans[0]),
                 headers=_auth_headers(cfg),
             )
-            upstream = await client.send(req, stream=True)
+            first_upstream = await client.send(first_req, stream=True)
         except httpx.RequestError as exc:
             await client.aclose()
             _health_cache["checked_at"] = 0.0
@@ -575,27 +754,82 @@ def get_router():
             _health_cache["error"] = str(exc)
             raise HTTPException(status_code=502, detail=f"TTS server unreachable: {exc}") from exc
 
-        if upstream.status_code >= 400:
-            err_bytes = await upstream.aread()
-            await upstream.aclose()
+        if first_upstream.status_code >= 400:
+            err_bytes = await first_upstream.aread()
+            await first_upstream.aclose()
             await client.aclose()
-            detail = err_bytes.decode("utf-8", errors="replace")[:300] or f"HTTP {upstream.status_code}"
-            raise HTTPException(status_code=upstream.status_code, detail=detail)
+            detail = err_bytes.decode("utf-8", errors="replace")[:300] or f"HTTP {first_upstream.status_code}"
+            raise HTTPException(status_code=first_upstream.status_code, detail=detail)
 
-        sample_rate = upstream.headers.get("x-sample-rate") or str(SAMPLE_RATE)
-        channels = upstream.headers.get("x-channels") or "1"
-        audio_format = upstream.headers.get("x-audio-format") or "s16le"
-        active_emotion = upstream.headers.get("x-tts-emotion") or resolved_emotion
+        sample_rate = first_upstream.headers.get("x-sample-rate") or str(SAMPLE_RATE)
+        channels = first_upstream.headers.get("x-channels") or "1"
+        audio_format = first_upstream.headers.get("x-audio-format") or "s16le"
+        active_emotion = header_emotion or first_upstream.headers.get("x-tts-emotion") or ""
+        try:
+            sr_int = max(8000, min(96000, int(sample_rate)))
+        except ValueError:
+            sr_int = SAMPLE_RATE
+        pause_bytes = b"\x00\x00" * int(sr_int * SPAN_PAUSE_SEC)
 
         async def forward_pcm():
-            try:
-                async for chunk in upstream.aiter_bytes(chunk_size=8192):
+            current_upstream: httpx.Response | None = first_upstream
+            disconnected = False
+
+            async def _iter_aligned_pcm(resp: httpx.Response, fade_first: bool):
+                nonlocal disconnected
+                carry = b""
+                needs_fade = fade_first
+                async for chunk in resp.aiter_bytes(chunk_size=8192):
                     if await request.is_disconnected():
-                        break
-                    if chunk:
-                        yield chunk
+                        disconnected = True
+                        return
+                    if not chunk:
+                        continue
+                    buf = carry + chunk if carry else chunk
+                    if len(buf) % 2 == 1:
+                        carry = buf[-1:]
+                        buf = buf[:-1]
+                    else:
+                        carry = b""
+                    if buf:
+                        if needs_fade:
+                            buf = _fade_in_pcm16(buf)
+                            needs_fade = False
+                        yield buf
+
+            try:
+                async for pcm_chunk in _iter_aligned_pcm(first_upstream, fade_first=False):
+                    yield pcm_chunk
+                await first_upstream.aclose()
+                current_upstream = None
+
+                if not disconnected and len(merged_spans) > 1:
+                    for next_span in merged_spans[1:]:
+                        if await request.is_disconnected():
+                            break
+                        if pause_bytes:
+                            yield pause_bytes
+                        next_req = client.build_request(
+                            "POST",
+                            upstream_url,
+                            json=_make_upstream_body(next_span),
+                            headers=_auth_headers(cfg),
+                        )
+                        current_upstream = await client.send(next_req, stream=True)
+                        if current_upstream.status_code >= 400:
+                            await current_upstream.aread()
+                            await current_upstream.aclose()
+                            current_upstream = None
+                            break
+                        async for pcm_chunk in _iter_aligned_pcm(current_upstream, fade_first=True):
+                            yield pcm_chunk
+                        await current_upstream.aclose()
+                        current_upstream = None
+                        if disconnected:
+                            break
             finally:
-                await upstream.aclose()
+                if current_upstream is not None:
+                    await current_upstream.aclose()
                 await client.aclose()
 
         headers = {

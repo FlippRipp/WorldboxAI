@@ -374,7 +374,19 @@ def test_wb_tts_jev_emotion_routing_and_fallback(tmp_path, monkeypatch):
     host_app.include_router(tts_backend.get_router(), prefix="/api/modules/wb_tts")
     client = TestClient(host_app)
 
-    # 1. Jev picks `teasing` (even at 0.62 < 0.90 RPG confidence) and preserves full untruncated context
+    # 1. Pure narration skips Jev completely and uses configured `narration_emotion`
+    nar_cmd = asyncio.run(tts_backend.on_command_tts(["narrator", "somber"], {}, None))
+    assert "somber" in nar_cmd["message"]
+    nar_res = client.post(
+        "/api/modules/wb_tts/stream",
+        json={"text": "He didn't look back at Elena's courtyard."},
+    )
+    assert nar_res.status_code == 200
+    assert nar_res.headers["X-TTS-Emotion"] == "somber"
+    assert len(jev_requests) == 0
+    assert fake_model.calls[-1]["ref_audio"].endswith("somber.wav")
+
+    # 2. Pure dialogue uses Jev (even at 0.62 < 0.90 RPG confidence) and preserves full untruncated context
     res = client.post(
         "/api/modules/wb_tts/stream",
         json={
@@ -394,18 +406,43 @@ def test_wb_tts_jev_emotion_routing_and_fallback(tmp_path, monkeypatch):
     assert sent_state["turn_preceding_sentences"] == ["She tilted her head with a slow grin."]
     assert inspector.get_calls()[0]["decision_outcome"] == "accepted"
 
-    # 2. Low probability (< 0.25) falls back cleanly to `neutral`
+    # 3. Mixed sentence splits at quote boundaries: narration (`somber`) -> dialogue (`teasing`) -> narration (`somber`)
+    calls_before = len(fake_model.calls)
+    jev_before = len(jev_requests)
+    mixed_res = client.post(
+        "/api/modules/wb_tts/stream",
+        json={
+            "text": 'She leaned closer, <pink>"Everything is synced,"</pink> she murmured.',
+        },
+    )
+    assert mixed_res.status_code == 200
+    assert mixed_res.headers["X-TTS-Emotion"] == "teasing"
+    assert len(jev_requests) == jev_before + 1
+    assert 'she murmured.' in jev_requests[-1]["state"]["surrounding_sentence"]
+    new_calls = fake_model.calls[calls_before:]
+    assert len(new_calls) == 3
+    assert new_calls[0]["text"] == "She leaned closer,"
+    assert new_calls[0]["ref_audio"].endswith("somber.wav")
+    assert new_calls[1]["text"] == '"Everything is synced,"'
+    assert new_calls[1]["ref_audio"].endswith("teasing.wav")
+    assert new_calls[2]["text"] == "she murmured."
+    assert new_calls[2]["ref_audio"].endswith("somber.wav")
+    single_span_bytes = 3 * 240 * 2
+    pause_bytes = int(24000 * tts_backend.SPAN_PAUSE_SEC) * 2
+    assert len(mixed_res.content) == (3 * single_span_bytes) + (2 * pause_bytes)
+
+    # 4. Low probability (< 0.25) on dialogue falls back cleanly to `narration_emotion` (`somber`)
     chosen["emotion"] = "awed"
     chosen["prob"] = 0.15
     low_res = client.post(
         "/api/modules/wb_tts/stream",
-        json={"text": "He walked across the courtyard."},
+        json={"text": '"It is nearly midnight."'},
     )
     assert low_res.status_code == 200
-    assert low_res.headers["X-TTS-Emotion"] == "neutral"
+    assert low_res.headers["X-TTS-Emotion"] == "somber"
     assert inspector.get_calls()[0]["decision_outcome"] == "fallback"
 
-    # 3. Explicit manual emotion (e.g. from VoiceServer test picker) bypasses Jev
+    # 5. Explicit manual emotion (e.g. from VoiceServer test picker) bypasses Jev
     prev_req_count = len(jev_requests)
     manual_res = client.post(
         "/api/modules/wb_tts/stream",

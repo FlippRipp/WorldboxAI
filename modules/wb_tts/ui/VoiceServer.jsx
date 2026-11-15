@@ -27,6 +27,7 @@ export default function VoiceServer({ onBack }) {
   const [chunkSize, setChunkSize] = useState(8);
   const [enabled, setEnabled] = useState(true);
   const [emotionEnabled, setEmotionEnabled] = useState(true);
+  const [narrationEmotion, setNarrationEmotion] = useState('neutral');
   const [emotions, setEmotions] = useState(DEFAULT_EMOTIONS);
   const [jevStatus, setJevStatus] = useState({ available: false, enabled: false, tts_enabled: true });
   const [testEmotion, setTestEmotion] = useState('auto');
@@ -60,6 +61,7 @@ export default function VoiceServer({ onBack }) {
       const cfg = data.config || {};
       setEnabled(cfg.enabled !== false);
       setEmotionEnabled(cfg.emotion_enabled !== false);
+      setNarrationEmotion(cfg.narration_emotion || 'neutral');
       setServerUrl(cfg.server_url || 'http://127.0.0.1:7864');
       setToken(cfg.token || '');
       setTemperature(Number(cfg.temperature) || 0.9);
@@ -85,6 +87,7 @@ export default function VoiceServer({ onBack }) {
       const res = await ttsCoordinator.updateConfig({
         enabled,
         emotion_enabled: emotionEnabled,
+        narration_emotion: narrationEmotion,
         server_url: serverUrl,
         token,
         temperature: Number(temperature),
@@ -93,6 +96,7 @@ export default function VoiceServer({ onBack }) {
       setServerUrl(res.config.server_url);
       setToken(res.config.token || '');
       setEmotionEnabled(res.config.emotion_enabled !== false);
+      setNarrationEmotion(res.config.narration_emotion || 'neutral');
       setHealth(res.health || {});
       if (res.jev) setJevStatus(res.jev);
       setFeedback(
@@ -115,15 +119,19 @@ export default function VoiceServer({ onBack }) {
     await ttsCoordinator.playPreviewSample(sampleText, testEmotion);
   };
 
+  const narrationLabel =
+    emotions.find((emo) => emo.id === narrationEmotion)?.label ||
+    narrationEmotion.charAt(0).toUpperCase() + narrationEmotion.slice(1);
+
   const jevHint = !emotionEnabled
-    ? 'Disabled — narration always uses the clean neutral reference voice.'
+    ? `Disabled — character dialogue also uses the Narration Emotion (${narrationLabel}).`
     : jevStatus.available
-      ? 'Jev active — classifying each sentence across 16 vocal emotions automatically.'
+      ? `Jev active — classifying spoken dialogue across 16 vocal emotions while story narration uses ${narrationLabel}.`
       : !jevStatus.enabled
-        ? 'Enable Jev in Model Settings to classify sentences automatically (falling back to Neutral until enabled).'
+        ? `Enable Jev in Model Settings to classify dialogue automatically (falling back to ${narrationLabel} until enabled).`
         : !jevStatus.tts_enabled
-          ? 'TTS emotions is unchecked in Jev Settings (falling back to Neutral).'
-          : 'No Jev/Router API key configured — falling back to Neutral.';
+          ? `TTS emotions is unchecked in Jev Settings (dialogue falling back to ${narrationLabel}).`
+          : `No Jev/Router API key configured — dialogue falling back to ${narrationLabel}.`;
 
   return (
     <div className="min-h-dvh bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 text-gray-100 flex flex-col">
@@ -184,19 +192,48 @@ export default function VoiceServer({ onBack }) {
 
           <div className="flex items-center justify-between gap-4 pb-4 border-b border-gray-800">
             <div>
-              <h2 className="text-sm font-semibold text-gray-100">Emotional Delivery (via Jev)</h2>
+              <h2 className="text-sm font-semibold text-gray-100">Narration Voice Emotion</h2>
+              <p className="text-xs text-gray-400 mt-0.5">
+                Single emotion used for all normal story text outside spoken dialogue.
+              </p>
+            </div>
+            <select
+              aria-label="Narration Voice Emotion"
+              value={narrationEmotion}
+              onChange={(e) => {
+                const next = e.target.value;
+                setNarrationEmotion(next);
+                ttsCoordinator.updateConfig({ narration_emotion: next }).catch(() => {});
+              }}
+              className="px-3 py-2 rounded-xl bg-gray-950 border border-gray-700 text-xs font-medium text-gray-100 focus:outline-none focus:border-purple-500 shrink-0"
+            >
+              {emotions.map((emo) => (
+                <option key={emo.id} value={emo.id}>
+                  {emo.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center justify-between gap-4 pb-4 border-b border-gray-800">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-100">Dialogue Emotions (via Jev)</h2>
               <p className="text-xs text-gray-400 mt-0.5">{jevHint}</p>
             </div>
             <button
               type="button"
-              onClick={() => setEmotionEnabled((v) => !v)}
+              onClick={() => {
+                const next = !emotionEnabled;
+                setEmotionEnabled(next);
+                ttsCoordinator.updateConfig({ emotion_enabled: next }).catch(() => {});
+              }}
               className={`px-4 py-2 rounded-xl border text-xs font-semibold transition-colors shrink-0 ${
                 emotionEnabled
                   ? 'bg-purple-600/30 border-purple-500 text-purple-100'
                   : 'bg-gray-800 border-gray-700 text-gray-400'
               }`}
             >
-              {emotionEnabled ? 'Emotions On' : 'Neutral Only'}
+              {emotionEnabled ? 'Dialogue On' : 'Narration Only'}
             </button>
           </div>
 
@@ -296,7 +333,7 @@ export default function VoiceServer({ onBack }) {
                 onChange={(e) => setTestEmotion(e.target.value)}
                 className="px-2.5 py-1.5 rounded-lg bg-gray-950 border border-gray-700 text-xs text-gray-100 focus:outline-none focus:border-purple-500"
               >
-                <option value="auto">Auto (via Jev)</option>
+                <option value="auto">Auto (Narration + Jev Dialogue)</option>
                 {emotions.map((emo) => (
                   <option key={emo.id} value={emo.id}>
                     {emo.label}

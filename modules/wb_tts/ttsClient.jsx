@@ -85,6 +85,7 @@ class TtsCoordinator {
       config: {
         enabled: true,
         emotion_enabled: true,
+        narration_emotion: 'neutral',
         server_url: 'http://127.0.0.1:7864',
         token: '',
         has_token: false,
