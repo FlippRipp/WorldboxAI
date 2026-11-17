@@ -23,6 +23,7 @@ import json
 import re
 
 from backend.engine import director_shared as _shared
+from backend.engine.narrative_voice import state_pronoun_grounding
 
 try:
     from backend.engine import jev_tasks
@@ -1549,8 +1550,11 @@ async def _run_librarian_llm_pass(state: dict, sdk, base_updates: dict | None = 
     # The seed pass above may have just written deep profile fields; build on
     # that version so this turn's assessment doesn't clobber them.
     profile = updates.get("profile") or data.get("profile") or _default_profile()
+    voice_note = state_pronoun_grounding(state)
 
     prompt = f"""You maintain a live profile of the player and track one active plot thread in a text RPG. The thread is visible to the player; your profile drives what threads they get next.
+
+{voice_note}
 
 ACTIVE PLOT THREAD:
 Title: {thread.get('title', '')}

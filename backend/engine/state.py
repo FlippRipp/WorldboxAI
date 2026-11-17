@@ -33,4 +33,5 @@ class WorldState(TypedDict):
     player_location_map_id: Optional[str]   # Current map (hierarchy scope) the player is on
     revealed_node_ids: list[str]            # Node IDs revealed to the player (fog of war)
     world_data: Optional[dict[str, Any]]    # Cached compiled world data (rules, lore, regions, map, layers)
-    story_style: dict[str, str]             # Editable story direction ({themes, tags, pacing}), injected at depth 0 every turn
+    story_style: dict[str, str]             # Editable story direction ({themes, tags, pacing, perspective, tense}), injected at depth 0 every turn
+    narrative_voice: Optional[dict[str, str]] # Resolved {perspective, tense, player_name} for prompts/modules

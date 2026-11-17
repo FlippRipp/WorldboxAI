@@ -8,6 +8,7 @@ import uuid
 from backend.engine import director_shared as _shared
 from backend.engine import jev_tasks
 from backend.engine.jev import Decision, fallback_generate
+from backend.engine.narrative_voice import state_pronoun_grounding
 
 MODULE_ID = "wb_npc_system"
 
@@ -391,6 +392,7 @@ def _scene_summary(state: dict) -> str:
         f"Location: node={state.get('player_location_node_id', 'unknown')}, region={state.get('player_location_region', 'unknown')}",
         f"Player action: {state.get('input_text', '(system/game start)')}",
         f"Turn: {state.get('turn', 0)}",
+        state_pronoun_grounding(state),
     ]
     clock = _shared.get_time_clock(state)
     if clock is not None:
@@ -603,7 +605,10 @@ async def _update_story_threads(state: dict, sdk) -> list[dict]:
     bank = _get_bank(state)
     recent = "\n".join(str(h) for h in history[-5:])
     bank_text = _bank_summary(bank)
+    voice_note = state_pronoun_grounding(state)
     prompt = f"""Extract 3-5 active story threads from this RPG narrative. These are ongoing plotlines, goals, or tensions.
+
+{voice_note}
 
 Narrative:
 {recent}
@@ -730,6 +735,8 @@ async def _llm_scene_presence(state: dict, sdk, candidates: list[dict]) -> set[s
         for npc in candidates
     )
     prompt = f"""You track which characters are on stage in a text RPG.
+
+{state_pronoun_grounding(state)}
 
 RECENT STORY (oldest to newest):
 {scene}
@@ -1817,6 +1824,8 @@ async def _track_character_changes(state: dict, bank: dict, sdk) -> bool:
 
     prompt = f"""You maintain the character records for the NPCs of a text RPG. After each scene you check whether any of the tracked characters changed in a LASTING way and bring their records up to date.
 
+{state_pronoun_grounding(state)}
+
 TRACKED CHARACTERS (the only characters you may report on):
 {records}
 
@@ -2297,6 +2306,8 @@ async def _update_npc_from_story(npc_id: str, state: dict, sdk) -> dict:
     personality = _normalize_personality(npc.get("personality", ""))
 
     prompt = f"""You maintain the character records for the NPCs of a text RPG. The player has asked you to bring one character's record up to date: check the recent story for LASTING changes to this character and rewrite only the fields that changed.
+
+{state_pronoun_grounding(state)}
 
 CHARACTER RECORD FOR: {npc.get('name', '')}
   Name: {npc.get('name', '')}

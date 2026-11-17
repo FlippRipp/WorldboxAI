@@ -7,6 +7,7 @@ import shutil
 
 from backend.engine.save_manager import SaveManager
 from backend.engine.prompt_pipeline import PromptCompiler, STORY_STYLE_FIELDS
+from backend.engine.narrative_voice import normalize_perspective, normalize_tense
 from backend.engine.settings_registry import SettingsRegistry
 
 
@@ -34,8 +35,8 @@ class GameSessionManager:
     def __init__(self, data_dir: str, settings: SettingsRegistry = None):
         self.data_dir = Path(data_dir)
         self.save_manager = SaveManager(str(self.data_dir))
-        self.prompt_compiler = PromptCompiler()
         self.settings = settings or SettingsRegistry()
+        self.prompt_compiler = PromptCompiler(settings=self.settings)
         # No story is active until one is created or loaded. Saves exist only
         # when the player makes them — there is no implicit default slot.
         self.active_save_id: Optional[str] = None
@@ -415,8 +416,8 @@ class GameSessionManager:
         return sanitized
 
     def get_story_style(self, save_id: str) -> dict[str, str]:
-        """The save's editable story direction (themes/tags/pacing); every
-        field defaults to "" for saves that never set one."""
+        """The save's editable story direction (themes/tags/pacing/perspective/tense);
+        every field defaults to "" for saves that never set one."""
         self._validate_save_id(save_id)
         if save_id == self.active_save_id:
             style = self.state.get("story_style") or {}
@@ -426,13 +427,18 @@ class GameSessionManager:
                 raise FileNotFoundError(f"Save {save_id} not found.")
             metadata = self.save_manager.read_core_json(save_id, "metadata.json", {}) or {}
             style = metadata.get("story_style") or {}
-        return {key: str(style.get(key) or "") for key, _ in STORY_STYLE_FIELDS}
+        out = {key: str(style.get(key) or "") for key, _ in STORY_STYLE_FIELDS}
+        out["perspective"] = normalize_perspective(out.get("perspective"), allow_empty=True)
+        out["tense"] = normalize_tense(out.get("tense"), allow_empty=True)
+        return out
 
     def set_story_style(self, save_id: str, style: dict[str, Any]) -> dict[str, str]:
         """Persist a save's story direction. Works on the loaded save (updates
         in-memory state too, so the next turn picks it up) or any save on disk."""
         self._validate_save_id(save_id)
         clean = {key: str((style or {}).get(key) or "").strip() for key, _ in STORY_STYLE_FIELDS}
+        clean["perspective"] = normalize_perspective(clean.get("perspective"), allow_empty=True)
+        clean["tense"] = normalize_tense(clean.get("tense"), allow_empty=True)
         self.save_manager.update_metadata(save_id, {"story_style": clean})
         if save_id == self.active_save_id:
             self.state["story_style"] = clean

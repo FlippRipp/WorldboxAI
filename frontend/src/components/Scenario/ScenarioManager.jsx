@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api } from '../../lib/api';
+import { PERSPECTIVE_OPTIONS, TENSE_OPTIONS, labelForPerspective, labelForTense } from '../../lib/constants';
 import { useBackTrap } from '../../hooks/useBackNavigation';
 import ModuleTogglePanel from '../shared/ModuleTogglePanel';
 import ModuleInstructionsEditor from '../shared/ModuleInstructionsEditor';
@@ -108,6 +109,7 @@ export default function ScenarioManager({ onBack }) {
   const [allLorebooks, setAllLorebooks] = useState([]);
   const [linkedLorebooks, setLinkedLorebooks] = useState([]);
   const [modules, setModules] = useState([]);
+  const [globalVoice, setGlobalVoice] = useState({ perspective: 'second_person', tense: 'present' });
 
   const refresh = () => {
     setLoading(true);
@@ -121,6 +123,17 @@ export default function ScenarioManager({ onBack }) {
     api.getModules()
       .then((d) => setModules(d.modules || []))
       .catch(() => {});
+    api.getSettings('global')
+      .then((d) => {
+        const items = d?.settings?.Storytelling || [];
+        const p = items.find((i) => i.key === 'narrative.perspective')?.value;
+        const t = items.find((i) => i.key === 'narrative.tense')?.value;
+        setGlobalVoice({
+          perspective: p || 'second_person',
+          tense: t || 'present',
+        });
+      })
+      .catch(() => {});
   };
 
   useEffect(refresh, []);
@@ -129,6 +142,7 @@ export default function ScenarioManager({ onBack }) {
     setLinkedLorebooks([]);
     setEditing({
       name: '', scenario_description: '', starting_prompt: '', themes: '', tags: '', pacing: '',
+      perspective: '', tense: '',
       skip_skill_categories: false, disable_skill_progression: false, skill_points_per_level: null,
       active_modules: null, module_instructions: {},
     });
@@ -142,7 +156,7 @@ export default function ScenarioManager({ onBack }) {
       // Older scenarios predate themes/tags/pacing and the module fields;
       // backfill so the inputs stay controlled.
       setEditing({
-        themes: '', tags: '', pacing: '', skip_skill_categories: false,
+        themes: '', tags: '', pacing: '', perspective: '', tense: '', skip_skill_categories: false,
         disable_skill_progression: false, skill_points_per_level: null,
         active_modules: null, module_instructions: {}, ...scenario,
       });
@@ -167,6 +181,8 @@ export default function ScenarioManager({ onBack }) {
     themes: editing?.themes,
     tags: editing?.tags,
     pacing: editing?.pacing,
+    perspective: editing?.perspective,
+    tense: editing?.tense,
   };
   const scenarioContext = () => scenarioContextValue;
 
@@ -315,10 +331,40 @@ export default function ScenarioManager({ onBack }) {
 
               <div className="space-y-3 p-4 rounded-lg border border-gray-700 bg-gray-800/30">
                 <div>
-                  <h4 className="text-sm font-medium text-gray-300">Story Style</h4>
+                  <h4 className="text-sm font-medium text-gray-300">Story Style & Voice</h4>
                   <p className="text-xs text-gray-500">
-                    Optional direction injected into every turn to guide the story's themes, style, and pace. Editable per story after creation.
+                    Optional direction injected into every turn to guide narrative perspective, tense, themes, style, and pace. Editable per story after creation.
                   </p>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    {field('Perspective', 'narrator POV')}
+                    <select
+                      value={editing.perspective || ''}
+                      onChange={(e) => setEditing({ ...editing, perspective: e.target.value })}
+                      aria-label="Scenario perspective"
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
+                    >
+                      <option value="">Default ({labelForPerspective(globalVoice.perspective)})</option>
+                      {PERSPECTIVE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="space-y-1.5">
+                    {field('Tense', 'grammatical tense')}
+                    <select
+                      value={editing.tense || ''}
+                      onChange={(e) => setEditing({ ...editing, tense: e.target.value })}
+                      aria-label="Scenario tense"
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
+                    >
+                      <option value="">Default ({labelForTense(globalVoice.tense)})</option>
+                      {TENSE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
                 <div className="space-y-1.5">
                   {field('Themes', 'e.g. redemption, found family, the cost of power')}

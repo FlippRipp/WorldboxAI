@@ -18,6 +18,7 @@ import re
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from backend.engine.narrative_voice import normalize_perspective, normalize_tense
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,8 @@ class ScenarioStore:
             "themes": data.get("themes", ""),
             "tags": data.get("tags", ""),
             "pacing": data.get("pacing", ""),
+            "perspective": normalize_perspective(data.get("perspective"), allow_empty=True),
+            "tense": normalize_tense(data.get("tense"), allow_empty=True),
             # When true, the RPG add-skill wizard in stories created from this
             # scenario skips the category-picking step and offers skills
             # directly (search stays available).

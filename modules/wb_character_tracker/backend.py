@@ -9,6 +9,7 @@ human-readable change log is kept in this module's own module_data.
 """
 import json
 import re
+from backend.engine.narrative_voice import state_pronoun_grounding
 
 
 # Canonical character fields this module is allowed to evolve. The engine's
@@ -92,8 +93,11 @@ async def on_librarian(state: dict, sdk) -> dict | None:
 
     player_action = str(state.get("last_input_text") or state.get("input_text") or "").strip()[:600]
     action_block = f"THE PLAYER'S ACTION THIS TURN:\n{player_action}\n\n" if player_action else ""
+    voice_note = state_pronoun_grounding(state)
 
     prompt = f"""You maintain the character record for the player of a text RPG. After each scene you check whether the player's action or the narration shows the player character CHANGING in a lasting way.
+
+{voice_note} Keep the updated record fields themselves written in third-person reference prose.
 
 Report changes ONLY in these areas:
 - appearance / physical condition (new scars, wounds, lost limbs, aging, a transformation, altered hair/eyes/skin)
@@ -209,7 +213,10 @@ async def _update_from_story(target: str, state: dict, sdk) -> dict:
         )
     field_specs.append('"change_note": one short sentence summarizing what changed versus the current record')
 
+    voice_note = state_pronoun_grounding(state)
     prompt = f"""You maintain the character record for the player of a text RPG. The player has asked you to bring their record up to date with the story: rewrite the requested fields so they reflect everything that has happened so far.
+
+{voice_note}
 
 CURRENT CHARACTER RECORD:
   Name: {player.get('name', '')}

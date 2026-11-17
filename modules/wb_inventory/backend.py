@@ -1,5 +1,6 @@
 """Inventory & Economy -- player items, currency, and consistency enforcement."""
 import json
+from backend.engine.narrative_voice import state_pronoun_grounding
 
 
 DEFAULT_STARTING_ITEMS = [
@@ -202,6 +203,8 @@ async def on_validate_output(llm_output: str, state: dict, sdk) -> None:
         return
 
     prompt = f"""You are a consistency checker for a text RPG. Output ONLY valid JSON.
+
+{state_pronoun_grounding(state)}
 
 The player's actual possessions:
   Items: {_item_summary(data)}

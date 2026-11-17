@@ -49,7 +49,9 @@ def scenario_start_brief(scenario: dict) -> str:
     if request:
         parts.append(
             "The player's change request for this scenario — HIGHEST priority, "
-            f"it overrides the scenario text below where they conflict:\n{request}")
+            "it overrides the scenario text below where they conflict "
+            '(any "you"/"your" or "I"/"my" in this request refers to the player '
+            f"character / protagonist, never the AI):\n{request}")
     grounding = scenario_grounding_text(scenario)
     if grounding:
         parts.append(
@@ -76,6 +78,8 @@ def build_world_prompt_messages(instruction: str, current_text: str = "",
         "generator expands into a full world (rules, lore, regions, a map). It is "
         "NOT the world itself and NOT in-fiction narration: write it as direction "
         "for the generator, in plain descriptive prose, a few sentences long. "
+        'If the player\'s direction uses "you"/"your" or "I"/"my", those pronouns '
+        "refer to the story's protagonist, not to you (the AI). "
         'Return only valid JSON: {"text": "..."}.'
     )
     parts = []

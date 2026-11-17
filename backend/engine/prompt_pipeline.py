@@ -3,6 +3,18 @@ import random
 from copy import deepcopy
 from typing import Any
 from backend.engine.st_macros import STMacroContext
+from backend.engine.narrative_voice import (
+    DEFAULT_PERSPECTIVE,
+    DEFAULT_TENSE,
+    extract_player_name,
+    input_pronoun_grounding,
+    narration_voice_lines,
+    normalize_perspective,
+    normalize_tense,
+    perspective_short_label,
+    resolve_narrative_voice,
+    tense_short_label,
+)
 
 
 ALLOWED_BLOCK_TYPES = {"static_text", "engine_context", "module_prompt", "world_context", "character_context", "chat_history"}
@@ -22,7 +34,8 @@ DEFAULT_INJECTION_ORDER = 100
 # input classifiers after dark prose or cause reasoning models to repeat prior lines).
 DEFAULT_CONTINUE_PROMPT = (
     "[Narrative continuation: Pick up the scene around ${player_name} from the exact "
-    "moment the previous passage ended, without repeating or summarizing prior narration. "
+    "moment the previous passage ended in ${narrative_perspective}, ${narrative_tense}, "
+    "without repeating or summarizing prior narration. "
     "Focus on the immediate atmosphere, unfolding events, and nearby characters' reactions "
     "and dialogue, advancing the next beat of the story naturally while leaving "
     "${player_name}'s own deliberate choices open.]"
@@ -30,41 +43,98 @@ DEFAULT_CONTINUE_PROMPT = (
 
 # The editable story-style fields ({state key, prompt label}) and how they are
 # rendered — shared by the per-turn depth-0 injection and the intro prompt.
-STORY_STYLE_FIELDS = [
+STORY_STYLE_PROSE_FIELDS = [
     ("themes", "Themes"),
     ("tags", "Tags"),
     ("pacing", "Pacing"),
 ]
+STORY_STYLE_FIELDS = [
+    *STORY_STYLE_PROSE_FIELDS,
+    ("perspective", "Perspective"),
+    ("tense", "Tense"),
+]
 
 
-def render_story_style(story_style: dict[str, Any] | None) -> str:
-    """Render the story's themes/tags/pacing as a <story_style> directive.
-    Empty fields are skipped; returns "" when nothing is set."""
+def render_story_style(
+    story_style: dict[str, Any] | None,
+    settings: Any = None,
+    player_name: str = "",
+    *,
+    force_voice: bool = False,
+) -> str:
+    """Render the story's themes/tags/pacing plus perspective/tense as a
+    <story_style> directive. Returns "" when no style fields are set and the
+    global perspective/tense settings are at their untouched defaults (unless
+    ``force_voice=True``, e.g. for opening-scene generation)."""
     style = story_style or {}
-    field_lines = []
-    for key, label in STORY_STYLE_FIELDS:
+    prose_lines = []
+    for key, label in STORY_STYLE_PROSE_FIELDS:
         value = (style.get(key) or "").strip() if isinstance(style.get(key), str) else ""
         if value:
-            field_lines.append(f"{label}: {value}")
-    if not field_lines:
+            prose_lines.append(f"{label}: {value}")
+
+    explicit_perspective = normalize_perspective(style.get("perspective"), allow_empty=True)
+    explicit_tense = normalize_tense(style.get("tense"), allow_empty=True)
+    non_default_global = False
+    if settings is not None and hasattr(settings, "get"):
+        try:
+            gp = normalize_perspective(settings.get("narrative.perspective"), allow_empty=True)
+            gt = normalize_tense(settings.get("narrative.tense"), allow_empty=True)
+            non_default_global = bool(
+                (gp and gp != DEFAULT_PERSPECTIVE) or (gt and gt != DEFAULT_TENSE)
+            )
+        except Exception:
+            pass
+
+    has_voice = bool(
+        force_voice
+        or explicit_perspective
+        or explicit_tense
+        or non_default_global
+        or (prose_lines and settings is not None)
+    )
+
+    if not prose_lines and not has_voice:
         return ""
+
+    body_lines = []
+    if has_voice:
+        voice = resolve_narrative_voice(
+            settings=settings,
+            style_override=style,
+            player_name=player_name,
+        )
+        body_lines.extend(
+            narration_voice_lines(voice["perspective"], voice["tense"], voice["player_name"])
+        )
+    if prose_lines:
+        body_lines.extend(prose_lines)
+        body_lines.append(
+            "Let these themes, tags, and pacing guide the style, mood, and rhythm "
+            "of the narration. Express them through the story itself — never name "
+            "or reference them directly."
+        )
     return "\n".join([
         "<story_style>",
-        *field_lines,
-        "Let these themes, tags, and pacing guide the style, mood, and rhythm "
-        "of the narration. Express them through the story itself — never name "
-        "or reference them directly.",
+        *body_lines,
         "</story_style>",
     ])
 
 
-def build_auto_player_action_prompt(state: dict[str, Any], nudge: str = "") -> str:
+def build_auto_player_action_prompt(
+    state: dict[str, Any],
+    nudge: str = "",
+    settings: Any = None,
+) -> str:
     """Prompt for the fast model that plays the player in storyteller auto
     mode: decide the character's next action from their personality and the
     recent story, phrased like a message the player would have typed."""
     characters = state.get("characters") or {}
     player = characters.get("default_player") or {}
     name = (player.get("name") or "").strip() or "the protagonist"
+    voice = resolve_narrative_voice(state, settings=settings, player_name=name)
+    perspective = voice["perspective"]
+    tense = voice["tense"]
 
     lines = [
         f"You are playing {name}, the protagonist of an ongoing interactive story. "
@@ -86,18 +156,32 @@ def build_auto_player_action_prompt(state: dict[str, Any], nudge: str = "") -> s
 
     recent = [entry[-1500:] for entry in (state.get("history") or [])[-2:]]
     if recent:
-        lines.append("The story so far (most recent scenes; the \"you\" in the narration is this character):")
+        if perspective == "first_person":
+            scene_note = 'the "I" in the narration is this character'
+        elif perspective == "third_person":
+            scene_note = f"narrated in third person around {name}"
+        else:
+            scene_note = 'the "you" in the narration is this character'
+        lines.append(f"The story so far (most recent scenes; {scene_note}):")
         lines.extend(recent)
         lines.append("")
 
     nudge = (nudge or "").strip()
     if nudge:
-        lines.append(f"Direction from the player (follow its intent when deciding the action): {nudge}")
+        lines.append(
+            f"Direction from the player (follow its intent when deciding the action; "
+            f"{input_pronoun_grounding(perspective, tense, name, include_story_voice=False)}): {nudge}"
+        )
         lines.append("")
+
+    if tense == "past":
+        tense_example = 'first person, past tense (e.g. "I drew my sword and stepped between them.")'
+    else:
+        tense_example = 'first person, present tense (e.g. "I draw my sword and step between them.")'
 
     lines.append(
         f"Answer with {name}'s next move as a short player message: 1-3 sentences, "
-        f"first person, present tense (e.g. \"I draw my sword and step between them.\"), "
+        f"{tense_example}, "
         f"stating what {name} does and says. Declare the attempt only — never its "
         f"outcome, and never other characters' reactions; the storyteller decides "
         f"those. Stay true to the personality and the current scene, and keep the "
@@ -108,6 +192,8 @@ def build_auto_player_action_prompt(state: dict[str, Any], nudge: str = "") -> s
 
 AVAILABLE_MACROS = [
     {"key": "${player_name}", "description": "Name of the player character"},
+    {"key": "${narrative_perspective}", "description": "Active narrative perspective (e.g. second person)"},
+    {"key": "${narrative_tense}", "description": "Active narrative tense (e.g. present tense)"},
     {"key": "${world_name}", "description": "Name of the current world"},
     {"key": "${world_genre}", "description": "Genre of the current world"},
     {"key": "${world_tone}", "description": "Narrative tone of the world"},
@@ -223,6 +309,9 @@ class PromptPipelineValidationError(ValueError):
 
 class PromptCompiler:
 
+    def __init__(self, settings: Any = None):
+        self.settings = settings
+
     def resolve_macros(self, text: str, state: dict[str, Any]) -> str:
         if not text or "${" not in text:
             return text
@@ -233,9 +322,12 @@ class PromptCompiler:
 
         characters = state.get("characters") or {}
         player_char = characters.get("default_player") or {}
+        voice = resolve_narrative_voice(state, settings=self.settings)
         lethality = rules.get("lethality")
         substitutions = {
             "${player_name}": (player_char.get("name") or "").strip() or "Adventurer",
+            "${narrative_perspective}": perspective_short_label(voice["perspective"]),
+            "${narrative_tense}": tense_short_label(voice["tense"]),
             "${world_name}": (lore.get("world_name") or "").strip() or "Unknown World",
             "${world_genre}": (rules.get("genre") or "").strip() or "Fantasy",
             "${world_tone}": (rules.get("tone") or "").strip() or "Neutral",
@@ -704,10 +796,16 @@ class PromptCompiler:
         if not field_lines:
             return ""
 
+        voice = resolve_narrative_voice(
+            state,
+            settings=self.settings,
+            player_name=(player.get("name") or "").strip(),
+        )
         lines = [
             "<player_character>",
             "The player controls the following character. Refer to them consistently and never contradict these details:",
             *field_lines,
+            *narration_voice_lines(voice["perspective"], voice["tense"], voice["player_name"]),
             "</player_character>",
         ]
         return "\n".join(lines)
@@ -846,9 +944,13 @@ class PromptCompiler:
         return self._engine_directive_block("engine_validation_veto", "Validation Veto", validation_veto)
 
     def _story_style_block(self, state: dict[str, Any]) -> dict[str, Any] | None:
-        """The story's editable style direction (themes/tags/pacing) as a
-        depth-0 chat injection. Returns None when every field is empty."""
-        text = render_story_style(state.get("story_style"))
+        """The story's editable style direction (themes/tags/pacing + perspective/tense)
+        as a depth-0 chat injection. Returns None when nothing is set."""
+        text = render_story_style(
+            state.get("story_style"),
+            settings=self.settings,
+            player_name=extract_player_name(state),
+        )
         if not text:
             return None
         return self._engine_directive_block("engine_story_style", "Story Style", text)

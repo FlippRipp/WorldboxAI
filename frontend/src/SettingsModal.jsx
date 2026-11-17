@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api } from './lib/api';
+import { PERSPECTIVE_OPTIONS, TENSE_OPTIONS, labelForPerspective, labelForTense } from './lib/constants';
 import { useBackTrap } from './hooks/useBackNavigation';
 import ModuleSettingsModal from './components/ModuleSettingsModal';
 
@@ -177,8 +178,12 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
   // Global cheat toggle; gates the unlock button on hardcore-locked module
   // settings. The server enforces the same gate, so this is purely cosmetic.
   const [cheatsEnabled, setCheatsEnabled] = useState(false);
+  const [globalVoice, setGlobalVoice] = useState({ perspective: 'second_person', tense: 'present' });
+  const [storyStyle, setStoryStyle] = useState(null);
+  const [initialStoryStyle, setInitialStoryStyle] = useState(null);
 
   const isGlobal = scope === 'global';
+  const activeSaveId = gameState?.active_save_id || null;
 
   useEffect(() => {
     if (!isOpen) return;
@@ -189,9 +194,37 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
     api.getSettings('global').then(data => {
       for (const items of Object.values(data.settings || {})) {
         const hit = (items || []).find(s => s.key === 'cheats.enabled');
-        if (hit) { setCheatsEnabled(!!hit.value); return; }
+        if (hit) setCheatsEnabled(!!hit.value);
       }
+      const stItems = data?.settings?.Storytelling || [];
+      const p = stItems.find(s => s.key === 'narrative.perspective')?.value;
+      const t = stItems.find(s => s.key === 'narrative.tense')?.value;
+      setGlobalVoice({
+        perspective: p || 'second_person',
+        tense: t || 'present',
+      });
     }).catch(() => {});
+
+    if (!isGlobal && activeSaveId) {
+      api.getStoryStyle(activeSaveId).then(data => {
+        const st = data?.story_style || {};
+        const clean = {
+          themes: st.themes || '',
+          tags: st.tags || '',
+          pacing: st.pacing || '',
+          perspective: st.perspective || '',
+          tense: st.tense || '',
+        };
+        setStoryStyle(clean);
+        setInitialStoryStyle(clean);
+      }).catch(() => {
+        setStoryStyle(null);
+        setInitialStoryStyle(null);
+      });
+    } else {
+      setStoryStyle(null);
+      setInitialStoryStyle(null);
+    }
 
     api.getSettings(scope).then(data => {
       setEngineSettings(data.settings || {});
@@ -219,7 +252,7 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
       }
     });
     setModuleValues(initialModule);
-  }, [isOpen, scope, modules, moduleConfigs]);
+  }, [isOpen, scope, modules, moduleConfigs, activeSaveId]);
 
   if (!isOpen) return null;
 
@@ -245,6 +278,10 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
     });
     if (Object.keys(engineUpdates).length > 0) {
       await api.updateSettings(engineUpdates, scope);
+    }
+    if (!isGlobal && activeSaveId && storyStyle && initialStoryStyle &&
+        (storyStyle.perspective !== initialStoryStyle.perspective || storyStyle.tense !== initialStoryStyle.tense)) {
+      await api.setStoryStyle(activeSaveId, storyStyle);
     }
     if (!isGlobal) {
       await onSaveModuleConfigs(modValues);
@@ -313,6 +350,42 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
           {!loading && error && (
             <div className="text-center text-red-400 italic py-4 bg-red-900/30 rounded border border-red-800">
               {error}
+            </div>
+          )}
+
+          {!loading && !error && !isGlobal && storyStyle && (
+            <div>
+              <h3 className="text-sm uppercase tracking-wider text-gray-500 mb-4 font-semibold">Narrative Voice</h3>
+              <div className="bg-gray-900/50 p-4 rounded border border-gray-700 space-y-4">
+                <div className="flex flex-col gap-1">
+                  <label className="text-sm font-medium text-gray-300">Perspective</label>
+                  <select
+                    value={storyStyle.perspective || ''}
+                    onChange={(e) => setStoryStyle((prev) => ({ ...prev, perspective: e.target.value }))}
+                    aria-label="Story perspective"
+                    className="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-gray-200 text-sm"
+                  >
+                    <option value="">Default ({labelForPerspective(globalVoice.perspective)})</option>
+                    {PERSPECTIVE_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-sm font-medium text-gray-300">Tense</label>
+                  <select
+                    value={storyStyle.tense || ''}
+                    onChange={(e) => setStoryStyle((prev) => ({ ...prev, tense: e.target.value }))}
+                    aria-label="Story tense"
+                    className="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-gray-200 text-sm"
+                  >
+                    <option value="">Default ({labelForTense(globalVoice.tense)})</option>
+                    {TENSE_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
             </div>
           )}
 
@@ -414,7 +487,7 @@ export default function SettingsModal({ isOpen, onClose, modules, moduleConfigs,
             </div>
           )}
 
-          {!loading && !error && !hasEngineSettings && !hasModuleSettings && (
+          {!loading && !error && !hasEngineSettings && !hasModuleSettings && !storyStyle && (
             <div className="text-center text-gray-500 italic py-8">No configurable settings available.</div>
           )}
         </div>

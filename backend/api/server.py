@@ -13,6 +13,15 @@ from backend.engine.settings_registry import SettingsRegistry
 from backend.engine.character_builder import CharacterBuilder
 from backend.engine.scenario import ScenarioStore
 from backend.engine.prompt_pipeline import STORY_STYLE_FIELDS
+from backend.engine.narrative_voice import (
+    input_pronoun_grounding,
+    narration_voice_directive,
+    normalize_perspective,
+    normalize_tense,
+    perspective_short_label,
+    resolve_narrative_voice,
+    tense_short_label,
+)
 from backend.engine.lorebook import LorebookStore, make_story_entry, patch_story_entry, story_entries_book
 from backend.engine.memory import embed_texts_batch
 from backend.engine.provider_manager import ProviderManager
@@ -282,6 +291,9 @@ class CreateSaveRequest(BaseModel):
     # Director's profile as player-set entries when that module is active.
     plot_likes: Optional[str] = None
     plot_dislikes: Optional[str] = None
+    # Optional per-story narrative perspective & tense overrides (""/None = inherit scenario or global default).
+    perspective: Optional[str] = None
+    tense: Optional[str] = None
 
 
 class UndoTurnRequest(BaseModel):
@@ -740,6 +752,8 @@ def _scenario_context_parts(ctx: Optional[dict], exclude: tuple = ()) -> list[st
         ("themes", "themes"),
         ("tags", "tags"),
         ("pacing", "pacing"),
+        ("perspective", "perspective"),
+        ("tense", "tense"),
     ]
     parts = []
     for key, tag in labels:
@@ -783,6 +797,14 @@ async def rewrite_module_instruction(mod_id: str, slot_id: str, payload: Rewrite
     if scenario_parts:
         user_parts.append("<scenario_context>\n" + "\n".join(scenario_parts) + "\n</scenario_context>")
     user_parts.append(f"<user_request>\n{request_text}\n</user_request>")
+    voice = resolve_narrative_voice(
+        session_manager.state,
+        settings=backend_settings,
+        style_override=payload.scenario_context if isinstance(payload.scenario_context, dict) else None,
+    )
+    pronoun_rule = input_pronoun_grounding(
+        voice["perspective"], voice["tense"], voice["player_name"]
+    )
     messages = [
         {"role": "system", "content": (
             "You customize the generation instructions of a text-RPG game system. The player "
@@ -792,7 +814,9 @@ async def rewrite_module_instruction(mod_id: str, slot_id: str, payload: Rewrite
             "as the starting point and the default as reference. When a scenario context is given, "
             "it describes the story these instructions are for — use it to make the instruction fit "
             "that setting and tone, but keep the instruction general module guidance rather than "
-            "narrating the scenario. Keep everything the request does "
+            "narrating the scenario. "
+            f"{pronoun_rule} "
+            "Keep everything the request does "
             "not ask to change, keep roughly the same length and the same imperative style, and "
             "write the instruction as plain prose or dash bullets. The instruction text itself "
             "must never mention JSON, output formats, field names, or how many items to produce - "
@@ -862,6 +886,15 @@ async def rewrite_all_module_instructions(mod_id: str, payload: RewriteAllInstru
         user_parts.append("<scenario_context>\n" + "\n".join(scenario_parts) + "\n</scenario_context>")
     user_parts.append(f"<user_request>\n{request_text}\n</user_request>")
 
+    voice = resolve_narrative_voice(
+        session_manager.state,
+        settings=backend_settings,
+        style_override=payload.scenario_context if isinstance(payload.scenario_context, dict) else None,
+    )
+    pronoun_rule = input_pronoun_grounding(
+        voice["perspective"], voice["tense"], voice["player_name"]
+    )
+
     slot_ids = [s.get("id") for s in slots]
     messages = [
         {"role": "system", "content": (
@@ -870,7 +903,9 @@ async def rewrite_all_module_instructions(mod_id: str, payload: RewriteAllInstru
             "request that may concern some or all of them. For each slot, decide whether the request "
             "applies to it. If it does, rewrite that slot's instruction to fit the request - base the "
             "rewrite on the default instruction, or on the current instruction when one is given "
-            "(the player is iterating on it). Keep everything the request does not ask to change, "
+            "(the player is iterating on it). "
+            f"{pronoun_rule} "
+            "Keep everything the request does not ask to change, "
             "keep roughly the same length and the same imperative style, and write instructions as "
             "plain prose or dash bullets. If the request does NOT apply to a slot, return an empty "
             "string for it - never rewrite a slot just to rephrase it. The instruction text itself "
@@ -1558,6 +1593,9 @@ async def create_save(request: CreateSaveRequest):
                 )
                 await _sync_lorebooks_for_save(request.save_id)
 
+        req_perspective = normalize_perspective(request.perspective, allow_empty=True)
+        req_tense = normalize_tense(request.tense, allow_empty=True)
+
         # A scenario can be used alone or alongside a world: the world supplies
         # the setting, the scenario supplies (or rewrites) the opening message.
         # Loaded up front so a missing scenario fails before any save is created.
@@ -1572,26 +1610,38 @@ async def create_save(request: CreateSaveRequest):
             if request.scenario_request and request.scenario_request.strip():
                 scenario["pending_modification_request"] = request.scenario_request.strip()
                 scenario["revision_mode"] = request.scenario_revision_mode
+            if req_perspective:
+                scenario["perspective"] = req_perspective
+            if req_tense:
+                scenario["tense"] = req_tense
+
+        def _persist_story_style():
+            style = {
+                key: str((scenario or {}).get(key) or "").strip()
+                for key, _ in STORY_STYLE_FIELDS
+            }
+            if req_perspective:
+                style["perspective"] = req_perspective
+            if req_tense:
+                style["tense"] = req_tense
+            if any(style.values()):
+                session_manager.set_story_style(request.save_id, style)
 
         def _persist_scenario():
             # Write the save's scenario copy (parallel to World/world_data.json)
             # and expose it in session state for the intro. Must run after the
             # save workspace exists.
-            if scenario is None:
-                return
-            save_workspace = session_manager.data_dir / "saves" / request.save_id
-            scenario_dir = save_workspace / "Scenario"
-            scenario_dir.mkdir(parents=True, exist_ok=True)
-            import json as _json
-            with open(scenario_dir / "scenario.json", "w", encoding="utf-8") as f:
-                _json.dump(scenario, f, indent=2, ensure_ascii=False)
-            session_manager.state["scenario_data"] = scenario
+            if scenario is not None:
+                save_workspace = session_manager.data_dir / "saves" / request.save_id
+                scenario_dir = save_workspace / "Scenario"
+                scenario_dir.mkdir(parents=True, exist_ok=True)
+                import json as _json
+                with open(scenario_dir / "scenario.json", "w", encoding="utf-8") as f:
+                    _json.dump(scenario, f, indent=2, ensure_ascii=False)
+                session_manager.state["scenario_data"] = scenario
             # Seed the save's editable story direction from the scenario's
-            # themes/tags/pacing. Stored in save metadata so it stays editable
-            # per story, independently of the frozen scenario copy.
-            style = {key: str(scenario.get(key) or "").strip() for key, _ in STORY_STYLE_FIELDS}
-            if any(style.values()):
-                session_manager.set_story_style(request.save_id, style)
+            # fields plus any explicit New Story overrides.
+            _persist_story_style()
 
         if request.world_id:
             # World is an optional story source provided by the wb_worldgen module.
@@ -1643,6 +1693,7 @@ async def create_save(request: CreateSaveRequest):
                 character_module_data=character_module_data,
                 character_data=character_data,
             )
+            _persist_story_style()
             engine.set_memory_path(session_manager.get_memory_path())
             _persist_active_modules()
             return {"session": session_manager.get_status(), "state": state}
@@ -1786,6 +1837,8 @@ class StoryStyleRequest(BaseModel):
     themes: Optional[str] = ""
     tags: Optional[str] = ""
     pacing: Optional[str] = ""
+    perspective: Optional[str] = ""
+    tense: Optional[str] = ""
 
 
 @app.get("/api/saves/{save_id}/export")
@@ -1996,6 +2049,8 @@ class ScenarioRequest(BaseModel):
     themes: Optional[str] = ""
     tags: Optional[str] = ""
     pacing: Optional[str] = ""
+    perspective: Optional[str] = ""
+    tense: Optional[str] = ""
     # RPG add-skill wizard: skip the category-picking step in stories created
     # from this scenario and offer skills directly.
     skip_skill_categories: Optional[bool] = False
@@ -2050,6 +2105,8 @@ class RewriteScenarioPromptRequest(BaseModel):
     themes: Optional[str] = None
     tags: Optional[str] = None
     pacing: Optional[str] = None
+    perspective: Optional[str] = None
+    tense: Optional[str] = None
 
 
 @app.post("/api/scenarios/rewrite-prompt")
@@ -2065,22 +2122,30 @@ async def rewrite_scenario_prompt(payload: RewriteScenarioPromptRequest):
         raise HTTPException(status_code=400, detail="An edit request is required.")
     current_text = (payload.current_text or "").strip()
     field = payload.field if payload.field in ("starting_prompt", "scenario_description") else "starting_prompt"
+    voice = resolve_narrative_voice(
+        settings=backend_settings,
+        style_override={"perspective": payload.perspective, "tense": payload.tense},
+    )
 
     if field == "starting_prompt":
+        pov_label = perspective_short_label(voice["perspective"])
+        tense_label = tense_short_label(voice["tense"])
+        voice_block = narration_voice_directive(voice["perspective"], voice["tense"])
         role = (
             "You are an expert interactive-fiction editor. The text is the opening message of a "
-            "text-RPG story — the literal first thing the player reads, written in second person "
-            "and in-fiction (no meta commentary, no headings, no quotation marks around the whole "
-            "thing). Revise it to fit the player's request while keeping it a self-contained "
-            "opening scene that hands the story to the player."
+            f"text-RPG story — the literal first thing the player reads, written in {pov_label}, "
+            f"{tense_label} and in-fiction (no meta commentary, no headings, no quotation marks "
+            "around the whole thing). Revise it to fit the player's request while keeping it a "
+            f"self-contained opening scene that hands the story to the player. {voice_block}"
         )
     else:
+        pronoun_rule = input_pronoun_grounding(voice["perspective"], voice["tense"])
         role = (
             "You are an expert interactive-fiction editor. The text is a scenario description — a "
             "system prompt that frames the setting, situation, and tone for the AI game master. "
             "It is written as instructional/descriptive prose about the world, not as in-story "
             "narration. Revise it to fit the player's request while keeping it usable as a "
-            "framing prompt for the AI."
+            f"framing prompt for the AI. {pronoun_rule}"
         )
 
     # Everything else in the scenario is context; the field being edited is
@@ -2093,6 +2158,8 @@ async def rewrite_scenario_prompt(payload: RewriteScenarioPromptRequest):
             "themes": payload.themes,
             "tags": payload.tags,
             "pacing": payload.pacing,
+            "perspective": payload.perspective,
+            "tense": payload.tense,
         },
         exclude=(field,),
     )

@@ -4,6 +4,7 @@ import json
 import re
 
 from backend.engine.jev import ask, choice, noul, Decision, Uncertain
+from backend.engine.narrative_voice import state_pronoun_grounding
 
 RPG = "wb_core_rpg"
 NPC = "wb_npc_system"
@@ -253,6 +254,7 @@ def npc_context(state, candidates, *, player_action):
     """The caller selects its phase's action; an empty Continue stays empty."""
     return {"recent_story": list(state.get("history", []))[-5:],
             "player_action": player_action,
+            "narrative_voice": state_pronoun_grounding(state),
             "characters": candidates, "turn": state.get("turn", 0),
             "location": {k: v for k, v in state.items() if k.startswith("player_location")},
             "story_threads": state.get("module_data", {}).get(NPC, {}).get("story_threads", []),
@@ -348,6 +350,7 @@ async def plot_injection(sdk, state, thread, last_assessment=None):
     context = {
         "recent_story": list(state.get("history", []))[-5:],
         "player_action": state.get("input_text", ""),
+        "narrative_voice": state_pronoun_grounding(state),
         "turn": state.get("turn", 0),
         "thread": {k: thread.get(k, "") for k in ("title", "mode", "hook", "challenge", "stakes")},
     }

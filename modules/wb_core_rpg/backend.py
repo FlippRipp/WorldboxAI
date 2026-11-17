@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass, field
 from backend.engine import jev_tasks
 from backend.engine.jev import Decision, fallback_generate
+from backend.engine.narrative_voice import state_pronoun_grounding
 
 
 STAT_NAMES = ["power", "agility", "vitality", "intelligence", "spirit", "charm"]
@@ -527,10 +528,12 @@ async def on_gather_context(state: dict, sdk) -> dict:
         # Pre-assess action feasibility with a fast model call
         model_pref = config.get("practice_ai_model", "fastest")
         recent_story = list((state.get("history") or [])[-2:])
+        voice_note = state_pronoun_grounding(state, settings=_services.get("settings"))
         assessment = await _assess_action(
             input_text, char, config, sdk, model_pref, state.get("world_data"), recent_story,
             instructions=state.get("module_instructions"),
             practice_decision=practice_decision,
+            voice_note=voice_note,
         )
         char.action_assessment = assessment
 
@@ -546,7 +549,9 @@ async def on_gather_context(state: dict, sdk) -> dict:
         elif active_skills:
             model_pref = config.get("practice_ai_model", "fastest")
             skill_names = [f"{_skill_prompt_label(n, d)} ({d['rating']}/10)" for n, d in active_skills.items()]
+            voice_note = state_pronoun_grounding(state, settings=_services.get("settings"))
             prompt = (
+                f"{voice_note}\n\n"
                 f"The player just performed: \"{input_text}\"\n\n"
                 f"Character skills: {', '.join(skill_names)}\n\n"
                 f"Which single skill is most relevant to this action? "
@@ -567,7 +572,7 @@ async def on_gather_context(state: dict, sdk) -> dict:
     return updates
 
 
-async def _assess_action(input_text: str, char: Character, config: dict, sdk, model_pref: str = "fastest", world_data: dict = None, recent_story: list = None, instructions: dict = None, practice_decision: dict = None) -> dict:
+async def _assess_action(input_text: str, char: Character, config: dict, sdk, model_pref: str = "fastest", world_data: dict = None, recent_story: list = None, instructions: dict = None, practice_decision: dict = None, voice_note: str = "") -> dict:
     tier_list = config.get("stat_tiers", DEFAULT_STAT_TIERS) or DEFAULT_STAT_TIERS
     difficulty_label, difficulty_guidance, no_and_max, fail_max, success_min = _strictness_tier(config)
     outcome_parts = []
@@ -618,11 +623,12 @@ async def _assess_action(input_text: str, char: Character, config: dict, sdk, mo
     if recent_story:
         story_section = "Recent story (most recent last):\n" + "\n---\n".join(recent_story) + "\n"
 
+    voice_section = f"{voice_note}\n\n" if voice_note else ""
     prompt = f"""Assess this RPG action for a character. Output ONLY valid JSON, no other text.
 
 First decide whether the player input is a substantive action - something with a contested outcome or mechanical consequence. If the input is pure dialog/speech with nothing at stake, or a trivial everyday action (standing up, walking across a room, looking around, picking up an ordinary object), respond with exactly {{"skip": true}} and nothing else. A social ATTEMPT with a contested outcome (persuading, proposing, deceiving, intimidating, seducing, bargaining) IS substantive - assess it.
 
-{world_section}{story_section}
+{voice_section}{world_section}{story_section}
 Character:
   Level {char.level}, HP {char.hp}/{char.max_hp}{unconscious}
   Stats: {stats_line}
@@ -1025,9 +1031,12 @@ async def on_librarian(state: dict, sdk) -> dict | None:
 
 def _xp_judge_prompt(rpg: dict, action_text: str, assessment: dict, state: dict, instructions: dict | None = None) -> str:
     story_section = _story_context_section(state)
+    voice_note = state_pronoun_grounding(state, settings=_services.get("settings"))
     difficulty = str(assessment.get("difficulty", "moderate"))
     feasibility = assessment.get("feasibility")
     return f"""You are the XP judge for a text RPG. The turn is over; decide whether the player's action deserved experience points and, if so, how much XP to award. Output ONLY valid JSON, no other text.
+
+{voice_note}
 
 {story_section}Character:
 {_character_context_block(rpg)}
@@ -1115,7 +1124,10 @@ async def _detect_external_skill_events(char: "Character", state: dict, config: 
         effect_lines = "(none)"
 
     model_pref = config.get("practice_ai_model", "fastest")
+    voice_note = state_pronoun_grounding(state, settings=_services.get("settings"))
     prompt = f"""You are the game system that records supernatural or external changes to a player character's abilities in a text RPG.
+
+{voice_note}
 
 Read the recent narration and detect ONLY skill changes that an EXTERNAL force imposed on the player: a god or spirit granting a power, a curse or hex stripping/weakening an ability, a blessing or artifact bestowing a skill, a magical injury disabling a skill, or a mentor/entity directly gifting knowledge.
 
@@ -1669,6 +1681,7 @@ def _story_context_section(state: dict) -> str:
             lines.append(f"{label}: {value}")
     history = [h for h in (state.get("history") or []) if isinstance(h, str) and h.strip()]
     if history:
+        lines.append(state_pronoun_grounding(state, settings=_services.get("settings")))
         lines.append("Recent story (most recent last):\n" + "\n---\n".join(history[-3:]))
     if not lines:
         return ""
@@ -1815,11 +1828,12 @@ def _skill_options_prompt(rpg: dict, menu: str, exclude: list[str], state: dict,
             "(no two from the same domain)"
         )
     elif search:
+        voice_note = state_pronoun_grounding(state, settings=_services.get("settings"))
         intro = (
             f'The player searched for "{menu}" and is browsing skills themed on that search. '
             "If the request is a basic ability you may match it exactly; for elaborate or very "
             "specific requests, offer close interpretations grounded in this world rather than "
-            "an exact match."
+            f"an exact match. {voice_note}"
         )
         task = f'Propose exactly 5 NEW skills themed on the search "{menu}"'
     else:

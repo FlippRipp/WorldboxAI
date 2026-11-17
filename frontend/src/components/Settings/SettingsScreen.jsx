@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import ModelSettings from '../ModelSettings/ModelSettings';
+import StorytellingSettings from './StorytellingSettings';
 import AppearanceSettings from './AppearanceSettings';
 import CheatSettings from './CheatSettings';
 import LogSettings from './LogSettings';
@@ -7,6 +8,7 @@ import RemoteBridgeSettings from './RemoteBridgeSettings';
 
 const CATEGORIES = [
   { id: 'model', label: 'Model', icon: '⚙️', description: 'AI providers, models, and API keys' },
+  { id: 'storytelling', label: 'Storytelling', icon: '📖', description: 'Default narrative perspective and tense across stories and editors' },
   { id: 'appearance', label: 'Appearance', icon: '🎨', description: 'Theme colors and presets' },
   { id: 'cheats', label: 'Cheats', icon: '🎲', description: 'Bend the rules — applies to every story' },
   { id: 'bridge', label: 'Remote Bridge', icon: '🔗', description: 'Pair your local AI assistant for same-LAN diagnostics' },
@@ -99,6 +101,7 @@ export default function SettingsScreen({ onBack }) {
                 <p className="text-xs text-gray-500">{cat.description}</p>
               </div>
               {cat.id === 'model' && <ModelSettings embedded />}
+              {cat.id === 'storytelling' && <StorytellingSettings />}
               {cat.id === 'appearance' && <AppearanceSettings />}
               {cat.id === 'cheats' && <CheatSettings />}
               {cat.id === 'bridge' && <RemoteBridgeSettings />}

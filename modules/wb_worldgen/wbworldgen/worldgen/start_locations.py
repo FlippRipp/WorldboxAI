@@ -127,7 +127,9 @@ async def llm_pick_start_location(compiled: dict, candidates: list[dict], prefer
     )
     system = (
         f"You are helping a player choose a starting location in the world of {world_name}. "
-        "Pick the best match based on their preference. Output only valid JSON."
+        'Pick the best match based on their preference (any "you"/"your" or "I"/"my" in the '
+        "player's preference refers to the player character / protagonist, never to you). "
+        "Output only valid JSON."
     )
     parent_name = (inside_of or {}).get("name", "")
     inside_context = ""
@@ -427,7 +429,8 @@ async def generate_start_location(compiled: dict, preference: str, wanted: str, 
     system = (
         f"You are helping place a new location for a player's story in the world of {world_name}. "
         "No existing named location matches the request, so you will found a brand-new location at one of "
-        "the available unnamed map positions. Output only valid JSON."
+        'the available unnamed map positions (any "you"/"your" or "I"/"my" in the request refers to the '
+        "player character / protagonist, never to you). Output only valid JSON."
     )
     placement_rules = (
         "Placement matters — pick the position whose surroundings fit the request:\n"

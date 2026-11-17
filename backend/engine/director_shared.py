@@ -21,6 +21,8 @@ import threading
 from typing import Callable
 import zipfile
 
+from backend.engine.narrative_voice import state_pronoun_grounding
+
 DEFAULT_OBSERVATION_TURNS = 4
 RECENT_INPUTS_COUNT = 6
 ABANDON_COOLDOWN_FACTOR = 2
@@ -151,6 +153,8 @@ def setting_material(state: dict) -> list[str]:
         parts.append(
             f"<in_world_time>\nCurrent in-world date and time: {format_clock_text(clock)}.\n</in_world_time>"
         )
+
+    parts.append(f"<narrative_voice>\n{state_pronoun_grounding(state)}\n</narrative_voice>")
 
     return parts
 

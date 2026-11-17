@@ -1747,7 +1747,16 @@ def _condition_character_block(characters: dict | None) -> str:
         lines.append(f"- {npc['name']}: {npc['descriptor']}")
     if not lines:
         return ""
-    return "\n\nCHARACTERS PRESENT (canonical sheets):\n" + "\n".join(lines)
+    pov_hint = ""
+    if player:
+        pov = str(characters.get("perspective") or "second_person")
+        if pov == "first_person":
+            pov_hint = f' (in the scene text, "I"/"me"/"my" is {player["name"]}, the player character)'
+        elif pov == "third_person":
+            pov_hint = f' (the scene text is in third person; {player["name"]} is the player character)'
+        else:
+            pov_hint = f' (in the scene text, "you"/"your" is {player["name"]}, the player character)'
+    return f"\n\nCHARACTERS PRESENT (canonical sheets{pov_hint}):\n" + "\n".join(lines)
 
 
 async def _apply_lora_conditions(cfg: dict, narration: str, sdk,
@@ -1882,6 +1891,12 @@ def _character_block(cfg: dict, characters: dict | None,
                        "VERBATIM for that character (never re-derive, drop, or contradict "
                        "them), and take only clothing, pose, and expression from their "
                        "description and the scene.")
+        if player and not pov:
+            story_pov = str(characters.get("perspective") or "second_person")
+            if story_pov == "first_person":
+                header += f' In the scene narration, "I"/"me"/"my" refers to {player["name"]} (player character).'
+            elif story_pov == "second_person":
+                header += f' In the scene narration, "you"/"your" refers to {player["name"]} (player character).'
         parts.append(header + "\n" + "\n".join(lines))
     if pov:
         # The player is never depicted in POV mode. The first-person camera,
@@ -4622,7 +4637,12 @@ def _character_snapshot(state: dict) -> dict | None:
     # npcs: who is in the scene (feeds the image prompt); all_npcs: every
     # known living character (feeds the LoRA gate, whose per-character
     # conditions must be able to match anyone regardless of scene presence).
-    out = {"player": player_out, "npcs": npcs, "all_npcs": all_npcs}
+    out = {
+        "player": player_out,
+        "npcs": npcs,
+        "all_npcs": all_npcs,
+        "perspective": (state.get("narrative_voice") or {}).get("perspective") or "second_person",
+    }
     _attach_cached_tags(state.get("active_save_id") or "unknown", out)
     return out
 

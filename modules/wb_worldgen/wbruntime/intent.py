@@ -170,11 +170,19 @@ async def evaluate_travel_intent(host, state: dict, sdk) -> dict:
 
     mode = _resolution_mode(host)
     location_line = _current_location_line(state, world_data)
+    nv = state.get("narrative_voice") or {}
+    pname = (nv.get("player_name") or "").strip() or "the player character"
+    pronoun_line = (
+        f'Pronoun note: In the player\'s input, "you"/"your" and "I"/"my" both refer to '
+        f"{pname} (the protagonist), never to you (the AI)."
+    )
 
     if mode == "roster":
         roster = _destination_roster(world_data, state)
         roster_block = "\n".join(roster) if roster else "(no known destinations)"
         prompt = f"""The player of a role-played story just typed their action. Decide if it sets out on a journey to another location.
+
+{pronoun_line}
 
 Player input: {input_text}
 The player is currently at: {location_line}{journey_line}
@@ -202,6 +210,8 @@ Respond ONLY with JSON: {{"traveling": true/false, "destination_node_id": "<id o
         eta = result.get("eta_minutes")
     else:
         prompt = f"""The player of a role-played story just typed their action. Decide if it sets out on a journey to another location.
+
+{pronoun_line}
 
 Player input: {input_text}
 The player is currently at: {location_line}{journey_line}

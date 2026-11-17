@@ -35,6 +35,8 @@ export const api = {
                             module_instructions: opts.moduleInstructions ?? null,
                             plot_likes: opts.plotLikes ?? null,
                             plot_dislikes: opts.plotDislikes ?? null,
+                            perspective: opts.perspective ?? null,
+                            tense: opts.tense ?? null,
                           }) }),
   loadSave:               (saveId, { ifNeeded = false } = {}) => request(`/api/saves/${saveId}/load${ifNeeded ? '?if_needed=true' : ''}`, { method: 'POST' }),
   undoSave:               (saveId, targetTurn) => request(`/api/saves/${saveId}/undo`, { method: 'POST', body: JSON.stringify({ target_turn: targetTurn }) }),
@@ -177,6 +179,8 @@ export const api = {
                               themes: context.themes ?? null,
                               tags: context.tags ?? null,
                               pacing: context.pacing ?? null,
+                              perspective: context.perspective ?? null,
+                              tense: context.tense ?? null,
                             }) }),
 
   // Lorebooks (SillyTavern World Info imports, RAG-retrieved lore)

@@ -5,6 +5,16 @@ from backend.engine.registry import ModuleRegistry
 from backend.engine.llm import LLMService
 from backend.engine.memory import MemoryManager
 from backend.engine.prompt_pipeline import PromptCompiler, build_auto_player_action_prompt, render_story_style
+from backend.engine.narrative_voice import (
+    DEFAULT_PERSPECTIVE,
+    DEFAULT_TENSE,
+    PERSPECTIVE_SELECT_OPTIONS,
+    TENSE_SELECT_OPTIONS,
+    input_pronoun_grounding,
+    narration_voice_directive,
+    resolve_narrative_voice,
+    state_pronoun_grounding,
+)
 from backend.engine.settings_registry import SettingsRegistry
 from backend.engine.provider_manager import ProviderManager
 from copy import deepcopy
@@ -54,7 +64,7 @@ class EngineGraph:
         print(f"[DEBUG] EngineGraph.__init__: LLMService created, reader_model='{self.llm.reader_model}', storyteller_model='{self.llm.storyteller_model}'")
         self.provider_manager.set_llm_service(self.llm)
         print(f"[DEBUG] EngineGraph.__init__: after set_llm_service, reader_model='{self.llm.reader_model}', storyteller_model='{self.llm.storyteller_model}'")
-        self.prompt_compiler = PromptCompiler()
+        self.prompt_compiler = PromptCompiler(settings=self.settings)
         self.memory = None # Lazy initialized
         # Bound to the active save before any turn runs; None while no story
         # is loaded.
@@ -141,6 +151,22 @@ class EngineGraph:
             category="Cheats",
             description="Unlock cheat controls across all stories, e.g. choosing the rarity a new skill rolls instead of leaving it to fate.",
             is_global=True,
+        )
+        self.settings.register(
+            "narrative.perspective", "select", DEFAULT_PERSPECTIVE,
+            label="Default Perspective",
+            category="Storytelling",
+            description="Default narrative point of view for stories, scenarios, and prompts (can be overridden per scenario or story).",
+            is_global=True,
+            options=PERSPECTIVE_SELECT_OPTIONS,
+        )
+        self.settings.register(
+            "narrative.tense", "select", DEFAULT_TENSE,
+            label="Default Tense",
+            category="Storytelling",
+            description="Default grammatical tense for story narration (can be overridden per scenario or story).",
+            is_global=True,
+            options=TENSE_SELECT_OPTIONS,
         )
         self.settings.register(
             "prompt.strict_post_processing", "toggle", False,
@@ -331,6 +357,12 @@ class EngineGraph:
         if own_instructions:
             filtered["module_instructions"] = deepcopy(own_instructions)
 
+        # Resolved narrative perspective, tense, and player name so every module
+        # prompt can interpret narration and player-written inputs consistently.
+        filtered["narrative_voice"] = resolve_narrative_voice(
+            full_state, settings=getattr(self, "settings", None)
+        )
+
         dep_data = consumes.get("module_data", [])
         if dep_data == "*":
             for did, dval in full_state.get("module_data", {}).items():
@@ -488,6 +520,12 @@ class EngineGraph:
         module_data = state.get("module_data", {})
         world_data = state.get("world_data")
         scenario_data = state.get("scenario_data")
+        voice = resolve_narrative_voice(
+            state,
+            settings=getattr(self, "settings", None),
+            style_override=scenario_data if isinstance(scenario_data, dict) else None,
+            player_name=character_name,
+        )
 
         # Basic scenario story source: when a scenario supplies a literal opening
         # message, the story opens with it verbatim (no LLM generation) — unless
@@ -497,12 +535,15 @@ class EngineGraph:
         if scenario_data:
             pending_request = (scenario_data.get("pending_modification_request") or "").strip()
             if pending_request:
-                scenario_data = await self._rewrite_scenario_description(scenario_data, pending_request)
+                scenario_data = await self._rewrite_scenario_description(
+                    scenario_data, pending_request, voice=voice
+                )
                 state["scenario_data"] = scenario_data
                 original_opening = (scenario_data.get("starting_prompt") or "").strip()
                 if original_opening:
                     result = await self._rewrite_starting_prompt(
-                        scenario_data, original_opening, pending_request, streaming_callback
+                        scenario_data, original_opening, pending_request, streaming_callback,
+                        voice=voice,
                     )
                     # The streamed rewrite becomes both the opening message and
                     # the scenario's new literal starting prompt.
@@ -582,9 +623,20 @@ class EngineGraph:
                 parts.append(description)
                 parts.append("</scenario>")
 
-        # The story's themes/tags/pacing shape the opening scene too; ongoing
-        # turns get the same directive as a depth-0 chat injection.
-        style_text = render_story_style(state.get("story_style"))
+        # The story's themes/tags/pacing + perspective/tense shape the opening
+        # scene too; ongoing turns get the same directive as a depth-0 injection.
+        effective_style = dict(scenario_data) if isinstance(scenario_data, dict) else {}
+        effective_style.update(
+            {k: v for k, v in (state.get("story_style") or {}).items() if v}
+        )
+        effective_style.setdefault("perspective", voice["perspective"])
+        effective_style.setdefault("tense", voice["tense"])
+        style_text = render_story_style(
+            effective_style,
+            settings=getattr(self, "settings", None),
+            player_name=character_name,
+            force_voice=True,
+        )
         if style_text:
             parts.append(style_text)
 
@@ -654,7 +706,9 @@ class EngineGraph:
         state.update(await self.librarian_node(state))
         return state
 
-    async def _rewrite_scenario_description(self, scenario_data: dict, request_text: str) -> dict:
+    async def _rewrite_scenario_description(
+        self, scenario_data: dict, request_text: str, voice: dict | None = None
+    ) -> dict:
         """Apply a player's modification request to the save's scenario copy.
 
         Returns a new scenario dict with the pending request consumed and the
@@ -668,6 +722,14 @@ class EngineGraph:
         description = (scenario_data.get("scenario_description") or "").strip()
         if not description:
             return updated
+        resolved_voice = voice or resolve_narrative_voice(
+            settings=getattr(self, "settings", None), style_override=scenario_data
+        )
+        pronoun_rule = input_pronoun_grounding(
+            resolved_voice["perspective"],
+            resolved_voice["tense"],
+            resolved_voice["player_name"],
+        )
         if scenario_data.get("revision_mode") == "flexible":
             instruction = (
                 "You revise role-play scenario descriptions. Treat the player's requested "
@@ -677,7 +739,9 @@ class EngineGraph:
                 "length when the request or its consequences require it. Resolve contradictions "
                 "and update connected details even when the player has not listed every "
                 "necessary change. Preserve compatible details where useful and respect "
-                "anything the player explicitly asks to keep. Return a complete, self-contained "
+                "anything the player explicitly asks to keep. "
+                f"{pronoun_rule} "
+                "Return a complete, self-contained "
                 "scenario description, not an explanation of the edits. "
                 "Output only valid JSON: {\"scenario_description\": \"...\"}"
             )
@@ -685,7 +749,8 @@ class EngineGraph:
             instruction = (
                 "You revise role-play scenario descriptions. Apply the player's requested "
                 "changes while keeping the same base premise, setting, and roughly the same "
-                "length. Output only valid JSON: {\"scenario_description\": \"...\"}"
+                f"length. {pronoun_rule} "
+                "Output only valid JSON: {\"scenario_description\": \"...\"}"
             )
         messages = [
             {"role": "system", "content": instruction},
@@ -707,8 +772,17 @@ class EngineGraph:
             print(f"[Engine] Scenario description rewrite failed, keeping original: {e}")
         return updated
 
-    async def _rewrite_starting_prompt(self, scenario_data: dict, original_opening: str,
-                                       request_text: str, streaming_callback=None) -> dict:
+    async def _rewrite_starting_prompt(
+        self,
+        scenario_data: dict,
+        original_opening: str,
+        request_text: str,
+        streaming_callback=None,
+        voice: dict | None = None,
+    ) -> dict:
+        resolved_voice = voice or resolve_narrative_voice(
+            settings=getattr(self, "settings", None), style_override=scenario_data
+        )
         parts = ["You are a creative storyteller adapting the opening message of a text-based RPG scenario."]
         description = (scenario_data.get("scenario_description") or "").strip()
         if description:
@@ -718,23 +792,37 @@ class EngineGraph:
         parts.append("<original_opening>")
         parts.append(original_opening)
         parts.append("</original_opening>")
+        parts.append(
+            "<narrative_voice>\n"
+            + narration_voice_directive(
+                resolved_voice["perspective"],
+                resolved_voice["tense"],
+                resolved_voice["player_name"],
+            )
+            + "\n</narrative_voice>"
+        )
         parts.append("<instructions>")
         if scenario_data.get("revision_mode") == "flexible":
             parts.append(
                 "Rewrite the opening message to fully realize the player's requested changes. "
                 "Change as much as needed for the scene to make sense, including its base "
                 "situation, setting, character roles, relationships, motivations, events, "
-                "voice, structure, and length. Follow through on the request's consequences "
+                "tone, structure, and length. Follow through on the request's consequences "
                 "even when the player has not listed every necessary change. Give the player's "
                 "request priority and use the revised scenario description above, when present, "
                 "as context. Keep the opening consistent with these changes, replacing "
                 "conflicting details from the original opening. Preserve compatible details "
                 "where useful and respect "
                 "anything the player explicitly asks to keep. Write a complete, coherent "
-                "opening scene that gives the player a situation to act on."
+                "opening scene strictly in the perspective and tense specified in <narrative_voice> "
+                "that gives the player a situation to act on."
             )
         else:
-            parts.append("Rewrite the opening message so it satisfies the player's requested changes while keeping the original's base situation, voice, structure, and approximate length.")
+            parts.append(
+                "Rewrite the opening message so it satisfies the player's requested changes "
+                "while keeping the original's base situation, tone, structure, and approximate "
+                "length, written strictly in the perspective and tense specified in <narrative_voice>."
+            )
         parts.append("Output only the rewritten opening as narrative prose — no preamble, lists, or XML tags.")
         parts.append("</instructions>")
         messages = [
@@ -1039,7 +1127,9 @@ class EngineGraph:
         model as the storyteller. Returns "" on failure so callers can fall
         back to a normal turn."""
         await self.sdk.ui.emit_status("auto_player", "Deciding your character's move…")
-        prompt = build_auto_player_action_prompt(state, nudge)
+        prompt = build_auto_player_action_prompt(
+            state, nudge, settings=getattr(self, "settings", None)
+        )
         try:
             action = await self.sdk.llm.generate(prompt, model_preference="smartest")
         except Exception as exc:
@@ -1141,6 +1231,11 @@ class EngineGraph:
             return {}
         print("\n[Node: Reader] Parsing story output for state mutations...")
         await self.sdk.ui.emit_status("reader", "Updating the world…")
+
+        if hasattr(self.llm, "set_narrative_voice_note"):
+            self.llm.set_narrative_voice_note(
+                state_pronoun_grounding(state, settings=getattr(self, "settings", None))
+            )
 
         latest_story = state["history"][-1]
 
@@ -1269,6 +1364,11 @@ class EngineGraph:
     async def librarian_node(self, state: WorldState):
         await self.sdk.ui.emit_status("librarian", "Recording memories…")
         await self._ensure_memory()
+
+        if hasattr(self.llm, "set_narrative_voice_note"):
+            self.llm.set_narrative_voice_note(
+                state_pronoun_grounding(state, settings=getattr(self, "settings", None))
+            )
 
         turn = state.get("turn", 1)
         history = state.get("history", [])

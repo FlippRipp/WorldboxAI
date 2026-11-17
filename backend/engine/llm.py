@@ -126,6 +126,10 @@ class LLMService:
         self._reasoning_support: dict[str, bool] = {}
         self.inspector: LLMInspector | None = None
         self.cost_calculator: CostCalculator = CostCalculator()
+        self.narrative_voice_note: str = ""
+
+    def set_narrative_voice_note(self, note: str):
+        self.narrative_voice_note = (note or "").strip()
 
     def set_inspector(self, inspector: LLMInspector):
         self.inspector = inspector
@@ -849,11 +853,17 @@ class LLMService:
 
         ctx = inspector_ctx or {}
         schema_str = json.dumps(schema, indent=2)
-        context_block = ""
+        extra_context_parts = []
+        if getattr(self, "narrative_voice_note", ""):
+            extra_context_parts.append(self.narrative_voice_note)
         if context:
+            extra_context_parts.append(context)
+        context_block = ""
+        if extra_context_parts:
+            merged_ctx = "\n\n".join(extra_context_parts)
             context_block = f"""
-Context (the game state BEFORE this turn's story — use it to interpret the story):
-{context}
+Context (the game state and narrative voice BEFORE this turn's story — use it to interpret the story):
+{merged_ctx}
 """
         prompt = f"""
 Given the following story text, extract any game state mutations into a strict JSON format matching the schema provided.
@@ -889,7 +899,8 @@ Respond ONLY with valid JSON. Do not include markdown formatting like ```json.
             first_line = text.strip().splitlines()[0] if text.strip() else "Nothing notable happened."
             return first_line[:240]
 
-        prompt = f"Extract a 1-sentence factual summary of the most important event from this text:\n\n{text}"
+        voice_line = f"{self.narrative_voice_note}\n\n" if getattr(self, "narrative_voice_note", "") else ""
+        prompt = f"{voice_line}Extract a 1-sentence factual summary of the most important event from this text (write in third person, referring to the player character by name rather than 'you' or 'I'):\n\n{text}"
         return await self.generate_story(prompt)
 
     async def summarize_memory_structured(self, text: str, turn_range: str = "", inspector_ctx: dict = None) -> MemorySummary:
@@ -901,15 +912,16 @@ Respond ONLY with valid JSON. Do not include markdown formatting like ```json.
                 await self.inspector.end_call(cid, text, result.summary, 0, 0)
             return result
 
+        voice_section = f"\n{self.narrative_voice_note}\n" if getattr(self, "narrative_voice_note", "") else ""
         prompt = f"""Analyze this chunk of RPG narrative history and produce a structured summary.
-
+{voice_section}
 Turn range: {turn_range}
 
 Narrative text:
 {text}
 
 Return a JSON object with:
-- "summary": a one-paragraph factual summary of the most important events
+- "summary": a one-paragraph factual summary of the most important events (written in third person, referring to the protagonist by name rather than "you" or "I")
 - "entities": a list of named entities mentioned (characters, places, items, factions)
 - "topics": a list of key topics or themes (e.g. combat, diplomacy, exploration, mystery, trade)
 - "turn_range": the range of turns covered (use "{turn_range}" or derive from context)"""

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../../lib/api';
+import { PERSPECTIVE_OPTIONS, TENSE_OPTIONS, labelForPerspective, labelForTense } from '../../lib/constants';
 import { useBackTrap } from '../../hooks/useBackNavigation';
 import ModuleTogglePanel from '../shared/ModuleTogglePanel';
 import ModuleInline from '../shared/ModuleInline';
@@ -41,6 +42,9 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack, initialModu
   // plot module is active for the new story.
   const [plotLikes, setPlotLikes] = useState('');
   const [plotDislikes, setPlotDislikes] = useState('');
+  const [newPerspective, setNewPerspective] = useState('');
+  const [newTense, setNewTense] = useState('');
+  const [globalVoice, setGlobalVoice] = useState({ perspective: 'second_person', tense: 'present' });
   const [creating, setCreating] = useState(false);
   // Ref mirror of `creating`: state hasn't flushed yet when a second Enter
   // keydown lands in the same tick, so the guard needs a synchronous check.
@@ -52,8 +56,8 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack, initialModu
   const [editingSave, setEditingSave] = useState(null);
   const [editModules, setEditModules] = useState(() => new Set());
   const [editName, setEditName] = useState('');
-  // Story direction (themes/tags/pacing) injected into every turn's prompt.
-  const [editStyle, setEditStyle] = useState({ themes: '', tags: '', pacing: '' });
+  // Story direction (themes/tags/pacing/perspective/tense) injected into every turn's prompt.
+  const [editStyle, setEditStyle] = useState({ themes: '', tags: '', pacing: '', perspective: '', tense: '' });
   // Per-module instruction overrides of the save being edited, plus the
   // values frozen from its scenario at creation (the reset baseline).
   const [editInstructions, setEditInstructions] = useState({});
@@ -87,6 +91,17 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack, initialModu
       .catch(() => {});
     api.listScenarios()
       .then((scenariosData) => setScenarios(scenariosData.scenarios || []))
+      .catch(() => {});
+    api.getSettings('global')
+      .then((d) => {
+        const items = d?.settings?.Storytelling || [];
+        const p = items.find((i) => i.key === 'narrative.perspective')?.value;
+        const t = items.find((i) => i.key === 'narrative.tense')?.value;
+        setGlobalVoice({
+          perspective: p || 'second_person',
+          tense: t || 'present',
+        });
+      })
       .catch(() => {});
     if (!initialModules?.length) {
       api.getModules()
@@ -133,6 +148,8 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack, initialModu
       setEnabledModules(new Set(modules.map((m) => m.id)));
       setModuleInstructions({});
       setScenarioInstructionDefaults(null);
+      setNewPerspective('');
+      setNewTense('');
       return;
     }
     if (selectedScenario?.id === id) return;
@@ -145,6 +162,8 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack, initialModu
       const instructions = scenario.module_instructions || {};
       setModuleInstructions(instructions);
       setScenarioInstructionDefaults(Object.keys(instructions).length ? instructions : null);
+      setNewPerspective(scenario.perspective || '');
+      setNewTense(scenario.tense || '');
     } catch {
       // The scenario list may be stale; creation itself will surface the error.
     }
@@ -210,7 +229,7 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack, initialModu
     // Default to "all active" while we fetch, then apply the saved set. A null
     // result (legacy save) means every module is active.
     setEditModules(new Set(modules.map((m) => m.id)));
-    setEditStyle({ themes: '', tags: '', pacing: '' });
+    setEditStyle({ themes: '', tags: '', pacing: '', perspective: '', tense: '' });
     setEditInstructions({});
     setEditScenarioDefaults(null);
     try {
@@ -219,7 +238,13 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack, initialModu
       if (Array.isArray(active)) setEditModules(new Set(active));
       const styleData = await api.getStoryStyle(saveId);
       const style = styleData.story_style || {};
-      setEditStyle({ themes: style.themes || '', tags: style.tags || '', pacing: style.pacing || '' });
+      setEditStyle({
+        themes: style.themes || '',
+        tags: style.tags || '',
+        pacing: style.pacing || '',
+        perspective: style.perspective || '',
+        tense: style.tense || '',
+      });
       const instrData = await api.getSaveModuleInstructions(saveId);
       setEditInstructions(instrData.module_instructions || {});
       const scenarioDefaults = instrData.scenario_module_instructions || {};
@@ -312,6 +337,8 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack, initialModu
         moduleInstructions: Object.keys(moduleInstructions).length ? moduleInstructions : null,
         plotLikes: enabledModules.has('wb_plot_director') ? (plotLikes.trim() || null) : null,
         plotDislikes: enabledModules.has('wb_plot_director') ? (plotDislikes.trim() || null) : null,
+        perspective: newPerspective || null,
+        tense: newTense || null,
       });
       // The backend turns spaces into underscores for the save id; mirror
       // that here so the id we hand over matches the created save.
@@ -573,6 +600,44 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack, initialModu
                 </div>
               )}
 
+              <div className="p-4 rounded-lg border border-gray-700 bg-gray-800/30">
+                <h4 className="text-sm font-medium text-gray-300 mb-1">Narrative Voice</h4>
+                <p className="text-xs text-gray-500 mb-3">
+                  Choose the perspective and tense for narration and prompt interpretation.
+                  {selectedScenario ? ' Pre-filled from the selected scenario; edit freely.' : ''}
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1" htmlFor="new-story-perspective">Perspective</label>
+                    <select
+                      id="new-story-perspective"
+                      value={newPerspective}
+                      onChange={(e) => setNewPerspective(e.target.value)}
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
+                    >
+                      <option value="">Default ({labelForPerspective(globalVoice.perspective)})</option>
+                      {PERSPECTIVE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1" htmlFor="new-story-tense">Tense</label>
+                    <select
+                      id="new-story-tense"
+                      value={newTense}
+                      onChange={(e) => setNewTense(e.target.value)}
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
+                    >
+                      <option value="">Default ({labelForTense(globalVoice.tense)})</option>
+                      {TENSE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
               {modules.some((m) => m.has_instruction_slots && enabledModules.has(m.id)) && (
                 <div className="p-4 rounded-lg border border-gray-700 bg-gray-800/30">
                   <h4 className="text-sm font-medium text-gray-300 mb-2">Module Instructions (optional)</h4>
@@ -704,11 +769,41 @@ export default function SaveSelectScreen({ onLoad, onCreate, onBack, initialModu
             </div>
 
             <div className="p-4 border-b border-gray-700">
-              <h4 className="text-sm font-medium text-gray-300 mb-1">Story Style</h4>
+              <h4 className="text-sm font-medium text-gray-300 mb-1">Story Style & Voice</h4>
               <p className="text-xs text-gray-500 mb-3">
-                Optional direction the storyteller follows every turn. Leave a field empty for no direction.
+                Direction the storyteller and game prompts follow every turn. Leave prose fields empty for no direction.
               </p>
               <div className="space-y-2.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Perspective</label>
+                    <select
+                      value={editStyle.perspective || ''}
+                      onChange={(e) => setEditStyle({ ...editStyle, perspective: e.target.value })}
+                      aria-label="Story perspective"
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
+                    >
+                      <option value="">Default ({labelForPerspective(globalVoice.perspective)})</option>
+                      {PERSPECTIVE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Tense</label>
+                    <select
+                      value={editStyle.tense || ''}
+                      onChange={(e) => setEditStyle({ ...editStyle, tense: e.target.value })}
+                      aria-label="Story tense"
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
+                    >
+                      <option value="">Default ({labelForTense(globalVoice.tense)})</option>
+                      {TENSE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
                 {[
                   { key: 'themes', label: 'Themes', placeholder: 'e.g. redemption, found family, the cost of power' },
                   { key: 'tags', label: 'Tags', placeholder: 'e.g. dark fantasy, mystery, slow burn' },

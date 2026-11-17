@@ -93,6 +93,9 @@ def _context_header(state: dict, world_data: dict) -> str:
 
     opening = next(iter(state.get("history") or []), "")
     if opening:
+        nv = state.get("narrative_voice") or {}
+        pov = (nv.get("perspective") or "second_person").replace("_", " ")
+        parts.append(f"(Narrative voice of the opening scene: {pov}; \"you\"/\"I\" in narration is this character.)")
         parts.append("<opening_scene>\n" + opening + "\n</opening_scene>")
 
     return "\n\n".join(parts)

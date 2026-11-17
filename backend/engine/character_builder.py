@@ -5,6 +5,7 @@ import re
 import random
 from datetime import datetime, timezone
 from typing import Any, Optional
+from backend.engine.narrative_voice import input_pronoun_grounding, resolve_narrative_voice
 
 
 class CharacterBuilder:
@@ -77,8 +78,13 @@ class CharacterBuilder:
 
         constraint_text = ", ".join(constraints) if constraints else "any theme"
         world_text = f"\n\nThe character lives in this world:\n{world_context}" if world_context else ""
+        voice = resolve_narrative_voice(settings=self._settings, style_override=context)
+        seed_note = (
+            f"\n\n{input_pronoun_grounding(voice['perspective'], voice['tense'], subject_label='the character being named', include_story_voice=False)}"
+            if seed else ""
+        )
 
-        prompt = f"""Generate a single unique character name for a character with these details: {constraint_text}.{world_text}
+        prompt = f"""Generate a single unique character name for a character with these details: {constraint_text}.{world_text}{seed_note}
 
 Respond with ONLY the name, nothing else. The name should be 2-3 words at most, memorable, and fitting to the context."""
         try:
@@ -114,8 +120,13 @@ Respond with ONLY the name, nothing else. The name should be 2-3 words at most, 
         constraint_text = ", ".join(constraints) if constraints else ""
         constraint_prefix = f" with these details: {constraint_text}" if constraint_text else ""
         world_text = f"\n\nThe character lives in this world:\n{world_context}" if world_context else ""
+        voice = resolve_narrative_voice(settings=self._settings, style_override=context)
+        seed_note = (
+            f"\n\n{input_pronoun_grounding(voice['perspective'], voice['tense'], subject_label='the character being created', include_story_voice=False)}"
+            if seed else ""
+        )
 
-        prompt = f"""Generate a single fantasy race or species for a character{constraint_prefix}.{world_text}
+        prompt = f"""Generate a single fantasy race or species for a character{constraint_prefix}.{world_text}{seed_note}
 
 The race should be fitting to the world's setting and lore. Consider the factions, regions, and genre when choosing.
 
@@ -156,11 +167,21 @@ Respond with ONLY the race name, nothing else. Keep it to 1-2 words maximum."""
             f' Refer to the character by their name, "{name}", instead of pronouns like "her", "him", "he", or "she".'
             if name else ""
         )
+        voice = resolve_narrative_voice(settings=self._settings, style_override=context, player_name=name)
+        pronoun_note = input_pronoun_grounding(
+            voice["perspective"],
+            voice["tense"],
+            name,
+            subject_label="the character being created",
+            include_story_voice=False,
+        )
         prompt = f"""Expand this short character appearance into a vivid, detailed 2-3 sentence description:
 
 Short description: "{short_desc}"{traits_text}{world_text}
 
-Write a rich physical description that brings this character to life. Include details like build, facial features, hair, eyes, skin, and distinctive marks (scars, tattoos, etc). Do NOT describe clothing, attire, equipment, or anything worn — physical body only.{name_instruction} Make it immersive and evocative. Write ONLY the expanded description, nothing else."""
+{pronoun_note}
+
+Write a rich third-person physical description that brings this character to life. Include details like build, facial features, hair, eyes, skin, and distinctive marks (scars, tattoos, etc). Do NOT describe clothing, attire, equipment, or anything worn — physical body only.{name_instruction} Make it immersive and evocative. Write ONLY the expanded description, nothing else."""
         try:
             full = await self._llm_service.simple_completion(
                 messages=[{"role": "user", "content": prompt}],
@@ -266,7 +287,17 @@ OUTPUT FORMAT: Return ONLY valid JSON matching this exact schema:
   "backstory": "2-4 sentence polished backstory in light-novel third-person style"
 }"""  # noqa: E501
 
+        voice = resolve_narrative_voice(settings=self._settings, style_override=context, player_name=name)
+        pronoun_note = input_pronoun_grounding(
+            voice["perspective"],
+            voice["tense"],
+            name,
+            subject_label="the character being created",
+            include_story_voice=False,
+        )
         prompt = f"""Create a character based on this concept: "{concept}"{traits_text}{appearance_text}{world_text}
+
+{pronoun_note} Translate any second-person ("you"/"your") or first-person ("I"/"my") statements in the concept or appearance into facts, memories, traits, and abilities belonging to this character, while writing the JSON output fields themselves in third person.
 
 Return ONLY the JSON object, no other text."""
         try:

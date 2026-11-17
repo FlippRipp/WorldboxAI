@@ -43,21 +43,22 @@ def test_scenario_revision_preserves_original_strict_prompts(revision_mode):
     asyncio.run(engine.generate_intro(state))
 
     description_messages = engine.llm.simple_completion.call_args.args[0]
-    assert description_messages[0]["content"] == (
-        "You revise role-play scenario descriptions. Apply the player's requested "
-        "changes while keeping the same base premise, setting, and roughly the same "
-        'length. Output only valid JSON: {"scenario_description": "..."}'
-    )
+    desc_sys = description_messages[0]["content"]
+    assert "You revise role-play scenario descriptions." in desc_sys
+    assert "keeping the same base premise, setting, and roughly the same length." in desc_sys
+    assert "second person, present tense" in desc_sys
+    assert '"you"/"your" and "I"/"my" refer to' in desc_sys
+    assert 'Output only valid JSON: {"scenario_description": "..."}' in desc_sys
+
     opening_messages = engine.llm.generate_story_from_messages.call_args.args[0]
-    assert opening_messages[0]["content"] == "\n\n".join([
-        "You are a creative storyteller adapting the opening message of a text-based RPG scenario.",
-        "<scenario>", "Revised setting.", "</scenario>",
-        "<original_opening>", "Original opening.", "</original_opening>",
-        "<instructions>",
-        "Rewrite the opening message so it satisfies the player's requested changes while keeping the original's base situation, voice, structure, and approximate length.",
-        "Output only the rewritten opening as narrative prose — no preamble, lists, or XML tags.",
-        "</instructions>",
-    ])
+    open_sys = opening_messages[0]["content"]
+    assert "You are a creative storyteller adapting the opening message of a text-based RPG scenario." in open_sys
+    assert "<scenario>\n\nRevised setting.\n\n</scenario>" in open_sys
+    assert "<original_opening>\n\nOriginal opening.\n\n</original_opening>" in open_sys
+    assert "<narrative_voice>" in open_sys
+    assert "second person, present tense" in open_sys
+    assert "keeping the original's base situation, tone, structure, and approximate length" in open_sys
+    assert "written strictly in the perspective and tense specified in <narrative_voice>" in open_sys
 
 
 def test_flexible_revision_updates_description_before_adapting_opening():

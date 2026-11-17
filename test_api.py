@@ -241,7 +241,13 @@ def test_story_style_seeded_from_scenario_and_editable(tmp_path, monkeypatch):
 
     resp = client.post("/api/saves", json={"save_id": "styled_save", "scenario_id": scenario_id})
     assert resp.status_code == 200
-    expected = {"themes": "betrayal", "tags": "noir, heist", "pacing": "breakneck"}
+    expected = {
+        "themes": "betrayal",
+        "tags": "noir, heist",
+        "pacing": "breakneck",
+        "perspective": "",
+        "tense": "",
+    }
     assert session_manager.state["story_style"] == expected
 
     get_resp = client.get("/api/saves/styled_save/story-style")
@@ -250,11 +256,20 @@ def test_story_style_seeded_from_scenario_and_editable(tmp_path, monkeypatch):
 
     put_resp = client.put("/api/saves/styled_save/story-style", json={
         "themes": "hope", "tags": "", "pacing": "slow and atmospheric",
+        "perspective": "first_person", "tense": "past",
     })
     assert put_resp.status_code == 200
     assert session_manager.state["story_style"]["themes"] == "hope"
+    assert session_manager.state["story_style"]["perspective"] == "first_person"
+    assert session_manager.state["story_style"]["tense"] == "past"
     metadata = session_manager.save_manager.read_core_json("styled_save", "metadata.json", {})
-    assert metadata["story_style"] == {"themes": "hope", "tags": "", "pacing": "slow and atmospheric"}
+    assert metadata["story_style"] == {
+        "themes": "hope",
+        "tags": "",
+        "pacing": "slow and atmospheric",
+        "perspective": "first_person",
+        "tense": "past",
+    }
 
 
 def test_story_style_defaults_empty_and_missing_save_404(tmp_path, monkeypatch):
@@ -263,7 +278,13 @@ def test_story_style_defaults_empty_and_missing_save_404(tmp_path, monkeypatch):
     # A save that never set a style (or predates the feature) reads as empty.
     resp = client.get("/api/saves/autosave/story-style")
     assert resp.status_code == 200
-    assert resp.json()["story_style"] == {"themes": "", "tags": "", "pacing": ""}
+    assert resp.json()["story_style"] == {
+        "themes": "",
+        "tags": "",
+        "pacing": "",
+        "perspective": "",
+        "tense": "",
+    }
 
     assert client.get("/api/saves/no_such_save/story-style").status_code == 404
     assert client.put("/api/saves/no_such_save/story-style", json={"themes": "x"}).status_code == 404
